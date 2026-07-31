@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -228,8 +229,21 @@ def gate_dead_code(root, cfg):
 # --- dormant gates ---------------------------------------------------------
 
 def gate_protocol(root, cfg):
+    """S4.4: generated TS and C++ are regenerated and diffed; drift fails."""
     schema = os.path.join(root, "protocol", "schema.json")
-    return (1 if os.path.exists(schema) else 0), []
+    if not os.path.exists(schema):
+        return 0, []
+    gen = os.path.join(root, "scripts", "gen_protocol.py")
+    result = subprocess.run([sys.executable, gen, "--root", root, "--check"],
+                            capture_output=True, text=True, check=False)
+    findings = []
+    if result.returncode != 0:
+        for line in result.stdout.splitlines():
+            if line.startswith("DRIFT"):
+                findings.append(Finding("protocol", line.split(":")[0].replace("DRIFT ", ""),
+                                        0, "generated file differs from protocol/schema.json"
+                                           " -- run scripts/gen_protocol.py"))
+    return 1, findings
 
 
 TOOL_DECL_RE = re.compile(r'\bd\.name = "([a-z_]+)"')
@@ -404,6 +418,35 @@ def violations():
     }
 
 
+def copy_tree_for_probe(root, dest, extra=()):
+    """Copies the repo, excluding build output -- by DIRECTORY NAME, not by prefix.
+
+    An earlier version passed shutil.ignore_patterns("build*"), which also matched
+    third_party/simdjson/include/simdjson/builder.h. Every copy then failed to compile
+    for a reason that had nothing to do with the mutation, and the mutation score came
+    back a perfect 6/6 killed -- a number that was measuring this function. Caught by
+    running the harness on an UNMUTATED copy and watching it "kill" that too (S16: no
+    metric quoted without checking what it counts)."""
+    skip_dirs = {".git", "node_modules", "out", "__pycache__"} | set(extra)
+
+    def ignore(directory, names):
+        drop = set()
+        for name in names:
+            full = os.path.join(directory, name)
+            if not os.path.isdir(full):
+                continue
+            if name in skip_dirs or name == "build" or name.startswith("build-"):
+                drop.add(name)
+        return drop
+
+    # symlinks=True: npm's node_modules/.bin entries are symlinks whose targets are
+    # resolved RELATIVE to the link. Dereferencing them turns each into a real file
+    # whose `require('../typescript/bin/tsc')` no longer resolves, and the extension
+    # typecheck fails in the copy for a reason unrelated to any mutation. Third thing
+    # the null mutant caught.
+    shutil.copytree(root, dest, ignore=ignore, symlinks=True)
+
+
 def self_test(root, cfg):
     """Proves each live gate can go red. A green from a gate that has never been
     seen red is not evidence (S2.1.2)."""
@@ -411,9 +454,8 @@ def self_test(root, cfg):
     for label, (relpath, content) in violations().items():
         gate = label.split(":")[0]
         with tempfile.TemporaryDirectory() as tmp:
-            shutil.copytree(root, os.path.join(tmp, "repo"),
-                            ignore=shutil.ignore_patterns("build*", ".git", "third_party",
-                                                          "bakeoff", "__pycache__"))
+            copy_tree_for_probe(root, os.path.join(tmp, "repo"),
+                                extra=("third_party", "bakeoff"))
             repo = os.path.join(tmp, "repo")
             probe = os.path.join(repo, relpath)
             os.makedirs(os.path.dirname(probe), exist_ok=True)

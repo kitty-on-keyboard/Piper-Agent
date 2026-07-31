@@ -54,6 +54,17 @@ struct AgentConfig {
     std::uint64_t seed = 0;
 };
 
+// The UI feed. The Agent emits structured facts; the sidecar serializes them with the
+// GENERATED protocol serializers. Injected rather than reached for, so the scripted
+// loop suite can assert on exactly what a run would have told the user.
+struct Observer {
+    std::function<void(const std::string& channel, const std::string& text)> on_token;
+    std::function<void(const TurnResult&, double duration_ms)> on_turn;
+    std::function<void(const context::VerificationRecord&)> on_verification;
+    std::function<void(const model::GenResult&, std::size_t ctx_used, std::size_t ctx_max)>
+        on_perf;
+};
+
 struct RunReport {
     // The one unambiguous signal for WHICH ENDING a run took (S14).
     std::string termination_reason;
@@ -69,6 +80,7 @@ class Agent {
           platform::EventLogWriter& log, const platform::Clock& clock, AgentConfig config);
 
     void set_approver(Approver a) { approver_ = std::move(a); }
+    void set_observer(Observer o) { observer_ = std::move(o); }
 
     [[nodiscard]] RunReport run(const model::CancelToken& cancel);
 
@@ -89,6 +101,7 @@ class Agent {
     ModePolicy policy_;
     RepeatDetector repeats_;
     Approver approver_;
+    Observer observer_;
     std::string tools_guidance_;
     bool halted_ = false;
     std::string halt_reason_;

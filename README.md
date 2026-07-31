@@ -4,8 +4,10 @@ A local coding agent for Apple Silicon: a VS Code extension plus one native side
 loads a Qwen3 model in-process via MLX and drives a tool-using ReAct loop against the
 user's workspace.
 
-**Status: phase 0 complete.** See [docs/PHASE_0.md](docs/PHASE_0.md) for what landed, what
-was measured, and what the next phase may assume.
+**Status: all nine phases landed.** The model runs in-process on MLX and completes a
+grammar-accepted turn at 22.9 tok/s. See [docs/PHASES.md](docs/PHASES.md) for every
+measurement, the places the spec was overruled with the argument, and — importantly —
+what is **not** done (T2 containers, speculative decoding, the approval round-trip).
 
 The build order in the spec is not advisory. Phases 0–2 come before any model code,
 because v1 built the loop first and spent the next month discovering what it could not

@@ -39,9 +39,8 @@
       "min_subjects": 20
     },
     "protocol": {
-      "live": false,
-      "activates_in_phase": 4,
-      "note": "protocol/schema.json does not exist yet. S4.4: generated TS and C++ are regenerated and diffed; drift fails."
+      "live": true,
+      "min_subjects": 1
     },
     "tool_honesty": {
       "live": true,
@@ -86,6 +85,50 @@
     {
       "symbol": "base64_decode",
       "reason": "The replay side of the byte-faithful trace pair (S2.1.4). Its only non-test caller is ReplayBackend, phase 2. Kept because shipping an encoder with no decoder is how a trace stops being replayable."
+    },
+    {
+      "symbol": "StartParams",
+      "reason": "Request payload types are the WIRE CONTRACT, consumed by the TypeScript client (extension/src/client.ts) and regenerated + diffed by the protocol gate. The sidecar reads request fields by name off the framed message rather than deserializing a struct, so the C++ mirror is unreferenced by construction. Deleting it would break the one-schema-two-sides property S4.4 exists for."
+    },
+    {
+      "symbol": "StartResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "CancelParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "CancelResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ApproveParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ApproveResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ShutdownParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ShutdownResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ChecklistNotification",
+      "reason": "Emitted once the model's checklist is parsed from its plan turn (the ContextStore already carries it); the TS side renders it today. Remove this entry when the sidecar emits it."
+    },
+    {
+      "symbol": "EditNotification",
+      "reason": "S12.4: workspace edits are applied via the extension's edit API so undo, dirty buffers and the diff UI work. The sidecar writes files directly today; this is the type that carries the handover. Remove this entry when the edit path moves through the extension."
+    },
+    {
+      "symbol": "ApprovalRequestNotification",
+      "reason": "Emitted when the HITL router escalates AND a UI approver is attached. The sidecar currently passes a null approver (deny-by-default when nobody is there to ask), so it is unreferenced until the extension wires the approver back."
     }
   ]
 }
