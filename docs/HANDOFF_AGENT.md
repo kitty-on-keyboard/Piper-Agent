@@ -84,6 +84,23 @@ The lesson to carry: **one task passing proves nothing about the loop.** Run the
 A drop fails; an improvement asks to be re-pinned with `--pin`. The **holdout must stay the
 harder set** (S11.3); if it ever outscores the corpus it has leaked.
 
+**Current baseline** (2026-07-31, n=6 corpus / n=4 holdout — small enough that these are
+floors, not precise rates):
+
+```
+corpus   solved 3/6   completed 1   verified 1   turns 130
+holdout  solved 1/4   completed 2   verified 2   turns 58
+```
+
+Holdout solves at 25% against corpus's 50%, so it is still the harder set. One result to
+watch rather than reactively patch: `email_regex_edges` (holdout) reached evidential
+completion — deliverable recorded, declared contract passed and proven falsifiable — while
+the ground-truth check says it is still wrong. Not a defect in the loop; it is the gap
+S10.4 already names, that a proven-passing verification is evidence for what the declared
+contract covers, not a guarantee it covers the whole mission. If this pattern recurs across
+more tasks once the suite has more history, it is worth its own investigation; one instance
+at n=4 is not that yet.
+
 ## Known-imperfect, deliberately left
 
 - **A refused call is retried indefinitely.** The destructive fixture passes (the files
@@ -135,6 +152,14 @@ an hour.
 
 Known flake: `test_sandbox`'s spin test races the wall-clock killer against `RLIMIT_CPU`,
 both at 1 s. It passes on rerun. Pre-existing.
+
+**GitHub Actions CI is red on `main`, and was already red before this session's PR** — do
+not spend time on it thinking you broke something. `gate` and `sanitizers` both fail in
+~20-35 s inside vendored `third_party/parsephony/src/parsephony.cpp`: the runner's Xcode
+16.4 libc++ does not have `std::from_chars<double>` available (Apple gates it behind a
+deployment-target check), where local Apple clang 21 does. `ctest --preset gate` locally is
+the real signal; CI is a toolchain mismatch, not a code regression. Worth fixing if you want
+green CI back, but it is unrelated to anything in `src/loop`, `src/context` or `src/surface`.
 
 ## Working agreements
 
