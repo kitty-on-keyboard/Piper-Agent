@@ -41,16 +41,29 @@ execute_process(
   RESULT_VARIABLE _mlx_probe_rc)
 
 if(_mlx_probe_rc EQUAL 0 AND EXISTS "${_mlx_cmake_dir}")
+  # find_package(CONFIG) resolves via the cached MLX_DIR and ignores PATHS once that
+  # cache entry exists. Changing LMP_MLX_PYTHON on an existing build dir therefore kept
+  # linking the *previous* interpreter's MLX -- silently, because the version reported
+  # below used to come from the interpreter rather than from the package that was found.
+  # That combination pinned a build to 0.29.3 while printing 0.31.2. Re-point MLX_DIR
+  # whenever the probe disagrees with it.
+  if(DEFINED MLX_DIR AND NOT MLX_DIR STREQUAL "${_mlx_cmake_dir}")
+    message(STATUS "MLX: LMP_MLX_PYTHON moved MLX_DIR ${MLX_DIR} -> ${_mlx_cmake_dir}")
+    set(MLX_DIR "${_mlx_cmake_dir}" CACHE PATH
+        "The directory containing a CMake configuration file for MLX." FORCE)
+    # MLXConfig.cmake calls find_library(MLX_LIBRARY ...), which is a no-op once that
+    # cache entry exists, so it would keep naming the old dylib in the "Found MLX" line.
+    unset(MLX_LIBRARY CACHE)
+  endif()
   find_package(MLX CONFIG PATHS "${_mlx_cmake_dir}" NO_DEFAULT_PATH)
 endif()
 
 if(MLX_FOUND)
-  execute_process(
-    COMMAND "${LMP_MLX_PYTHON}" -c "import mlx.core as mx; print(mx.__version__)"
-    OUTPUT_VARIABLE _mlx_version
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  message(STATUS "MLX C++ SDK found: ${_mlx_cmake_dir} (version ${_mlx_version})")
+  # MLX_VERSION comes from the MLXConfigVersion.cmake that was actually found, so it
+  # describes the library that will be linked. Do not substitute the interpreter's
+  # mx.__version__ here: the two can disagree, and when they do this line is the only
+  # warning that a performance number belongs to a different MLX than you think.
+  message(STATUS "MLX C++ SDK found: ${_mlx_cmake_dir} (version ${MLX_VERSION})")
   target_compile_definitions(lmp_model PUBLIC LMP_HAVE_MLX=1)
   target_link_libraries(lmp_model PUBLIC mlx)
   # The vendored numerics (src/model/mlx/) are adapted v1 code kept close to their

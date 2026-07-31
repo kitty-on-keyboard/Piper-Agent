@@ -240,10 +240,17 @@ inline std::pair<mx::array, mx::array> gated_delta_update(const mx::array& q,
 
     // Dk % 32 is the kernel's thread-layout precondition; no checkpoint this project
     // loads violates it, but a head dim that did would silently index out of bounds.
-    if (mx::metal::is_available() && Dk % 32 == 0) {
-        return gated_delta_update_kernel(q, k, v, g, beta, *state);
-    }
-    return gated_delta_update_ops(q, k, v, g, beta, *state);
+    // y leaves in q's dtype; only the recurrent state stays float32. This mirrors
+    // mlx-lm's `return y.astype(q.dtype), state` and its output_dtypes=[input_type,
+    // state_type], and it is load-bearing for speed, not just for tidiness: the block's
+    // result feeds out_proj and then the residual stream, so a float32 y silently
+    // promotes the hidden state for the WHOLE REST OF THE MODEL. Every quantized matmul
+    // downstream -- all 40 MoE blocks included -- then runs its float32 activation path
+    // against bf16 weights. That single promotion was the bulk of a 34.9 ms decode step.
+    auto [y, new_state] = (mx::metal::is_available() && Dk % 32 == 0)
+                              ? gated_delta_update_kernel(q, k, v, g, beta, *state)
+                              : gated_delta_update_ops(q, k, v, g, beta, *state);
+    return {mx::astype(y, q.dtype()), new_state};
 }
 
 } // namespace lmp::model::mlxl

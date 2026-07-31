@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <variant>
 
 #include "src/model/sampler.hpp"
 
 #ifdef LMP_HAVE_MLX
 #include <mlx/array.h>
+#include <mlx/backend/metal/metal.h>
+#include <mlx/device.h>
+#include <mlx/memory.h>
 #include <mlx/ops.h>
 #include <mlx/transforms.h>
 
@@ -22,6 +27,31 @@ namespace mx = mlx::core;
 struct MlxBackend::Impl {
     mlxl::Qwen35MoeModel model;
 };
+
+// MLX's wired limit defaults to 0: nothing is kept resident, so a 19 GB checkpoint is
+// re-made-resident by the OS around GPU dispatches. That is invisible to any op-level
+// benchmark -- a microbenchmark touches a small hot set and never pays it -- but it
+// throttles a real decode step, where every layer walks a different 8-of-256 slice of
+// the expert weights. mlx-lm wires the whole working set in generate.py's wired_limit()
+// context manager, which is why the same ops on the same MLX decode faster there.
+//
+// max_recommended_working_set_size is what mlx-lm passes, and a value above the system
+// wired limit is an error, so clamp to it rather than to the model size.
+void wire_working_set() {
+    if (!mx::metal::is_available()) {
+        return;
+    }
+    // mx::metal::device_info() is declared in the headers but no longer exported by the
+    // 0.31.2 dylib; mx::device_info() is the current spelling and carries the same keys.
+    const auto& info = mx::device_info();
+    const auto it = info.find("max_recommended_working_set_size");
+    if (it == info.end()) {
+        return;
+    }
+    if (const auto* limit = std::get_if<std::size_t>(&it->second)) {
+        mx::set_wired_limit(*limit);
+    }
+}
 
 MlxBackend::MlxBackend(const platform::Clock& clock) : clock_(clock) {}
 MlxBackend::~MlxBackend() = default;
@@ -39,6 +69,7 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
         return {false, config.model_dir + ": model load failed (missing config.json or "
                        "safetensors)"};
     }
+    wire_working_set();
     loaded_ = true;
     return {true, {}};
 }
