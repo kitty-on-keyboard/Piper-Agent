@@ -11,6 +11,7 @@
 #include "activations.hpp"
 
 #include "mlx/backend/metal/metal.h"
+#include "mlx/compile.h"
 #include "mlx/fast.h"
 #include "mlx/ops.h"
 
@@ -31,15 +32,29 @@ inline mx::array softplus(const mx::array& x) {
     return mx::log(mx::add(mx::array(1.0f), mx::exp(x)));
 }
 
-// Left uncompiled deliberately. mx::compile fuses this chain and, in isolation,
-// measures 18.4 us -> 3.3 us per call (diag_main.cpp `chain`). End to end it moved
-// decode by nothing: 28.1 -> 27.9 tok/s, inside run-to-run noise. The MoE block's
-// cost is not in its elementwise ops, so the fusion was reverted rather than shipped
-// on the strength of a micro-benchmark (S5.11: no performance change without a
-// number, and this one's number was zero).
+// Compiled, matching mlx-lm, which runs this whole chain as one fused kernel (it shows
+// up in `lmp_diag graph` as CompiledAsTypeExpNegative...LogAddExp...MultiplyExp).
+//
+// This carried a comment saying the opposite -- that compile was measured end to end at
+// "28.1 -> 27.9 tok/s, nothing" and reverted on principle. That measurement was real and
+// is now void: it was taken while the float32-residual bug made a decode step 34.9 ms, so
+// the ~0.5 ms of dispatch this saves across 30 layers was 1.3% and buried in noise. The
+// step is now ~11.9 ms. See the header comment in activations.hpp for the histogram that
+// prompted re-running it -- and for the general rule, which is that a null result
+// measured under a bug that has since been fixed by 3x has to be re-measured rather than
+// inherited.
+//
+// The arithmetic is unchanged, including the strongly typed float32 scalars: mlx-lm casts
+// A_log to float32 explicitly and our promotion lands in the same place (see the note on
+// softplus above).
 inline mx::array compute_g(const mx::array& a_log, const mx::array& a, const mx::array& dt_bias) {
-    const mx::array sp = softplus(mx::add(a, dt_bias));
-    return mx::exp(mx::multiply(mx::multiply(mx::array(-1.0f), mx::exp(a_log)), sp));
+    static const auto f = mx::compile(+[](const std::vector<mx::array>& in) {
+        const mx::array sp =
+            mx::log(mx::add(mx::array(1.0f), mx::exp(mx::add(in[1], in[2]))));
+        return std::vector<mx::array>{
+            mx::exp(mx::multiply(mx::multiply(mx::array(-1.0f), mx::exp(in[0])), sp))};
+    });
+    return f({a_log, a, dt_bias})[0];
 }
 
 inline std::pair<mx::array, mx::array> gated_delta_step(const mx::array& q,

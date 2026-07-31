@@ -10,6 +10,9 @@
 //   lmp_diag bench [runs] [prompt_tokens] [max_new]
 //                           the whole stack, N runs, median + spread, next to the
 //                           LM Studio numbers derived by scripts/lmstudio_baseline.py
+//   lmp_diag graph [prompt] the decode step's graph as dot, unevaluated -- the only
+//                           subcommand here that is not a timing. Diff its primitive
+//                           histogram against mlx-lm's with scripts/graph_histogram.py
 //
 // LMP_ABLATE=routed|mlp|delta|deltakernel deletes one block from the forward pass and
 // leaves the rest running. Output is garbage; only the rate means anything. Attribution
@@ -32,6 +35,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -47,6 +51,7 @@
 #if LMP_HAVE_MLX
 #include "mlx/compile.h"
 #include "mlx/fast.h"
+#include "mlx/graph_utils.h"
 #include "mlx/memory.h"
 #include "mlx/ops.h"
 #include "mlx/random.h"
@@ -246,6 +251,47 @@ int cmd_step(int steps) {
     // The other ~0.7 ms is MLX op construction itself, which no amount of handle caching
     // removes. That is why there is no weight-handle cache here: it was measured before
     // it was written, and it buys about 2%.
+    return 0;
+}
+#endif
+
+// --- graph -----------------------------------------------------------------
+//
+// Dump the decode step's graph, unevaluated, as dot. This is the one instrument here
+// that is not a timing, and that is the point: every other subcommand answers "how
+// long did this take", which on this project has been wrong four times. A primitive
+// histogram answers "what work is in the graph", which is a fact about the program
+// rather than about the machine it ran on.
+//
+// It exists to be diffed against the same dump from mlx-lm. Two stacks that claim to
+// run the same ops on the same shapes must produce the same histogram; a primitive
+// that appears in one and not the other is real work one of them is doing:
+//
+//   lmp_diag graph > ours.dot
+//   scripts/graph_histogram.py --dot ours.dot --json ours.json
+//   <lmstudio python> scripts/graph_histogram.py --reference --json ref.json
+//   scripts/graph_histogram.py --compare ours.json ref.json
+
+#if LMP_HAVE_MLX
+int cmd_graph(int prompt_tokens) {
+    mlxl::Qwen35MoeModel model;
+    if (!model.load(qwen_dir())) {
+        std::fprintf(stderr, "model load failed\n");
+        return 1;
+    }
+    // Prefill first and force it, so the caches hold evaluated state. Without this the
+    // dump would contain the whole prefill graph behind the step and the histogram would
+    // describe a first-token forward, not a decode step.
+    std::vector<int32_t> prompt(static_cast<std::size_t>(prompt_tokens), 100);
+    mx::array ids = mx::array(prompt.data(), {1, prompt_tokens}, mx::int32);
+    mx::array logits = model.forward_logits(ids);
+    mx::eval(logits);
+    model.eval_caches();
+
+    int32_t tok = 42;
+    mx::array one = mx::array(&tok, {1, 1}, mx::int32);
+    mx::array step = model.forward_logits(one);
+    mx::export_to_dot(std::cout, {step});
     return 0;
 }
 #endif
@@ -599,6 +645,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "step") {
         return cmd_step(argc > 2 ? std::atoi(argv[2]) : 50);
+    }
+    if (cmd == "graph") {
+        return cmd_graph(argc > 2 ? std::atoi(argv[2]) : 547);
     }
     if (cmd == "layers") {
         return cmd_layers(argc > 2 ? std::atoi(argv[2]) : 1);
