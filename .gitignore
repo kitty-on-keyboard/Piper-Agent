@@ -1,0 +1,34 @@
+# Build output
+build/
+build-*/
+out/
+dist/
+node_modules/
+__pycache__/
+*.o
+*.a
+*.dylib
+
+# CTest run artifacts. Root-anchored: core.ignorecase=true on macOS, so a bare
+# "Testing/" would also swallow a src/testing/ directory.
+/Testing/
+
+# Logs and temp files
+*.log
+# ...except the log-triage corpus, where the captured build output IS the
+# benchmark. Without this negation the 32 committed logs are silently dropped
+# and corpus.jsonl points at files that do not exist on a fresh clone -- the
+# benchmark would look committed and be unrunnable. tests/bakeoff/
+# test_corpus_loads.cpp asserts every referenced log opens and matches its
+# pinned byte count, so this negation failing is a test failure, not a mystery.
+!bakeoff/log_triage/logs/*.log
+!bakeoff/log_triage/holdout_logs/*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+
+# System
+.DS_Store
