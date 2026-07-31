@@ -229,27 +229,30 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // remained unreachable -- the same symptom as having no mechanism at all.
     //
     // `specs` must outlive `grammar`: TurnGrammar keeps a reference.
-    // The mirror of plan-first, at the other end: once the declared contract has passed
-    // and been proven falsifiable, the only thing left is to reconcile the checklist.
-    // A run reached exactly that state and then narrated instead of ticking, so it ended
-    // `text_only_no_progress` on work that was demonstrably finished.
-    bool must_reconcile = false;
-    if (!ctx_.checklist().empty()) {
-        const bool proven = std::any_of(
-            ctx_.verifications().begin(), ctx_.verifications().end(),
-            [](const context::VerificationRecord& v) { return v.passed && v.falsifiable; });
-        must_reconcile = proven && ctx_.open_checklist_items() > 0;
-    }
-
-    // A steering message that arrived since the last plan gets the same treatment, and
-    // for the same reason: an instruction the run acknowledges and then does not act on
-    // is indistinguishable from one it never received. Making `plan` the only samplable
-    // call forces the next turn to restate the checklist in the light of what it was just
-    // told -- one turn, and the instruction is provably incorporated (S9.2).
+    //
+    // There used to be a second restriction here, `must_reconcile`: once the declared
+    // contract had passed provably and items were still open, `plan` became the only
+    // callable tool so the run would tick its list. It existed only because completion
+    // required every item ticked, and it DEADLOCKED the moment a run could be continued.
+    //
+    // Observed on the first real follow-up: the previous run's green satisfies "proven"
+    // forever, the new instruction means items are open again, so the grammar allowed
+    // nothing but `plan` -- and each `plan` call re-entered the same state. Fourteen
+    // consecutive plan turns, no work, budget_exhausted.
+    //
+    // Deleted rather than repaired, because the case it was built for no longer exists:
+    // a run that has fixed the bug and proved the fix now COMPLETES on that evidence
+    // without needing the model to agree in checkbox form (S10.4).
+    //
+    // A steering message is different and still restricts: an instruction the run
+    // acknowledges and then does not act on is indistinguishable from one it never
+    // received. Making `plan` the only samplable call forces the next turn to restate the
+    // checklist in the light of what it was just told (S9.2). It cannot loop, because
+    // restating the checklist is exactly what clears the flag.
     const bool must_replan = ctx_.plan_is_stale();
 
     std::vector<parsephony::ToolSpec> specs;
-    if (ctx_.checklist().empty() || must_reconcile || must_replan) {
+    if (ctx_.checklist().empty() || must_replan) {
         for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
             if (s.name == "plan") {
                 specs.push_back(s);
