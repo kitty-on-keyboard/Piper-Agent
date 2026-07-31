@@ -70,16 +70,12 @@ public:
         return 0;
     }
 
+    // Returns the graph, unevaluated. The caller decides what to force and when, which
+    // matters twice: it lets the decode loop fold the host-ready float32 conversion into
+    // the same evaluation instead of paying a second GPU round-trip for it, and it lets
+    // prefill chunks whose logits nobody reads skip the lm_head projection entirely.
+    // It also lets `lmp_diag step` time graph construction apart from execution.
     mx::array forward_logits(const mx::array& input_ids) {
-        mx::array logits = forward_logits_lazy(input_ids);
-        mx::eval(logits);
-        return logits;
-    }
-
-    // The graph without the eval, so a caller can time construction separately from
-    // execution. Whether a slow step is the CPU failing to feed the GPU or the GPU
-    // itself is the first thing worth knowing and the easiest thing to assume wrongly.
-    mx::array forward_logits_lazy(const mx::array& input_ids) {
         mx::array h = embed_tokens(input_ids);
         const int seq_len = static_cast<int>(input_ids.shape()[1]);
 
@@ -319,8 +315,13 @@ private:
         // deltakernel keeps the projections, the conv and the norms and removes only the
         // fused recurrence, to split "the custom Metal kernel" from "everything else in
         // this block". Removing the whole block (LMP_ABLATE=delta) cannot tell them apart.
+        // inputs.dtype(), not float32. A float32 stand-in here re-promotes the residual
+        // stream exactly the way the real bug did and costs 11.8 -> 32.8 ms/token, which
+        // makes the ablation measure the promotion instead of the kernel. Kept as a
+        // comment rather than a footnote because it is a live trap: any substitute value
+        // spliced into this block has to carry the block's own dtype.
         mx::array out = mx::zeros({B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim},
-                                  mx::float32);
+                                  inputs.dtype());
         if (ablation() != Ablate::deltakernel) {
             auto [o, state] =
                 lmp::model::mlxl::gated_delta_update(q, k, v, a, b, a_log, dt_bias, cache.delta_state);

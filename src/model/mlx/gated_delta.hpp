@@ -174,7 +174,7 @@ inline const char* gated_delta_kernel_source() {
         }
         for (int i = 0; i < n_per_t; ++i) {
           auto s_idx = n_per_t * dk_idx + i;
-          o_state[s_idx] = static_cast<InT>(state[i]);
+          o_state[s_idx] = static_cast<StT>(state[i]);
         }
     )METAL";
 }
@@ -200,18 +200,25 @@ inline std::pair<mx::array, mx::array> gated_delta_update_kernel(const mx::array
         {"y", "state_out"},
         gated_delta_kernel_source());
 
-    // float32 throughout, matching gated_delta_update_ops: there the float32 state
-    // promotes every operand it touches, so the recurrence already runs in float32
-    // whatever dtype the projections produced.
-    const auto f32 = [](const mx::array& x) { return mx::astype(x, mx::float32); };
-
+    // Activations enter in their own dtype and only the recurrent state is float32 --
+    // mlx-lm's ("InT", input_type) / ("StT", state_type) split, and its
+    // output_dtypes=[input_type, state_type].
+    //
+    // This used to cast q,k,v,g,beta to float32 first, on the reasoning that the
+    // recurrence runs in float32 anyway. It does: the accumulators below are float and
+    // every read is converted on load, so the arithmetic is identical either way. What
+    // the casts actually bought was five materialised float32 copies of the inputs per
+    // call -- five extra dispatches and twice the bytes to read, thirty times a token --
+    // for values the kernel was going to widen for free. InT applies to y; the state is
+    // written as StT so keeping it float32 no longer forces the activations to match it.
     std::vector<mx::array> outs = kernel(
-        {f32(q), f32(k), f32(v), f32(g), f32(beta), f32(state), mx::array(T, mx::int32)},
+        {q, k, v, g, beta, state, mx::array(T, mx::int32)},
         {mx::Shape{B, T, Hv, Dv}, mx::Shape{B, Hv, Dv, Dk}},
-        {mx::float32, mx::float32},
+        {q.dtype(), state.dtype()},
         {32, Dv, B * Hv},
         {32, 4, 1},
-        {{"InT", mx::float32}, {"Dk", Dk}, {"Dv", Dv}, {"Hk", Hk}, {"Hv", Hv}},
+        {{"InT", q.dtype()}, {"StT", state.dtype()}, {"Dk", Dk}, {"Dv", Dv}, {"Hk", Hk},
+         {"Hv", Hv}},
         std::nullopt,
         false,
         {});
