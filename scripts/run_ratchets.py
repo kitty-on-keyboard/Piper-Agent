@@ -232,9 +232,49 @@ def gate_protocol(root, cfg):
     return (1 if os.path.exists(schema) else 0), []
 
 
+TOOL_DECL_RE = re.compile(r'\bd\.name = "([a-z_]+)"')
+TOOL_MENTION_RE = re.compile(r"\b([a-z]+_[a-z_]+)\b")
+# Words that look like tool names (letter_letter) but are ordinary prose/identifiers.
+TOOL_MENTION_STOPLIST = {
+    "wall_clock", "old_text", "new_text", "start_line", "end_line", "workspace_root",
+    "max_result_bytes", "tool_name", "error_class", "exit_code",
+    # blast-radius capability flags: model-facing vocabulary from the S7 contract,
+    # deliberately shown to the model by job_status's advisory output.
+    "write_out", "read_out",
+}
+
+
 def gate_tool_honesty(root, cfg):
-    registry = os.path.join(root, "src", "tools")
-    return (1 if os.path.isdir(registry) else 0), []
+    """S6.3: any tool name a model-facing string mentions must resolve to a registered
+    tool. v1 audited this once and 7 of 13 tools were lying -- describing follow-up
+    tools that did not exist, teaching the model to call ghosts.
+
+    Scope: the string literals of src/tools/registry.cpp (the declarations file). A
+    mention is any snake_case token; declared names plus a stoplist of parameter-ish
+    words are legal, and anything else that LOOKS like a tool reference fails."""
+    path = os.path.join(root, "src", "tools", "registry.cpp")
+    if not os.path.exists(path):
+        return 0, []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    declared = set(TOOL_DECL_RE.findall(text))
+    findings = []
+    if not declared:
+        findings.append(Finding("tool_honesty", "src/tools/registry.cpp", 0,
+                                "registry file exists but declares no tools"))
+        return 1, findings
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if line.lstrip().startswith("#include"):
+            continue  # an include path is not a model-facing string
+        for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
+            for mention in TOOL_MENTION_RE.findall(lit):
+                if mention in declared or mention in TOOL_MENTION_STOPLIST:
+                    continue
+                findings.append(Finding(
+                    "tool_honesty", "src/tools/registry.cpp", lineno,
+                    f"model-facing string mentions '{mention}', which is not a "
+                    f"registered tool (declared: {', '.join(sorted(declared))})"))
+    return len(declared), findings
 
 
 def gate_prose_correctives(root, cfg):

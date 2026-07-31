@@ -5,3 +5,5 @@
 #   L0 platform  L1 model  L2 tools  L3 context  L4 loop  L5 surface
 
 add_subdirectory(platform)
+add_subdirectory(model)
+add_subdirectory(tools)

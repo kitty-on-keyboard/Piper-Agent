@@ -14,28 +14,38 @@
     "wildcard-with-no-explanation entry, and adding one should be as awkward as",
     "it looks."
   ],
-
   "limits": {
     "max_file_lines": 800,
     "max_function_lines": 80,
     "max_nesting_depth": 3
   },
-
-  "source_roots": ["src", "tests", "scripts", "cmake"],
-
+  "source_roots": [
+    "src",
+    "tests",
+    "scripts",
+    "cmake"
+  ],
   "gates": {
-    "size": { "live": true, "min_subjects": 15 },
-    "layers": { "live": true, "min_subjects": 5 },
-    "dead_code": { "live": true, "min_subjects": 20 },
+    "size": {
+      "live": true,
+      "min_subjects": 15
+    },
+    "layers": {
+      "live": true,
+      "min_subjects": 5
+    },
+    "dead_code": {
+      "live": true,
+      "min_subjects": 20
+    },
     "protocol": {
       "live": false,
       "activates_in_phase": 4,
       "note": "protocol/schema.json does not exist yet. S4.4: generated TS and C++ are regenerated and diffed; drift fails."
     },
     "tool_honesty": {
-      "live": false,
-      "activates_in_phase": 4,
-      "note": "No tool registry yet. S6.3: any tool name a description or error string mentions must resolve to a registered tool. v1 audited this once and 7 of 13 tools were lying."
+      "live": true,
+      "min_subjects": 5
     },
     "prose_correctives": {
       "live": false,
@@ -43,7 +53,6 @@
       "note": "No loop yet. S9.2: the count of prose-only corrective sites must be 0. v1 had 11 of 34, including one named ForceWrite that forced nothing."
     }
   },
-
   "layers": {
     "src/platform": 0,
     "src/model": 1,
@@ -52,7 +61,6 @@
     "src/loop": 4,
     "src/surface": 5
   },
-
   "size_exempt": [
     {
       "path": "bakeoff/",
@@ -61,9 +69,16 @@
     {
       "path": "third_party/",
       "reason": "Vendored simdjson 4.6.1, upstream source."
+    },
+    {
+      "path": "src/security/blast_radius.hpp",
+      "reason": "The consolidated blast-radius engine, ported from v1 unmodified. It is graded by bakeoff/blast_radius (0 wmiss corpus, 15 wmiss holdout, re-measured 2026-07-30 in this repo) and the e00_merged scoreboard includes THIS header -- refactoring it to satisfy the line limits would detach the measured number from the shipped code. If it is ever rewritten, the rewrite must be re-scored first."
+    },
+    {
+      "path": "src/tools/graft_engine.hpp",
+      "reason": "Cookoff-merged edit engine ported from v1 unmodified; under the file limit today, exempted so a future verbatim upstream fix cannot be blocked by a formatting gate. Same measured-evidence argument as blast_radius.hpp."
     }
   ],
-
   "dead_code_exempt": [
     {
       "symbol": "SystemClock",

@@ -1,0 +1,139 @@
+#ifndef LLM_MODELS_QWEN35_MOE_CONFIG_HPP
+#define LLM_MODELS_QWEN35_MOE_CONFIG_HPP
+
+#include <cstdint>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+#include <simdjson.h>
+
+namespace lmp::model::mlxl {
+
+struct Qwen35MoeConfig {
+    std::string model_type{"qwen3_5_moe_text"};
+    int hidden_size{2048};
+    int num_hidden_layers{40};
+    int num_attention_heads{16};
+    int num_key_value_heads{2};
+    int head_dim{256};
+    int vocab_size{248320};
+    int intermediate_size{0};
+    int moe_intermediate_size{512};
+    int shared_expert_intermediate_size{512};
+    int num_experts{256};
+    int num_experts_per_tok{8};
+    int full_attention_interval{4};
+    int linear_num_key_heads{16};
+    int linear_num_value_heads{32};
+    int linear_key_head_dim{128};
+    int linear_value_head_dim{128};
+    int linear_conv_kernel_dim{4};
+    float rms_norm_eps{1e-6f};
+    float rope_theta{10000000.0f};
+    float partial_rotary_factor{0.25f};
+    bool tie_word_embeddings{false};
+    bool norm_topk_prob{true};
+
+    [[nodiscard]] bool is_linear_layer(int layer_idx) const noexcept {
+        return (layer_idx + 1) % full_attention_interval != 0;
+    }
+};
+
+inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig& cfg) {
+    const std::string path = model_dir + "/config.json";
+    std::ifstream in(path);
+    if (!in) {
+        return false;
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    const std::string json = buf.str();
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element root;
+    if (parser.parse(json).get(root)) {
+        return false;
+    }
+
+    simdjson::dom::element text_cfg = root;
+    simdjson::dom::element nested;
+    if (!root["text_config"].get(nested)) {
+        text_cfg = nested;
+    }
+
+    auto get_i = [&](const char* key, int& out) -> bool {
+        int64_t v = 0;
+        if (text_cfg[key].get_int64().get(v)) {
+            return false;
+        }
+        out = static_cast<int>(v);
+        return true;
+    };
+
+    auto get_f = [&](const char* key, float& out) -> bool {
+        double v = 0;
+        if (text_cfg[key].get_double().get(v)) {
+            return false;
+        }
+        out = static_cast<float>(v);
+        return true;
+    };
+
+    auto get_b = [&](const char* key, bool& out) -> bool {
+        bool v = false;
+        if (text_cfg[key].get_bool().get(v)) {
+            return false;
+        }
+        out = v;
+        return true;
+    };
+
+    std::string_view mt;
+    if (!text_cfg["model_type"].get_string().get(mt)) {
+        cfg.model_type = std::string(mt);
+    }
+
+    if (!get_i("hidden_size", cfg.hidden_size) ||
+        !get_i("num_hidden_layers", cfg.num_hidden_layers) ||
+        !get_i("vocab_size", cfg.vocab_size)) {
+        return false;
+    }
+
+    (void)get_i("num_attention_heads", cfg.num_attention_heads);
+    (void)get_i("num_key_value_heads", cfg.num_key_value_heads);
+    (void)get_i("head_dim", cfg.head_dim);
+    (void)get_i("moe_intermediate_size", cfg.moe_intermediate_size);
+    (void)get_i("shared_expert_intermediate_size", cfg.shared_expert_intermediate_size);
+    (void)get_i("num_experts", cfg.num_experts);
+    (void)get_i("num_experts_per_tok", cfg.num_experts_per_tok);
+    (void)get_i("full_attention_interval", cfg.full_attention_interval);
+    (void)get_i("linear_num_key_heads", cfg.linear_num_key_heads);
+    (void)get_i("linear_num_value_heads", cfg.linear_num_value_heads);
+    (void)get_i("linear_key_head_dim", cfg.linear_key_head_dim);
+    (void)get_i("linear_value_head_dim", cfg.linear_value_head_dim);
+    (void)get_i("linear_conv_kernel_dim", cfg.linear_conv_kernel_dim);
+    (void)get_f("rms_norm_eps", cfg.rms_norm_eps);
+    (void)get_b("tie_word_embeddings", cfg.tie_word_embeddings);
+    (void)get_b("norm_topk_prob", cfg.norm_topk_prob);
+
+    simdjson::dom::element rope_params;
+    if (!text_cfg["rope_parameters"].get(rope_params)) {
+        double partial = static_cast<double>(cfg.partial_rotary_factor);
+        if (!rope_params["partial_rotary_factor"].get_double().get(partial)) {
+            cfg.partial_rotary_factor = static_cast<float>(partial);
+        }
+        double theta = static_cast<double>(cfg.rope_theta);
+        if (!rope_params["rope_theta"].get_double().get(theta)) {
+            cfg.rope_theta = static_cast<float>(theta);
+        }
+    } else {
+        (void)get_f("partial_rotary_factor", cfg.partial_rotary_factor);
+    }
+
+    return cfg.hidden_size > 0 && cfg.num_hidden_layers > 0;
+}
+
+} // namespace lmp::model::mlxl
+
+#endif // LLM_MODELS_QWEN35_MOE_CONFIG_HPP
