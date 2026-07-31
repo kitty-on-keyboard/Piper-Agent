@@ -30,6 +30,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  decision independently, so this only chooses the wording shown to the user. */
   private runInFlight = false;
   private view: vscode.WebviewView | undefined;
+  private watcher: vscode.Disposable | undefined;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -80,12 +81,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     void this.view?.webview.postMessage({ kind, payload });
   }
 
+  /** Keys the drawer can read and write. Everything else stays in the Settings UI --
+   *  this is the set worth changing between one run and the next. */
+  private static readonly LIVE_KEYS = [
+    "mode",
+    "sandboxTier",
+    "autoApproveExec",
+    "autoApproveWrites",
+    "sampling.temperature",
+    "sampling.topP",
+    "sampling.topK",
+    "sampling.minP",
+    "sampling.repetitionPenalty",
+    "prompts.agent",
+    "prompts.plan",
+    "prompts.debug",
+  ];
+
+  /** Pushes current configuration into the drawer. The drawer holds no state of its
+   *  own: it renders this and writes back, so it and the Settings UI cannot drift. */
+  private pushSettings(): void {
+    const cfg = vscode.workspace.getConfiguration("lmPipe");
+    const out: Record<string, unknown> = {};
+    for (const key of SidebarProvider.LIVE_KEYS) out[key] = cfg.get(key);
+    this.post("settings", out);
+  }
+
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
     view.webview.html = this.html();
     view.webview.onDidReceiveMessage(
-      (msg: { kind: string; id?: string; approved?: boolean; text?: string }) => {
+      (msg: {
+        kind: string; id?: string; approved?: boolean; text?: string;
+        key?: string; value?: unknown;
+      }) => {
         if (msg.kind === "approve" && msg.id !== undefined) {
           void this.client.approve(msg.id, msg.approved === true);
         }
@@ -95,8 +125,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (msg.kind === "message" && msg.text) {
           this.send(msg.text);
         }
+        if (msg.kind === "setting" && msg.key !== undefined) {
+          // Only the keys the drawer owns. A webview message is untrusted input, and
+          // "write whatever key it names into the user's settings" is not a thing to
+          // offer on trust.
+          if (!SidebarProvider.LIVE_KEYS.includes(msg.key)) return;
+          void vscode.workspace
+            .getConfiguration("lmPipe")
+            .update(msg.key, msg.value, vscode.ConfigurationTarget.Global);
+        }
       }
     );
+    this.pushSettings();
+    // Settings changed elsewhere -- the Settings UI, another window, a sync -- must
+    // reach the drawer too, or it would show a stale copy of state it does not own.
+    this.watcher?.dispose();
+    this.watcher = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("lmPipe")) this.pushSettings();
+    });
+  }
+
+  dispose(): void {
+    this.watcher?.dispose();
   }
 
   /** Sends the user's text and echoes it into the transcript immediately.

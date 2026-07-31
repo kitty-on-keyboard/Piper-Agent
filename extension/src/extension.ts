@@ -70,7 +70,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const sidebar = new SidebarProvider(context.extensionUri, client);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar)
+    vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar),
+    sidebar
   );
 
   // Sidecar died -> surface it with the last stderr lines and offer restart (S12.3).
