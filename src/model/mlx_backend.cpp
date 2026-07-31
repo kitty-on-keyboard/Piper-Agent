@@ -83,7 +83,13 @@ void MlxBackend::reset_cache() {
 
 namespace {
 
-// One logits row -> CPU floats. The single sync point per decode step (S5.11).
+// One logits row -> CPU floats. The sync point per decode step (S5.11).
+//
+// The float32 cast is deliberately issued AFTER the forward has been evaluated, not
+// folded into its graph. Folding it in reads better -- one round-trip instead of two --
+// and measures worse: 84.8 -> 83.9 tok/s, reproduced across three runs. As a separate
+// tiny dispatch it costs nothing; on the end of the step's graph it extends the critical
+// path. Do not "simplify" this without re-running `lmp_diag bench`.
 void logits_to_host(const mx::array& logits, std::vector<float>& out) {
     mx::array row = mx::astype(mx::reshape(logits, {-1}), mx::float32);
     mx::eval(row);
@@ -191,6 +197,7 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
         const auto t_f0 = clock_.mono();
         mx::array ids = mx::array(&pick.id, {1, 1}, mx::int32);
         mx::array logits = impl_->model.forward_logits(ids);
+        mx::eval(logits);
         const auto t_f1 = clock_.mono();
         logits_to_host(logits, logits_host);
         const auto t_f2 = clock_.mono();

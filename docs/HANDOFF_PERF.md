@@ -79,14 +79,21 @@ rebuild, is worth more than any log-derived median.
 
 `lmp_diag bench 4 512 200`, 547-token prompt:
 
-| | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix |
-|---|---|---|---|---|
-| decode  | 27.6 | 27.5 | 28.6 | **84.8** |
-| prefill | 586.7 | 856.4 | 871.0 | **1110.7** |
+| | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix | + kernel dtypes |
+|---|---|---|---|---|---|
+| decode  | 27.6 | 27.5 | 28.6 | 84.8 | **85.4** |
+| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | **1126.5** |
 
-Decode **PASS** at 1.08x. Prefill **FAIL** at 0.82x — but note we are already 1.52x the
+Decode **PASS** at 1.09x. Prefill **FAIL** at 0.84x — but note we are already 1.55x the
 Python reference's prefill (728.5), so 1347 may not be an apples-to-apples target; see
 "Still open".
+
+**The honest apples-to-apples decode comparison is 85.4 vs 80.9, not 85.4 vs 103.1.**
+The reference reaches 103 by running one step ahead with `mx.async_eval`, which a
+host-side sampler cannot do (see "Why async_eval is not available"). Constrain the
+reference the way our loop is constrained — synchronous eval, full logits to host, CPU
+sampling — and it does **80.9 tok/s** on this machine. Our forward pass is already
+faster than mlx-lm's; what is left is a loop-structure difference, not a kernel one.
 
 ---
 
@@ -127,6 +134,21 @@ went in beside it and are worth keeping even though neither moved the clock on i
 `gated_delta_update` now returns `y` in `q.dtype()` with only the state in float32
 (mlx-lm's `output_dtypes=[input_type, state_type]`), and the router softmax passes
 `precise=true`.
+
+The same dtype confusion had a second instance in the fused kernel itself, worth +0.6
+tok/s decode and +16 prefill on its own. `gated_delta_update_kernel` cast q,k,v,g,beta to
+float32 before the launch, reasoning that the recurrence runs in float32 anyway. It does
+— the accumulators are `float` and every read widens on load — so the casts bought
+nothing arithmetically and cost five materialised float32 copies of the inputs per call,
+thirty times a token. They existed only because the kernel templated `InT` on one type
+and used it for both `y` and the output state, so keeping the state in float32 forced the
+activations to float32 too. mlx-lm splits these (`InT` = input dtype, `StT` = state
+dtype); ours now does the same and passes the activations through untouched.
+
+**Any substitute value spliced into the delta block must carry the block's dtype.** The
+`LMP_ABLATE=deltakernel` stand-in was initially `mx::zeros(..., mx::float32)` and
+re-created the original bug exactly — 11.8 -> 32.8 ms/token — turning the ablation into a
+measurement of the promotion rather than of the kernel.
 
 **Watch for this class of bug anywhere a Python reference is transcribed to C++.** MLX's
 Python bindings give scalars weak dtype semantics; the C++ API has no such notion, so the
@@ -173,17 +195,48 @@ either one took the float32 residual with it.
    from LM Studio's server logs at 1-second resolution, and we already run prefill 1.52x
    faster than the mlx_lm reference on this machine. If the reference is the honest bar,
    prefill is done. Settle that before optimising.
-2. **`mx::async_eval` double-buffering — the clearest remaining decode win.** Measured in
-   the reference's own loop: running one step ahead is worth **12.29 -> 9.78 ms/token,
-   about 20%**. Our decode loop in `MlxBackend::generate` is strictly synchronous
-   (forward -> eval -> copy -> sample -> next). mlx-lm builds and dispatches step N+1
-   before waiting on step N. This is the one structural difference left, and 20% of 84.8
-   is ~102 tok/s.
-3. **The wired limit is set but barely earns its keep** (+4%, 27.5 -> 28.6). Kept because
+2. **The wired limit is set but barely earns its keep** (+4%, 27.5 -> 28.6). Kept because
    it is what mlx-lm does and it costs nothing; do not expect more from it.
-4. **Weak-scalar audit.** The bug above was one instance of a general hazard. Worth
+3. **Weak-scalar audit.** The bug above was one instance of a general hazard. Worth
    grepping the forward path for other `mx::array(<float literal>)` constructions and
    checking each one's dtype against the reference.
+4. **Small quantized matmuls.** With the ablations now additive, our gated-delta block
+   costs 4.42 ms against the reference's 3.41, and our MoE gate/topk/shared-expert 1.32
+   against 0.77. Both "everything except the big gather" categories are ~2x. Same op,
+   same shapes, same `quantized_matmul` arguments, so this is unexplained and is the
+   largest remaining item that is actually ours to fix.
+
+## Why async_eval is not available
+
+The third pass listed `mx::async_eval` double-buffering as the clearest remaining win.
+It is worth ~20% in the reference (12.33 -> 9.86 ms/token, re-measured). **We cannot
+have it, and the reason is structural rather than an implementation gap.**
+
+mlx-lm samples on the GPU, so `y` is an `mx.array`. It builds step N+1's forward from
+that *unevaluated* array and submits it before ever reading step N's token, which is what
+keeps the pipeline full. Our sampler is a pure CPU function over a host logits row —
+deliberately, per `sampler.hpp`: mask-first constrained decode, repetition penalty over
+`recent`, top-k/min-p/top-p, and a seeded splitmix64 draw whose determinism the tests and
+the replay path depend on. The next forward's embedding lookup needs the sampled id as a
+host value, so `logits_N -> token_N -> forward_{N+1}` is a hard data dependency and there
+is nothing to overlap it with.
+
+Closing it would mean reimplementing constrained sampling on the GPU. That cannot be done
+bit-exactly — the heap top-k's tie-break, the accumulation order in softmax/min-p/top-p,
+and the cumulative-sum traversal of the draw would all have to match — so it would change
+generated tokens and trade a documented determinism invariant for ~20%. That is a product
+decision, not a perf fix, and it should not be made silently.
+
+## Measured and rejected — do not redo these
+
+- **Folding the float32 logits cast into the forward graph** ("one round-trip instead of
+  two"). Reads better, measures worse: 84.8 -> 83.9 tok/s, reproduced across three runs.
+  As a separate small dispatch the cast is free; on the end of the step's graph it
+  extends the critical path. `logits_to_host` carries a comment saying so.
+- **Caching resolved weight handles.** The model rebuilds every weight key as a
+  `std::string` and hash-probes it on each access, ~800 times a step. Measured before
+  writing the refactor: that is 0.27 ms of a 0.94 ms CPU build, and the other ~0.7 ms is
+  MLX op construction, which no cache removes. Worth ~2%; not worth the blast radius.
 
 ---
 
