@@ -18,6 +18,15 @@ namespace lmp::model::mlxl {
 
 namespace mx = mlx::core;
 
+// The float32 scalars here and in compute_g are deliberate, and are the one place in the
+// forward path where a bare mx::array(<float>) is right. mlx-lm's compute_g is
+// `mx.exp(-mx.exp(A_log.astype(mx.float32)) * nn.softplus(a + dt_bias))` -- it casts to
+// float32 on purpose, and returns a float32 g even though A_log is bf16 in the
+// checkpoint. Our strongly typed scalars promote to the same float32, so the dtypes
+// agree; do not "fix" these to astype(qkv.dtype()) by analogy with forward_gated_delta.
+// It is safe because g is [B, S, num_v_heads] -- 32 elements -- and feeds only the delta
+// kernel, which widens every input to float on load, so the promotion neither reaches
+// the residual stream nor costs bandwidth worth measuring.
 inline mx::array softplus(const mx::array& x) {
     return mx::log(mx::add(mx::array(1.0f), mx::exp(x)));
 }

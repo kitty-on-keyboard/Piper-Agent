@@ -228,7 +228,18 @@ private:
                  key.ends_with(".q_norm.weight") ||
                  key.ends_with(".k_norm.weight"))) {
                 if (val.ndim() == 1) {
-                    updated.emplace_back(key, mx::add(val, mx::array(1.0f)));
+                    // astype, not a bare mx::array(1.0f). mlx-lm writes `v + 1.0`, and a
+                    // Python float is weakly typed, so the weight stays bf16; the C++
+                    // scalar is a strongly typed float32 array and would promote it.
+                    // These are norm weights -- they multiply into rms_norm on every
+                    // step, including model.norm before lm_head -- so a float32 one puts
+                    // float32 back into the residual stream, which is the same fault that
+                    // cost 3x in forward_gated_delta. No checkpoint here trips
+                    // should_shift_norm_weights (it needs mtp weights or an unsanitized
+                    // conv1d), so this is latent rather than measured: it costs nothing
+                    // today and is wrong for the first checkpoint that does trip it.
+                    updated.emplace_back(key, mx::add(val, mx::astype(mx::array(1.0f),
+                                                                      val.dtype())));
                     to_erase.push_back(key);
                 }
             }
