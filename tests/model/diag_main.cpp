@@ -219,6 +219,22 @@ int cmd_blocks(int T) {
     const mx::array gate_logits = ws.linear(x, p + "mlp.gate");
     auto [inds, scores] = mlxl::moe_topk(gate_logits, 8, true);
     mx::eval({inds, scores});
+    // The pieces the first version of this driver never timed, because it hoisted
+    // moe_topk and the combine out of the loop. forward_moe minus everything `blocks`
+    // measured is 0.56 of its 0.65 ms, so it is entirely in here.
+    total += time_block("moe topk (argpartition)", reps, 40,
+                        [&] { return mlxl::moe_topk(gate_logits, 8, true).first; });
+    total += time_block("  softmax only", reps, 0,
+                        [&] { return mx::softmax(gate_logits, -1); });
+    const mx::array gates = mx::softmax(gate_logits, -1);
+    mx::eval(gates);
+    total += time_block("  argpartition only", reps, 0,
+                        [&] { return mx::argpartition(gates, 256 - 8, 2); });
+    const mx::array y8 = mx::zeros({1, T, 8, hidden}, x.dtype());
+    mx::eval(y8);
+    total += time_block("moe combine (sum over 8)", reps, 40, [&] {
+        return mx::sum(mx::multiply(y8, mx::expand_dims(scores, -1)), -2);
+    });
     total += time_block("moe switch_glu (8/256)", reps, 40, [&] {
         return mlxl::switch_glu(x, ws, p + "mlp.switch_mlp.gate_proj",
                                 p + "mlp.switch_mlp.up_proj", p + "mlp.switch_mlp.down_proj",
@@ -271,6 +287,78 @@ int cmd_blocks(int T) {
 }
 #endif
 
+// --- moe -------------------------------------------------------------------
+//
+// Bisect forward_moe. The sum of its pieces timed in isolation is 0.109 ms; the block
+// itself is 0.647. Something about composing them costs 6x, and the only way to find
+// out which addition it is, is to build the block up one stage at a time and time each
+// prefix exactly the way forward_moe builds it -- unevaluated intermediates included,
+// since `blocks` hoisted an evaluated `inds` out of the loop and that is precisely the
+// difference it hid.
+
+#if LMP_HAVE_MLX
+int cmd_moe(int T) {
+    mlxl::WeightStore ws;
+    if (!ws.load_directory(qwen_dir())) {
+        std::printf("weight load failed\n");
+        return 1;
+    }
+    const std::string p = "language_model.model.layers.0.mlp.";
+    const mx::array ids = mx::zeros({1, T}, mx::int32);
+    mx::array x = ws.embed_lookup(ids, "language_model.model.embed_tokens");
+    mx::eval(x);
+    const int reps = T == 1 ? 30 : 4;
+
+    const auto stage = [&](const char* label, const std::function<mx::array()>& make) {
+        mx::array warm = make();
+        mx::eval(warm);
+        auto t0 = Clock::now();
+        std::vector<mx::array> outs;
+        outs.reserve(static_cast<std::size_t>(reps));
+        for (int i = 0; i < reps; ++i) {
+            outs.push_back(make());
+        }
+        mx::eval(outs);
+        const double per = ms(t0, Clock::now()) / reps;
+        std::printf("  %-34s %7.3f ms/call  x40 = %6.2f ms\n", label, per, per * 40);
+        return per;
+    };
+
+    double prev = 0;
+    const auto step = [&](const char* label, const std::function<mx::array()>& make) {
+        const double now = stage(label, make);
+        std::printf("      (+%.3f ms over previous stage)\n", now - prev);
+        prev = now;
+    };
+
+    step("1 gate", [&] { return ws.linear(x, p + "gate"); });
+    step("2 + moe_topk", [&] {
+        return mlxl::moe_topk(ws.linear(x, p + "gate"), 8, true).second;
+    });
+    step("3 + switch_glu", [&] {
+        auto [inds, scores] = mlxl::moe_topk(ws.linear(x, p + "gate"), 8, true);
+        return mlxl::switch_glu(x, ws, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj",
+                                p + "switch_mlp.down_proj", inds);
+    });
+    step("4 + combine", [&] {
+        auto [inds, scores] = mlxl::moe_topk(ws.linear(x, p + "gate"), 8, true);
+        mx::array y = mlxl::switch_glu(x, ws, p + "switch_mlp.gate_proj",
+                                       p + "switch_mlp.up_proj", p + "switch_mlp.down_proj",
+                                       inds);
+        return mx::sum(mx::multiply(y, mx::expand_dims(scores, -1)), -2);
+    });
+    // Control: the same switch_glu, but fed indices that are already evaluated. This is
+    // the only thing `blocks` did differently.
+    auto [pre_inds, pre_scores] = mlxl::moe_topk(ws.linear(x, p + "gate"), 8, true);
+    mx::eval({pre_inds, pre_scores});
+    stage("control: switch_glu, evaluated inds", [&] {
+        return mlxl::switch_glu(x, ws, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj",
+                                p + "switch_mlp.down_proj", pre_inds);
+    });
+    return 0;
+}
+#endif
+
 // --- layers ----------------------------------------------------------------
 //
 // Per-layer cost using the model's OWN block functions, chained the way a real step
@@ -289,11 +377,16 @@ int cmd_layers(int T) {
     mx::eval(x);
 
     const int reps = T == 1 ? 30 : 4;
+    // Two timings of the SAME block, differing only in whether call i+1 consumes call
+    // i's output. If chained >> independent, the cost is stall between dependent
+    // kernels. If they match, the cost is per-call and the dependency is innocent --
+    // and those two findings point at completely different fixes.
     const auto run = [&](const char* label, int layers, int total_layers,
                          const std::function<mx::array(mx::array)>& step) {
         model.reset_cache();
         mx::array warm = step(x);
         mx::eval(warm);
+
         model.reset_cache();
         auto t0 = Clock::now();
         mx::array h = x;
@@ -301,11 +394,22 @@ int cmd_layers(int T) {
             h = step(h);
         }
         mx::eval(h);
-        const double per = ms(t0, Clock::now()) / reps;
-        std::printf("  %-24s %7.3f ms/layer  x%2d = %6.2f ms\n", label, per, total_layers,
-                    per * total_layers);
+        const double chained = ms(t0, Clock::now()) / reps;
+
+        model.reset_cache();
+        auto t1 = Clock::now();
+        std::vector<mx::array> outs;
+        outs.reserve(static_cast<std::size_t>(reps));
+        for (int i = 0; i < reps; ++i) {
+            outs.push_back(step(x));
+        }
+        mx::eval(outs);
+        const double indep = ms(t1, Clock::now()) / reps;
+
+        std::printf("  %-24s chained %7.3f  independent %7.3f ms/layer  x%2d = %6.2f ms\n",
+                    label, chained, indep, total_layers, chained * total_layers);
         (void)layers;
-        return per * total_layers;
+        return chained * total_layers;
     };
 
     double total = 0;
@@ -572,6 +676,9 @@ int main(int argc, char** argv) {
         return cmd_mask();
     }
 #if LMP_HAVE_MLX
+    if (cmd == "moe") {
+        return cmd_moe(argc > 2 ? std::atoi(argv[2]) : 1);
+    }
     if (cmd == "layers") {
         return cmd_layers(argc > 2 ? std::atoi(argv[2]) : 1);
     }

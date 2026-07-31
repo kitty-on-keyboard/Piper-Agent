@@ -1,64 +1,72 @@
-# Handoff: LM_Pipe v2 vs LM Studio, second pass
+# Handoff: LM_Pipe v2 vs LM Studio, third pass
 
 Paste this whole file as the opening prompt of a fresh session in
-`/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `main`).
+`/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `perf/mask-and-scan`).
 
-Everything below was re-measured in this repo on 2026-07-30. No number here is quoted
-from the previous handoff without being reproduced first (S19.6).
+Every number here was measured in this repo on 2026-07-31. Nothing is quoted from a
+previous handoff without being reproduced first (S19.6).
+
+**The target is known to be reachable on this hardware, because LM Studio reaches it
+with the same checkpoint.** Two of three original causes are closed. The remaining gap is
+one block, and this session narrowed it to one measurement.
 
 ---
 
-## Baselines, re-derived
+## Build note, read this first
+
+MLX is now **0.31.2**, matching LM Studio exactly. It was 0.29.3, and the reason was
+invisible: `src/model/CMakeLists.txt` probed `python3 -m mlx --cmake-dir`, this machine's
+`python3` is /usr/bin/python3 (3.9), and **MLX stopped shipping cp39 wheels after
+0.29.3**. The whole project was pinned two minor versions back by an interpreter nobody
+chose.
+
+The interpreter is now a cache variable. Configure with:
+
+```bash
+cmake --preset dev -DLMP_MLX_PYTHON=$HOME/.venvs/lmp-mlx/bin/python
+```
+
+That venv exists (`python3.12 -m venv ~/.venvs/lmp-mlx`, `pip install mlx==0.31.2`).
+**Reconfigure without the flag and you silently drop back to 0.29.3.** The configure line
+now prints the resolved version — read it before believing any performance number.
+
+---
+
+## Baselines
 
 `scripts/lmstudio_baseline.py` rebuilds LM Studio's numbers from `~/.lmstudio/server-logs`
-(34 files, real prior usage of this exact checkpoint). Timestamps are 1-second
-resolution, so it reports two views: all windows, and windows >= 5 s where the clock
-error is small.
+(34 files, real prior usage of this exact checkpoint). 1-second timestamps, so it reports
+all windows and windows >= 5 s where clock error is small.
 
 ```
 all windows:      prefill n=1963 median 1145.0   decode n=134 median 78.5
 windows >= 5s:    prefill n=740  median 1338.9   decode n=17  median 87.7
 ```
 
-The previous handoff's 78.5 / 1347 reproduce. **Exit criterion stays decode > 78.5,
-prefill > 1347.**
+**Exit criterion: decode > 78.5, prefill > 1347.**
 
 ## Where we are
 
-Matched before/after, same prompt and seed, `test_realmodel`:
-
-| | before | after | LM Studio |
-|---|---|---|---|
-| decode | 22.7 tok/s | **28.4 tok/s** | 78.5 |
-| prefill | 45.8 tok/s | **119.1 tok/s** | 1347 |
-
-`lmp_diag bench 4 512 200` (547-token prompt, 200 new tokens) — a new instrument, so
-there is no pre-change measurement at this shape:
+`lmp_diag bench 4 512 200` (547-token prompt, 200 new tokens), MLX 0.31.2:
 
 ```
-prefill  n=4 median 591.5 tok/s  min 520.7 max 592.6    [0.44x LM Studio]
-decode   n=4 median  27.9 tok/s  min  27.8 max  28.0    [0.35x LM Studio]
+prefill  n=4 median 586.7 tok/s  min 571.0 max 587.1    [0.44x LM Studio]
+decode   n=4 median  27.6 tok/s  min  27.6 max  27.7    [0.35x LM Studio]
 ```
 
-Not there. Two of the three named causes are closed; the third turned out not to be a
-cause at all, and the real one is now located precisely.
+Matched before/after from the first pass, same prompt and seed (`test_realmodel`):
+decode 22.7 -> 28.4 tok/s, prefill 45.8 -> 119.1 tok/s.
 
 ---
 
-## Closed
+## Closed (first pass)
 
-### 1. The grammar mask — 22.8 ms/token to 0.00
+### The grammar mask — 28.3 ms/token to 0.00
 
 `Sampler::sample` took `std::function<bool(TokenId)>` and called it once per vocabulary
-id. `TurnGrammar::permitted` is now the *definition* of the mask, not the hot path; the
-sampler consults `TurnGrammar::mask()`, which returns a `TokenMask` bitset
-(`src/model/token_mask.hpp`).
-
-Outside a tool call the legal set is "everything except a handful of structural ids", so
-it is a bitset cached per (phase, saw_tool_call) — no vocabulary walk at all. Inside one
-it is parsephony's `TokenMaskT<ToolCallGuard>`, finally wired up.
-
-`lmp_diag mask`:
+id. `TurnGrammar::permitted` is now the *definition*; the sampler reads a `TokenMask`
+bitset (`src/model/token_mask.hpp`) — cached per phase outside a tool call, parsephony's
+`TokenMaskT<ToolCallGuard>` inside one. `lmp_diag mask`:
 
 ```
 permitted() over full vocab :    28.29 ms/token
@@ -67,115 +75,111 @@ sampler, no mask            :     0.18 ms/token   (was 1.7 -- top_p no longer
 sampler + mask (as shipped) :     0.17 ms/token    std::sort's 248k indices)
 ```
 
-Two correctness results fell out of it, both pinned by tests:
+Two correctness results, both pinned by
+`the_bulk_mask_and_the_predicate_agree_over_the_whole_vocabulary`:
 
-- **parsephony's free-text mask was more permissive than its own automaton.**
-  `classify()` only simulated tokens containing the parameter terminator, but
-  `ToolCallGuard` also rejects control bytes in a raw text value — 93 vocabulary entries
-  the fast mask allowed and the grammar denies. Fixed in
-  `third_party/parsephony/include/parsephony/mask.hpp`. Found by the new test
-  `the_bulk_mask_and_the_predicate_agree_over_the_whole_vocabulary`, which compares
-  `mask()` against `permitted()` for every id at every state of a real tool call. **Keep
-  that test.** It is the only thing standing between a 22 ms saving and a mask that lies
-  to the sampler.
-- **Ids past the vocabulary are no longer emittable.** The logits row is 248,320 wide and
-  the tokenizer has 248,077 entries; the old predicate permitted the difference.
+- **parsephony's free-text mask was more permissive than its own automaton** — it only
+  simulated tokens carrying the parameter terminator, but `ToolCallGuard` also rejects
+  control bytes in a raw text value. 93 vocabulary entries the fast mask allowed and the
+  grammar denies. Fixed in the vendored header.
+- **Ids past the vocabulary** (logits row 248,320 wide, vocab 248,077) are no longer
+  emittable.
 
-### 2. Prefill's op-per-timestep scan — 20-25x
+**Keep that test.** It is the only thing between a 28 ms saving and a mask that lies.
 
-`gated_delta_update` ran one MLX op-set per token position: ~8,600 sequential launches
-for a 287-token prompt.
+### Prefill's op-per-timestep scan — 20-30x
 
-The fix was not a chunked associative scan. **mlx-lm already ships a fused Metal kernel
-for this** (`mlx_lm/models/gated_delta.py`), and LM Studio runs it — our C++ had ported
-mlx-lm's *reference* loop, the one it labels `gated_delta_ops`.
-`gated_delta_update_kernel` is that kernel: the whole T-step recurrence in one launch,
-state held in registers.
-
-Same arithmetic in the same order, so the deviation is fp32 association only.
-`lmp_diag scan`:
+`gated_delta_update` ran one MLX op-set per token position. The fix was not a chunked
+scan: **mlx-lm already ships a fused Metal kernel** and LM Studio runs it; our C++ had
+ported mlx-lm's *reference* loop. `lmp_diag scan` on 0.31.2:
 
 ```
      T         ops ms      kernel ms   speedup   rel|dy|   rel|dstate|
-     1            1.4           0.73      1.9x   1.9e-07     0.0e+00
-   287           27.2           1.15     23.6x   1.1e-07     9.4e-08
-  1024           79.1           3.12     25.3x   1.5e-07     9.4e-08
+     1            1.6           0.25      6.7x   1.9e-07     0.0e+00
+   287           33.0           1.08     30.6x   1.1e-07     9.4e-08
+   512           40.1           1.78     22.5x   1.6e-07     1.1e-07
 ```
 
-The reference loop is kept as `gated_delta_update_ops` — it is the definition the kernel
-is tested against. If you touch the kernel, `lmp_diag scan` is the check.
+Deviation is fp32 association only. `gated_delta_update_ops` stays as the definition the
+kernel is tested against. Feed that diagnostic raw normals for `k` and *both*
+implementations diverge — `(I - beta k k^T)` is only contractive once `k` is rms-normed
+and scaled by `1/sqrt(Dk)`, which is what `forward_gated_delta` does.
 
-One note on that diagnostic: feed it raw normals for `k` and *both* implementations
-diverge, because `(I - beta k k^T)` is only contractive once `k` is rms-normed and scaled
-by `1/sqrt(Dk)` the way `forward_gated_delta` does. The first version of the check got
-that wrong and reported 1e16 deviations that were entirely its own inputs.
+### The logits copy
 
-### 3. The logits copy — measured, then left alone
-
-0.07 ms/token (`copy=14ms` over 200 tokens). It was the smallest of the three and it is
-not worth touching. Closed by measurement rather than by work.
+0.07 ms/token. Closed by measurement, not by work.
 
 ---
 
-## The remaining gap is one block
+## The gap: forward_moe, 27 ms of a 35 ms step
 
-`lmp_diag layers 1` runs the model's own block functions, chained the way a step chains
-them:
-
-```
-  linear layer (delta+moe)   1.139 ms/layer  x30 =  34.17 ms
-  attn layer (attn+moe)      0.791 ms/layer  x10 =   7.91 ms
-    of which moe             0.674 ms/layer  x40 =  26.98 ms
-```
-
-**The MoE block is 27 ms/token of a 35 ms decode step.** And `lmp_diag blocks 1` says its
-actual GPU work is 0.085 ms/layer:
+`lmp_diag layers 1`:
 
 ```
-  moe gate                   latency  0.343  cpu  0.000  marginal  0.020 ms
-  moe switch_glu (8/256)     latency  0.232  cpu  0.003  marginal  0.048 ms
-  moe shared expert          latency  0.172  cpu  0.001  marginal  0.019 ms
+  linear layer (delta+moe) chained 1.067  independent 1.579 ms/layer  x30 = 32.02 ms
+  attn layer (attn+moe)    chained 0.818  independent 0.764 ms/layer  x10 =  8.18 ms
+    of which moe           chained 0.693  independent 0.647 ms/layer  x40 = 27.71 ms
 ```
 
-So ~0.59 ms per MoE block is neither compute nor CPU graph construction. It is the cost
-of ~27 MLX ops that cannot overlap. `lmp_diag chain` prices that directly:
+### Five hypotheses, all falsified by measurement
+
+Do not re-run these without a new reason:
+
+| tried | result |
+|---|---|
+| **MLX 0.31.2** (this session's main lead) | decode 27.9 -> 27.6. Nothing. |
+| `mx::compile` on the elementwise clusters | 5.5x in isolation on compute_g; 28.1 -> 27.9 end to end. Reverted. |
+| `MLX_MAX_OPS_PER_BUFFER` 50/200/500 | moves `chain` 1.9x, moves decode by 0.1 tok/s |
+| CPU graph construction | under 1 ms/step, so `mx::async_eval` has nothing to hide |
+| **dependent-op stall** | **chained 0.693 vs independent 0.647 — the dependency is innocent** |
+
+That last row killed the theory the previous handoff was built on. MLX serializes onto
+one stream either way, so "make the ops independent" buys nothing.
+
+### The one live lead
+
+`lmp_diag blocks 1` times forward_moe's pieces and they sum to **0.109 ms**. The block is
+**0.647 ms**. Composing them costs 6x, and `lmp_diag moe 1` bisects where:
 
 ```
-  dependent chain   :  5.22 us/op        independent :  4.08 us/op
+  1 gate                               0.025 ms/call
+  2 + moe_topk                         0.027 ms/call   (+0.002)
+  3 + switch_glu                       0.256 ms/call   (+0.229)
+  4 + combine                          0.120 ms/call
+  control: switch_glu, evaluated inds  0.093 ms/call
 ```
 
-Three things were tried against it and **all three did nothing**, which is worth knowing
-before trying them again:
+**`gather_qmm` fed an unevaluated index array costs ~2.5x what it costs fed an evaluated
+one** — same kernel, same weights, same data. That is the only thing `blocks` did
+differently (it hoisted `mx::eval({inds, scores})` out of its loop), and it is why
+`blocks` and `layers` disagreed by 6x.
 
-- **`mx::compile` on the elementwise clusters** (silu, swiglu, precise_rms_norm_gated,
-  compute_g). In isolation it is real — compute_g goes 18.4 us -> 3.3 us per call. End to
-  end: 28.1 -> 27.9 tok/s, inside noise. Reverted; the comment on `compute_g` records why.
-- **`MLX_MAX_OPS_PER_BUFFER`** (50 / 200 / 500). Moves the `chain` micro-benchmark 1.9x,
-  moves real decode by 0.1 tok/s. MLX already batches inside our single `mx::eval`.
-- **CPU-side graph construction** as a suspect: measured at under 1 ms per step. It is not
-  the problem, so `mx::async_eval` has nothing to hide and was not pursued.
+Stage 4 being *cheaper* than stage 3 is not noise to ignore either: stage 3 returns
+[1,1,8,2048] and stage 4 reduces it to [1,1,2048]. Understand that before trusting the
+absolute numbers in stages 3-4; the control row is the clean comparison.
 
-### What to try next
+### Where to go next
 
-The cost is in the MoE's *heavy* ops, not its elementwise ones — that is what the failed
-fusion experiment established. Two leads, cheapest first:
-
-1. **MLX version.** LM Studio ships **MLX 0.31.2**; we link **0.29.3** (the pip package
-   `src/model/CMakeLists.txt` probes). Its engine source is on this machine, and its
-   `SparseMoeBlock` and `SwitchGLU` are structurally identical to ours:
+1. **Find out what MLX does differently for gather_qmm with an unmaterialized index.**
+   Read `mx::gather_qmm`'s Metal path in the 0.31.2 source
+   (`~/.venvs/lmp-mlx/lib/python3.12/site-packages/mlx/include/mlx/`, and the ops source
+   upstream). Candidates: an index-dependent kernel-selection or output-shape decision
+   that forces the scheduler to break the batch; a fallback path when indices are not
+   contiguous/evaluated.
+2. **Test the obvious workaround directly**: `mx::eval(inds)` inside `forward_moe` before
+   `switch_glu`. It adds a sync per layer, so it may well be a net loss — but it is a
+   three-line experiment that either confirms the mechanism or kills it, and the answer
+   is worth more than the change.
+3. **Compare against LM Studio's actual call shape.** Its engine source is on this
+   machine and its `SparseMoeBlock`/`SwitchGLU` are structurally identical to ours:
    `~/.lmstudio/extensions/backends/vendor/_amphibian/`
    `app-mlx-generate-mac14-arm64@29/lib/python3.11/site-packages/mlx_lm/models/`.
-   Same op graph, 2.8x the throughput, newer MLX. Upgrading and re-running
-   `lmp_diag layers 1` is a one-line experiment and should be the first one.
+   Same ops, same MLX, same machine, 2.8x the throughput — so the difference is in *how*
+   they are issued, and it is now down to a small surface. Note `generate_step` runs
+   inside `with mx.stream(generation_stream)` on a **dedicated stream** and uses
+   `mx.async_eval`; the stream has not been tried.
 
-2. **Time forward_moe's pieces chained, not batched.** `lmp_diag blocks` batches them,
-   which is exactly what hides this; that measurement is the one this session did not get
-   to. Build it incrementally — the shared-expert path is naturally chainable through
-   [1,1,2048] — and diff. Prime suspects: the three `gather_qmm` calls, then
-   `argpartition` + `take_along_axis` over 256 experts. If one op carries most of the
-   0.59 ms, that is a different fix from "too many ops".
-
-Prefill is the same story: the scan is fixed, so prefill is now MoE-bound too.
+Prefill is the same story — the scan is fixed, so prefill is MoE-bound too.
 
 ---
 
@@ -188,30 +192,36 @@ Prefill is the same story: the scan is fixed, so prefill is now MoE-bound too.
 | `lmp_diag scan [T...]` | fused kernel vs reference loop: deviation and wall time |
 | `lmp_diag mask` | one decode step outside the forward pass |
 | `lmp_diag blocks [T]` | per-block cost, batched — latency / cpu / marginal |
-| `lmp_diag layers [T]` | per-layer cost, chained, via the model's own blocks |
-| `lmp_diag chain [n]` | what a dependent MLX op costs on this machine |
+| `lmp_diag moe [T]` | bisects forward_moe stage by stage; has the gather_qmm control |
+| `lmp_diag layers [T]` | per-layer cost, chained AND independent, via the model's own blocks |
+| `lmp_diag chain [n]` | what a dependent MLX op costs on this machine (5.2 us) |
 | `lmp_diag bench [runs] [prompt] [max_new]` | N-run ledger against the LM Studio numbers |
 
 `scripts/lmstudio_baseline.py` re-derives the other side.
 
 `Qwen35MoeModel::forward_{linear_layer,full_attn_layer,moe}` are public so `layers` times
-the code the model actually runs rather than a copy of it.
+the code the model actually runs rather than a copy of it. `GenResult` carries
+`forward_ms`, `logits_copy_ms`, `sample_ms`.
 
-`GenResult` now carries `forward_ms`, `logits_copy_ms`, `sample_ms`, so "decode is slow"
-is answerable with *where* without reaching for a profiler.
+A warning about this driver, learned twice: **it is easy to write a measurement that
+answers a different question than the one asked.** `blocks` hoisted an evaluated `inds`
+and hid a 6x effect; the first `scan` fed unnormalised `k` and reported 1e16 deviations
+that were entirely its own inputs; the first `blocks` charged every block a 0.17 ms eval
+round-trip and concluded they all cost the same. When a number surprises you, suspect the
+instrument before the code.
 
-## Guardrails — all green as of this handoff
+## Guardrails — all green on MLX 0.31.2
 
 `ctest -L gate` 19/19 · `./scripts/run_ratchets.py --root .` 6/6 clean ·
-`ctest -L realmodel` 2/2 · `./scripts/eval.py --root . score` unmoved
-(corpus wmiss=0 179/179 pinned, holdout wmiss=15 34/42 pinned).
+`ctest -L realmodel` 2/2 (same 536 tokens generated as on 0.29.3) ·
+`./scripts/eval.py --root . score` unmoved (corpus wmiss=0 179/179, holdout wmiss=15 34/42).
 
 ## Do not
 
 - Do not delete `gated_delta_update_ops`, or the equivalence tests in
   `tests/model/test_grammar.cpp`. They are what make the fast paths falsifiable.
-- Do not re-apply `mx::compile` on the strength of a micro-benchmark. It was measured end
-  to end and it was zero.
+- Do not re-apply `mx::compile`, or re-test MLX versions or `MLX_MAX_OPS_PER_BUFFER`,
+  without a new reason. All three were measured end to end and all three were zero.
 - Do not weaken the grammar to make the mask cheap. Speed came from *how* the mask is
   computed; the tool-call automaton constrains exactly as much as it did before.
 - Do not reach for speculative decoding. The MoE block is 27 ms of a 35 ms step; stacking
