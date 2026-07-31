@@ -45,6 +45,15 @@ struct HitlThresholds {
 using Approver = std::function<bool(const std::string& tool, const std::string& preview,
                                     const tools::RiskHint& hint)>;
 
+// Anything the user has said since the last time it was asked, oldest first.
+//
+// Polled at TURN BOUNDARIES, never mid-generation. Cancel is the violent interrupt and
+// sets a token in the middle of the token stream; steering is the gentle one, so the
+// model finishes the thought it is having and then reads the instruction before choosing
+// its next move. Injected for the same reason the approver is: the scripted loop suite
+// can hand the run a message at a chosen turn with no transport in the picture.
+using SteerSource = std::function<std::vector<std::string>()>;
+
 struct AgentConfig {
     Mode mode = Mode::Agent;
     Budget budget;
@@ -68,6 +77,10 @@ struct Observer {
     std::function<void(const context::VerificationRecord&)> on_verification;
     std::function<void(const model::GenResult&, std::size_t ctx_used, std::size_t ctx_max)>
         on_perf;
+    // Fired whenever the checklist CHANGES, which is the only time it is news. The
+    // sidebar had a Checklist panel and nothing ever filled it: `lmp/checklist` was
+    // declared in the schema, generated on both sides, and emitted by nobody.
+    std::function<void(const std::vector<context::ChecklistItem>&)> on_checklist;
 };
 
 struct RunReport {
@@ -76,6 +89,11 @@ struct RunReport {
     int iterations = 0;
     bool completed = false;
     std::size_t compactions = 0;
+    // Checklist items still open at the end. Reported, never enforced -- see
+    // CompletionVerdict.
+    std::size_t unfinished_items = 0;
+    // Instructions that arrived mid-run and were taken up at a turn boundary.
+    std::size_t steers_received = 0;
 };
 
 class Agent {
@@ -86,6 +104,7 @@ class Agent {
 
     void set_approver(Approver a) { approver_ = std::move(a); }
     void set_observer(Observer o) { observer_ = std::move(o); }
+    void set_steer_source(SteerSource s) { steer_ = std::move(s); }
 
     [[nodiscard]] RunReport run(const model::CancelToken& cancel);
 
@@ -104,6 +123,8 @@ class Agent {
 
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
     void compact_to_budget();
+    // Drains the steer source into the context. Returns how many instructions landed.
+    [[nodiscard]] std::size_t take_steering();
     [[nodiscard]] TurnResult::PlanOutcome apply_plan(
         const std::vector<tools::ToolParamValue>& params);
     [[nodiscard]] std::string baseline_check();
@@ -123,9 +144,8 @@ class Agent {
     RepeatDetector repeats_;
     Approver approver_;
     Observer observer_;
+    SteerSource steer_;
     Verifier verifier_;
-    // The command the run declared, via `plan`, as the proof that the mission is done.
-    std::string verify_contract_;
     std::string tools_guidance_;
     int consecutive_text_only_ = 0;
     bool halted_ = false;

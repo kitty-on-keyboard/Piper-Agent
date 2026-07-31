@@ -40,7 +40,13 @@ struct ChecklistItem {
 };
 
 // One turn's worth of history: what the model said, and what it observed back.
+//
+// A record carrying only `user_text` is something the HUMAN said -- the opening mission
+// or a later instruction. It sits in the same ordered stream as everything else because
+// when an instruction arrived relative to what the model had already seen is the whole
+// meaning of "no, use the other approach".
 struct TurnRecord {
+    std::string user_text;        // set only on a human turn; the rest are then empty
     std::string assistant_text;   // the answer body; reasoning is NOT carried forward
     std::string tool_name;        // empty when the turn was text-only
     std::string tool_args_summary;
@@ -59,20 +65,58 @@ struct VerificationRecord {
     // capable of failing.
     bool ran = false;
     std::string detail;
+    // Where this reading sits in the conversation. Evidence gathered BEFORE the user's
+    // latest instruction cannot discharge that instruction, and without a position on
+    // the timeline there is no way to tell the two apart: a follow-up would complete
+    // instantly on the previous run's green.
+    std::size_t seq = 0;
 };
 
 class ContextStore {
   public:
-    // The mission is immutable and set once. It is the only text in the whole prompt
-    // that may name the deliverable (S8.2 T0).
-    explicit ContextStore(std::string mission) : mission_(std::move(mission)) {}
+    // The opening mission. Still the only text in the STABLE prompt block that may name
+    // the deliverable (S8.2 T0), and still fixed once set -- but it is now the FIRST user
+    // turn rather than the only one. An agent you can only launch is a batch job; the
+    // store has to outlive one mission for a follow-up to continue a conversation
+    // instead of restarting it.
+    explicit ContextStore(std::string mission) { user_turns_.push_back(std::move(mission)); }
 
     // --- T1 pinned ---------------------------------------------------------
-    void set_checklist(std::vector<ChecklistItem> items) { checklist_ = std::move(items); }
+    void set_checklist(std::vector<ChecklistItem> items) {
+        checklist_ = std::move(items);
+        plan_stale_ = false;
+    }
     [[nodiscard]] const std::vector<ChecklistItem>& checklist() const noexcept {
         return checklist_;
     }
-    void record_verification(VerificationRecord v) { verifications_.push_back(std::move(v)); }
+    [[nodiscard]] std::size_t open_checklist_items() const noexcept {
+        return static_cast<std::size_t>(std::count_if(
+            checklist_.begin(), checklist_.end(), [](const ChecklistItem& c) { return !c.done; }));
+    }
+
+    // The command the run declared, via `plan`, as the proof that the mission is done.
+    // Pinned here rather than held by the Agent so a follow-up run picks up the contract
+    // its predecessor declared instead of silently losing it.
+    void set_verify_contract(std::string c) { verify_contract_ = std::move(c); }
+    [[nodiscard]] const std::string& verify_contract() const noexcept {
+        return verify_contract_;
+    }
+
+    // True when an instruction has landed that the current checklist predates. Cleared
+    // only by restating the checklist. The loop turns this into a MECHANISM -- `plan`
+    // becomes the sole callable tool -- so a steering message cannot be received and
+    // then quietly ignored (S9.2).
+    [[nodiscard]] bool plan_is_stale() const noexcept { return plan_stale_; }
+
+    void record_verification(VerificationRecord v) {
+        // Takes its OWN position on the timeline rather than borrowing the current
+        // turn's. A verification runs mid-turn, before that turn is recorded, so
+        // reusing the turn counter would stamp evidence with the position of the last
+        // COMPLETED turn -- and a check run immediately after an instruction would tie
+        // with it instead of postdating it.
+        v.seq = ++seq_;
+        verifications_.push_back(std::move(v));
+    }
     [[nodiscard]] const std::vector<VerificationRecord>& verifications() const noexcept {
         return verifications_;
     }
@@ -99,8 +143,34 @@ class ContextStore {
     // --- T2 recent ----------------------------------------------------------
     // The ONLY door for run facts. Everything it stores was observed through a tool
     // result in this run.
-    void add_turn(TurnRecord t) { recent_.push_back(std::move(t)); }
+    void add_turn(TurnRecord t) {
+        ++seq_;
+        recent_.push_back(std::move(t));
+    }
     [[nodiscard]] const std::vector<TurnRecord>& recent() const noexcept { return recent_; }
+
+    // What the human said, mid-run or between runs. Not prompt IMPURITY: a user
+    // instruction is an observed fact about this session, in the same sense a tool
+    // result is (S8.4). What stays forbidden is text nobody said -- an inferred
+    // workspace description or a guessed deliverable name.
+    //
+    // Two things follow from an instruction landing, and both are mechanisms:
+    // the plan goes stale, and the position is remembered so evidence gathered
+    // beforehand cannot be mistaken for evidence that discharges it.
+    void add_user_message(std::string text) {
+        user_turns_.push_back(text);
+        TurnRecord t;
+        t.user_text = std::move(text);
+        add_turn(std::move(t));
+        last_directive_seq_ = seq_;
+        plan_stale_ = true;
+    }
+    [[nodiscard]] const std::vector<std::string>& user_turns() const noexcept {
+        return user_turns_;
+    }
+    [[nodiscard]] std::size_t last_directive_seq() const noexcept {
+        return last_directive_seq_;
+    }
 
     // --- T3 compacted -------------------------------------------------------
     [[nodiscard]] std::size_t compaction_count() const noexcept { return compactions_; }
@@ -116,7 +186,7 @@ class ContextStore {
     // is diffable and a purity violation is a unit test, not a run-time surprise.
     [[nodiscard]] std::vector<Message> render(std::string_view tool_guidance) const;
 
-    [[nodiscard]] const std::string& mission() const noexcept { return mission_; }
+    [[nodiscard]] const std::string& mission() const noexcept { return user_turns_.front(); }
     [[nodiscard]] const std::vector<std::string>& compacted_spans() const noexcept {
         return spans_;
     }
@@ -125,14 +195,22 @@ class ContextStore {
     [[nodiscard]] std::string render_live_state() const;
 
   private:
-    const std::string mission_;
+    // user_turns_[0] is the opening mission and never changes; the rest are instructions
+    // that arrived later. front() is therefore always valid.
+    std::vector<std::string> user_turns_;
     std::string project_instructions_;
+    std::string verify_contract_;
     std::vector<ChecklistItem> checklist_;
     std::vector<VerificationRecord> verifications_;
     std::vector<std::string> deliverables_;
     std::vector<TurnRecord> recent_;
     std::vector<std::string> spans_;
     std::size_t compactions_ = 0;
+    // Monotonic position in the conversation. Never reset -- compaction moves turns into
+    // spans but must not renumber the timeline, or evidence would appear to move.
+    std::size_t seq_ = 0;
+    std::size_t last_directive_seq_ = 0;
+    bool plan_stale_ = false;
 };
 
 } // namespace lmp::context

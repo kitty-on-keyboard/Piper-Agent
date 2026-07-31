@@ -11,6 +11,7 @@ import { SidecarClient } from "./client";
 import {
   TokenNotification,
   TurnNotification,
+  ChecklistNotification,
   VerificationNotification,
   ApprovalRequestNotification,
   PerfNotification,
@@ -20,27 +21,54 @@ import {
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "lmPipe.sidebar";
   public currentRunId: string | undefined;
+  /** True between the first notification of a run and its run_end. Decides whether typing
+   *  into the box steers the live run or starts a follow-up -- the sidecar makes the same
+   *  decision independently, so this only chooses the wording shown to the user. */
+  private runInFlight = false;
   private view: vscode.WebviewView | undefined;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly client: SidecarClient
   ) {
-    this.client.on("token", (n: TokenNotification) => this.post("token", n));
-    this.client.on("turn", (n: TurnNotification) => this.post("turn", n));
-    this.client.on("verification", (n: VerificationNotification) => this.post("verification", n));
-    this.client.on("perf", (n: PerfNotification) => this.post("perf", n));
+    this.client.on("token", (n: TokenNotification) => this.observe(n.run_id, "token", n));
+    this.client.on("turn", (n: TurnNotification) => this.observe(n.run_id, "turn", n));
+    this.client.on("checklist", (n: ChecklistNotification) =>
+      this.observe(n.run_id, "checklist", n)
+    );
+    this.client.on("verification", (n: VerificationNotification) =>
+      this.observe(n.run_id, "verification", n)
+    );
+    this.client.on("perf", (n: PerfNotification) => this.observe(n.run_id, "perf", n));
     this.client.on("approval_request", (n: ApprovalRequestNotification) =>
-      this.post("approval", n)
+      this.observe(n.run_id, "approval", n)
     );
     this.client.on("run_end", (n: RunEndNotification) => {
       // termination_reason is the one unambiguous signal for WHICH ENDING a run took
       // (S14). It is shown, not summarized away.
-      this.post("run_end", n);
+      this.observe(n.run_id, "run_end", n);
+      this.runInFlight = false;
+      this.post("idle", {});
     });
   }
 
+  /** Every notification carries the run it belongs to, so the run id is READ off the
+   *  stream rather than remembered from the start reply.
+   *
+   *  It was remembered from nowhere at all before this: `currentRunId` was declared,
+   *  never assigned, and `lmPipe.cancel` read it -- so the Cancel command sent nothing
+   *  and silently did nothing, for every run. Reading it here also keeps it correct
+   *  across a follow-up, which mints a new run id without a start reply to carry it. */
+  private observe(runId: string, kind: string, payload: unknown): void {
+    if (runId) {
+      this.currentRunId = runId;
+      this.runInFlight = true;
+    }
+    this.post(kind, payload);
+  }
+
   beginRun(mission: string): void {
+    this.runInFlight = true;
     this.post("run_start", { mission });
   }
 
@@ -52,14 +80,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
     view.webview.html = this.html();
-    view.webview.onDidReceiveMessage((msg: { kind: string; id?: string; approved?: boolean }) => {
-      if (msg.kind === "approve" && msg.id !== undefined) {
-        void this.client.approve(msg.id, msg.approved === true);
+    view.webview.onDidReceiveMessage(
+      (msg: { kind: string; id?: string; approved?: boolean; text?: string }) => {
+        if (msg.kind === "approve" && msg.id !== undefined) {
+          void this.client.approve(msg.id, msg.approved === true);
+        }
+        if (msg.kind === "cancel") {
+          void vscode.commands.executeCommand("lmPipe.cancel");
+        }
+        if (msg.kind === "message" && msg.text) {
+          this.send(msg.text);
+        }
       }
-      if (msg.kind === "cancel") {
-        void vscode.commands.executeCommand("lmPipe.cancel");
-      }
-    });
+    );
+  }
+
+  /** Sends the user's text and echoes it into the transcript immediately.
+   *
+   *  The echo is local because the sidecar does not reflect user turns back -- it puts
+   *  them in the model's context, which is a different thing from putting them on the
+   *  user's screen. Without it, typing into a running agent looked like typing into a
+   *  void for however long the current turn had left. */
+  private send(text: string): void {
+    this.post("said", { text, steering: this.runInFlight });
+    if (!this.runInFlight) {
+      this.runInFlight = true;
+    }
+    void this.client.message(this.currentRunId ?? "", text);
   }
 
   private html(): string {
@@ -84,6 +131,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
  #perf { font-family: var(--vscode-editor-font-family); opacity: .75; }
  .card { border: 1px solid var(--vscode-panel-border); padding: 6px; margin: 6px 0; }
  button { margin-right: 6px; }
+ /* The input box is pinned to the bottom and is ALWAYS enabled. An agent you can only
+    launch and abort is a batch job; being able to type at it mid-run is the difference
+    (S4.5). */
+ #composer { position: sticky; bottom: 0; display: flex; gap: 6px; padding: 8px 0 2px;
+             background: var(--vscode-sideBar-background); }
+ #say { flex: 1; font-family: inherit; font-size: 12px; resize: vertical; min-height: 34px;
+        color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+        border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); padding: 4px; }
+ #hint { opacity: .6; font-size: 10px; padding-bottom: 6px; }
+ .said { border-left: 2px solid var(--vscode-focusBorder); padding: 2px 0 2px 6px;
+         margin: 6px 0; white-space: pre-wrap; }
+ .said .who { opacity: .6; font-size: 10px; }
 </style></head><body>
 <div id="mission"></div>
 <h3>Answer</h3><div id="answer"></div>
@@ -93,17 +152,72 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <h3>Verification</h3><div id="verify"></div>
 <h3>Approvals</h3><div id="approvals"></div>
 <h3>Perf</h3><div id="perf"></div>
+<div id="composer">
+  <textarea id="say" rows="1" placeholder="Say something to the agent…"></textarea>
+  <button id="send">Send</button>
+</div>
+<div id="hint">Enter to send, Shift+Enter for a newline.</div>
 <script nonce="${nonce}">
 const vscodeApi = acquireVsCodeApi();
 const $ = (id) => document.getElementById(id);
 const chipFor = (status) =>
   status === 'ok' ? 'ok' : (status === 'refused' || status === 'denied') ? 'refused' : 'failed';
 
+let inFlight = false;
+
+const submit = () => {
+  const text = $('say').value.trim();
+  if (!text) return;
+  vscodeApi.postMessage({ kind: 'message', text });
+  $('say').value = '';
+};
+$('send').onclick = submit;
+$('say').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); submit(); }
+});
+
+const setHint = () => {
+  $('hint').textContent = inFlight
+    ? 'A run is in flight — your message reaches it at the next turn boundary. Enter to send.'
+    : 'Nothing running — your message continues the conversation as a follow-up. Enter to send.';
+};
+setHint();
+
 window.addEventListener('message', (e) => {
   const { kind, payload } = e.data;
   if (kind === 'run_start') {
+    inFlight = true; setHint();
     $('mission').textContent = payload.mission;
-    ['answer','think','timeline','verify','approvals'].forEach(id => $(id).textContent = '');
+    ['answer','think','timeline','verify','approvals','checklist'].forEach(id => $(id).textContent = '');
+  }
+  if (kind === 'idle') { inFlight = false; setHint(); }
+  if (kind === 'said') {
+    inFlight = true; setHint();
+    // Echoed locally: the sidecar routes user text to the MODEL, not back to the view.
+    const d = document.createElement('div');
+    d.className = 'said';
+    const who = document.createElement('div');
+    who.className = 'who';
+    who.textContent = payload.steering ? 'you, mid-run' : 'you';
+    const body = document.createElement('div');
+    body.textContent = payload.text;
+    d.append(who, body);
+    $('timeline').append(d);
+    // A steering message clears the streamed answer: what follows is a NEW answer, and
+    // letting the next turn's tokens append to the previous one produced a single
+    // run-on paragraph with no seam where the instruction landed.
+    $('answer').textContent = '';
+    $('think').textContent = '';
+  }
+  if (kind === 'checklist') {
+    const items = JSON.parse(payload.items_json);
+    $('checklist').textContent = '';
+    for (const item of items) {
+      const d = document.createElement('div');
+      d.textContent = (item.done ? '☑ ' : '☐ ') + item.text;
+      if (item.done) d.style.opacity = '.6';
+      $('checklist').append(d);
+    }
   }
   if (kind === 'token') {
     const target = payload.channel === 'thinking' ? 'think' : 'answer';
@@ -154,8 +268,16 @@ window.addEventListener('message', (e) => {
   if (kind === 'run_end') {
     const d = document.createElement('div');
     d.className = 'row';
-    d.textContent = 'run ended: ' + payload.termination_reason +
+    let text = 'run ended: ' + payload.termination_reason +
       ' after ' + payload.iterations + ' iteration(s)';
+    // completed is EVIDENTIAL -- a recorded deliverable plus a falsifiable passing
+    // verification. When it disagrees with the model's own checklist, show both rather
+    // than picking the flattering one (S10.4).
+    if (payload.completed && payload.unfinished_items > 0) {
+      text += ' — evidence says done; ' + payload.unfinished_items +
+        ' checklist item(s) left unticked';
+    }
+    d.textContent = text;
     $('timeline').append(d);
   }
 });

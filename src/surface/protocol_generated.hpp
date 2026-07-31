@@ -216,6 +216,17 @@ struct ApproveResult {
     bool accepted = false;
 };
 
+// request "lmp/message"
+struct MessageParams {
+    std::string run_id;
+    std::string text;
+};
+struct MessageResult {
+    bool accepted = false;
+    std::string run_id;
+    bool started_run = false;
+};
+
 // request "lmp/shutdown"
 struct ShutdownParams {
 };
@@ -404,6 +415,7 @@ struct RunEndNotification {
     std::string termination_reason;
     std::int64_t iterations = 0;
     bool completed = false;
+    std::int64_t unfinished_items = 0;
     static constexpr const char* kMethod = "lmp/run_end";
 };
 [[nodiscard]] inline std::string to_json(const RunEndNotification& n) {
@@ -419,6 +431,9 @@ struct RunEndNotification {
     out += ",";
     out += "\"completed\":";
     append_value(out, n.completed);
+    out += ",";
+    out += "\"unfinished_items\":";
+    append_value(out, n.unfinished_items);
     out += "}";
     return out;
 }

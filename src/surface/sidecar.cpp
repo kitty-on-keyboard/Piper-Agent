@@ -109,6 +109,7 @@ void end_run(const std::string& id, const std::string& reason) {
     end.termination_reason = reason;
     end.iterations = 0;
     end.completed = false;
+    end.unfinished_items = 0;
     notify(end);
 }
 
@@ -144,6 +145,18 @@ loop::Observer make_observer(const std::string& id) {
         n.detail = v.detail;
         notify(n);
     };
+    obs.on_checklist = [id](const std::vector<context::ChecklistItem>& items) {
+        protocol::ChecklistNotification n;
+        n.run_id = id;
+        n.items_json = "[";
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            n.items_json += i == 0 ? "" : ",";
+            n.items_json += R"({"text":)" + json_escape(items[i].text) + R"(,"done":)" +
+                            (items[i].done ? "true" : "false") + "}";
+        }
+        n.items_json += "]";
+        notify(n);
+    };
     obs.on_perf = [id](const model::GenResult& g, std::size_t used, std::size_t max) {
         protocol::PerfNotification n;
         n.run_id = id;
@@ -158,20 +171,36 @@ loop::Observer make_observer(const std::string& id) {
     return obs;
 }
 
-// The approval round-trip (S7.2).
+// The inbox of a run that is already in flight: approvals (S7.2) and steering (S4.5).
 //
-// An escalation BLOCKS the run until the human answers, and the wait drains the inbox on
-// the run's own thread -- which is already the channel's only consumer. Handing the wait
-// to a second consumer would break the SPSC invariant to no purpose: this thread has
-// nothing else to do until the answer arrives.
+// Both are the same problem wearing different clothes -- the human said something while
+// the model was working -- so they are one class over one channel. The run thread is
+// already the channel's only consumer; handing either job to a second consumer would
+// break the SPSC invariant to no purpose.
+//
+// The two differ only in urgency. An approval BLOCKS: nothing can proceed until the human
+// answers. Steering does not block anything; it accumulates and is collected at the next
+// turn boundary, which is why `take_messages` never waits.
 //
 // Deny-by-default survives intact. An `approved: true` carrying the request_id of the
-// card still on screen is the ONLY path that returns true; a denial, a stale card, a
-// cancel, a shutdown, a malformed reply and a dead parent all return false.
-class ApprovalBridge {
+// card still on screen is the ONLY path that returns true from ask(); a denial, a stale
+// card, a cancel, a shutdown, a malformed reply and a dead parent all return false.
+class RunInbox {
   public:
-    ApprovalBridge(platform::SpscChannel<std::string>& inbox, std::string run_id)
+    RunInbox(platform::SpscChannel<std::string>& inbox, std::string run_id)
         : inbox_(inbox), run_id_(std::move(run_id)) {}
+
+    // Everything the user has said since the last call, oldest first. Non-blocking: the
+    // run is mid-flight and has work to get back to.
+    std::vector<std::string> take_messages() {
+        std::string msg;
+        while (inbox_.try_pop(msg)) {
+            (void)handle(msg, nullptr, nullptr);
+        }
+        std::vector<std::string> out;
+        out.swap(steering_);
+        return out;
+    }
 
     bool ask(const std::string& tool, const std::string& preview,
              const tools::RiskHint& hint) {
@@ -184,60 +213,92 @@ class ApprovalBridge {
         req.risk = loop::risk_score(hint);
         req.capabilities = chips_of(hint);
         notify(req);
-        return wait_for_answer(request_id);
-    }
 
-    // True when a shutdown arrived while a card was on screen: acknowledged there, but
-    // only actionable once the run has unwound.
-    [[nodiscard]] bool shutdown_requested() const noexcept { return shutdown_; }
-
-  private:
-    bool wait_for_answer(const std::string& request_id) {
-        std::string reply;
+        bool answer = false;
+        std::string msg;
         while (true) {
             if (inbox_.drained()) {
                 // The parent is gone, so there is nobody left to ask. Deny, rather than
                 // block forever on a dead pipe holding 19 GB of weights.
                 return false;
             }
-            if (!inbox_.try_pop(reply)) {
+            if (!inbox_.try_pop(msg)) {
                 std::this_thread::yield();
                 continue;
             }
-            const std::string method = surface::method_of(reply);
-            const std::string id = surface::string_field(reply, "id");
-
-            if (method == "lmp/approve" &&
-                surface::string_field(reply, "request_id") == request_id) {
-                reply_result(id, R"({"accepted":true})");
-                return surface::bool_field(reply, "approved");
+            if (handle(msg, &request_id, &answer)) {
+                return answer;
             }
-            if (method == "lmp/approve") {
-                // An answer to a card this run has already moved past. Say so rather
-                // than letting it decide the CURRENT call -- an approval is for one
-                // specific command, not for a position in a queue.
-                reply_result(id, R"({"accepted":false})");
-                continue;
-            }
-            if (method == "lmp/cancel") {
-                // The reader thread set the token when it framed the message; this is
-                // only the acknowledgement. Deny, and the loop notices the token.
-                reply_result(id, R"({"accepted":true})");
-                return false;
-            }
-            if (method == "lmp/shutdown") {
-                shutdown_ = true;
-                reply_result(id, R"({"ok":true})");
-                return false;
-            }
-            reply_error(id, "a run is in flight and is waiting on approval '" +
-                                request_id + "'; '" + method +
-                                "' cannot be serviced until that run ends");
         }
+    }
+
+    // True when a shutdown arrived mid-run: acknowledged there, but only actionable once
+    // the run has unwound.
+    [[nodiscard]] bool shutdown_requested() const noexcept { return shutdown_; }
+
+  private:
+    // Services one message. Returns true only when it ANSWERED the approval named by
+    // `awaiting` -- so the same routing serves the blocking and non-blocking paths, and a
+    // message cannot mean one thing at a turn boundary and another under a card.
+    bool handle(const std::string& msg, const std::string* awaiting, bool* answer) {
+        const std::string method = surface::method_of(msg);
+        const std::string id = surface::string_field(msg, "id");
+
+        if (method == "lmp/message") {
+            const std::string text = surface::string_field(msg, "text");
+            if (text.empty()) {
+                reply_error(id, "lmp/message requires a non-empty 'text'");
+                return false;
+            }
+            // Collected, not applied. The model is generating; the instruction lands at
+            // the next turn boundary, where the run can actually act on it. This holds
+            // even when a card is on screen -- steering typed while the human was
+            // deciding is queued, not dropped, and not mistaken for the answer.
+            steering_.push_back(text);
+            reply_result(id, R"({"accepted":true,"run_id":")" + run_id_ +
+                                 R"(","started_run":false})");
+            return false;
+        }
+        if (method == "lmp/approve") {
+            if (awaiting != nullptr && surface::string_field(msg, "request_id") == *awaiting) {
+                reply_result(id, R"({"accepted":true})");
+                *answer = surface::bool_field(msg, "approved");
+                return true;
+            }
+            // An answer to a card this run has already moved past, or one nobody asked
+            // for. Say so rather than letting it decide the CURRENT call -- an approval
+            // is for one specific command, not for a position in a queue.
+            reply_result(id, R"({"accepted":false})");
+            return false;
+        }
+        if (method == "lmp/cancel") {
+            // The reader thread set the token when it framed the message; this is only
+            // the acknowledgement. Under a card, deny and let the loop notice the token.
+            reply_result(id, R"({"accepted":true})");
+            if (awaiting != nullptr) {
+                *answer = false;
+                return true;
+            }
+            return false;
+        }
+        if (method == "lmp/shutdown") {
+            shutdown_ = true;
+            reply_result(id, R"({"ok":true})");
+            if (awaiting != nullptr) {
+                *answer = false;
+                return true;
+            }
+            return false;
+        }
+        reply_error(id, "a run is in flight; '" + method +
+                            "' cannot be serviced until it ends. To talk to the run "
+                            "while it works, use lmp/message.");
+        return false;
     }
 
     platform::SpscChannel<std::string>& inbox_;
     std::string run_id_;
+    std::vector<std::string> steering_;
     std::uint64_t seq_ = 0;
     bool shutdown_ = false;
 };
@@ -309,10 +370,62 @@ std::string load_project_instructions(const std::string& workspace) {
     return {};
 }
 
-// One run, start to finish. Returns true when the run should be the process's last.
-bool run_mission(const std::string& id, const std::string& message,
-                 platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
-                 platform::EventLogWriter& log, const platform::Clock& clock) {
+// What survives between missions.
+//
+// v1 of this file built the tokenizer, the weights, the registry and the context store
+// inside one function and dropped all four on the way out, so every mission was a fresh
+// one-shot: no history to follow up on, and a ~19 GB reload to ask a second question.
+// The agent could be launched and could be aborted, and that was the entire vocabulary.
+//
+// The context store is the part that makes a conversation; keeping the weights loaded
+// alongside it is what makes a follow-up cost a prefill instead of a minute.
+struct Session {
+    std::string model_dir;
+    std::string workspace;
+    std::unique_ptr<model::QwenTokenizer> tok;
+    std::unique_ptr<model::MlxBackend> backend;
+    std::unique_ptr<tools::Registry> registry;
+    std::unique_ptr<context::ContextStore> ctx;
+    loop::AgentConfig config;
+};
+
+// Turns the loop once over an EXISTING session. Returns true when the run should be the
+// process's last. The caller has already replied to the request that triggered it, since
+// this blocks for as long as the mission takes.
+bool run_loop(const std::string& run_id, Session& session,
+              platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
+              platform::EventLogWriter& log, const platform::Clock& clock) {
+    loop::Agent agent(*session.tok, *session.backend, *session.registry, *session.ctx, log,
+                      clock, session.config);
+    agent.set_observer(make_observer(run_id));
+
+    RunInbox run_inbox(inbox, run_id);
+    agent.set_approver([&run_inbox](const std::string& tool, const std::string& preview,
+                                    const tools::RiskHint& hint) {
+        return run_inbox.ask(tool, preview, hint);
+    });
+    agent.set_steer_source([&run_inbox]() { return run_inbox.take_messages(); });
+
+    cancel.reset();
+    const loop::RunReport report = agent.run(cancel);
+
+    protocol::RunEndNotification end;
+    end.run_id = run_id;
+    end.termination_reason = report.termination_reason;
+    end.iterations = report.iterations;
+    end.completed = report.completed;
+    end.unfinished_items = static_cast<std::int64_t>(report.unfinished_items);
+    notify(end);
+    return run_inbox.shutdown_requested();
+}
+
+// A fresh mission. Reuses the loaded weights when the model has not changed -- the
+// tokenizer and the checkpoint are the expensive part and neither depends on the mission
+// -- but the context store is rebuilt, because `lmp/start` MEANS start over. Continuing a
+// conversation is what lmp/message is for.
+bool start_mission(const std::string& id, const std::string& message, Session& session,
+                   platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
+                   platform::EventLogWriter& log, const platform::Clock& clock) {
     const std::string mission = surface::string_field(message, "mission");
     const std::string model_dir = surface::string_field(message, "model_dir");
     const std::string workspace = surface::string_field(message, "workspace_root");
@@ -323,53 +436,71 @@ bool run_mission(const std::string& id, const std::string& message,
     }
     reply_result(id, R"({"run_id":")" + id + R"("})");
 
-    model::QwenTokenizer tok;
-    const model::LoadStatus tok_status =
-        tok.load(model_dir + "/tokenizer.json", model::Family::Qwen3);
-    if (!tok_status.ok) {
-        end_run(id, "tokenizer_refused: " + tok_status.error);
-        return false;
-    }
-
-    auto backend = std::make_unique<model::MlxBackend>(clock);
-    const model::LoadStatus backend_status = backend->load({model_dir, ""});
-    if (!backend_status.ok) {
-        end_run(id, "model_load_failed: " + backend_status.error);
-        return false;
-    }
-
-    tools::WorkspaceContext wctx;
-    wctx.root = workspace;
-    wctx.max_read_bytes = 4U << 20;
-    wctx.max_result_bytes = 8192;
-    wctx.spool_dir = workspace + "/.lmp_spool";
-    wctx.shell_wall_clock_seconds = 300;
-    tools::Registry registry(std::move(wctx));
-
-    context::ContextStore ctx(mission);
-    ctx.set_project_instructions(load_project_instructions(workspace));
     loop::AgentConfig config;
     if (!apply_settings(id, message, config)) {
         return false;
     }
-    loop::Agent agent(tok, *backend, registry, ctx, log, clock, config);
+    session.config = config;
 
-    agent.set_observer(make_observer(id));
-    ApprovalBridge approvals(inbox, id);
-    agent.set_approver([&approvals](const std::string& tool, const std::string& preview,
-                                    const tools::RiskHint& hint) {
-        return approvals.ask(tool, preview, hint);
-    });
+    if (session.tok == nullptr || session.model_dir != model_dir) {
+        auto tok = std::make_unique<model::QwenTokenizer>();
+        const model::LoadStatus tok_status =
+            tok->load(model_dir + "/tokenizer.json", model::Family::Qwen3);
+        if (!tok_status.ok) {
+            end_run(id, "tokenizer_refused: " + tok_status.error);
+            return false;
+        }
+        auto backend = std::make_unique<model::MlxBackend>(clock);
+        const model::LoadStatus backend_status = backend->load({model_dir, ""});
+        if (!backend_status.ok) {
+            end_run(id, "model_load_failed: " + backend_status.error);
+            return false;
+        }
+        // Assigned only once BOTH succeeded, so a failed reload cannot leave the session
+        // holding a tokenizer for one checkpoint and weights for another.
+        session.tok = std::move(tok);
+        session.backend = std::move(backend);
+        session.model_dir = model_dir;
+    }
 
-    cancel.reset();
-    const loop::RunReport report = agent.run(cancel);
-    protocol::RunEndNotification end;
-    end.run_id = id;
-    end.termination_reason = report.termination_reason;
-    end.iterations = report.iterations;
-    end.completed = report.completed;
-    notify(end);
-    return approvals.shutdown_requested();
+    if (session.registry == nullptr || session.workspace != workspace) {
+        tools::WorkspaceContext wctx;
+        wctx.root = workspace;
+        wctx.max_read_bytes = 4U << 20;
+        wctx.max_result_bytes = 8192;
+        wctx.spool_dir = workspace + "/.lmp_spool";
+        wctx.shell_wall_clock_seconds = 300;
+        session.registry = std::make_unique<tools::Registry>(std::move(wctx));
+        session.workspace = workspace;
+    }
+
+    session.ctx = std::make_unique<context::ContextStore>(mission);
+    session.ctx->set_project_instructions(load_project_instructions(workspace));
+
+    return run_loop(id, session, inbox, cancel, log, clock);
+}
+
+// A follow-up: the same context, one more user turn, another pass of the loop.
+//
+// This is the idle half of lmp/message. The in-flight half lives in RunInbox and never
+// reaches here -- while a run is turning, the main loop is inside run_loop and is not
+// reading the inbox at all, so a message that arrives HERE is by construction one that
+// arrived with nothing running.
+bool continue_session(const std::string& id, const std::string& message, Session& session,
+                      platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
+                      platform::EventLogWriter& log, const platform::Clock& clock) {
+    const std::string text = surface::string_field(message, "text");
+    if (text.empty()) {
+        reply_error(id, "lmp/message requires a non-empty 'text'");
+        return false;
+    }
+    if (session.ctx == nullptr) {
+        reply_error(id, "there is no session to continue; send lmp/start first");
+        return false;
+    }
+    reply_result(id, R"({"accepted":true,"run_id":")" + id + R"(","started_run":true})");
+    session.ctx->add_user_message(text);
+    return run_loop(id, session, inbox, cancel, log, clock);
 }
 
 } // namespace
@@ -393,6 +524,10 @@ int main() {
 
     write_line(std::string(R"({"jsonrpc":"2.0","method":"lmp/ready","params":)") +
                R"({"protocol_version":")" + protocol::kProtocolVersion + R"("}})");
+
+    // Outlives every run in this process: the conversation, and the weights it is having
+    // that conversation with.
+    Session session;
 
     std::string message;
     while (!inbox.drained()) {
@@ -419,17 +554,25 @@ int main() {
             reply_result(id, R"({"accepted":false})");
             continue;
         }
-        if (method != "lmp/start") {
+
+        // --- a run --------------------------------------------------------
+        //
+        // Both of these BLOCK for the length of a mission. Anything the user says while
+        // one is turning is read by the RunInbox inside it, not here.
+        bool last_run = false;
+        if (method == "lmp/start") {
+            last_run = start_mission(id, message, session, inbox, cancel, log, clock);
+        } else if (method == "lmp/message") {
+            last_run = continue_session(id, message, session, inbox, cancel, log, clock);
+        } else {
             reply_error(id, "unknown method '" + method +
                                 "'. This sidecar speaks the private lmp/* namespace; it "
                                 "is not MCP and does not claim to be.");
             continue;
         }
-
-        // --- a run --------------------------------------------------------
-        if (run_mission(id, message, inbox, cancel, log, clock)) {
-            // A shutdown arrived while a card was on screen: acknowledged there, acted
-            // on here, now that the run has unwound and the model is freed.
+        if (last_run) {
+            // A shutdown arrived mid-run: acknowledged there, acted on here, now that
+            // the run has unwound and the model is freed.
             exit_now(log);
         }
     }

@@ -133,38 +133,95 @@ std::string param_value(const std::vector<tools::ToolParamValue>& params,
 }
 
 CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
-    // Driven by the checklist and the ledgers. Nothing here reads the model's prose for
-    // a sense that it sounded finished (S10.4).
-    const auto& checklist = ctx.checklist();
-    if (checklist.empty()) {
-        return {false, "no checklist: the run has not stated what it must produce"};
+    // COMPLETION IS EVIDENTIAL (S10.4). Every gate below is an observed fact: a file the
+    // harness watched get written, and a command the harness watched go red and then
+    // green. None of them is the model's own account of how it went.
+    //
+    // The model used to have a vote here, in the form of "every checklist item ticked".
+    // It no longer does, for two reasons.
+    //
+    // First, a tick is a SELF-REPORT -- the same prose-trust this design refuses
+    // everywhere else. A run that fixed the bug, proved the fix, and then narrated its
+    // success instead of restating the list ended `text_only_no_progress` on work that
+    // was demonstrably finished; the evidence was complete and the gate was waiting on
+    // the model to agree with it.
+    //
+    // Second, the industry line is drawn elsewhere: the agent decides when to STOP, the
+    // harness decides whether it SUCCEEDED, and benchmarks score the transition of the
+    // tests rather than the agent's claim. One boolean was doing both jobs.
+    //
+    // So an unticked list no longer blocks -- it is reported (`open_items`, and
+    // `unfinished_items` on the wire) so a human can see the disagreement.
+    const std::size_t open = ctx.open_checklist_items();
+
+    if (ctx.checklist().empty()) {
+        return {false, "no checklist: the run has not stated what it must produce", open};
     }
-    const std::size_t open = static_cast<std::size_t>(
-        std::count_if(checklist.begin(), checklist.end(),
-                      [](const context::ChecklistItem& c) { return !c.done; }));
-    if (open > 0) {
-        return {false, std::to_string(open) + " checklist item(s) still open"};
+    // An instruction that arrived after the current plan is unfinished business by
+    // definition, whatever the ledgers already hold.
+    if (ctx.plan_is_stale()) {
+        return {false, "an instruction has arrived that the checklist predates", open};
     }
     if (ctx.deliverables().empty()) {
-        return {false, "checklist is complete but no deliverable was recorded"};
+        return {false, "no deliverable was recorded", open};
     }
     const auto& vs = ctx.verifications();
     if (vs.empty()) {
-        return {false, "no verification has been run"};
+        return {false, "no verification has been run", open};
     }
+
+    // The LATEST reading for the declared contract, not every reading ever taken.
+    //
+    // Requiring all of them to be green made completion unreachable by construction: the
+    // baseline check records a deliberate red at declaration time -- that red IS the
+    // proof of falsifiability -- so the ledger of a healthy run always contains a
+    // failure. Scanning the whole ledger read the evidence of rigour as evidence of
+    // breakage.
+    const std::string& declared = ctx.verify_contract();
+    const context::VerificationRecord* latest = nullptr;
     for (const context::VerificationRecord& v : vs) {
-        if (!v.passed) {
-            return {false, "verification still failing: " + v.contract};
+        if (!v.ran) {
+            continue; // a refusal never ran, so it is not evidence either way (S6.2)
         }
-        // A green counts only if that exact check has been proven capable of red
-        // (S10.2). An unproven green does not complete a run.
-        if (!v.falsifiable) {
-            return {false, "verification '" + v.contract +
-                               "' passed but has never been shown capable of failing; "
-                               "it does not count as evidence yet"};
+        if (!declared.empty() && v.contract != declared) {
+            continue;
         }
+        latest = &v; // the ledger is append-ordered, so the last match is the current one
     }
-    return {true, "checklist complete, deliverables recorded, verifications proven"};
+    if (latest == nullptr) {
+        return {false,
+                declared.empty() ? "no verification has actually run"
+                                 : "the declared contract '" + declared + "' has not run",
+                open};
+    }
+    if (!latest->passed) {
+        return {false, "verification still failing: " + latest->contract, open};
+    }
+    // A green counts only if that exact check has been proven capable of red (S10.2).
+    // An unproven green does not complete a run.
+    if (!latest->falsifiable) {
+        return {false,
+                "verification '" + latest->contract +
+                    "' passed but has never been shown capable of failing; "
+                    "it does not count as evidence yet",
+                open};
+    }
+    // Evidence has to POSTDATE the instruction it is offered against. Without this a
+    // follow-up would complete on its predecessor's green before doing any of the new
+    // work -- the ledger was already full, and nothing in it knew it was stale.
+    if (latest->seq <= ctx.last_directive_seq()) {
+        return {false,
+                "'" + latest->contract +
+                    "' last passed before the latest instruction; it has not been re-run "
+                    "since",
+                open};
+    }
+    return {true,
+            open == 0 ? "deliverables recorded and the declared contract passes provably"
+                      : "deliverables recorded and the declared contract passes provably, "
+                        "though " + std::to_string(open) + " checklist item(s) are "
+                        "still unticked",
+            open};
 }
 
 } // namespace lmp::loop
