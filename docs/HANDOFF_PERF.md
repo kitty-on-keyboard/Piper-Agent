@@ -1,24 +1,30 @@
-# Handoff: LM_Pipe v2 vs LM Studio, fifth pass
+# Handoff: LM_Pipe v2 vs LM Studio, sixth pass
 
 Paste this whole file as the opening prompt of a fresh session in
 `/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `perf/mask-and-scan`).
 
 Every number here was measured in this repo on 2026-07-31. Nothing is quoted from a
-previous handoff without being reproduced first (S19.6) — and each of the last two passes
-had to retract things its predecessor asserted, so read the retractions before trusting
-anything you remember.
+previous handoff without being reproduced first (S19.6) — the fifth pass's headline
+numbers were re-run at the top of this one and held (decode 83.7 median over 10 runs
+against its claimed 84.7). Each of the last three passes had to retract something its
+predecessor asserted, so read the retractions before trusting anything you remember.
 
-**Both criteria now pass, and one of them was the wrong criterion.**
+**Read "Never run two MLX processes at once" in the instruments section before running
+anything.** Ignoring it crashed the machine this pass.
 
-Decode 84.7 tok/s against 78.5. Prefill 1324 tok/s at a 547-token prompt and 1818 at
-8240 — against a target of 1347 that was never comparable to what it was being measured
-against. 1347 is the median over LM Studio log windows >= 5 s, and **those windows have a
-median prompt of 9172 uncached tokens**, while the bench ran 547. LM Studio's own prefill
-runs 824 tok/s at 512-1024 tokens and 1529 at 8192-16384; there is no single number to
-beat. Against length-matched bars we now pass everywhere.
+**Both criteria pass, with margin, and the last open item was misnamed.**
 
-The fix that got us there was one constant: prefill chunked at 512 where mlx-lm's
-`prefill_step_size` default is 2048.
+Decode 88.2 tok/s against 78.5 (1.12x). Prefill 1409 at a 547-token prompt, 1889 at 2090,
+1932 at 8240 — against length-matched bars, because there is no single prefill number to
+beat: LM Studio's own runs 824 tok/s at 512-1024 tokens and 1529 at 8192-16384.
+
+Two things got us here. The fifth pass found one constant — prefill chunked at 512 where
+mlx-lm's `prefill_step_size` default is 2048. This pass found the other by building the
+first instrument in this repo that is not a stopwatch: **a primitive histogram of one
+decode step's graph, diffed against the same dump from mlx-lm.** It showed our quantized
+matmuls were identical in count to the reference's and that the entire difference was 919
+un-fused elementwise dispatches. See "What the '~2x on small quantized matmuls' actually
+was".
 
 ---
 
@@ -121,31 +127,36 @@ we now beat both — but do not treat the two as interchangeable.
 
 `lmp_diag bench 4 512 200`, 547-token prompt:
 
-| | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix | + kernel dtypes | + chunk 2048 |
-|---|---|---|---|---|---|---|
-| decode  | 27.6 | 27.5 | 28.6 | 84.8 | 85.4 | **84.7** |
-| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | 1126.5 | **1324** |
+| | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix | + kernel dtypes | + chunk 2048 | + fused chains |
+|---|---|---|---|---|---|---|---|
+| decode  | 27.6 | 27.5 | 28.6 | 84.8 | 85.4 | 84.7 | **88.2** |
+| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | 1126.5 | 1324 | **1409** |
 
-Decode **PASS** at 1.08x. Prefill passes at every length once the bar is length-matched:
+Decode **PASS** at 1.12x. Prefill passes at every length once the bar is length-matched:
 
 | prompt | LM_Pipe | LM Studio (same bucket) | mlx_lm live |
 |---|---|---|---|
-| 547 | 1324 | 824 (floor only) | 700 |
-| 2090 | 1751 | 1155 (floor only) | 802 |
-| 4130 | 1779 | 1350 | — |
-| 8240 | 1818 | 1529 | 773 |
-| 16430 | 1684 | 1334 | — |
+| 547 | 1409 | 824 (floor only) | 700 |
+| 2090 | 1889 | 1155 (floor only) | 802 |
+| 4130 | 1779 (fifth pass) | 1350 | — |
+| 8240 | 1932 | 1529 | 773 |
+| 16430 | 1684 (fifth pass) | 1334 | — |
 
-**The honest apples-to-apples decode comparison is 84.7 vs 80.9, not 84.7 vs 98.**
+4130 and 16430 were **not re-measured** after the fusion commits; they are the fifth
+pass's numbers and are therefore a floor, since every length that was re-measured went
+up. Do not quote them as current.
+
+**The honest apples-to-apples decode comparison is 88.2 vs 80.9, not 88.2 vs 98.**
 The reference reaches 98 by running one step ahead with `mx.async_eval`, which a
 host-side sampler cannot do (see "Why async_eval is not available"). Constrain the
 reference the way our loop is constrained — synchronous eval, full logits to host, CPU
-sampling — and it does **80.9 tok/s** on this machine. Our forward pass is already
-faster than mlx-lm's; what is left is a loop-structure difference, not a kernel one.
+sampling — and it does **80.9 tok/s** on this machine (fifth-pass measurement, not
+re-run this pass). Our forward pass was already faster than mlx-lm's before this pass
+and is now faster by more; what is left is a loop-structure difference, not a kernel one.
 
-Decode falls with context at the same rate as the reference — ours 82.4 at 547 tokens to
-75.1 at 8240 (0.91x), the reference 98.0 to 88.4 (0.90x) — so the 8k decode reading
-below 78.5 is the aggregate-bar problem again, not a regression. The 78.5 bar is a median
+Decode still falls with context at the reference's rate — ours 88.2 at 547 tokens to
+78.9 at 8240 (0.89x), the reference 98.0 to 88.4 (0.90x) — so an 8k decode reading near
+78.5 is the aggregate-bar problem again, not a regression. The 78.5 bar is a median
 over logged decodes at every context length.
 
 ---
@@ -240,6 +251,14 @@ as uniform slowness.
 
 Re-derive before reusing any of these.
 
+**Fifth pass:**
+
+| fifth-pass claim | what measurement shows |
+|---|---|
+| "Small quantized matmuls — the largest item that is actually ours... same op, same shapes, same `quantized_matmul` arguments, so this is unexplained." | Not the matmuls, and not unexplained. `lmp_diag graph` counts 391 QuantizedMatmul and 120 GatherQMM on both sides. The gap was 919 un-fused elementwise dispatches; fusing them is worth 4.8% of decode. |
+| "Left uncompiled deliberately... `mx::compile` moved decode by nothing: 28.1 -> 27.9 tok/s" (in `gated_delta.hpp`) | True when written, void now. It was measured while the float32-residual bug made a step 34.9 ms, so ~0.5 ms was 1.3%. At an 11.3 ms step the same four sites are worth 4.8%. |
+| "decode 84.7 at 547 tokens" | Reproduces at 83.7 median over 10 runs (min 82.1, max 84.6) on the fifth pass's own binary. 84.7 was the top of the spread, not the middle. The conclusion is unchanged — it passed then and passes now — but quote medians. |
+
 **Fourth pass:**
 
 | fourth-pass claim | what measurement shows |
@@ -282,22 +301,62 @@ either one took the float32 residual with it.
 Both exit criteria pass. Nothing below is blocking; this is the list of things that are
 known-unfinished rather than known-broken.
 
-1. **Small quantized matmuls — the largest item that is actually ours.** With the
-   ablations additive, our gated-delta block costs 4.42 ms against the reference's 3.41,
-   and our MoE gate/topk/shared-expert 1.32 against 0.77. Both "everything except the big
-   gather" categories are ~2x. Same op, same shapes, same `quantized_matmul` arguments,
-   so this is unexplained.
-2. **LM Studio's logged prefill is ~2x stock mlx_lm** on the same machine and checkpoint
+1. **LM Studio's logged prefill is ~2x stock mlx_lm** on the same machine and checkpoint
    (1529 vs 773 at 8k). Either their backend is not stock mlx_lm, or the progress lines
    `lmstudio_baseline.py` brackets do not span the whole prefill. Unsettled — it stopped
    mattering once we beat both, but it means the two references are not interchangeable.
-3. **The wired limit is set but barely earns its keep** (+4%, 27.5 -> 28.6). Kept because
+2. **The wired limit is set but barely earns its keep** (+4%, 27.5 -> 28.6). Kept because
    it is what mlx-lm does and it costs nothing; do not expect more from it.
+3. **The last 19 graph nodes** are a Reshape difference (ours 340, reference 320).
+   Named for completeness; at this size it is not worth a commit on its own.
+4. **4130 and 16430 were not re-measured** after the fusion commits. Every length that
+   was re-measured improved, so the table's numbers for those two are a floor.
 
-**Closed this pass:** prefill (chunk 2048, and the target was wrong); the weak-scalar
-audit (three sites, one latent bug in the weight loader's norm shift, two correct — see
-the comments in `gated_delta.hpp` and `qwen35_moe_model.hpp`, both of which explain why
-they look like the bug and are not).
+**Closed this pass:** the "small quantized matmuls are ~2x" item, which was misnamed —
+see below.
+
+## What the "~2x on small quantized matmuls" actually was
+
+The fifth pass left this as the largest item that was ours, and described it as
+unexplained: same op, same shapes, same `quantized_matmul` arguments, yet our
+gated-delta block measured 4.42 ms against the reference's 3.41 and our MoE
+gate/topk/shared-expert 1.32 against 0.77.
+
+It was never the matmuls. `lmp_diag graph` dumps one decode step's graph as dot,
+unevaluated, and `scripts/graph_histogram.py` histograms it and diffs it against the
+same dump taken from mlx-lm on the LM Studio interpreter. The diff settled it in one
+run:
+
+| | ours (before) | reference |
+|---|---|---|
+| QuantizedMatmul | 391 | 391 |
+| GatherQMM | 120 | 120 |
+| RMSNorm | 191 | 191 |
+| CustomKernel | 30 | 30 |
+| **TOTAL** | **3529** | **2610** |
+
+Every heavy op issued in identical counts. The whole 919-node difference was elementwise
+and shape work: mlx-lm fuses four chains into 170 `Compiled*` kernels — `swiglu` (x80),
+`silu` (x30), `compute_g` (x30), the gated-norm tail (x30) — and we were issuing ~1090
+separate dispatches for the same arithmetic. Compiling the same four sites took the graph
+to 2799 and decode 83.7 -> 87.7; three shape/scalar alignments (`split` instead of
+slices, scalars built in the target dtype instead of cast into it, one multi-axis
+`expand_dims`) took it to 2629 and decode to 88.2.
+
+**The instrument is the point.** Every other subcommand in `lmp_diag` answers "how long
+did this take", and on this project that question has now been answered wrongly four
+times. A primitive histogram answers "what work is in the graph" — a fact about the
+program rather than about the machine it ran on — so it cannot be wrong about the thing
+it measures, only incomplete. Reach for it first when two stacks that should agree do
+not.
+
+**And a null result has an expiry date.** `compute_g` carried a comment stating that
+`mx::compile` had been measured end to end at "28.1 -> 27.9 tok/s, nothing" and reverted
+on principle. That measurement was honest. It was also taken while the float32-residual
+bug made a decode step 34.9 ms, where the ~0.5 ms it saves is 1.3% and invisible. The
+step is now ~11.3 ms. **A null measured under a bug that has since been fixed by 3x has
+to be re-run, not inherited** — check the denominator every negative result was divided
+by before trusting it.
 
 ## Why async_eval is not available
 
@@ -345,6 +404,7 @@ decision, not a perf fix, and it should not be made silently.
 | `lmp_diag bench [runs] [prompt] [max_new]` | N-run ledger against the **length-matched** LM Studio bar, plus peak/active/cache memory. Sweep `[prompt]` — one length is not a prefill result. |
 | `lmp_diag scan [T...]` | fused kernel vs reference loop: deviation and wall time |
 | `lmp_diag mask` | one decode step outside the forward pass |
+| `lmp_diag graph [prompt]` | one decode step's graph as dot, unevaluated — **not a timing**, see below |
 | `lmp_diag layers [T]` \| `moe [T]` \| `blocks [T]` | isolation benchmarks — **hypothesis generators only**, see below |
 
 `LMP_ABLATE=routed|mlp|delta|deltakernel` deletes one block from a real forward pass.
@@ -355,6 +415,38 @@ Output is garbage; only the rate means anything.
 `scripts/lmstudio_baseline.py` re-derives the log side. `scripts/mlxlm_reference.py`
 re-derives the live side — run it with the LM Studio interpreter, and use `--prompts` /
 `--chunks` rather than trusting any single number from it.
+
+`scripts/graph_histogram.py` is the other half of `lmp_diag graph`, and the one
+instrument here that does not measure time:
+
+```bash
+./build/tests/model/lmp_diag graph 547 > ours.dot
+python3 scripts/graph_histogram.py --dot ours.dot --json ours.json
+```
+
+```bash
+~/.lmstudio/extensions/backends/vendor/_amphibian/app-mlx-generate-mac14-arm64@29/bin/python scripts/graph_histogram.py --reference --json ref.json
+```
+
+```bash
+python3 scripts/graph_histogram.py --compare ours.json ref.json
+```
+
+Run those three **one at a time** — see the memory-safety note below.
+
+## Never run two MLX processes at once
+
+One loaded checkpoint is 19 GB resident and peaks over 20 GB on a 16k prompt; this
+machine has 48 GB and normally has several IDEs open. Two concurrent MLX processes
+exhaust it. This is not hypothetical: backgrounding a `bench` length sweep and running
+`graph_histogram.py --reference` on top of it **crashed the machine** on 2026-07-31.
+
+Everything that loads a model counts — `lmp_diag` (any subcommand), `mlxlm_reference.py`,
+`graph_histogram.py --reference`, `ctest --preset realmodel`. Run them sequentially, in
+the foreground, and wait for each to exit.
+
+It also invalidates the numbers, which is how the contamination was noticed: the same
+8240-token prefill read 1686 tok/s under contention and 1932 alone.
 
 **The standing warning, now with three convictions against it.** `blocks`, `moe` and
 `layers` call one block repeatedly on a fixed input, which is not what a decode step
@@ -372,6 +464,13 @@ read the resulting FAIL as a fact about the code. When a comparison is against a
 aggregate someone else produced, check what population it aggregates before believing the
 verdict.
 
+**A fifth, and the reason `graph` exists.** The "small quantized matmuls are ~2x" item
+survived a whole pass as unexplained because every tool available to question it was a
+timing. The primitive histogram answered it immediately and unambiguously: the matmul
+counts were identical and the difference was 919 un-fused elementwise dispatches. When
+two stacks that should agree do not, compare *what they do* before comparing how long
+they take.
+
 ## Guardrails — all green
 
 `ctest --preset gate` 20/20 · `./scripts/run_ratchets.py --root .` 6/6 clean ·
@@ -382,10 +481,17 @@ verdict.
 
 - Do not delete `gated_delta_update_ops`, or the equivalence tests in
   `tests/model/test_grammar.cpp`. They are what make the fast paths falsifiable.
-- Do not re-apply `mx::compile`, or re-test `MLX_MAX_OPS_PER_BUFFER`, without a new
-  reason. Both were measured end to end and both were zero. **MLX versions are no longer
-  on this list** — 0.31.2 was never actually tested until this pass.
+- Do not re-test `MLX_MAX_OPS_PER_BUFFER` without a new reason; it was measured end to
+  end and was zero. **`mx::compile` has come off this list** — it is now applied at the
+  four sites mlx-lm compiles and is worth 4.8% of decode. It was on the list because of a
+  null measured under a since-fixed 3x bug, which is the trap described above. **MLX
+  versions came off it in the fifth pass** for the same kind of reason.
+- Do not run two MLX processes concurrently. It crashes the machine and it corrupts the
+  numbers; see the instruments section.
 - Do not trust a per-block timing that disagrees with `step` or `bench`.
+- Do not answer "why is our X slower than theirs" with a timing when `lmp_diag graph`
+  can answer it structurally. That question has been answered wrongly four times here by
+  timings and correctly once, immediately, by an op histogram.
 - Do not reintroduce a scalar prefill target, and do not quote a prefill number without
   the prompt length beside it. Both stacks' prefill varies ~2x across the length range.
 - Do not lower `LMP_PREFILL_CHUNK` back to 512 to save memory without re-measuring: it
