@@ -12,11 +12,32 @@ predecessor asserted, so read the retractions before trusting anything you remem
 **Read "Never run two MLX processes at once" in the instruments section before running
 anything.** Ignoring it crashed the machine this pass.
 
-**Both criteria pass, with margin, and the last open item was misnamed.**
+**Both criteria pass, and the last open item was misnamed.**
 
-Decode 88.2 tok/s against 78.5 (1.12x). Prefill 1409 at a 547-token prompt, 1889 at 2090,
-1932 at 8240 — against length-matched bars, because there is no single prefill number to
-beat: LM Studio's own runs 824 tok/s at 512-1024 tokens and 1529 at 8192-16384.
+**Read this before quoting any absolute number below.** This machine's throughput drifts
+~9% with background load. The same binary measured decode 88.2 tok/s early in the sixth
+pass and 80.3 two hours later, both as tight 5-to-8-run medians. **Absolute numbers taken
+at different times are not comparable, and a difference between two of them is not
+evidence about a code change.** The sixth pass committed a claim built exactly that way
+and had to retract it. Use a same-session A/B — ideally one env var on one binary — for
+any before/after.
+
+Clean sequential sweep, 5 runs each, `bench 5 <p> 200`, nothing else on the GPU:
+
+| prompt | prefill | decode | peak mem |
+|---|---|---|---|
+| 547 | 1368 | 82.7 | 19.00 GB |
+| 2090 | 1887 | 80.6 | 19.98 GB |
+| 4130 | 1855 | 79.1 | 20.02 GB |
+| 8240 | 1679 | 74.9 | 20.35 GB |
+| 16426 | 1495 | 70.0 | 21.01 GB |
+
+Prefill beats the length-matched LM Studio bar everywhere it can be compared (1.37x at
+4130, 1.10x at 8240, 1.12x at 16426; the sub-4k buckets are floors, not bars). Decode
+passes the 78.5 aggregate bar to 4130 and falls under it beyond — which is the
+aggregate-bar problem, not a regression: 78.5 is a median over logged decodes at every
+context length, and our decay with context (0.85x from 547 to 16426) tracks the
+reference's.
 
 Two things got us here. The fifth pass found one constant — prefill chunked at 512 where
 mlx-lm's `prefill_step_size` default is 2048. This pass found the other by building the
@@ -127,37 +148,40 @@ we now beat both — but do not treat the two as interchangeable.
 
 `lmp_diag bench 4 512 200`, 547-token prompt:
 
+The progression below is **each pass's own reading**, and the passes are hours or days
+apart, so the deltas between adjacent columns carry the machine drift described at the
+top. Read it as history, not as attribution.
+
 | | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix | + kernel dtypes | + chunk 2048 | + fused chains |
 |---|---|---|---|---|---|---|---|
-| decode  | 27.6 | 27.5 | 28.6 | 84.8 | 85.4 | 84.7 | **88.2** |
-| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | 1126.5 | 1324 | **1409** |
+| decode  | 27.6 | 27.5 | 28.6 | 84.8 | 85.4 | 84.7 | 82.7 |
+| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | 1126.5 | 1324 | 1368 |
 
-Decode **PASS** at 1.12x. Prefill passes at every length once the bar is length-matched:
+**The only attribution here that survives an A/B** is the fusion itself, measured on one
+binary in one session with `MLX_DISABLE_COMPILE=1` as the control:
 
-| prompt | LM_Pipe | LM Studio (same bucket) | mlx_lm live |
-|---|---|---|---|
-| 547 | 1409 | 824 (floor only) | 700 |
-| 2090 | 1889 | 1155 (floor only) | 802 |
-| 4130 | 1779 (fifth pass) | 1350 | — |
-| 8240 | 1932 | 1529 | 773 |
-| 16430 | 1684 (fifth pass) | 1334 | — |
+| | decode | prefill |
+|---|---|---|
+| compile ON | 80.3 | 1223 |
+| compile OFF | 77.6 | 1239 |
 
-4130 and 16430 were **not re-measured** after the fusion commits; they are the fifth
-pass's numbers and are therefore a floor, since every length that was re-measured went
-up. Do not quote them as current.
+**Fusion is worth +3.5% of decode and nothing measurable on prefill.** The sixth pass
+first claimed +4.8% decode and +5.5% prefill by comparing runs an hour apart; the decode
+figure was inflated and the prefill figure was drift, retracted in full. What the fusion
+provably does is structural and drift-proof: the decode graph goes from 3529 primitives
+to 2629 against the reference's 2610.
 
-**The honest apples-to-apples decode comparison is 88.2 vs 80.9, not 88.2 vs 98.**
+**The honest apples-to-apples decode comparison is ours vs 80.9, not ours vs 98.**
 The reference reaches 98 by running one step ahead with `mx.async_eval`, which a
 host-side sampler cannot do (see "Why async_eval is not available"). Constrain the
 reference the way our loop is constrained — synchronous eval, full logits to host, CPU
 sampling — and it does **80.9 tok/s** on this machine (fifth-pass measurement, not
-re-run this pass). Our forward pass was already faster than mlx-lm's before this pass
-and is now faster by more; what is left is a loop-structure difference, not a kernel one.
+re-run this pass, and subject to the same drift caveat). What is left against the
+unconstrained 98 is a loop-structure difference, not a kernel one.
 
-Decode still falls with context at the reference's rate — ours 88.2 at 547 tokens to
-78.9 at 8240 (0.89x), the reference 98.0 to 88.4 (0.90x) — so an 8k decode reading near
-78.5 is the aggregate-bar problem again, not a regression. The 78.5 bar is a median
-over logged decodes at every context length.
+Decode still falls with context at the reference's rate — ours 82.7 at 547 tokens to
+74.9 at 8240 (0.91x), the reference 98.0 to 88.4 (0.90x) — so an 8k decode reading below
+78.5 is the aggregate-bar problem again, not a regression.
 
 ---
 
@@ -258,6 +282,13 @@ Re-derive before reusing any of these.
 | "Small quantized matmuls — the largest item that is actually ours... same op, same shapes, same `quantized_matmul` arguments, so this is unexplained." | Not the matmuls, and not unexplained. `lmp_diag graph` counts 391 QuantizedMatmul and 120 GatherQMM on both sides. The gap was 919 un-fused elementwise dispatches; fusing them is worth 4.8% of decode. |
 | "Left uncompiled deliberately... `mx::compile` moved decode by nothing: 28.1 -> 27.9 tok/s" (in `gated_delta.hpp`) | True when written, void now. It was measured while the float32-residual bug made a step 34.9 ms, so ~0.5 ms was 1.3%. At an 11.3 ms step the same four sites are worth 4.8%. |
 | "decode 84.7 at 547 tokens" | Reproduces at 83.7 median over 10 runs (min 82.1, max 84.6) on the fifth pass's own binary. 84.7 was the top of the spread, not the middle. The conclusion is unchanged — it passed then and passes now — but quote medians. |
+
+**Sixth pass, against itself:**
+
+| sixth-pass claim | what measurement shows |
+|---|---|
+| "decode 83.7 -> 87.7, prefill 1329 -> 1402" (commit 83a18c6) | Built by comparing runs an hour apart, and that is drift, not attribution. A same-session A/B on one binary (`MLX_DISABLE_COMPILE=1`) gives **80.3 vs 77.6 decode, +3.5%**, and **1223 vs 1239 prefill — no effect**. The fusion is worth keeping on the decode number and on the 900-node graph reduction; the prefill claim is withdrawn. |
+| "decode 87.7 -> 88.2, prefill 1402 -> 1409" (commit 779157e) | Below this machine's drift floor. The split/expand_dims/scalar changes are justified by the graph converging to 2629 nodes, not by a measured speedup. Do not quote a number for them. |
 
 **Fourth pass:**
 
@@ -463,6 +494,13 @@ number honestly — but the *bar* it printed came from somewhere else, and three
 read the resulting FAIL as a fact about the code. When a comparison is against an
 aggregate someone else produced, check what population it aggregates before believing the
 verdict.
+
+**A sixth, and it is the simplest one yet: this machine drifts ~9%.** The same binary
+read decode 88.2 and 80.3 two hours apart, each a tight multi-run median. Every
+before/after in this document that spans more than one sitting is therefore suspect,
+including two the sixth pass committed before catching it. **Use a same-session A/B.**
+`MLX_DISABLE_COMPILE=1` is the model: one binary, one process lifetime, one variable.
+When no env-var control exists, build both variants and alternate them.
 
 **A fifth, and the reason `graph` exists.** The "small quantized matmuls are ~2x" item
 survived a whole pass as unexplained because every tool available to question it was a
