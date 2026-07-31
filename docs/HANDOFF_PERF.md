@@ -1,15 +1,24 @@
-# Handoff: LM_Pipe v2 vs LM Studio, fourth pass
+# Handoff: LM_Pipe v2 vs LM Studio, fifth pass
 
 Paste this whole file as the opening prompt of a fresh session in
 `/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `perf/mask-and-scan`).
 
 Every number here was measured in this repo on 2026-07-31. Nothing is quoted from a
-previous handoff without being reproduced first (S19.6) — and this pass had to retract
-several things the third pass asserted, so read the retractions before trusting anything
-you remember.
+previous handoff without being reproduced first (S19.6) — and each of the last two passes
+had to retract things its predecessor asserted, so read the retractions before trusting
+anything you remember.
 
-**Decode now passes.** 28.6 -> 84.8 tok/s against an exit criterion of 78.5. Prefill went
-586.7 -> 1110.7 against a criterion of 1347, and is the only thing still open.
+**Both criteria now pass, and one of them was the wrong criterion.**
+
+Decode 84.7 tok/s against 78.5. Prefill 1324 tok/s at a 547-token prompt and 1818 at
+8240 — against a target of 1347 that was never comparable to what it was being measured
+against. 1347 is the median over LM Studio log windows >= 5 s, and **those windows have a
+median prompt of 9172 uncached tokens**, while the bench ran 547. LM Studio's own prefill
+runs 824 tok/s at 512-1024 tokens and 1529 at 8192-16384; there is no single number to
+beat. Against length-matched bars we now pass everywhere.
+
+The fix that got us there was one constant: prefill chunked at 512 where mlx-lm's
+`prefill_step_size` default is 2048.
 
 ---
 
@@ -56,48 +65,117 @@ all windows:      prefill n=1963 median 1145.0   decode n=134 median 78.5
 windows >= 5s:    prefill n=740  median 1338.9   decode n=17  median 87.7
 ```
 
-**Exit criterion: decode > 78.5, prefill > 1347.**
+**Decode criterion: > 78.5. There is no single prefill criterion** — see below.
 
-New this pass, and much more useful than the log-derived numbers: **LM Studio's own
-stack runs directly on this machine.**
+### Prefill has no scalar baseline
+
+LM Studio's logged prefill is a strong function of prompt length. Bucketed by
+`uncached_tokens` over the same 2097 windows:
+
+| uncached tokens | n | LM Studio median | median window | trustworthy? |
+|---|---|---|---|---|
+| 512-1024 | 449 | 824 | 1 s | no |
+| 1024-2048 | 341 | 1127 | 1 s | no |
+| 2048-4096 | 376 | 1155 | 2 s | no |
+| 4096-8192 | 234 | 1350 | 4 s | yes |
+| 8192-16384 | 447 | 1529 | 7 s | yes |
+| 16384+ | 195 | 1334 | 15 s | yes |
+
+The short buckets are not measurements. Timestamps are 1-second resolution, so a
+sub-second prefill either straddles a tick and reads as a full second — understating
+throughput badly — or does not straddle one and is dropped by the `dt > 0` filter. They
+are a floor. Only the 4096+ buckets have windows long enough to mean anything.
+
+`lmp_diag bench` now picks the bar for the length it actually measured and prints no
+verdict at all for the untrustworthy buckets. Do not reintroduce a scalar target.
+
+### The live reference
+
+Much more useful than the log-derived numbers: **LM Studio's own stack runs directly on
+this machine.**
 
 ```bash
 ~/.lmstudio/extensions/backends/vendor/_amphibian/app-mlx-generate-mac14-arm64@29/bin/python
 ```
 
-That interpreter has mlx 0.31.2 + mlx_lm 0.31.3 — exactly what LM Studio ships. On the
-same checkpoint, same machine, 522-token prompt, 200 new tokens:
+That interpreter has mlx 0.31.2 + mlx_lm 0.31.3 — exactly what LM Studio ships.
+`scripts/mlxlm_reference.py` sweeps it; run it with that interpreter. At
+`prefill_step_size=2048`:
 
-```
-mlx_lm reference:   prefill 728.5 tok/s     decode 103.1 tok/s
-```
+| prompt | reference prefill | reference decode |
+|---|---|---|
+| 522 | 699.9 | 98.0 |
+| 2062 | 801.9 | 95.2 |
+| 8213 | 773.0 | 88.4 |
 
 Use it. An apples-to-apples reference you can instrument and ablate in Python, with no
 rebuild, is worth more than any log-derived median.
+
+**Unexplained, and worth knowing before you trust the logs again:** LM Studio's logged
+prefill (1529 at 8-16k) is about 2x what stock mlx_lm does on the same machine and
+checkpoint (773 at 8213). Either their backend is not stock mlx_lm, or the progress lines
+the parser brackets do not span the whole prefill. It did not need settling this pass —
+we now beat both — but do not treat the two as interchangeable.
 
 ## Where we are
 
 `lmp_diag bench 4 512 200`, 547-token prompt:
 
-| | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix | + kernel dtypes |
-|---|---|---|---|---|---|
-| decode  | 27.6 | 27.5 | 28.6 | 84.8 | **85.4** |
-| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | **1126.5** |
+| | third pass (really 0.29.3) | real 0.31.2 | + wired limit | + dtype fix | + kernel dtypes | + chunk 2048 |
+|---|---|---|---|---|---|---|
+| decode  | 27.6 | 27.5 | 28.6 | 84.8 | 85.4 | **84.7** |
+| prefill | 586.7 | 856.4 | 871.0 | 1110.7 | 1126.5 | **1324** |
 
-Decode **PASS** at 1.09x. Prefill **FAIL** at 0.84x — but note we are already 1.55x the
-Python reference's prefill (728.5), so 1347 may not be an apples-to-apples target; see
-"Still open".
+Decode **PASS** at 1.08x. Prefill passes at every length once the bar is length-matched:
 
-**The honest apples-to-apples decode comparison is 85.4 vs 80.9, not 85.4 vs 103.1.**
-The reference reaches 103 by running one step ahead with `mx.async_eval`, which a
+| prompt | LM_Pipe | LM Studio (same bucket) | mlx_lm live |
+|---|---|---|---|
+| 547 | 1324 | 824 (floor only) | 700 |
+| 2090 | 1751 | 1155 (floor only) | 802 |
+| 4130 | 1779 | 1350 | — |
+| 8240 | 1818 | 1529 | 773 |
+| 16430 | 1684 | 1334 | — |
+
+**The honest apples-to-apples decode comparison is 84.7 vs 80.9, not 84.7 vs 98.**
+The reference reaches 98 by running one step ahead with `mx.async_eval`, which a
 host-side sampler cannot do (see "Why async_eval is not available"). Constrain the
 reference the way our loop is constrained — synchronous eval, full logits to host, CPU
 sampling — and it does **80.9 tok/s** on this machine. Our forward pass is already
 faster than mlx-lm's; what is left is a loop-structure difference, not a kernel one.
 
+Decode falls with context at the same rate as the reference — ours 82.4 at 547 tokens to
+75.1 at 8240 (0.91x), the reference 98.0 to 88.4 (0.90x) — so the 8k decode reading
+below 78.5 is the aggregate-bar problem again, not a regression. The 78.5 bar is a median
+over logged decodes at every context length.
+
 ---
 
-## The cause: one strongly-typed scalar
+## The cause of the prefill gap: one chunk size
+
+Prefill was roughly **flat in prompt length** — 1118 tok/s at 547 tokens, 1170 at 8240 —
+where LM Studio's climbs from 824 to 1529. A fixed chunk size predicts exactly that
+shape, and ours was 512 against mlx-lm's `prefill_step_size` default of 2048.
+
+Every chunk ends in a full synchronous barrier (`eval_caches`), so the chunk size sets
+how often prefill drains the GPU and rebuilds a 48-layer graph from the host. At 512 we
+paid that barrier four times as often as the reference. At 547 tokens it was worse than
+that: a 512-token chunk plus a **35-token second chunk** that was almost entirely
+overhead, which is why the single biggest relative jump is at the shortest prompt.
+
+| prompt | chunk 512 | 1024 | 2048 | 4096 |
+|---|---|---|---|---|
+| 547 | 1117.7 | 1315.6 | **1317.1** | — |
+| 2090 | 1209.0 | 1513.0 | **1751.5** | — |
+| 8240 | 1169.6 | 1512.4 | **1684.5** | 1527.7 |
+
+2048 is the knee; 4096 turns over again. Peak memory is unchanged on short prompts and
+19.08 -> 20.41 GB at 8240, against the 20.18 GB mlx-lm peaks at on this checkpoint.
+
+`LMP_PREFILL_CHUNK` overrides it so the sweep can be re-run without a rebuild.
+
+---
+
+## The cause of the decode gap: one strongly-typed scalar
 
 `forward_gated_delta` scaled the rms-normed q and k like this:
 
@@ -158,9 +236,19 @@ as uniform slowness.
 
 ---
 
-## Retractions — things the third pass asserted that are not true
+## Retractions
 
 Re-derive before reusing any of these.
+
+**Fourth pass:**
+
+| fourth-pass claim | what measurement shows |
+|---|---|
+| "Exit criterion: prefill > 1347." | Not comparable to anything the bench measured. 1347 is the median over >= 5 s windows, whose median prompt is 9172 tokens; the bench ran 547. LM Studio's own prefill is 824 at 512-1024 tokens and 1529 at 8192-16384. |
+| "prefill n=1963 median 1145.0" as a baseline | The buckets under 4096 tokens have 1-2 s median windows against a 1-second clock. They are a floor, not a measurement — sub-second prefills either read as a full second or are dropped by `dt > 0`. |
+| "mlx_lm reference: prefill 728.5, decode 103.1" | Reproduces as 699.9 / 98.0 at 522 tokens with `prefill_step_size=2048`. Close enough to be the same measurement, but the reference's prefill is also length- and chunk-dependent (802 at 2062, 773 at 8213) — one number is not a baseline for it either. |
+
+**Third pass:**
 
 | third-pass claim | what measurement shows |
 |---|---|
@@ -191,20 +279,25 @@ either one took the float32 residual with it.
 
 ## Still open
 
-1. **Prefill, 1110.7 vs 1347.** First establish whether 1347 is a real target: it comes
-   from LM Studio's server logs at 1-second resolution, and we already run prefill 1.52x
-   faster than the mlx_lm reference on this machine. If the reference is the honest bar,
-   prefill is done. Settle that before optimising.
-2. **The wired limit is set but barely earns its keep** (+4%, 27.5 -> 28.6). Kept because
+Both exit criteria pass. Nothing below is blocking; this is the list of things that are
+known-unfinished rather than known-broken.
+
+1. **Small quantized matmuls — the largest item that is actually ours.** With the
+   ablations additive, our gated-delta block costs 4.42 ms against the reference's 3.41,
+   and our MoE gate/topk/shared-expert 1.32 against 0.77. Both "everything except the big
+   gather" categories are ~2x. Same op, same shapes, same `quantized_matmul` arguments,
+   so this is unexplained.
+2. **LM Studio's logged prefill is ~2x stock mlx_lm** on the same machine and checkpoint
+   (1529 vs 773 at 8k). Either their backend is not stock mlx_lm, or the progress lines
+   `lmstudio_baseline.py` brackets do not span the whole prefill. Unsettled — it stopped
+   mattering once we beat both, but it means the two references are not interchangeable.
+3. **The wired limit is set but barely earns its keep** (+4%, 27.5 -> 28.6). Kept because
    it is what mlx-lm does and it costs nothing; do not expect more from it.
-3. **Weak-scalar audit.** The bug above was one instance of a general hazard. Worth
-   grepping the forward path for other `mx::array(<float literal>)` constructions and
-   checking each one's dtype against the reference.
-4. **Small quantized matmuls.** With the ablations now additive, our gated-delta block
-   costs 4.42 ms against the reference's 3.41, and our MoE gate/topk/shared-expert 1.32
-   against 0.77. Both "everything except the big gather" categories are ~2x. Same op,
-   same shapes, same `quantized_matmul` arguments, so this is unexplained and is the
-   largest remaining item that is actually ours to fix.
+
+**Closed this pass:** prefill (chunk 2048, and the target was wrong); the weak-scalar
+audit (three sites, one latent bug in the weight loader's norm shift, two correct — see
+the comments in `gated_delta.hpp` and `qwen35_moe_model.hpp`, both of which explain why
+they look like the bug and are not).
 
 ## Why async_eval is not available
 
@@ -249,7 +342,7 @@ decision, not a perf fix, and it should not be made silently.
 |---|---|
 | `lmp_diag step [n]` | **the real decode forward**, split CPU-build vs GPU-eval |
 | `lmp_diag moestream [n]` | routed experts under a real step's access pattern, in GB/s |
-| `lmp_diag bench [runs] [prompt] [max_new]` | N-run ledger against the LM Studio numbers, plus peak/active/cache memory |
+| `lmp_diag bench [runs] [prompt] [max_new]` | N-run ledger against the **length-matched** LM Studio bar, plus peak/active/cache memory. Sweep `[prompt]` — one length is not a prefill result. |
 | `lmp_diag scan [T...]` | fused kernel vs reference loop: deviation and wall time |
 | `lmp_diag mask` | one decode step outside the forward pass |
 | `lmp_diag layers [T]` \| `moe [T]` \| `blocks [T]` | isolation benchmarks — **hypothesis generators only**, see below |
@@ -257,8 +350,11 @@ decision, not a perf fix, and it should not be made silently.
 `LMP_ABLATE=routed|mlp|delta|deltakernel` deletes one block from a real forward pass.
 Output is garbage; only the rate means anything.
 
-`scripts/lmstudio_baseline.py` re-derives the log side; the mlx_lm interpreter above
-re-derives the live side.
+`LMP_PREFILL_CHUNK=N` overrides the prefill chunk (default 2048) without a rebuild.
+
+`scripts/lmstudio_baseline.py` re-derives the log side. `scripts/mlxlm_reference.py`
+re-derives the live side — run it with the LM Studio interpreter, and use `--prompts` /
+`--chunks` rather than trusting any single number from it.
 
 **The standing warning, now with three convictions against it.** `blocks`, `moe` and
 `layers` call one block repeatedly on a fixed input, which is not what a decode step
@@ -268,9 +364,17 @@ the wrong dtype. Every one of them was believed at the time. Prefer `step` and
 `moestream`, prefer ablation on a real run to any per-block timing, and when a number
 surprises you, suspect the instrument before the code.
 
+**A fourth conviction, and this one was the baseline rather than a benchmark.** The
+prefill target was a median over a population whose prompts were 17x longer than the one
+being measured against it. Nothing in the instrument was wrong — `bench` reported its own
+number honestly — but the *bar* it printed came from somewhere else, and three passes
+read the resulting FAIL as a fact about the code. When a comparison is against an
+aggregate someone else produced, check what population it aggregates before believing the
+verdict.
+
 ## Guardrails — all green
 
-`ctest --preset gate` 19/19 · `./scripts/run_ratchets.py --root .` 6/6 clean ·
+`ctest --preset gate` 20/20 · `./scripts/run_ratchets.py --root .` 6/6 clean ·
 `ctest --preset realmodel` 2/2 · `./scripts/eval.py --root . score` unmoved
 (corpus wmiss=0 179/179, holdout wmiss=15 34/42).
 
@@ -282,6 +386,10 @@ surprises you, suspect the instrument before the code.
   reason. Both were measured end to end and both were zero. **MLX versions are no longer
   on this list** — 0.31.2 was never actually tested until this pass.
 - Do not trust a per-block timing that disagrees with `step` or `bench`.
+- Do not reintroduce a scalar prefill target, and do not quote a prefill number without
+  the prompt length beside it. Both stacks' prefill varies ~2x across the length range.
+- Do not lower `LMP_PREFILL_CHUNK` back to 512 to save memory without re-measuring: it
+  costs 15-35% of prefill and buys 1.3 GB only on prompts over ~4k.
 - Do not weaken the grammar to make the mask cheap.
 - Do not reach for speculative decoding.
 - Do not re-litigate settled decisions: Apple Silicon only, MLX in-process, Qwen3 only,
