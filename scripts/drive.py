@@ -7,6 +7,15 @@ printed in full and auto-approved, which stands in for a human clicking Approve.
 
     python3 scripts/drive.py --workspace /path/to/ws --mission "fix the failing test"
 
+Steering, which is the thing worth exercising here -- it is the one part of the protocol
+with no test that can prove it against a real model:
+
+    # say something mid-run, once the 3rd turn lands
+    --say 3:"actually, use the other approach"
+
+    # and/or continue the conversation after the run ends, as many times as you like
+    --then "now do the same for the other module"
+
 Loads the model, so it is subject to the one-MLX-process-at-a-time rule in
 docs/HANDOFF_AGENT.md: run it alone, in the foreground, to completion.
 """
@@ -36,7 +45,22 @@ ap.add_argument("--mode", default="agent", choices=["plan", "debug", "agent"])
 ap.add_argument("--deadline", type=float, default=900.0)
 ap.add_argument("--deny", action="store_true",
                 help="deny every approval card instead of approving it")
+ap.add_argument("--say", action="append", default=[], metavar="TURN:TEXT",
+                help="send TEXT as an lmp/message once TURN turns have gone by "
+                     "(repeatable). Exercises mid-run steering.")
+ap.add_argument("--then", action="append", default=[], metavar="TEXT",
+                help="on run_end, continue the conversation with TEXT instead of "
+                     "shutting down (repeatable, in order).")
 args = ap.parse_args()
+
+# {turn_number: [text, ...]}
+say_at = {}
+for spec in args.say:
+    turn, _, text = spec.partition(":")
+    if not text:
+        ap.error(f"--say wants TURN:TEXT, got {spec!r}")
+    say_at.setdefault(int(turn), []).append(text)
+follow_ups = list(args.then)
 
 proc = subprocess.Popen(
     [os.path.abspath(args.sidecar)], cwd=args.workspace,
@@ -73,6 +97,17 @@ threading.Thread(target=pump_stderr, daemon=True).start()
 
 answer, thinking = [], []
 approvals = 0
+turns = 0
+run_id = "1"
+
+
+def say(text):
+    """An lmp/message. Steering if a run is turning, a follow-up if not -- the sidecar
+    decides which, and says so in `started_run`."""
+    print(f"{T()} >>> SAY {text!r}", flush=True)
+    send({"jsonrpc": "2.0", "id": new_id(), "method": "lmp/message",
+          "params": {"run_id": run_id, "text": text}})
+
 
 for raw in proc.stdout:
     raw = raw.strip()
@@ -81,7 +116,7 @@ for raw in proc.stdout:
     if time.monotonic() - start > args.deadline:
         print(f"{T()} DEADLINE; cancelling", flush=True)
         send({"jsonrpc": "2.0", "id": new_id(), "method": "lmp/cancel",
-              "params": {"run_id": "1"}})
+              "params": {"run_id": run_id}})
     try:
         msg = json.loads(raw)
     except json.JSONDecodeError:
@@ -105,10 +140,22 @@ for raw in proc.stdout:
         (thinking if params.get("channel") == "thinking" else answer).append(
             params.get("text", ""))
     elif method == "lmp/turn":
-        print(f"{T()} TURN outcome={params.get('outcome')} tool={params.get('tool_name')!r}"
-              f" status={params.get('tool_status')}", flush=True)
+        turns += 1
+        run_id = params.get("run_id", run_id)
+        print(f"{T()} TURN #{turns} outcome={params.get('outcome')} "
+              f"tool={params.get('tool_name')!r} status={params.get('tool_status')}",
+              flush=True)
         print(f"          args: {str(params.get('tool_args'))[:200]}", flush=True)
         print(f"          summary: {str(params.get('summary'))[:400]}", flush=True)
+        for text in say_at.pop(turns, []):
+            say(text)
+    elif method == "lmp/checklist":
+        items = json.loads(params.get("items_json") or "[]")
+        done = sum(1 for i in items if i.get("done"))
+        print(f"{T()} CHECKLIST {done}/{len(items)}", flush=True)
+        for item in items:
+            print(f"          [{'x' if item.get('done') else ' '}] {item.get('text')}",
+                  flush=True)
     elif method == "lmp/approval_request":
         approvals += 1
         caps = [k for k, v in (params.get("capabilities") or {}).items() if v is True]
@@ -130,11 +177,23 @@ for raw in proc.stdout:
               f"ctx={s.get('context_used')}", flush=True)
     elif method == "lmp/run_end":
         print(f"{T()} RUN_END reason={params.get('termination_reason')!r} "
-              f"iterations={params.get('iterations')} completed={params.get('completed')}",
-              flush=True)
-        send({"jsonrpc": "2.0", "id": new_id(), "method": "lmp/shutdown", "params": {}})
+              f"iterations={params.get('iterations')} completed={params.get('completed')} "
+              f"unfinished_items={params.get('unfinished_items')}", flush=True)
+        if follow_ups:
+            # A follow-up, not a new mission: same context, same loaded weights.
+            answer.clear()
+            thinking.clear()
+            say(follow_ups.pop(0))
+        else:
+            send({"jsonrpc": "2.0", "id": new_id(), "method": "lmp/shutdown", "params": {}})
     elif method is not None:
         print(f"{T()} <-- {method}", flush=True)
+    elif "error" in msg:
+        # Replies were dropped on the floor before, so a refused request looked exactly
+        # like a request that worked.
+        print(f"{T()} ERROR {msg['error'].get('message')}", flush=True)
+    elif "result" in msg:
+        print(f"{T()} result {json.dumps(msg['result'])}", flush=True)
 
 proc.wait(timeout=30)
 print(f"\n{T()} sidecar exited {proc.returncode}; approval cards: {approvals}", flush=True)

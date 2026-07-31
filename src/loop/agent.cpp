@@ -92,7 +92,10 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
         if (p.name == "items") {
             raw = &p.value;
         } else if (p.name == "verify_with" && !p.value.empty()) {
-            verify_contract_ = p.value;
+            // Pinned in the store, not held here: a follow-up run builds a fresh Agent
+            // over the SAME context, and a contract that lived in the Agent would be
+            // silently lost between the two.
+            ctx_.set_verify_contract(p.value);
         }
     }
     if (raw == nullptr) {
@@ -134,11 +137,14 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     ctx_.set_checklist(std::move(items));
     emit("plan", {{"items", std::to_string(total)},
                   {"open", std::to_string(open)},
-                  {"verify_with", verify_contract_}});
+                  {"verify_with", ctx_.verify_contract()}});
+    if (observer_.on_checklist) {
+        observer_.on_checklist(ctx_.checklist());
+    }
     std::string s = "checklist set: " + std::to_string(total - open) + "/" +
                     std::to_string(total) + " done";
-    if (!verify_contract_.empty()) {
-        s += "; completion requires '" + verify_contract_ + "' to pass";
+    if (!ctx_.verify_contract().empty()) {
+        s += "; completion requires '" + ctx_.verify_contract() + "' to pass";
         s += baseline_check();
     }
     return {true, std::move(s)};
@@ -155,14 +161,14 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
 // already done, or the check does not exercise what the mission is about. Both are worth
 // telling the model, and neither is worth pretending otherwise.
 std::string Agent::baseline_check() {
-    const std::string canon = canonicalize_check(verify_contract_);
+    const std::string canon = canonicalize_check(ctx_.verify_contract());
     for (const context::VerificationRecord& v : ctx_.verifications()) {
         if (v.contract == canon) {
             return {}; // already have a reading for this contract
         }
     }
     const bool passed =
-        verifier_.run_and_record_as(verify_contract_, policy_.sandbox_tier, canon);
+        verifier_.run_and_record_as(ctx_.verify_contract(), policy_.sandbox_tier, canon);
     emit("baseline_check", {{"contract", canon}, {"passed", passed ? "1" : "0"}});
     if (observer_.on_verification && !ctx_.verifications().empty()) {
         observer_.on_verification(ctx_.verifications().back());
@@ -222,14 +228,18 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         const bool proven = std::any_of(
             ctx_.verifications().begin(), ctx_.verifications().end(),
             [](const context::VerificationRecord& v) { return v.passed && v.falsifiable; });
-        const bool open = std::any_of(
-            ctx_.checklist().begin(), ctx_.checklist().end(),
-            [](const context::ChecklistItem& c) { return !c.done; });
-        must_reconcile = proven && open;
+        must_reconcile = proven && ctx_.open_checklist_items() > 0;
     }
 
+    // A steering message that arrived since the last plan gets the same treatment, and
+    // for the same reason: an instruction the run acknowledges and then does not act on
+    // is indistinguishable from one it never received. Making `plan` the only samplable
+    // call forces the next turn to restate the checklist in the light of what it was just
+    // told -- one turn, and the instruction is provably incorporated (S9.2).
+    const bool must_replan = ctx_.plan_is_stale();
+
     std::vector<parsephony::ToolSpec> specs;
-    if (ctx_.checklist().empty() || must_reconcile) {
+    if (ctx_.checklist().empty() || must_reconcile || must_replan) {
         for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
             if (s.name == "plan") {
                 specs.push_back(s);
@@ -353,7 +363,7 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // Requiring an exact match meant the check never matched, the Verifier never saw it,
     // and the ledger stayed empty while the agent watched its own tests pass.
     const std::string canon_cmd = canonicalize_check(cmd);
-    const std::string canon_contract = canonicalize_check(verify_contract_);
+    const std::string canon_contract = canonicalize_check(ctx_.verify_contract());
     const bool is_the_check = name == "shell" && !canon_contract.empty() &&
                               canon_cmd.find(canon_contract) != std::string::npos;
     if (is_the_check) {
@@ -411,6 +421,33 @@ void Agent::compact_to_budget() {
     }
 }
 
+// Takes whatever the user has said since the last turn boundary into the context.
+//
+// Everything downstream falls out of ContextStore::add_user_message: the text enters the
+// ordered stream at the point it actually arrived, the latest one is pinned in live state
+// where compaction cannot reach it, the plan goes stale (so the next turn must re-plan),
+// and the directive's position is recorded so a green from before it cannot be offered as
+// evidence for it.
+std::size_t Agent::take_steering() {
+    if (!steer_) {
+        return 0;
+    }
+    const std::vector<std::string> messages = steer_();
+    for (const std::string& text : messages) {
+        if (text.empty()) {
+            continue;
+        }
+        ctx_.add_user_message(text);
+        emit("steer", {{"chars", std::to_string(text.size())},
+                       {"at_turn", std::to_string(ctx_.recent().size())}});
+        // A run that was drifting into narration has just been given something new to
+        // act on. Holding the old count against it would end the run on the strength of
+        // turns that happened before anyone spoke to it.
+        consecutive_text_only_ = 0;
+    }
+    return messages.size();
+}
+
 void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
     // Every branch here CHANGES STATE or CONTROL FLOW. None composes a sentence asking
     // the model to behave -- that is the S9.2 rule, and run_ratchets.py counts the
@@ -455,6 +492,9 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             report.termination_reason = "cancelled";
             break;
         }
+        // The turn boundary, and the only place the user's words enter a live run.
+        report.steers_received += take_steering();
+
         const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                                  clock_.mono() - started)
                                  .count();
@@ -543,6 +583,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         if (verdict.complete) {
             report.completed = true;
             report.termination_reason = "completed";
+            emit("completion", {{"reason", verdict.reason},
+                                {"open_items", std::to_string(verdict.open_items)}});
             break;
         }
         // A run that has stopped calling tools has stopped working. Two ways to see it:
@@ -555,13 +597,24 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         consecutive_text_only_ = turn.outcome == Outcome::TextOnly
                                      ? consecutive_text_only_ + 1
                                      : 0;
-        if (turn.outcome == Outcome::TextOnly && report.iterations > 1 &&
-            ctx_.checklist().empty()) {
-            report.termination_reason = "text_only_no_plan";
-            break;
-        }
-        if (consecutive_text_only_ >= kMaxConsecutiveTextOnly) {
-            report.termination_reason = "text_only_no_progress";
+        const bool stalled_without_plan = turn.outcome == Outcome::TextOnly &&
+                                          report.iterations > 1 &&
+                                          ctx_.checklist().empty();
+        const bool stalled_narrating = consecutive_text_only_ >= kMaxConsecutiveTextOnly;
+        if (stalled_without_plan || stalled_narrating) {
+            // Last look at the inbox before giving up. A human watching a run drift into
+            // narration is exactly the human who types "keep going" or "no, try the other
+            // file" -- and ending the run a moment after they said it, having already read
+            // it off the pipe, would be the worst possible time to stop listening.
+            // take_steering() resets the text-only count, so a message genuinely revives
+            // the run rather than deferring the same ending by one turn.
+            const std::size_t rescued = take_steering();
+            report.steers_received += rescued;
+            if (rescued > 0) {
+                continue;
+            }
+            report.termination_reason =
+                stalled_without_plan ? "text_only_no_plan" : "text_only_no_progress";
             break;
         }
     }
@@ -569,9 +622,12 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         report.termination_reason = halted_ ? halt_reason_ : "loop_exit";
     }
     report.compactions = ctx_.compaction_count();
+    report.unfinished_items = ctx_.open_checklist_items();
     emit("run_end", {{"termination_reason", report.termination_reason},
                      {"iterations", std::to_string(report.iterations)},
-                     {"completed", report.completed ? "true" : "false"}});
+                     {"completed", report.completed ? "true" : "false"},
+                     {"unfinished_items", std::to_string(report.unfinished_items)},
+                     {"steers_received", std::to_string(report.steers_received)}});
     return report;
 }
 

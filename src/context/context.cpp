@@ -50,6 +50,15 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
             std::to_string(recent_[drop - 1].last_event_seq) + "):\n";
     for (std::size_t i = 0; i < drop; ++i) {
         const TurnRecord& t = recent_[i];
+        if (!t.user_text.empty()) {
+            // A human turn keeps a longer anchor than an assistant one. An instruction
+            // is the only thing in the stream that changes what the run is FOR, and a
+            // 160-character truncation of "no, use the other approach because ..." can
+            // lose the half that mattered. The live-state block carries the latest one
+            // verbatim regardless; this is for the ones behind it.
+            span += "- you were told: " + first_line(t.user_text, 400) + "\n";
+            continue;
+        }
         if (t.tool_name.empty()) {
             span += "- said: " + first_line(t.assistant_text, 160) + "\n";
             continue;
@@ -96,7 +105,7 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     if (!project_instructions_.empty()) {
         system += "\n\n# Project conventions\n\n" + project_instructions_;
     }
-    system += "\n\n# Mission\n\n" + mission_;
+    system += "\n\n# Mission\n\n" + user_turns_.front();
     out.push_back({Role::System, std::move(system)});
 
     // T3: compacted spans, oldest first, as observed history.
@@ -107,6 +116,10 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // T2: recent turns, verbatim. The assistant's answer body and the observation it
     // got back -- the observation goes in as a tool_response, which is Qwen's shape.
     for (const TurnRecord& t : recent_) {
+        if (!t.user_text.empty()) {
+            out.push_back({Role::User, t.user_text});
+            continue;
+        }
         if (!t.assistant_text.empty()) {
             out.push_back({Role::Assistant, t.assistant_text});
         }
@@ -126,6 +139,23 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
 
 std::string ContextStore::render_live_state() const {
     std::string s;
+    // The standing instruction, verbatim and pinned.
+    //
+    // It is already in the recent stream at the position it arrived, and that copy is
+    // what gives it chronology. This one exists because compaction will eventually
+    // summarize that copy, and the thing a run must not lose to a trim is the sentence
+    // telling it what to do differently. Duplicated deliberately: T0 names the mission,
+    // and until this existed there was nowhere for "and now do it the other way" to live
+    // that a long run could not forget.
+    if (user_turns_.size() > 1) {
+        s += "# Standing instruction (most recent; supersedes the mission where they "
+             "conflict)\n\n" +
+             user_turns_.back() + "\n";
+        if (plan_stale_) {
+            s += "\nThe checklist below predates it.\n";
+        }
+        s += "\n";
+    }
     if (!checklist_.empty()) {
         s += "# Checklist\n\n";
         for (const ChecklistItem& c : checklist_) {

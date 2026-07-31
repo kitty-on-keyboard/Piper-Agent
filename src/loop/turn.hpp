@@ -136,11 +136,17 @@ struct Budget {
 
 // --- completion -------------------------------------------------------------
 
-// Driven by the checklist and the deliverable ledger, never by prose guessing whether
-// the model sounded finished (S10.4).
+// Driven by the deliverable and verification ledgers, never by prose guessing whether the
+// model sounded finished -- and, since the seventh pass, never by the model's checklist
+// ticks either, which are a self-report wearing a checkbox (S10.4).
+//
+// `open_items` is REPORTED, not enforced. completing with open_items > 0 means the
+// evidence says the mission is met while the model's own list says otherwise. That
+// disagreement is worth a human's attention and worth none of the harness's authority.
 struct CompletionVerdict {
     bool complete = false;
     std::string reason;
+    std::size_t open_items = 0;
 };
 
 [[nodiscard]] CompletionVerdict evaluate_completion(const context::ContextStore& ctx);

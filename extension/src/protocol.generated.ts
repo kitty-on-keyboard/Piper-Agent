@@ -74,6 +74,16 @@ export interface ApproveResult {
   accepted: boolean;
 }
 
+export interface MessageParams {
+  run_id: string;
+  text: string;
+}
+export interface MessageResult {
+  accepted: boolean;
+  run_id: string;
+  started_run: boolean;
+}
+
 export interface ShutdownParams {
 }
 export interface ShutdownResult {
@@ -134,12 +144,14 @@ export interface RunEndNotification {
   termination_reason: string;
   iterations: number;
   completed: boolean;
+  unfinished_items: number;
 }
 
 export const METHODS = [
   "lmp/start",
   "lmp/cancel",
   "lmp/approve",
+  "lmp/message",
   "lmp/shutdown",
   "lmp/token",
   "lmp/turn",

@@ -84,6 +84,35 @@
       ],
       "result": [{ "name": "accepted", "type": "bool" }]
     },
+    "lmp/message": {
+      "_comment": [
+        "Talk to the agent. ONE method, two behaviours, decided by whether a run is",
+        "in flight -- because from the user's side there is only one act, 'say",
+        "something to it', and which of those two it turns out to be is the",
+        "harness's business rather than the caller's.",
+        "",
+        "IN FLIGHT: steering. The text lands in the run's context at the NEXT TURN",
+        "BOUNDARY, not mid-generation. Cancel is the violent one and sets a token",
+        "mid-token-stream; steering is gentle by design, so the model finishes the",
+        "thought it is having and reads the instruction before choosing its next",
+        "move. It also marks the plan stale, which makes `plan` the only callable",
+        "tool on the following turn -- so an instruction cannot be received and",
+        "then quietly ignored (S9.2: mechanism, not a sentence asking it to listen).",
+        "",
+        "IDLE: a follow-up. The same ContextStore, the same loaded weights, one more",
+        "user turn. `started_run` says which happened, and `run_id` names the run",
+        "the text went to either way."
+      ],
+      "params": [
+        { "name": "run_id", "type": "string" },
+        { "name": "text", "type": "string" }
+      ],
+      "result": [
+        { "name": "accepted", "type": "bool" },
+        { "name": "run_id", "type": "string" },
+        { "name": "started_run", "type": "bool" }
+      ]
+    },
     "lmp/shutdown": { "params": [], "result": [{ "name": "ok", "type": "bool" }] }
   },
 
@@ -134,7 +163,8 @@
       { "name": "run_id", "type": "string" },
       { "name": "termination_reason", "type": "string" },
       { "name": "iterations", "type": "int" },
-      { "name": "completed", "type": "bool" }
+      { "name": "completed", "type": "bool" },
+      { "_comment": "Checklist items still open when the run ended. `completed` is an EVIDENTIAL verdict -- a recorded deliverable plus a falsifiable passing verification of the declared contract -- so it no longer waits on the model agreeing that it is done. This field reports the disagreement instead of hiding it: completed=true with unfinished_items>0 means the evidence says the mission is met and the model's own list says otherwise, and a human should look.", "name": "unfinished_items", "type": "int" }
     ]
   }
 }
