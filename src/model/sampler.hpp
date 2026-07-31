@@ -11,11 +11,11 @@
 // shaped afterwards (S5.6). Masking after top-k could leave zero legal candidates.
 //
 #include <cstdint>
-#include <functional>
 #include <vector>
 
 #include "src/model/backend.hpp"
 #include "src/model/qwen_tokenizer.hpp"
+#include "src/model/token_mask.hpp"
 
 namespace lmp::model {
 
@@ -31,10 +31,11 @@ class Sampler {
   public:
     explicit Sampler(const SamplingParams& params) : params_(params), rng_(params.seed) {}
 
-    // `mask` returns true if the id is permitted; pass nullptr for unconstrained.
+    // `mask` is the legal-token set for this step; pass nullptr for unconstrained. Ids
+    // at or beyond mask->size() are denied -- the logits row is wider than the
+    // tokenizer's vocabulary and the trailing rows decode to nothing.
     // `recent` feeds repetition penalty (applied to ids present in it).
-    [[nodiscard]] SampleResult sample(std::vector<float>& logits,
-                                      const std::function<bool(TokenId)>& mask,
+    [[nodiscard]] SampleResult sample(std::vector<float>& logits, const TokenMask* mask,
                                       const std::vector<TokenId>& recent);
 
   private:

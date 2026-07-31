@@ -44,8 +44,8 @@ crowding the error out.
 > traceback (which prints `File "x.py", line N`), rustc's `--error-format=short` message
 > (which folds the caret label onto the end), pytest's absolute path (its normal output is
 > relative). Each one made a case **nobody could answer**, which is the same defect the
-> entrants found in the blast-radius key. `test_log_triage_corpus` now asserts every key
-> entry is findable in its own log; it caught all three.
+> entrants found in the blast-radius key. `tests/bakeoff/test_corpus_loads.cpp` asserts every
+> key entry is findable in its own log; it caught all three.
 
 ## Layout
 
@@ -62,8 +62,18 @@ crowding the error out.
 | `holdout_logs/`, `holdout.jsonl` | 7 cases written AFTER the engine. Scored once. |
 | `adapters/eNN.hpp` | **Ours.** The call, adapted to the entrant's signature. |
 
-Validated by `src/testing/test_log_triage_corpus.cpp` (341 checks) and pinned by
-`src/testing/test_log_triage_engine.cpp` (13 checks), both in the standard gate.
+The corpus is validated by `tests/bakeoff/test_corpus_loads.cpp` (9 cases, 65 checks across
+both bakeoffs) and the engine is pinned by `tests/bakeoff/test_log_triage_engine.cpp`
+(8 cases, 38 checks), both labelled `gate` and both named in `tests/gate/gate_manifest.txt`.
+
+> ⚠️ **Until 2026-07-31 the second of those did not exist, and this file said it did.** The
+> claim here was that `src/testing/test_log_triage_corpus.cpp` (341 checks) and
+> `src/testing/test_log_triage_engine.cpp` (13 checks) validated and pinned the engine in the
+> standard gate. `src/testing/` has never existed, neither name has ever appeared in the gate
+> manifest, and **nothing tested `log_triage::compact` at all**. The round-2 patch below then
+> changed line selection on nearly every case in the corpus and the entire gate stayed green,
+> because there was nothing for it to turn red. Corpus validation was real all along under a
+> different path and name; the engine pin was not, and is now written.
 
 ```bash
 cmake --build build --target log_triage_score_e05 && ./build/log_triage_score_e05 -v
@@ -221,24 +231,91 @@ Only three of 75 points resist every implementation:
 
 ## The consolidated engine
 
-`src/tools/log_triage.hpp`, wired into `SubprocessVerifier::compact_command_output`.
-`line_is_diagnostic` is **deleted**, not kept alongside — two implementations of "is this
-line important" is how the caller ends up asking the wrong one. The frozen pre-change code
-lives at `entrants/incumbent.hpp` so the baseline stays measurable.
+`src/tools/log_triage.hpp`. `line_is_diagnostic` is **deleted**, not kept alongside — two
+implementations of "is this line important" is how the caller ends up asking the wrong one.
+The frozen pre-change code lives at `entrants/incumbent.hpp` so the baseline stays measurable.
 
-| | corpus (tuned against) | **holdout (blind)** |
-|---|---|---|
-| weighted | 34 | **20** |
-| locators lost | 1 / 177 | **0 / 39** |
-| messages lost | 1 / 195 | **0 / 48** |
-| context lost | 29 / 384 | 20 / 117 |
-| exact | 71 / 75 | **19 / 21** |
-| over budget | 0 | 0 |
+**Where it is actually called.** One site: `src/tools/registry.cpp:488`, in the shell tool
+handler, on every command result. There is no `SubprocessVerifier` in the tree — this file
+said the engine was "wired into `SubprocessVerifier::compact_command_output`" until
+2026-07-31, and that class and method are v1 names that did not survive the port.
+
+That one site is the whole path, which is worth stating because the absence of a `compact`
+call in `src/loop/verification.cpp` reads like a hole and is not one: `Verifier` does not run
+subprocesses itself. `run_and_record` and `prove_falsifiable` both go through
+`registry_.execute("shell", ...)`, so `VerificationRecord::detail` is already compacted
+output. Verification is triaged, by the shell handler, one layer down.
+
+| | corpus, round 1 | corpus, **round 2** | holdout, round 1 | holdout, **round 2** |
+|---|---|---|---|---|
+| weighted | 34 | **15** | 20 | **0** |
+| locators lost | 1 / 177 | **0** | 0 / 39 | **0** |
+| messages lost | 1 / 195 | **0** | 0 / 48 | **0** |
+| context lost | 29 / 384 | **15** | 20 / 117 | **0** |
+| exact | 71 / 75 | **73 / 75** | 19 / 21 | **21 / 21** |
+| over budget | 0 | 0 | 0 | 0 |
 
 **Quote the holdout column.** The corpus number is a memory test — the engine was written
 with that corpus open, iterating until the scorer went quiet.
 
+⚠️ **And for round 2, do not quote the holdout column either.** See "one holdout case is
+burned" below: `ho_rustc_no_cargo` is now burned twice over, and it is where the entire
+20 → 0 comes from.
+
+### Round 2 (2026-07-31): three defects in the shipped engine
+
+Found by re-reading the merged engine against the entrants, not by a new corpus.
+
+1. **Phase 1 selected by anchor-ness, so round 1's warning fix never bit.** Round 1 demoted a
+   warning's bare ` --> path:L:C` to `kWarning` in `inherited_score`, which fixed the *score* —
+   but phase 1's only test was `if (!lines[i].anchor)` and it never read the score. On
+   `ho_rustc_no_cargo` all 240 warning locators were still anchors, each a distinct line so
+   message-dedup did not collapse them, and phase 1 filled the whole 2048-byte budget with
+   them before the three real errors' caret blocks were considered. A `diagnostic` flag
+   (anchor **and** score ≥ `kAnchor`) is what makes the demotion bite. Worth the holdout
+   20 → 0 on its own, and it also solves `cargo_two_errors` on the corpus.
+2. **clang's include stack scored as a full anchor.** `In file included from …/vector:312:`
+   carries `path:line:`, so `find_locator_end` fired and nothing else claimed the line — it
+   became an anchor at `kAnchor`, or `kLocalAnchor` when the header happened to sit in the
+   project. Each is 150–200 bytes of SDK path and a template blow-up emits dozens. **e08 was
+   the only entrant to recognise these** (its `TEMPLATE_INST` state) and the round-1 merge
+   did not take it.
+3. **Locality was ranked; severity within locality was not.** Principle 2 ranks own-code over
+   system headers, but inside the system tier a `note:` and an `error:` both scored `kAnchor`,
+   so libc++'s twenty `note: in instantiation of …` lines tied with the one real `error:` and
+   crowded it out of `build_template_deep`. `kSystemNote = 320` applies **only** when the
+   locator is not local, so local notes are untouched — which is what preserves e10's
+   `build_no_matching_ctor` win. Takes `build_template_deep` at 8192 from w=4 to solved and at
+   2048 from w=9 to w=2; the round-1 table above records w=7 as the best any implementation
+   had managed on that case.
+
+Speed is unchanged — all three are O(1) per line, no new passes. Re-timed on a 15 MB,
+233k-line synthetic build log, best of 5: **0.045 s before, 0.040 s after.**
+
+#### A fourth defect, found by writing the missing test
+
+`compact` could return **one byte over budget**. When no line at all is affordable the whole
+log is a single gap and the output is a lone `[... N lines elided ...]\n` marker, whose own
+length the packer never checks — 27 bytes at `N=800`. The final clamp did not save it:
+`rfind('\n', budget_bytes)` searches positions ≤ the budget, so it returns the newline
+sitting exactly *at* `budget_bytes` and `resize(cut + 1)` is a no-op that looks like a
+truncation. Cutting from `budget_bytes - 1` is the fix.
+
+Round 1 violated its budget on **32 of 137,408** (log, budget) points — one per log, at the
+single budget where that newline lands on the cap. Round 2 violates none. It was never
+reachable in production, where the cap is 8192 or 16384, and no scoring point is at a budget
+that small, which is exactly why only a contract test could find it.
+
+**The remaining 15 is almost all `bare_error_limit` at 2048 (w=13), and it is capacity, not
+triage.** 19 diagnostics ≈ 1064 B plus 38 context lines ≈ 1254 B against a 2048 B cap; the
+output uses 2013 of 2048, the 13 gap markers cost 325 B and the next context pair needs 65 B.
+There is nothing to reclaim without shortening the marker format.
+
 ### The comparison is not one-sided, and the honest reading is this
+
+*Round 1's reading, kept as written. Round 2 takes the engine's holdout weighted to 0, which
+settles the aggregate in the engine's favour — but on a case that was already burned, so the
+tension below is resolved by a number that is not blind, and the reasoning still stands.*
 
 On the held-out set the frozen incumbent scores **18 weighted to the engine's 20**. The
 weights were published before anything was scored and are not being changed now that the
@@ -261,10 +338,10 @@ That is a real tension and it is why the engine ships: on the corpus it is 34 ag
 address. But the ratio between locator and context weight was a judgement made before any
 data existed, and it is the thing to revisit first with a fresh set.
 
-### ⚠️ One holdout case is burned
+### ⚠️ One holdout case is burned — twice over
 
-`ho_rustc_no_cargo` exposed two genuine defects and both were fixed with its output in front
-of me:
+`ho_rustc_no_cargo` exposed two genuine defects in round 1 and both were fixed with its
+output in front of me:
 
 1. **A bare locator line asserted maximum severity instead of inheriting it.** rustc prints
    the same ` --> path:L:C` under a `warning:` as under an `error:`, so a crate with 120
@@ -273,10 +350,44 @@ of me:
 2. **Context was bounded by a radius, not by structure.** A comment in the engine claimed six
    lines "covers the widest block any tool prints"; rustc's gutter is nine.
 
-The other six holdout cases were perfect before and after those fixes and remain blind.
-`test_log_triage_engine` asserts the held-out set stays harder **per point** than the corpus
-(0.95 vs 0.45) — a tripwire on the process, not a quality bar. **The next round needs a fresh
-set**, ideally one whose cases do not come from this generator at all.
+**Round 2 burned it again.** Defect 1 above was found by reading this case's output; defect 1
+of round 2 — that the fix never actually bit, because phase 1 packs by anchor-ness and never
+reads the score — was found by reading *the same case's output again*, after it had been
+declared fixed. So the holdout **20 → 0 is not a blind result and must not be quoted as one.**
+
+The defensible claims are narrower, and these are the ones to use:
+
+- The other six holdout cases were perfect before round 2 and are perfect after it. They
+  remain blind; nothing in round 2 was driven by them.
+- Round 2's defects 2 and 3 were found on **corpus** cases (`build_template_deep`) with the
+  holdout untouched. Ablated — each fix applied alone to the round-1 engine, measured, not
+  reasoned about:
+
+  | | corpus w | corpus exact | holdout w | holdout exact |
+  |---|---|---|---|---|
+  | round-1 engine | 34 | 71/75 | 20 | 19/21 |
+  | fix 1 alone (the `diagnostic` flag) | 26 | 72/75 | **0** | **21/21** |
+  | fixes 2+3 alone (include stack, `kSystemNote`) | 27 | 71/75 | 20 | 19/21 |
+  | **all three** | **15** | **73/75** | **0** | **21/21** |
+
+  **These do not add up, and that is the finding, not a rounding error.** Separately the
+  fixes are worth 8 and 7 weighted; together they are worth 19. Fix 1 stops 240 warning
+  addresses eating the budget, and fixes 2 and 3 are what spend the freed budget well —
+  neither is worth much without the other. Do not quote any row here as a fix's "cost" or
+  "contribution"; an ablation measures a removal, not a share.
+
+  The honest split on blindness: **fixes 2 and 3 move the holdout not at all.** Every bit of
+  the 20 → 0 is fix 1, and fix 1 came off the burned case.
+- One case has now supplied three of the five defects ever found in this engine. That is a
+  statement about the case, not about the engine's quality on unseen logs.
+
+`tests/bakeoff/test_corpus_loads.cpp` asserts the holdout stays harder than the tuned set —
+though only **structurally**, comparing mean log bytes per case, and its comment still says
+"the engine does not exist yet". Round 1 described this as a per-point weighted tripwire at
+0.95 vs 0.45; it has never measured that, and with the holdout now at 0 weighted a per-point
+version of it would fail. **The next round needs a fresh set**, ideally one whose cases do
+not come from this generator at all, and that is now the blocking item for this benchmark
+rather than a nice-to-have.
 
 ### Speed was a disqualification no score would have shown
 

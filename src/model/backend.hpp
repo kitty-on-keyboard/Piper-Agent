@@ -14,11 +14,11 @@
 //
 #include <atomic>
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
 #include "src/model/qwen_tokenizer.hpp"
+#include "src/model/token_mask.hpp"
 
 namespace lmp::model {
 
@@ -50,12 +50,11 @@ struct InferenceTask {
     std::vector<TokenId> prompt;
     SamplingParams sampling;
     std::int32_t max_new_tokens = 4096;
-    // Constrained decoding (S5.6): true iff `id` may be emitted next. Stateful through
-    // the caller's grammar -- the sink's on_token advances it, so by the time the next
-    // step consults this, it answers for the new state. Null means unconstrained.
-    // ScriptedBackend and ReplayBackend ignore it: their tokens are the script's
-    // business, and the loop's sink still classifies them.
-    std::function<bool(TokenId)> mask;
+    // Constrained decoding (S5.6): the legal-token set for the current state, asked for
+    // once per step rather than probed id by id. Null means unconstrained. ScriptedBackend
+    // and ReplayBackend ignore it: their tokens are the script's business, and the loop's
+    // sink still classifies them.
+    const MaskSource* mask = nullptr;
 };
 
 // Receives each sampled id as it is produced. Returns false to stop generation -- this is
@@ -88,6 +87,12 @@ struct GenResult {
     double ttft_ms = 0.0;
     double prefill_tok_per_s = 0.0;
     double decode_tok_per_s = 0.0;
+    // Decode-loop attribution, so "decode is slow" is always answerable with WHERE
+    // (S19.3). forward_ms is the model, logits_copy_ms is the GPU->CPU sync, sample_ms
+    // is mask + shaping + draw. They sum to roughly the decode wall time.
+    double forward_ms = 0.0;
+    double logits_copy_ms = 0.0;
+    double sample_ms = 0.0;
 };
 
 class InferenceBackend {

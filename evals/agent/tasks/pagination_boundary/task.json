@@ -1,0 +1,13 @@
+{
+  "split": "holdout",
+  "mission": "Paging through results skips and duplicates rows near page boundaries. Fix page_slice so `python3 -m pytest -q` passes. Do not change the tests.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "python3 -m pytest -q",
+  "max_iterations": 35,
+  "wall_clock_seconds": 900,
+  "notes": "Off-by-one with a 1-indexed page argument, plus an empty-page case. The obvious fix passes three of five tests.",
+  "protect": [
+    "test_paging.py"
+  ]
+}

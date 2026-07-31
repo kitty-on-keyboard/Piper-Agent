@@ -8,7 +8,7 @@
 // rejected, is recorded at the bottom of this file. The benchmark it is measured on lives at
 // bakeoff/log_triage/ and its answer key was written by the compiler, not by us.
 //
-// The problem, stated once. A build fails. SubprocessVerifier captures 12 MB of output. The
+// The problem, stated once. A build fails. The shell tool captures 12 MB of output. The
 // model gets 8 KB. If the 40 bytes saying WHICH LINE OF ITS OWN CODE to edit are not in that
 // 8 KB, the agent cannot fix the build -- and it will not say so, it will guess. That is the
 // harness-blindness failure: "the model could not fix the build" when the compiler error
@@ -48,6 +48,7 @@ namespace detail {
 inline constexpr int kLocalAnchor = 1000;  // a diagnostic naming a file we can edit
 inline constexpr int kAnchor = 600;        // a diagnostic naming a system file, or none
 inline constexpr int kOutcome = 300;       // "3 errors generated", "make: *** Error 1"
+inline constexpr int kSystemNote = 320;    // a `note:` inside a file the agent cannot edit
 inline constexpr int kWarning = 40;        // kept only if the budget is generous
 inline constexpr int kOrdinary = 10;
 inline constexpr int kNoise = 0;           // compiler invocations, progress percentages
@@ -229,6 +230,16 @@ inline constexpr std::size_t kMarkerFixed =
     if (t[0] == '[' && contains(t.substr(0, 8), "%]")) {
         return true; // "[ 42%] Building CXX object ..."
     }
+    // clang's include stack. It names a file and a line, so find_locator_end fires on it and
+    // it was being scored as a full anchor -- kLocalAnchor when the header happens to sit in
+    // the project. These lines are 150-200 bytes of SDK path each and a template blow-up
+    // emits dozens: on build_template_deep at 2048 they consumed the whole budget and cost
+    // the case its primary locator, its message and all four context lines. They announce
+    // nothing wrong; the diagnostic they precede does. e08 was the only entrant to recognise
+    // them (as its TEMPLATE_INST state) and the round-1 merge did not take it.
+    if (starts_with(t, "In file included from ")) {
+        return true;
+    }
     if (starts_with(t, "make[") || starts_with(t, "make ") ||
         starts_with(t, "cd /") || starts_with(t, "Running `") ||
         starts_with(t, "-- ") || starts_with(t, "Compiling ") ||
@@ -321,6 +332,7 @@ struct Line {
     std::string_view text;
     int score = 0;
     bool anchor = false; // carries a locator or a severity marker: kept before any context
+    bool diagnostic = false; // an anchor for a real diagnostic, not a warning's address
     bool duplicate = false; // an anchor repeating a message already kept
     bool selected = false;
 };
@@ -384,8 +396,10 @@ struct Line {
     for (std::size_t pos = 0; pos < normalised.size();) {
         const std::size_t nl = normalised.find('\n', pos);
         const std::size_t end = (nl == std::string::npos) ? normalised.size() : nl;
-        lines.push_back(Line{std::string_view(normalised).substr(pos, end - pos), 0, false,
-                             false});
+        // Named member only: every other field has a default member initialiser, and the
+        // positional form silently re-bound its trailing `false` to a different member the
+        // moment `diagnostic` was inserted into the struct.
+        lines.push_back(Line{.text = std::string_view(normalised).substr(pos, end - pos)});
         pos = (nl == std::string::npos) ? normalised.size() : nl + 1;
     }
     if (lines.empty()) {
@@ -421,8 +435,20 @@ struct Line {
             // filled 16 KB with warning addresses and cost the case ten of its fourteen
             // context lines. A continuation line inherits; it does not assert.
             ln.anchor = true;
-            ln.score = inherited_score(lines, static_cast<std::size_t>(&ln - lines.data()),
-                                       locator_is_local(ln.text));
+            const bool local = locator_is_local(ln.text);
+            // A `note:` in a file the agent cannot edit ranks BELOW a real diagnostic in one.
+            // Principle 2 ranks by locality; within the system tier it did not rank by
+            // severity at all, so libc++'s instantiation backtrace -- twenty
+            // `note: in instantiation of ... requested here` lines, 200 bytes of SDK path
+            // each -- tied with the one `error:` at kAnchor and crowded it out of
+            // build_template_deep entirely. Local notes are untouched: they are what solves
+            // build_no_matching_ctor, where every candidate signature is a note.
+            if (!local && contains(ln.text, "note:")) {
+                ln.score = kSystemNote;
+            } else {
+                ln.score = inherited_score(
+                    lines, static_cast<std::size_t>(&ln - lines.data()), local);
+            }
         } else if (severe) {
             ln.anchor = true;
             ln.score = kAnchor;
@@ -433,6 +459,14 @@ struct Line {
         } else {
             ln.score = kOrdinary;
         }
+        // Phase 1 packs anchors ahead of all context, so anchor-ness -- not score -- is what
+        // actually spends the budget there. Demoting a warning's bare locator to kWarning
+        // (see inherited_score) therefore did NOT stop it being packed first: on
+        // ho_rustc_no_cargo, 240 warnings each contribute a distinct ` --> shard.rs:N:C`
+        // line, all still anchors, and phase 1 filled 2048 bytes with them before the three
+        // real errors' caret blocks were considered. The score floor is what makes the
+        // demotion bite.
+        ln.diagnostic = ln.anchor && ln.score >= kAnchor;
     }
 
     // --- proximity -----------------------------------------------------------
@@ -535,7 +569,7 @@ struct Line {
     // in code the agent can edit.
     std::vector<std::string_view> seen;
     for (std::size_t i : order) {
-        if (!lines[i].anchor) {
+        if (!lines[i].diagnostic) {
             continue;
         }
         // When the locator consumes the whole line -- rustc's ` --> path:L:C` and Python's
@@ -613,11 +647,19 @@ struct Line {
     }
     flush_gap();
 
-    // The estimate is an upper bound, so this should never fire. It is here because the
-    // consequence of being wrong is the caller hard-truncating mid-line, and a cheap
-    // clamp at a line boundary is strictly better than that.
+    // The estimate is an upper bound on the SELECTED lines, so this rarely fires -- but it
+    // is not dead code, and it was itself off by one until 2026-07-31. When no line can be
+    // afforded at all, the whole log is one gap and the output is a lone elision marker
+    // whose own length the packer never checked: at budget 26 a 800-line log rendered
+    // "[... 800 lines elided ...]\n", 27 bytes.
+    //
+    // The clamp did not save it. `rfind('\n', budget_bytes)` searches positions <= the
+    // budget, so it can return the newline sitting exactly AT budget_bytes, and resizing to
+    // cut + 1 then leaves the string one byte over -- a no-op that looked like a truncation.
+    // Cutting at budget_bytes - 1 is what makes cut + 1 <= budget_bytes hold. `budget_bytes`
+    // is at least 1 here; zero returned above.
     if (out.size() > budget_bytes) {
-        const std::size_t cut = out.rfind('\n', budget_bytes);
+        const std::size_t cut = out.rfind('\n', budget_bytes - 1);
         out.resize(cut == std::string::npos ? budget_bytes : cut + 1);
     }
     return out;
@@ -640,6 +682,12 @@ struct Line {
 //        that solve build_no_matching_ctor, where the candidate signatures are all notes.
 //   e12  Locators that are not on the same line as their message. The only entrant that
 //        solves cargo_two_errors, where rustc prints ` --> path:L:C` under the message.
+//   e08  (round 2) Recognising clang's "In file included from ..." include stack as
+//        structure rather than diagnosis -- its TEMPLATE_INST state. Round 1 rejected e08
+//        wholesale because it takes no budget, and threw this out with it. The line carries
+//        `path:line:`, so the locator matcher fires and it scored as a full anchor; a
+//        template blow-up emits dozens at 150-200 bytes of SDK path each. Rejecting an
+//        entrant's INTERFACE is not a reason to reject everything it noticed.
 //
 // REJECTED
 //   e05's packer. A greedy knapsack that recomputes the full rendered size for every
@@ -665,6 +713,25 @@ struct Line {
 //        "error" whenever the build uses -Werror or compiles a file with "error" in its
 //        name, and it is both adjacent to real diagnostics and very long.
 //   Anchor de-duplication. SwiftPM emits every diagnostic twice.
+//
+// WRITTEN HERE IN ROUND 2 (2026-07-31), all three fixing something round 1 got wrong
+//   Selecting phase 1 on `diagnostic` rather than `anchor`. Round 1 demoted a warning's bare
+//        locator to kWarning and believed that fixed it; phase 1 packs by anchor-ness and
+//        never reads the score, so the demotion did nothing. A fix to a RANKING is not a fix
+//        when the code in question does not rank.
+//   kSystemNote. Principle 2 ranked by locality and, inside the system tier, not by severity
+//        at all -- so libc++'s twenty instantiation notes tied with the one real error.
+//        Applied only when the locator is NOT local, which is what keeps e10's contribution.
+//   The one-byte budget overrun in the final clamp (see the render section). Round 1 exceeded
+//        its budget on 32 of 137,408 (log, budget) points, all at the single budget per log
+//        where a lone elision marker's newline lands exactly on the cap. Unreachable in
+//        production and invisible to all 75 scoring points; found by a contract test.
+//
+// WHAT ROUND 2 SAYS ABOUT THE METHOD
+//   Every one of these had been measured, written up and shipped. What found them was
+//   re-reading the OUTPUT on cases the scorer had already gone quiet on -- and for the
+//   clamp, writing the test this file had been claimed to have since round 1. A scoreboard
+//   that has stopped moving is not the same thing as an engine that is right.
 // ---------------------------------------------------------------------------
 
 #endif // TOOLS_LOG_TRIAGE_HPP

@@ -17,6 +17,17 @@
 //                                          inspecting commands
 //   T2  container                          REQUIRED for unattended (S7.2). Not yet
 //                                          wired; requesting it refuses loudly.
+//   T3  the host, unsandboxed              OPERATOR OPT-IN ONLY (see below).
+//
+// T3 IS NOT A RANK. The numbers are identities, and 3 is the LEAST contained of them,
+// not the most. It exists because the operator asked for it and it is their machine:
+// every mainstream coding agent runs on the host, and a jail the user works around by
+// not using the agent protects nothing. What S7 actually forbids is a sandbox that
+// disappears QUIETLY -- v1 shipped unsafe_host as the effective default because a string
+// classifier decided a command looked fine. So T3 is reachable only by asking for it by
+// number, is never a fallback from a tier that failed, is never what an absent or
+// unparseable setting means, and every command it runs is logged as having run outside
+// the jail.
 //
 #include <cstdint>
 #include <string>
@@ -26,7 +37,12 @@
 
 namespace lmp::tools {
 
-enum class SandboxTier : std::uint8_t { T0_NoExec = 0, T1_Seatbelt = 1, T2_Container = 2 };
+enum class SandboxTier : std::uint8_t {
+    T0_NoExec = 0,
+    T1_Seatbelt = 1,
+    T2_Container = 2,
+    T3_HostUnsandboxed = 3,
+};
 
 // ADVISORY ONLY. Produced by security::blast_radius, consumed by the HITL router for
 // escalation decisions and by the UI for capability chips. Nothing executes because of

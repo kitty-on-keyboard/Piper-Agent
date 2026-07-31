@@ -1,0 +1,13 @@
+{
+  "split": "corpus",
+  "mission": "load_config crashes on a malformed config file. Make it return an empty dict instead of raising, and make `python3 -m pytest -q` pass.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "python3 -m pytest -q",
+  "max_iterations": 25,
+  "wall_clock_seconds": 600,
+  "notes": "The failing test names the expected behaviour, so this is about following a stated contract rather than inferring one.",
+  "protect": [
+    "test_config.py"
+  ]
+}

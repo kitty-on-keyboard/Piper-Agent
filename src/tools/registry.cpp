@@ -44,6 +44,22 @@ ToolResult refused_path(const std::string& p) {
                                "only paths inside the workspace are reachable");
 }
 
+// Single-quote for /bin/sh: wrap in ', and close-escape-reopen each embedded '. The git
+// tools compose their own command lines, so the only model-supplied bytes that reach a
+// shell are a path, and they reach it quoted.
+std::string shell_quote(std::string_view s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out.push_back(c);
+        }
+    }
+    out += "'";
+    return out;
+}
+
 // JSON string escape for tools_json -- the schema block, not a general serializer.
 void append_json_escaped(std::string& out, std::string_view in) {
     for (char c : in) {
@@ -77,6 +93,37 @@ const ToolDecl* Registry::find(const std::string& name) const {
         }
     }
     return nullptr;
+}
+
+ToolResult Registry::run_git(const std::string& args, int approved_tier) {
+    // Read-only git still runs in the jail: `git` reads config from outside the
+    // workspace, and T1 allows reads. What it must not do is write, and the profile --
+    // not this function -- is what guarantees that.
+    const ExecutionGrant grant =
+        grant_execution(approved_tier <= 0   ? SandboxTier::T0_NoExec
+                        : approved_tier == 1 ? SandboxTier::T1_Seatbelt
+                                             : SandboxTier::T2_Container);
+    const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
+    const ExecOutcome o = run_sandboxed(grant, "git " + args, ctx_.root, ctx_.root, limits);
+
+    if (o.status == Status::Refused) {
+        ToolResult r;
+        r.status = o.status;
+        r.error_class = ErrorClass::Policy;
+        r.summary = o.output;
+        return r;
+    }
+    if (o.exit_code == 128) {
+        // git's "not a repository" exit. A fact about the workspace, not a tool failure.
+        return ToolResult::okay("not a git repository (or no commits yet)");
+    }
+    if (o.exit_code != 0) {
+        return ToolResult::error(ErrorClass::Transient, true,
+                                 "[exit " + std::to_string(o.exit_code) + "]\n" + o.output);
+    }
+    return ToolResult::okay(o.output.empty() ? "(no changes)"
+                                             : log_triage::compact(o.output,
+                                                                   ctx_.max_result_bytes));
 }
 
 void Registry::declare(ToolDecl decl, Handler handler) {
@@ -429,6 +476,8 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true)};
         d.mutates_workspace = true;
+        // Nothing in the workspace can undo this, so it always asks (S7.2).
+        d.irreversible = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
             const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
             if (abs.empty()) {
@@ -545,6 +594,86 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                             ? "\nstatus=partial (effects depend on bytes not in the string)"
                             : "\nstatus=unparseable");
             return ToolResult::okay(std::move(s));
+        });
+    }
+    // --- git_status / git_diff / git_log ------------------------------------
+    //
+    // An agent that cannot see its own diff has no review surface: it edits files, and
+    // neither it nor the human can tell what changed without leaving the loop. These are
+    // read-only by construction -- the command is BUILT here from a fixed shape, never
+    // taken from the model -- so they carry no approval weight and cannot be turned into
+    // `git push` or `git reset --hard` by a crafted argument.
+    {
+        ToolDecl d;
+        d.name = "git_status";
+        d.description = "Show which files in the workspace are modified, staged or "
+                        "untracked. Read-only.";
+        d.spec.name = d.name;
+        d.spec.params = {};
+        declare(d, [this](const std::vector<ToolParamValue>&, int approved_tier) {
+            return run_git("status --short --branch", approved_tier);
+        });
+    }
+    {
+        ToolDecl d;
+        d.name = "git_diff";
+        d.description = "Show the unstaged diff for the workspace, or for one path when "
+                        "`path` is given. Read-only. This is how you review your own "
+                        "edits before claiming they are correct.";
+        d.spec.name = d.name;
+        d.spec.params = {param("path", ParamType::Text, false)};
+        declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
+            const std::string* path = get(p, "path");
+            if (path == nullptr || path->empty()) {
+                return run_git("diff --stat -p", approved_tier);
+            }
+            if (resolve_contained(ctx_.root, *path).empty()) {
+                return refused_path(*path);
+            }
+            return run_git("diff --stat -p -- " + shell_quote(*path), approved_tier);
+        });
+    }
+    {
+        ToolDecl d;
+        d.name = "git_log";
+        d.description = "Show recent commit subjects, most recent first. Read-only. Use "
+                        "it to match the repository's conventions before writing code.";
+        d.spec.name = d.name;
+        d.spec.params = {param("count", ParamType::Text, false)};
+        declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
+            const std::string* raw = get(p, "count");
+            int n = 15;
+            if (raw != nullptr && !raw->empty()) {
+                n = std::atoi(raw->c_str());
+            }
+            if (n <= 0 || n > 200) {
+                n = 15;
+            }
+            return run_git("log --oneline -n " + std::to_string(n), approved_tier);
+        });
+    }
+    // --- plan ---------------------------------------------------------------
+    //
+    // Declared here so it reaches the guidance and the grammar, but EXECUTED by the loop
+    // (Agent::step) -- the checklist lives in the context store, which the registry has
+    // no business reaching into. The handler is never called; it exists so that the
+    // declaration and the execution path cannot drift apart silently.
+    {
+        ToolDecl d;
+        d.name = "plan";
+        d.description =
+            "State or restate the checklist for this mission: one item per line, each "
+            "prefixed '[ ] ' for open or '[x] ' for done. Call it first, before doing "
+            "the work, and call it again to tick items off as you finish them. Give "
+            "`verify_with` the exact shell command that proves the mission is complete "
+            "(a test or build command); a run is only finished when that command has "
+            "been seen to pass.";
+        d.spec.name = d.name;
+        d.spec.params = {param("items", ParamType::Text, true),
+                         param("verify_with", ParamType::Text, false)};
+        declare(d, [](const std::vector<ToolParamValue>&, int) {
+            return ToolResult::error(ErrorClass::Malformed, false,
+                                     "internal: 'plan' must be handled by the loop");
         });
     }
 }
