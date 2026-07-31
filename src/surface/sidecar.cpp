@@ -349,6 +349,43 @@ class RunInbox {
         surface::double_field(message, "max_iterations", config.budget.max_iterations));
     config.budget.wall_clock_seconds = static_cast<int>(surface::double_field(
         message, "wall_clock_seconds", config.budget.wall_clock_seconds));
+
+    // --- autonomy ----------------------------------------------------------
+    //
+    // sandbox_tier and require_approval were on the wire, generated on both sides, and
+    // read by NOBODY: the tier came from the mode and the approval routing came from the
+    // risk thresholds, so both switches in the editor were decoration. Same failure as
+    // the sampling block before it -- a setting that is plumbed but not consumed looks
+    // exactly like one that works.
+    const double tier = surface::double_field(message, "sandbox_tier", -1.0);
+    if (tier >= 0.0) {
+        const int t = static_cast<int>(tier);
+        if (t > 3) {
+            reply_error(id, "sandbox_tier must be 0 (no execution), 1 (Seatbelt), "
+                            "2 (container) or 3 (UNSANDBOXED on the host); got " +
+                                std::to_string(t));
+            return false;
+        }
+        config.sandbox_tier_override = t;
+    }
+
+    // Presence-checked, not just read: absent must keep the AgentConfig default rather
+    // than collapsing to false, or every client that predates these fields would silently
+    // have both switches flipped.
+    if (surface::has_field(message, "auto_approve_exec")) {
+        config.auto_approve_exec = surface::bool_field(message, "auto_approve_exec");
+    }
+    if (surface::has_field(message, "auto_approve_writes")) {
+        config.auto_approve_writes = surface::bool_field(message, "auto_approve_writes");
+    }
+    // require_approval is the operator saying "ask me about everything", so it is a FLOOR
+    // over the two specific switches rather than a third one competing with them. It can
+    // only ever tighten: `require_approval: true` beats `auto_approve_exec: true`, and
+    // never the other way round.
+    if (surface::bool_field(message, "require_approval")) {
+        config.auto_approve_exec = false;
+        config.auto_approve_writes = false;
+    }
     return true;
 }
 
@@ -476,6 +513,8 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
     session.ctx->set_project_instructions(load_project_instructions(workspace));
+    // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
+    session.ctx->set_persona(surface::string_field(message, "system_prompt"));
 
     return run_loop(id, session, inbox, cancel, log, clock);
 }

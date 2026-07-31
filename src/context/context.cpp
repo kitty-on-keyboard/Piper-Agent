@@ -99,7 +99,7 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // place the deliverable is named. Fixed for the lifetime of the run, and FIRST,
     // because everything ahead of a change is what stays cached.
     std::string system;
-    system += kPersona;
+    system += persona_.empty() ? kPersona : persona_.c_str();
     system += "\n\n";
     system += std::string(tool_guidance);
     if (!project_instructions_.empty()) {

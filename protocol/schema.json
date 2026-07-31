@@ -39,8 +39,11 @@
       { "name": "sampling", "type": "SamplingSettings" },
       { "name": "max_iterations", "type": "int" },
       { "name": "wall_clock_seconds", "type": "int" },
-      { "name": "sandbox_tier", "type": "int" },
+      { "_comment": "0 no execution, 1 macOS Seatbelt, 2 container (refuses until wired), 3 UNSANDBOXED on the host. The number is an identity, not a rank -- 3 is the least contained, not the most. Plan mode pins this to 0 whatever is asked for: a mode that cannot execute cannot be talked into executing by a settings field.", "name": "sandbox_tier", "type": "int" },
+      { "_comment": "false makes EVERY command execution raise a card, whatever its risk score. true keeps the risk-routed behaviour, where only the 0.35-0.85 band escalates. Named for what the operator turns on -- 'run commands without asking me' -- rather than for the harness's internal routing.", "name": "auto_approve_exec", "type": "bool" },
+      { "_comment": "false makes every workspace-mutating call raise a card. Writes had no HITL path at all before: mode policy decided whether they were allowed and nothing asked about any individual one.", "name": "auto_approve_writes", "type": "bool" },
       { "name": "require_approval", "type": "bool" },
+      { "_comment": "Overrides the built-in persona. The editor keeps one per mode, so 'plan' can be told to think out loud and 'agent' to be terse. Empty means the built-in, which is the only reason this can be a plain string rather than a presence flag.", "name": "system_prompt", "type": "string" },
       { "name": "context_budget_tokens", "type": "int" }
     ],
     "CapabilityChips": [

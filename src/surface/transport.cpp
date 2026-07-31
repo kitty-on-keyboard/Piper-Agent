@@ -72,6 +72,10 @@ bool bool_field(std::string_view message, std::string_view key) {
     return extract_literal(message, key).substr(0, 4) == "true";
 }
 
+bool has_field(std::string_view message, std::string_view key) {
+    return !extract_literal(message, key).empty();
+}
+
 double double_field(std::string_view message, std::string_view key, double fallback) {
     const std::string_view literal = extract_literal(message, key);
     if (literal.empty()) {

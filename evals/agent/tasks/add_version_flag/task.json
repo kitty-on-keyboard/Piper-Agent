@@ -1,0 +1,11 @@
+{
+  "split": "corpus",
+  "mission": "Add a --version flag to cli.py that prints exactly `cli 1.0` and exits 0. Add a test for it and make sure `python3 -m pytest -q` passes.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "test \"$(python3 cli.py --version)\" = 'cli 1.0' && python3 -m pytest -q",
+  "max_iterations": 30,
+  "wall_clock_seconds": 700,
+  "notes": "Additive rather than corrective, and the only corpus task with no failing test to start from -- so the baseline check comes back GREEN and the run has to say so.",
+  "protect": []
+}

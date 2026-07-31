@@ -4,8 +4,13 @@
   "description": "A local coding agent for Apple Silicon: Qwen3 in-process via MLX.",
   "version": "2.0.0",
   "publisher": "lm-pipe",
-  "engines": { "vscode": "^1.90.0" },
-  "categories": ["Programming Languages", "Machine Learning"],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning"
+  ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:lmPipe.sidebar",
@@ -14,35 +19,64 @@
   ],
   "contributes": {
     "commands": [
-      { "command": "lmPipe.start", "title": "LM_Pipe: Start a run" },
-      { "command": "lmPipe.cancel", "title": "LM_Pipe: Cancel the current run" }
+      {
+        "command": "lmPipe.start",
+        "title": "LM_Pipe: Start a run"
+      },
+      {
+        "command": "lmPipe.cancel",
+        "title": "LM_Pipe: Cancel the current run"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
-        { "id": "lmPipe", "title": "LM_Pipe", "icon": "resources/icon.svg" }
+        {
+          "id": "lmPipe",
+          "title": "LM_Pipe",
+          "icon": "resources/icon.svg"
+        }
       ]
     },
     "views": {
-      "lmPipe": [{ "type": "webview", "id": "lmPipe.sidebar", "name": "Agent" }]
+      "lmPipe": [
+        {
+          "type": "webview",
+          "id": "lmPipe.sidebar",
+          "name": "Agent"
+        }
+      ]
     },
     "configuration": {
       "title": "LM_Pipe",
       "properties": {
         "lmPipe.modelDir": {
-          "type": "string", "default": "",
+          "type": "string",
+          "default": "",
           "description": "Absolute path to the Qwen3 MLX model directory. Required; there is no default model (S7.5)."
         },
         "lmPipe.draftModelDir": {
-          "type": "string", "default": "",
+          "type": "string",
+          "default": "",
           "description": "Optional smaller Qwen for speculative decoding. Empty disables it."
         },
         "lmPipe.quantization": {
-          "type": "string", "default": "4bit-experts",
-          "enum": ["4bit-experts", "4bit", "8bit"],
+          "type": "string",
+          "default": "4bit-experts",
+          "enum": [
+            "4bit-experts",
+            "4bit",
+            "8bit"
+          ],
           "description": "Quantisation. Both quality and speed must be MEASURED before changing this, never assumed (S5.11)."
         },
         "lmPipe.mode": {
-          "type": "string", "default": "agent", "enum": ["plan", "debug", "agent"],
+          "type": "string",
+          "default": "agent",
+          "enum": [
+            "plan",
+            "debug",
+            "agent"
+          ],
           "enumDescriptions": [
             "T0: no execution, no writes.",
             "T1 sandbox: may run commands, may not mutate the workspace.",
@@ -50,32 +84,138 @@
           ]
         },
         "lmPipe.sandboxTier": {
-          "type": "number", "default": 1, "enum": [0, 1, 2],
+          "type": "number",
+          "default": 1,
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
           "enumDescriptions": [
             "T0 - no execution.",
             "T1 - macOS Seatbelt: writes jailed to the workspace, egress denied.",
-            "T2 - container. REQUIRED for unattended runs (S7.2); refuses until wired."
-          ]
+            "T2 - container. REQUIRED for unattended runs (S7.2); refuses until wired.",
+            "T3 - UNSANDBOXED. Commands run on the host with no filesystem jail and no egress denial. Wall-clock, memory and output limits still apply. Opt in deliberately."
+          ],
+          "description": "How commands are contained. The numbers are identities, not ranks: 3 is the LEAST contained."
         },
-        "lmPipe.requireApproval": { "type": "boolean", "default": true },
-        "lmPipe.hitl.autoApproveBelowRisk": { "type": "number", "default": 0.35 },
-        "lmPipe.hitl.rejectAboveRisk": { "type": "number", "default": 0.85 },
-        "lmPipe.sampling.temperature": { "type": "number", "default": 0.6 },
-        "lmPipe.sampling.topP": { "type": "number", "default": 0.95 },
-        "lmPipe.sampling.topK": { "type": "number", "default": 20 },
-        "lmPipe.sampling.minP": { "type": "number", "default": 0.0 },
-        "lmPipe.sampling.repetitionPenalty": { "type": "number", "default": 1.05 },
-        "lmPipe.sampling.seed": { "type": "number", "default": 0 },
-        "lmPipe.maxIterations": { "type": "number", "default": 40 },
-        "lmPipe.wallClockSeconds": { "type": "number", "default": 900 },
-        "lmPipe.contextBudgetTokens": { "type": "number", "default": 96000 },
+        "lmPipe.requireApproval": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ask me about everything. A floor over the two switches above: it can only tighten them, never loosen them."
+        },
+        "lmPipe.hitl.autoApproveBelowRisk": {
+          "type": "number",
+          "default": 0.35
+        },
+        "lmPipe.hitl.rejectAboveRisk": {
+          "type": "number",
+          "default": 0.85
+        },
+        "lmPipe.sampling.temperature": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Qwen3's own recommended thinking-mode value is 0.6. Below ~0.3 the model repeats itself; above ~1.0 it stops following the tool grammar cleanly."
+        },
+        "lmPipe.sampling.topP": {
+          "type": "number",
+          "default": 0.95,
+          "minimum": 0.01,
+          "maximum": 1,
+          "description": "Nucleus sampling. Qwen3 thinking-mode default is 0.95."
+        },
+        "lmPipe.sampling.topK": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 200,
+          "description": "0 disables top-k. Qwen3 thinking-mode default is 20."
+        },
+        "lmPipe.sampling.minP": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Floor on token probability relative to the best token. 0 disables it."
+        },
+        "lmPipe.sampling.repetitionPenalty": {
+          "type": "number",
+          "default": 1.05,
+          "minimum": 1.0,
+          "maximum": 2.0,
+          "description": "1.0 disables it. Above ~1.2 the model starts avoiding tokens it legitimately needs, like repeated identifiers in code."
+        },
+        "lmPipe.sampling.seed": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2147483647,
+          "description": "Fixed seed for reproducible runs. The run is reproducible from this, so change it to resample the same prompt."
+        },
+        "lmPipe.maxIterations": {
+          "type": "number",
+          "default": 40
+        },
+        "lmPipe.wallClockSeconds": {
+          "type": "number",
+          "default": 900
+        },
+        "lmPipe.contextBudgetTokens": {
+          "type": "number",
+          "default": 96000
+        },
         "lmPipe.egressPolicy": {
-          "type": "string", "default": "deny", "enum": ["deny"],
+          "type": "string",
+          "default": "deny",
+          "enum": [
+            "deny"
+          ],
           "description": "Egress is denied in the sandbox profile itself, not by inspecting commands (S7.4). There is no allow option."
         },
-        "lmPipe.telemetry": { "type": "boolean", "default": false },
+        "lmPipe.telemetry": {
+          "type": "boolean",
+          "default": false
+        },
         "lmPipe.logLevel": {
-          "type": "string", "default": "info", "enum": ["error", "warn", "info", "debug"]
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ]
+        },
+        "lmPipe.autoApproveExec": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run commands without asking, subject to the risk thresholds below. Turn off to get a card for every single command the agent runs."
+        },
+        "lmPipe.autoApproveWrites": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let the agent write files without asking. Turn off to get a card for every file it edits or creates, showing the path before it lands."
+        },
+        "lmPipe.prompts.agent": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "System prompt for agent (code) mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
+        },
+        "lmPipe.prompts.plan": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "System prompt for plan mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
+        },
+        "lmPipe.prompts.debug": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "System prompt for debug mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
         }
       }
     }

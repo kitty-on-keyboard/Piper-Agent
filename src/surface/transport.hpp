@@ -43,6 +43,14 @@ inline constexpr std::size_t kReadBlockBytes = 64 * 1024;
 // read as "not approved" (S7.2).
 [[nodiscard]] bool bool_field(std::string_view message, std::string_view key);
 
+// Whether the key is present at all, with any value.
+//
+// bool_field cannot answer this: absent and an explicit `false` both read as false, so a
+// caller that wants "leave my default alone when unset" has no way to ask. Every boolean
+// setting whose safe default is TRUE needs this -- reading an absent field as false would
+// turn every such switch off for every client that predates it.
+[[nodiscard]] bool has_field(std::string_view message, std::string_view key);
+
 // Extracts a numeric field. Returns `fallback` when the key is absent or its value is
 // not a bare JSON number -- so a caller passes the value it already intends to use and
 // a missing setting keeps it, rather than collapsing to zero. A quoted number is NOT a

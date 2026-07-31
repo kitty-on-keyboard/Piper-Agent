@@ -84,7 +84,10 @@ struct RunSettings {
     std::int64_t max_iterations = 0;
     std::int64_t wall_clock_seconds = 0;
     std::int64_t sandbox_tier = 0;
+    bool auto_approve_exec = false;
+    bool auto_approve_writes = false;
     bool require_approval = false;
+    std::string system_prompt;
     std::int64_t context_budget_tokens = 0;
 };
 inline void append_value(std::string& out, const RunSettings& v) {
@@ -110,8 +113,17 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += "\"sandbox_tier\":";
     append_value(out, v.sandbox_tier);
     out += ",";
+    out += "\"auto_approve_exec\":";
+    append_value(out, v.auto_approve_exec);
+    out += ",";
+    out += "\"auto_approve_writes\":";
+    append_value(out, v.auto_approve_writes);
+    out += ",";
     out += "\"require_approval\":";
     append_value(out, v.require_approval);
+    out += ",";
+    out += "\"system_prompt\":";
+    append_value(out, v.system_prompt);
     out += ",";
     out += "\"context_budget_tokens\":";
     append_value(out, v.context_budget_tokens);

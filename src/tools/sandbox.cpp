@@ -190,7 +190,12 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         return out;
     }
 
-    const std::string profile = seatbelt_profile(workspace_root);
+    // T3 keeps every OTHER containment the harness has -- rlimits, the process group and
+    // its wall-clock killer, the output cap, the workspace cwd. Only the Seatbelt profile
+    // is dropped. "Unsandboxed" here means "no filesystem jail and no egress denial", not
+    // "no limits at all", and a runaway build is still killed on the same schedule.
+    const bool jailed = grant.tier() != SandboxTier::T3_HostUnsandboxed;
+    const std::string profile = jailed ? seatbelt_profile(workspace_root) : std::string();
 
     Pipe pipe;
     if (!pipe.open()) {
@@ -224,11 +229,15 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         // shell may have spawned rather than just the shell.
         ::setpgid(0, 0);
         apply_rlimits_in_child(limits, nproc);
-        // sandbox-exec applies the Seatbelt profile then execs the shell. Deprecated in
-        // the headers, load-bearing across macOS tooling, and the ONLY per-process
-        // profile API without an entitlement; the T2 container is the successor path.
-        ::execlp("/usr/bin/sandbox-exec", "sandbox-exec", "-p", profile.c_str(),
-                 "/bin/sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        if (jailed) {
+            // sandbox-exec applies the Seatbelt profile then execs the shell. Deprecated
+            // in the headers, load-bearing across macOS tooling, and the ONLY per-process
+            // profile API without an entitlement; the T2 container is the successor path.
+            ::execlp("/usr/bin/sandbox-exec", "sandbox-exec", "-p", profile.c_str(),
+                     "/bin/sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        } else {
+            ::execlp("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        }
         ::_exit(127);
     }
     ::setpgid(pid, pid);

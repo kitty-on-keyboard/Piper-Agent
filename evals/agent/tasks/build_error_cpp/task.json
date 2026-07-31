@@ -1,0 +1,11 @@
+{
+  "split": "corpus",
+  "mission": "main.cpp does not compile. Fix it so that `c++ -std=c++17 -fsyntax-only main.cpp` succeeds. Keep the behaviour the comments describe.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "c++ -std=c++17 -fsyntax-only main.cpp",
+  "max_iterations": 25,
+  "wall_clock_seconds": 600,
+  "notes": "A compiler error rather than a test failure: the diagnostic names the line, so this measures whether it reads tool output at all.",
+  "protect": []
+}
