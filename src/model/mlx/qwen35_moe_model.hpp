@@ -294,13 +294,15 @@ private:
         mx::array conv_out = lmp::model::mlxl::silu(
             mx::conv1d(conv_input, conv_w, /*stride=*/1, /*padding=*/0, /*dilation=*/1, conv_dim));
 
-        auto q_part = mx::slice(conv_out, {0, 0, 0}, {B, S, key_dim});
-        auto k_part = mx::slice(conv_out, {0, 0, key_dim}, {B, S, 2 * key_dim});
-        auto v_part = mx::slice(conv_out, {0, 0, 2 * key_dim}, {B, S, conv_dim});
+        // One split, not three slices. mlx-lm splits here and `lmp_diag graph` counted
+        // the difference: 110 Slice nodes against the reference's 40 Split, for the same
+        // partition of the same buffer.
+        const std::vector<mx::array> qkv_parts =
+            mx::split(conv_out, mx::Shape{key_dim, 2 * key_dim}, 2);
 
-        mx::array q = mx::reshape(q_part, {B, S, cfg_.linear_num_key_heads, cfg_.linear_key_head_dim});
-        mx::array k = mx::reshape(k_part, {B, S, cfg_.linear_num_key_heads, cfg_.linear_key_head_dim});
-        mx::array v = mx::reshape(v_part, {B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim});
+        mx::array q = mx::reshape(qkv_parts[0], {B, S, cfg_.linear_num_key_heads, cfg_.linear_key_head_dim});
+        mx::array k = mx::reshape(qkv_parts[1], {B, S, cfg_.linear_num_key_heads, cfg_.linear_key_head_dim});
+        mx::array v = mx::reshape(qkv_parts[2], {B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim});
         z = mx::reshape(z, {B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim});
 
         const float inv_scale = 1.0f / std::sqrt(static_cast<float>(cfg_.linear_key_head_dim));
@@ -312,8 +314,12 @@ private:
         // emits float32, and `h + attn_out` makes the residual stream float32 from layer 1
         // to the end of the model. Every quantized matmul downstream then runs its float32
         // activation path against bf16 weights.
-        const mx::array inv2 = mx::astype(mx::array(inv_scale * inv_scale), qkv.dtype());
-        const mx::array inv1 = mx::astype(mx::array(inv_scale), qkv.dtype());
+        //
+        // Built in the target dtype rather than cast into it: mx::array(v, dtype) is the
+        // same scalar as astype(mx::array(v), dtype) but is a constant, where the cast was
+        // an AsType node in the graph. Sixty of them a step, per `lmp_diag graph`.
+        const mx::array inv2 = mx::array(inv_scale * inv_scale, qkv.dtype());
+        const mx::array inv1 = mx::array(inv_scale, qkv.dtype());
         // std::nullopt, not ones(): mlx-lm passes no weight here. A literal ones vector is
         // arithmetically the same, but it allocates and evaluates a fresh array on every
         // one of these calls (twice per layer, 30 linear layers per token) and takes
@@ -362,12 +368,9 @@ private:
 
         // q_proj emits [q_h0, g_h0, q_h1, g_h1, ...] per head — not [all_q, all_g].
         const mx::array q_heads = mx::reshape(q_out, {B, L, n_heads, head_dim * 2});
-        mx::array queries = mx::reshape(
-            mx::slice(q_heads, {0, 0, 0, 0}, {B, L, n_heads, head_dim}),
-            {B, L, n_heads * head_dim});
-        mx::array gate = mx::reshape(
-            mx::slice(q_heads, {0, 0, 0, head_dim}, {B, L, n_heads, head_dim * 2}),
-            {B, L, n_heads * head_dim});
+        const std::vector<mx::array> qg = mx::split(q_heads, 2, -1);
+        mx::array queries = mx::reshape(qg[0], {B, L, n_heads * head_dim});
+        mx::array gate = mx::reshape(qg[1], {B, L, n_heads * head_dim});
 
         queries = mx::transpose(
             mx::reshape(ff::rms_norm(
