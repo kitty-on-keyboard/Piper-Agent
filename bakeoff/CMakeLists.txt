@@ -15,7 +15,9 @@ add_library(bakeoff_corpora INTERFACE)
 target_include_directories(bakeoff_corpora SYSTEM INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/blast_radius"
-  "${CMAKE_CURRENT_SOURCE_DIR}/log_triage")
+  "${CMAKE_CURRENT_SOURCE_DIR}/log_triage"
+  # e00_merged entrants include the PRODUCTION engines by their src-relative paths
+  "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(bakeoff_corpora INTERFACE simdjson)
 target_compile_definitions(bakeoff_corpora INTERFACE
   LMP_BAKEOFF_BR_DIR="${CMAKE_CURRENT_SOURCE_DIR}/blast_radius"
@@ -57,22 +59,16 @@ function(_lmp_log_triage_scoreboard name header adapter)
   target_compile_options(log_triage_score_${name} PRIVATE -w)
 endfunction()
 
-# Two blast-radius entrants are NOT built, and the distinction is worth stating because
-# it decides which numbers this repo can still reproduce.
-#
-#   entrants/incumbent.hpp   includes v1's "security/command_risk.hpp"
-#   entrants/e00_merged.hpp  includes v1's "security/blast_radius.hpp"
-#
-# Both are thin adapters around v1 source, and v1 source is deliberately not carried over
-# (S2: nothing carries except S18). The other eleven -- e01..e14, the actual cookoff
-# submissions -- are self-contained by construction, which is exactly the property the
-# README says was enforced so that an entrant's own copy of the contract could never
-# become the copy it was scored against. Those eleven still build and still score.
-#
-# So: README.md's e00_merged row (0 weighted misses, 179/179) and its incumbent row (253)
-# are NOT reproducible in this repo today. They are historical record, not measurements.
-# Re-wire both in phase 5, when v2 has a classifier of its own, and re-measure.
+# blast_radius/entrants/incumbent.hpp is NOT built: it adapts v1's seven-substring
+# command_risk.hpp, which is the one v1 security file deliberately NOT carried -- it is
+# the measured-bad baseline (253 weighted misses), not an asset. Its row in README.md is
+# historical record. Everything else builds: the eleven blind submissions are
+# self-contained, and e00_merged includes src/security/blast_radius.hpp -- the SHIPPED
+# engine, ported from v1, so its holdout number (15 wmiss / 33 exact of 42) is
+# reproducible here.
+_lmp_blast_radius_scoreboard(e00_merged "entrants/e00_merged.hpp")
 _lmp_blast_radius_scoreboard(e12 "entrants/e12.hpp")
+_lmp_log_triage_scoreboard(e00_merged "entrants/e00_merged.hpp" "adapters/e00_merged.hpp")
 _lmp_log_triage_scoreboard(incumbent "entrants/incumbent.hpp" "adapters/direct.hpp")
 
 if(LMP_BUILD_SCOREBOARDS)
@@ -80,8 +76,7 @@ if(LMP_BUILD_SCOREBOARDS)
        "${CMAKE_CURRENT_SOURCE_DIR}/blast_radius/entrants/e*.hpp")
   foreach(_h ${_br_entrants})
     get_filename_component(_n "${_h}" NAME_WE)
-    # e00_merged matches the glob but needs v1 source; see the note above.
-    if(NOT _n STREQUAL "e00_merged")
+    if(NOT _n STREQUAL "e00_merged") # built unconditionally above
       _lmp_blast_radius_scoreboard("${_n}" "${_h}")
     endif()
   endforeach()

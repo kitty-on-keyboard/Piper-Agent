@@ -1,0 +1,256 @@
+#include "src/tools/sandbox.hpp"
+
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <climits>
+#include <cerrno>
+#include <cstdlib>
+#include <chrono>
+#include <cstring>
+#include <thread>
+
+extern char** environ;
+
+namespace lmp::tools {
+
+RiskHint classify_command(std::string_view command, std::string_view workspace_root,
+                          std::string_view cwd) {
+    const blast_radius::CommandContext ctx{command, workspace_root, cwd};
+    const blast_radius::Verdict v = blast_radius::classify(ctx);
+    return RiskHint{v.capabilities, v.status};
+}
+
+ExecutionGrant grant_execution(SandboxTier tier) { return ExecutionGrant(tier); }
+
+std::string resolve_real(const std::string& path) {
+    // Seatbelt matches subpaths against RESOLVED paths. /tmp is a symlink to
+    // /private/tmp on macOS, so a profile written with the unresolved path silently
+    // matches nothing -- and a jail that matches nothing denies the workspace's own
+    // writes while looking correctly configured. Found by attempting a write inside
+    // the root and watching it be refused.
+    char buf[PATH_MAX];
+    if (::realpath(path.c_str(), buf) != nullptr) {
+        return {buf};
+    }
+    return path;
+}
+
+std::string seatbelt_profile(const std::string& workspace_root) {
+    // Deny by default. Writes ONLY under the workspace root -- no /tmp allowance, no
+    // /var/folders allowance. An earlier version allow-listed /private/var/folders for
+    // build scratch; that is the user's entire temp tree, which is precisely "writes
+    // outside the workspace", and the test that attempts the escape caught it. Build
+    // tools get scratch space via TMPDIR pointed inside the root instead (see
+    // run_sandboxed), so nothing legitimate needs the hole.
+    //
+    // Network is denied here, in the profile, not by inspecting the command (S7.4).
+    // Reads stay open: toolchains legitimately read /usr and the SDKs, and the assets
+    // protected at T1 are the user's data and the network. Read confinement beyond
+    // that is a T2 property, and S7.2 already requires T2 for unattended runs.
+    const std::string root = resolve_real(workspace_root);
+    std::string p;
+    p += "(version 1)\n";
+    p += "(allow default)\n";
+    p += "(deny network*)\n";
+    p += "(deny file-write*)\n";
+    p += "(allow file-write* (subpath \"" + root + "\"))\n";
+    p += "(allow file-write-data (literal \"/dev/null\"))\n";
+    p += "(allow file-write-data (literal \"/dev/stdout\"))\n";
+    p += "(allow file-write-data (literal \"/dev/stderr\"))\n";
+    return p;
+}
+
+namespace {
+
+struct Pipe {
+    int read_fd = -1;
+    int write_fd = -1;
+    [[nodiscard]] bool open() {
+        int fds[2] = {-1, -1};
+        if (::pipe(fds) != 0) {
+            return false;
+        }
+        read_fd = fds[0];
+        write_fd = fds[1];
+        return true;
+    }
+};
+
+void apply_rlimits_in_child(const ExecLimits& limits) {
+    const auto set = [](int what, rlim_t v) {
+        rlimit rl{v, v};
+        (void)::setrlimit(what, &rl);
+    };
+    set(RLIMIT_CPU, static_cast<rlim_t>(limits.cpu_seconds));
+    set(RLIMIT_AS, static_cast<rlim_t>(limits.memory_bytes));
+    set(RLIMIT_NOFILE, static_cast<rlim_t>(limits.max_open_files));
+    set(RLIMIT_NPROC, static_cast<rlim_t>(limits.max_processes));
+}
+
+// Reads until EOF or cap, then drains without storing. The wall-clock killer runs in
+// the same loop -- an unattended run cannot afford a command that never returns (S7.3).
+void pump_output(int fd, pid_t pid, const ExecLimits& limits, ExecOutcome& out) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(limits.wall_clock_seconds);
+    char buf[8192];
+    while (true) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            ::kill(-pid, SIGKILL); // the group: a shell's children die too
+            ::kill(pid, SIGKILL);
+            out.wall_clock_killed = true;
+            return;
+        }
+        struct timeval tv {0, 200000}; // 200 ms poll so the deadline is honoured
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(fd, &set);
+        const int rc = ::select(fd + 1, &set, nullptr, nullptr, &tv);
+        if (rc < 0 && errno != EINTR) {
+            return;
+        }
+        if (rc <= 0) {
+            continue;
+        }
+        const ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n == 0) {
+            return; // EOF
+        }
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+        if (out.output.size() < limits.max_output_bytes) {
+            const std::size_t room = limits.max_output_bytes - out.output.size();
+            out.output.append(buf, std::min(static_cast<std::size_t>(n), room));
+            out.output_truncated |= static_cast<std::size_t>(n) > room;
+        } else {
+            out.output_truncated = true;
+        }
+    }
+}
+
+} // namespace
+
+ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& command,
+                          const std::string& workspace_root, const std::string& cwd,
+                          const ExecLimits& limits) {
+    ExecOutcome out;
+    if (grant.tier() == SandboxTier::T0_NoExec) {
+        out.status = Status::Refused;
+        out.output = "T0: this mode does not execute commands";
+        return out;
+    }
+    if (grant.tier() == SandboxTier::T2_Container) {
+        // Refusal, not downgrade (S7.2): unattended MUST be containerised, and running
+        // it in T1 instead would be the silent unsafe_host default all over again.
+        out.status = Status::Refused;
+        out.output = "T2 (container) is not wired yet. Unattended runs require it; run "
+                     "attended (T1) or wire the container runtime.";
+        return out;
+    }
+
+    const std::string profile = seatbelt_profile(workspace_root);
+
+    Pipe pipe;
+    if (!pipe.open()) {
+        out.output = std::string("pipe: ") + std::strerror(errno);
+        return out;
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        out.output = std::string("fork: ") + std::strerror(errno);
+        ::close(pipe.read_fd);
+        ::close(pipe.write_fd);
+        return out;
+    }
+    if (pid == 0) {
+        ::close(pipe.read_fd);
+        ::dup2(pipe.write_fd, STDOUT_FILENO);
+        ::dup2(pipe.write_fd, STDERR_FILENO);
+        ::close(pipe.write_fd);
+        if (::chdir(cwd.c_str()) != 0) {
+            ::_exit(126);
+        }
+        // Scratch space inside the jail, so no temp-tree hole is needed in the profile.
+        const std::string tmp = resolve_real(workspace_root) + "/.lmp_tmp";
+        ::mkdir(tmp.c_str(), 0700);
+        ::setenv("TMPDIR", tmp.c_str(), 1);
+        // A new process group, so the wall-clock killer can take down the whole tree a
+        // shell may have spawned rather than just the shell.
+        ::setpgid(0, 0);
+        apply_rlimits_in_child(limits);
+        // sandbox-exec applies the Seatbelt profile then execs the shell. Deprecated in
+        // the headers, load-bearing across macOS tooling, and the ONLY per-process
+        // profile API without an entitlement; the T2 container is the successor path.
+        ::execlp("/usr/bin/sandbox-exec", "sandbox-exec", "-p", profile.c_str(),
+                 "/bin/sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    ::setpgid(pid, pid);
+    ::close(pipe.write_fd);
+    pump_output(pipe.read_fd, pid, limits, out);
+    ::close(pipe.read_fd);
+
+    int wstatus = 0;
+    (void)::waitpid(pid, &wstatus, 0);
+    if (out.wall_clock_killed) {
+        out.status = Status::Timeout;
+        return out;
+    }
+    if (WIFSIGNALED(wstatus)) {
+        out.signalled = true;
+        out.signal = WTERMSIG(wstatus);
+        out.status = Status::ToolError;
+        return out;
+    }
+    out.exit_code = WEXITSTATUS(wstatus);
+    out.status = out.exit_code == 0 ? Status::Ok : Status::ToolError;
+    return out;
+}
+
+std::string_view to_string(Status s) noexcept {
+    switch (s) {
+        case Status::Ok:
+            return "Ok";
+        case Status::ToolError:
+            return "ToolError";
+        case Status::Denied:
+            return "Denied";
+        case Status::Timeout:
+            return "Timeout";
+        case Status::Refused:
+            return "Refused";
+        case Status::Cancelled:
+            return "Cancelled";
+    }
+    return "ToolError";
+}
+
+std::string_view to_string(ErrorClass e) noexcept {
+    switch (e) {
+        case ErrorClass::None:
+            return "None";
+        case ErrorClass::NotFound:
+            return "NotFound";
+        case ErrorClass::Malformed:
+            return "Malformed";
+        case ErrorClass::Conflict:
+            return "Conflict";
+        case ErrorClass::Policy:
+            return "Policy";
+        case ErrorClass::Transient:
+            return "Transient";
+    }
+    return "None";
+}
+
+} // namespace lmp::tools
