@@ -43,6 +43,9 @@ ap.add_argument("--model", default=os.environ.get("LMP_QWEN_DIR", DEFAULT_MODEL)
 ap.add_argument("--sidecar", default=DEFAULT_SIDECAR)
 ap.add_argument("--mode", default="agent", choices=["plan", "debug", "agent"])
 ap.add_argument("--deadline", type=float, default=900.0)
+ap.add_argument("--max-iterations", type=int, default=40)
+ap.add_argument("--wall-clock", type=int, default=900)
+ap.add_argument("--sandbox-tier", type=int, default=1)
 ap.add_argument("--deny", action="store_true",
                 help="deny every approval card instead of approving it")
 ap.add_argument("--say", action="append", default=[], metavar="TURN:TEXT",
@@ -132,7 +135,9 @@ for raw in proc.stdout:
             "settings": {
                 "model_dir": args.model, "workspace_root": os.path.abspath(args.workspace),
                 "mode": args.mode, "sampling": QWEN_SAMPLING,
-                "max_iterations": 40, "wall_clock_seconds": 900, "sandbox_tier": 1,
+                "max_iterations": args.max_iterations,
+                "wall_clock_seconds": args.wall_clock,
+                "sandbox_tier": args.sandbox_tier,
                 "require_approval": True, "context_budget_tokens": 96000,
             },
         }})
