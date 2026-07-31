@@ -114,9 +114,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(
       (msg: {
         kind: string; id?: string; approved?: boolean; text?: string;
-        key?: string; value?: unknown;
+        key?: string; value?: unknown; remember?: string;
       }) => {
         if (msg.kind === "approve" && msg.id !== undefined) {
+          // "Always allow" is an approval PLUS a remembered rule. The rule is stored on
+          // this side, not the sidecar's: it has to outlive the run, and the sidecar
+          // deliberately owns no persistent state.
+          if (msg.remember) this.remember(msg.remember);
           void this.client.approve(msg.id, msg.approved === true);
         }
         if (msg.kind === "cancel") {
@@ -143,6 +147,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.watcher = vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("lmPipe")) this.pushSettings();
     });
+  }
+
+  /** Adds a command to the allowlist, deduplicated. */
+  private remember(command: string): void {
+    const trimmed = command.trim();
+    if (!trimmed) return;
+    const cfg = vscode.workspace.getConfiguration("lmPipe");
+    const current = cfg.get<string[]>("allowedCommands", []);
+    if (current.includes(trimmed)) return;
+    void cfg.update(
+      "allowedCommands",
+      [...current, trimmed],
+      vscode.ConfigurationTarget.Workspace
+    );
   }
 
   dispose(): void {

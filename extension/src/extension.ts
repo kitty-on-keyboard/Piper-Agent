@@ -42,6 +42,9 @@ function settingsFromConfig(): RunSettings {
     // One prompt per mode, so switching mode switches persona. Empty is meaningful:
     // it means the built-in.
     system_prompt: cfg.get<string>(`prompts.${mode}`, ""),
+    // Newline-separated on the wire: the generated protocol has no array type, and a
+    // newline is the one character a shell command cannot carry unescaped.
+    allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
   };
 }

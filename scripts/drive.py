@@ -46,6 +46,11 @@ ap.add_argument("--deadline", type=float, default=900.0)
 ap.add_argument("--max-iterations", type=int, default=40)
 ap.add_argument("--wall-clock", type=int, default=900)
 ap.add_argument("--sandbox-tier", type=int, default=1)
+ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--auto", action="store_true",
+                help="send the autonomy flags the eval harness sends (risk-routed "
+                     "approvals) instead of require_approval, so a hand-run and a "
+                     "scored run can be compared like for like")
 ap.add_argument("--deny", action="store_true",
                 help="deny every approval card instead of approving it")
 ap.add_argument("--say", action="append", default=[], metavar="TURN:TEXT",
@@ -134,11 +139,15 @@ for raw in proc.stdout:
             "mission": args.mission,
             "settings": {
                 "model_dir": args.model, "workspace_root": os.path.abspath(args.workspace),
-                "mode": args.mode, "sampling": QWEN_SAMPLING,
+                "mode": args.mode, "sampling": dict(QWEN_SAMPLING, seed=args.seed),
                 "max_iterations": args.max_iterations,
                 "wall_clock_seconds": args.wall_clock,
                 "sandbox_tier": args.sandbox_tier,
-                "require_approval": True, "context_budget_tokens": 96000,
+                "require_approval": not args.auto,
+                "auto_approve_exec": bool(args.auto),
+                "auto_approve_writes": bool(args.auto),
+                "system_prompt": "",
+                "context_budget_tokens": 96000,
             },
         }})
     elif method == "lmp/token":

@@ -38,6 +38,16 @@ struct ToolDecl {
     parsephony::ToolSpec spec;
     bool mutates_workspace = false;
     bool executes_commands = false;
+    // This tool destroys something that cannot be recovered from the workspace itself.
+    //
+    // DECLARED, not inferred. The blast-radius classifier reads command STRINGS, so it
+    // has nothing to say about a tool call: `delete_file` destroys data without any
+    // command ever existing. Told to wipe a workspace, a run did exactly that through
+    // this tool -- no card, no risk score, nothing to deny -- while the whole HITL
+    // apparatus watched the `shell` tool it never used.
+    //
+    // A tool knows what it does at declaration time. It does not need to be guessed at.
+    bool irreversible = false;
 };
 
 // Everything a tool invocation may touch. Paths are resolved against `root` and

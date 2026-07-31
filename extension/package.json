@@ -216,6 +216,14 @@
           "default": "",
           "editPresentation": "multilineText",
           "description": "System prompt for debug mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
+        },
+        "lmPipe.allowedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Commands you have already approved. The 'Always allow' button on an approval card adds to this. An entry matches a command that equals it or starts with it followed by a space; a command containing shell chaining (; && || | ` $( > <) never matches, so allowing 'pytest' cannot authorise 'pytest; rm -rf ~'. Irreversible operations (destroying data, writing outside the workspace, escalating privileges, rewriting history) always ask, whatever is on this list."
         }
       }
     }
