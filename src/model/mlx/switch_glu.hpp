@@ -61,7 +61,12 @@ inline mx::array switch_glu_impl(const mx::array& x,
                                  const std::string& up_base,
                                  const std::string& down_base,
                                  const mx::array& indices) {
-    mx::array expanded = mx::expand_dims(mx::expand_dims(x, -2), -2);
+    // Both axes in one op, as mlx-lm's x[:, None, None, :] does. Two chained
+    // expand_dims built two nodes where one will do. Note the axes are {-3, -2}, not
+    // {-2, -2}: multi-axis expand_dims indexes into the OUTPUT shape, so the two
+    // insertion points are distinct there even though chaining inserts at -2 twice
+    // (and {-2, -2} is rejected outright as a duplicate axis).
+    mx::array expanded = mx::expand_dims(x, std::vector<int>{-3, -2});
     const bool do_sort = static_cast<int>(indices.size()) >= 64;
 
     mx::array idx = indices;
