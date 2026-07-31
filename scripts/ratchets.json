@@ -48,9 +48,8 @@
       "min_subjects": 5
     },
     "prose_correctives": {
-      "live": false,
-      "activates_in_phase": 7,
-      "note": "No loop yet. S9.2: the count of prose-only corrective sites must be 0. v1 had 11 of 34, including one named ForceWrite that forced nothing."
+      "live": true,
+      "min_subjects": 3
     }
   },
   "layers": {

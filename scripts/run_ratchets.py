@@ -277,9 +277,58 @@ def gate_tool_honesty(root, cfg):
     return len(declared), findings
 
 
+# A corrective site is a case arm of Agent::apply_corrective. Each must change state,
+# synthesize a call, or alter control flow -- these are the shapes that count as
+# mechanism.
+MECHANISM_RE = re.compile(
+    r"\b(ctx_\.|registry_\.|repeats_\.|halted_\s*=|policy_\.|log_\.|"
+    r"verifier\.|\.run_and_record|\.add_turn|\.set_checklist|\.record_|"
+    r"return;|break;|continue;)")
+
+
 def gate_prose_correctives(root, cfg):
-    loop = os.path.join(root, "src", "loop")
-    return (1 if os.path.isdir(loop) else 0), []
+    """S9.2: the count of prose-only corrective sites must be 0.
+
+    v1 had 11 of 34, including one named ForceWrite that forced nothing while logging
+    that it was forcing something. The check does not count injection SITES -- that
+    number is gameable by moving branches into one function -- it checks that every
+    corrective arm contains a mechanism and not merely a composed sentence."""
+    path = os.path.join(root, "src", "loop", "agent.cpp")
+    if not os.path.exists(path):
+        return 0, []
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+
+    # `current` stays None until the first `case`, so the preamble between the
+    # function header and the switch is not mistaken for an arm.
+    body, arms, current, start = None, [], None, 0
+    for idx, line in enumerate(lines, start=1):
+        if "void Agent::apply_corrective" in line:
+            body = True
+            continue
+        if body and line.startswith("}"):
+            break
+        if not body:
+            continue
+        if re.match(r"\s*case Corrective::", line):
+            if current is not None:
+                arms.append((start, current))
+            current, start = [], idx
+        elif current is not None:
+            current.append(line)
+    if current is not None:
+        arms.append((start, current))
+
+    findings = []
+    for lineno, arm in arms:
+        text = "\n".join(arm)
+        code = "\n".join(l for l in arm if not l.strip().startswith("//"))
+        if not MECHANISM_RE.search(code):
+            findings.append(Finding(
+                "prose_correctives", "src/loop/agent.cpp", lineno,
+                "corrective arm changes no state and alters no control flow -- it is "
+                "prose-only, which S9.2 forbids"))
+    return len(arms), findings
 
 
 GATES = {
