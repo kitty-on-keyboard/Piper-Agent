@@ -1,40 +1,55 @@
-#include "src/model/chat_template.hpp"
-#include "src/model/grammar.hpp"
-#include "src/model/mlx_backend.hpp"
-#include "src/model/qwen_tokenizer.hpp"
-#include "src/platform/clock.hpp"
+// Micro-benchmark: what does ONE decode step cost outside the model forward pass?
+#include <chrono>
 #include <cstdio>
-using namespace lmp::model;
-int main(){
-  QwenTokenizer tok;
-  auto st = tok.load("/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit/tokenizer.json", Family::Qwen3);
-  if(!st.ok){ std::printf("tok fail %s\n", st.error.c_str()); return 1; }
-  ChatTemplate tmpl(tok);
-  auto ids = tmpl.render({{Role::System,"You are terse."},{Role::User,"What is 2+2? One short sentence."}}, "");
-  std::string p = tok.decode(ids);
-  std::printf("PROMPT TAIL: %s|END|\n", p.substr(p.size()>40?p.size()-40:0).c_str());
+#include "src/model/grammar.hpp"
+#include "src/model/qwen_tokenizer.hpp"
+#include "src/model/sampler.hpp"
 
-  lmp::platform::SystemClock clock;
-  MlxBackend b(clock);
-  auto ls = b.load({"/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",""});
-  if(!ls.ok){ std::printf("load fail %s\n", ls.error.c_str()); return 1; }
-  std::vector<parsephony::ToolSpec> none;
-  TurnGrammar g(tok, none);
-  struct S : TokenSink {
-    TurnGrammar& g; QwenTokenizer::Stream st; int n=0; Advance last=Advance::Ok;
-    S(TurnGrammar& gg, const QwenTokenizer& t):g(gg),st(t){}
-    bool on_token(TokenId id) override {
-      ++n; last=g.advance(id);
-      std::string t = st.push(id);
-      std::fwrite(t.data(),1,t.size(),stdout);
-      if(last!=Advance::Ok) std::printf("\n[STOP after %d tokens, advance=%d, phase=%d]\n",n,static_cast<int>(last),static_cast<int>(g.phase()));
-      return last==Advance::Ok;
-    }
-  } sink(g, tok);
-  InferenceTask t; t.prompt=ids; t.max_new_tokens=2000; t.sampling.seed=7;
-  t.mask=[&g](TokenId id){ return g.permitted(id); };
-  CancelToken c;
-  auto r=b.generate(t,sink,c);
-  std::printf("\n[status=%d tokens=%d think=%zu text=%zu decode=%.1f tok/s]\n",
-    static_cast<int>(r.status),r.tokens_generated,g.think_ids().size(),g.text_ids().size(),r.decode_tok_per_s);
+using namespace lmp::model;
+using Clock = std::chrono::steady_clock;
+static double ms(Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+}
+
+int main() {
+    QwenTokenizer tok;
+    auto st = tok.load("/Users/dev/.lmstudio/models/lmstudio-community/"
+                       "Qwen3.6-35B-A3B-MLX-4bit/tokenizer.json", Family::Qwen3);
+    if (!st.ok) { std::printf("tok fail: %s\n", st.error.c_str()); return 1; }
+    const std::size_t V = tok.vocab_size();
+    std::printf("vocab = %zu\n\n", V);
+
+    std::vector<parsephony::ToolSpec> tools;
+    parsephony::ToolSpec s; s.name = "read_file";
+    parsephony::ParamSpec p; p.name = "path"; p.required = true;
+    s.params.push_back(p); tools.push_back(s);
+    TurnGrammar g(tok, tools);
+
+    // 1. the mask, exactly as the sampler calls it
+    auto t0 = Clock::now();
+    std::size_t allowed = 0;
+    for (std::size_t i = 0; i < V; ++i) allowed += g.permitted(static_cast<TokenId>(i)) ? 1 : 0;
+    auto t1 = Clock::now();
+    std::printf("mask over full vocab      : %8.1f ms/token   (%zu allowed)\n", ms(t0,t1), allowed);
+
+    // 2. the sampler with a null mask (softmax + top-k + top-p sort)
+    std::vector<float> logits(V);
+    for (std::size_t i = 0; i < V; ++i) logits[i] = static_cast<float>(i % 97) * 0.01F;
+    Sampler smp{SamplingParams{}};
+    auto l2 = logits;
+    auto t2 = Clock::now();
+    (void)smp.sample(l2, nullptr, {});
+    auto t3 = Clock::now();
+    std::printf("sampler, no mask          : %8.1f ms/token\n", ms(t2,t3));
+
+    // 3. both together = what actually runs today
+    auto l3 = logits;
+    auto t4 = Clock::now();
+    (void)smp.sample(l3, [&g](TokenId id){ return g.permitted(id); }, {});
+    auto t5 = Clock::now();
+    std::printf("sampler + mask (as shipped): %7.1f ms/token\n\n", ms(t4,t5));
+
+    const double per_tok = ms(t4,t5);
+    std::printf("=> CPU-side ceiling from this alone: %.1f tok/s\n", 1000.0 / per_tok);
+    std::printf("   (LM Studio measured 78.5 tok/s on the same model/machine)\n");
 }
