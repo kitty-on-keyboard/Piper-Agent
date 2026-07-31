@@ -8,6 +8,10 @@
 
 #include "qwen35_moe_config.hpp"
 
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+
 #include "activations.hpp"
 #include "gated_delta.hpp"
 #include "kv_cache.hpp"
@@ -67,6 +71,15 @@ public:
     }
 
     mx::array forward_logits(const mx::array& input_ids) {
+        mx::array logits = forward_logits_lazy(input_ids);
+        mx::eval(logits);
+        return logits;
+    }
+
+    // The graph without the eval, so a caller can time construction separately from
+    // execution. Whether a slow step is the CPU failing to feed the GPU or the GPU
+    // itself is the first thing worth knowing and the easiest thing to assume wrongly.
+    mx::array forward_logits_lazy(const mx::array& input_ids) {
         mx::array h = embed_tokens(input_ids);
         const int seq_len = static_cast<int>(input_ids.shape()[1]);
 
@@ -83,9 +96,7 @@ public:
         // logits are ever consumed downstream. No-op when seq_len == 1 (decode).
         const int hidden = static_cast<int>(h.shape()[2]);
         mx::array h_last = mx::slice(h, {0, seq_len - 1, 0}, {1, seq_len, hidden});
-        mx::array logits = logits_from_hidden(h_last);
-        mx::eval(logits);
-        return logits;
+        return logits_from_hidden(h_last);
     }
 
     void eval_caches() {
@@ -99,17 +110,46 @@ public:
 
     [[nodiscard]] const Qwen35MoeConfig& qwen_config() const noexcept { return cfg_; }
 
+    // Ablation, for attribution only. Timing a block in isolation does not measure what
+    // it costs inside a real step: `layers 1` charges the MoE 0.673 ms/layer, and the
+    // same chained microbenchmark applied to mlx-lm's own block charges 0.304 -- yet
+    // mlx-lm's entire 40-layer step is 9.66 ms, so both numbers are dominated by the
+    // measurement, not the work. Deleting a block from a full generation run and reading
+    // the end-to-end rate has no such artifact. Set LMP_ABLATE=routed|mlp|delta.
+    // Output is garbage when this is on; only tok/s means anything.
+    enum class Ablate : std::uint8_t { none, routed, mlp, delta, deltakernel };
+    static Ablate ablation() {
+        // Read once. A getenv per layer would itself be a per-step cost.
+        static const Ablate mode = [] {
+            const char* v = std::getenv("LMP_ABLATE");
+            if (v == nullptr) return Ablate::none;
+            const std::string s(v);
+            if (s == "routed") return Ablate::routed;
+            if (s == "mlp") return Ablate::mlp;
+            if (s == "delta") return Ablate::delta;
+            if (s == "deltakernel") return Ablate::deltakernel;
+            return Ablate::none;
+        }();
+        return mode;
+    }
+
     // The three blocks a forward pass is made of, public so tests/model/diag_main.cpp
     // can time them individually against the real weights. Attribution has to run the
     // SAME code the model runs; a copy of these bodies in the driver would drift, and
     // the profile would then describe a forward pass nobody executes (S19.3).
     mx::array forward_moe(int layer, const mx::array& x) const {
         const std::string p = prefix_ + "layers." + std::to_string(layer) + ".mlp.";
+        if (ablation() == Ablate::mlp) {
+            return mx::zeros_like(x);
+        }
         const mx::array gate_logits = weights_.linear(x, p + "gate");
         auto [inds, scores] = lmp::model::mlxl::moe_topk(gate_logits, cfg_.num_experts_per_tok, cfg_.norm_topk_prob);
-        mx::array y = lmp::model::mlxl::switch_glu(
-            x, weights_, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj", p + "switch_mlp.down_proj", inds);
-        y = mx::sum(mx::multiply(y, mx::expand_dims(scores, -1)), -2);
+        mx::array y = mx::zeros_like(x);
+        if (ablation() != Ablate::routed) {
+            y = lmp::model::mlxl::switch_glu(
+                x, weights_, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj", p + "switch_mlp.down_proj", inds);
+            y = mx::sum(mx::multiply(y, mx::expand_dims(scores, -1)), -2);
+        }
 
         const mx::array shared = weights_.linear(
             lmp::model::mlxl::swiglu(
@@ -123,8 +163,13 @@ public:
     mx::array forward_linear_layer(int layer, const mx::array& x, int seq_len) {
         const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
         mx::array h = rms_norm(x, p + "input_layernorm.weight");
-        mx::array attn_out = forward_gated_delta(p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len);
-        h = mx::add(x, attn_out);
+        if (ablation() == Ablate::delta) {
+            h = x;
+        } else {
+            mx::array attn_out = forward_gated_delta(
+                p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len);
+            h = mx::add(x, attn_out);
+        }
         mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
         return mx::add(h, forward_moe(layer, mlp_in));
     }
@@ -231,8 +276,12 @@ private:
         mx::array conv_state = cache.conv_state.value_or(
             mx::zeros({B, cfg_.linear_conv_kernel_dim - 1, conv_dim}, inputs.dtype()));
         mx::array conv_input = mx::concatenate({conv_state, qkv}, 1);
-        cache.conv_state = mx::slice(conv_input, {0, conv_input.shape()[1] - (cfg_.linear_conv_kernel_dim - 1), 0},
-                                     {B, conv_input.shape()[1], conv_dim});
+        // mx::contiguous, as mlx-lm does: a bare slice is a strided view that both keeps
+        // the whole parent conv_input buffer alive across the step boundary and makes
+        // next step's concatenate read from a strided source.
+        cache.conv_state = mx::contiguous(
+            mx::slice(conv_input, {0, conv_input.shape()[1] - (cfg_.linear_conv_kernel_dim - 1), 0},
+                      {B, conv_input.shape()[1], conv_dim}));
 
         mx::array conv_w = weights_.get(p + "conv1d.weight");
         mx::array conv_out = lmp::model::mlxl::silu(
@@ -248,15 +297,36 @@ private:
         z = mx::reshape(z, {B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim});
 
         const float inv_scale = 1.0f / std::sqrt(static_cast<float>(cfg_.linear_key_head_dim));
-        const mx::array inv2 = mx::array(inv_scale * inv_scale);
-        const mx::array inv1 = mx::array(inv_scale);
-        q = mx::multiply(inv2, mx::fast::rms_norm(q, mx::ones({cfg_.linear_key_head_dim}), 1e-6f));
-        k = mx::multiply(inv1, mx::fast::rms_norm(k, mx::ones({cfg_.linear_key_head_dim}), 1e-6f));
+        // In the dtype of q/k, not float32. mlx-lm writes `(inv_scale**2) * rms_norm(q)`
+        // with a Python float, which is weakly typed and leaves q in bf16; the obvious
+        // C++ transcription, mx::array(inv_scale), is a strongly typed float32 scalar and
+        // promotes instead. That promotion does not stay local -- q and k go float32 into
+        // the delta kernel, y comes back float32, the gated norm returns float32, out_proj
+        // emits float32, and `h + attn_out` makes the residual stream float32 from layer 1
+        // to the end of the model. Every quantized matmul downstream then runs its float32
+        // activation path against bf16 weights.
+        const mx::array inv2 = mx::astype(mx::array(inv_scale * inv_scale), qkv.dtype());
+        const mx::array inv1 = mx::astype(mx::array(inv_scale), qkv.dtype());
+        // std::nullopt, not ones(): mlx-lm passes no weight here. A literal ones vector is
+        // arithmetically the same, but it allocates and evaluates a fresh array on every
+        // one of these calls (twice per layer, 30 linear layers per token) and takes
+        // rms_norm's weighted path instead of its unweighted one.
+        q = mx::multiply(inv2, mx::fast::rms_norm(q, std::nullopt, 1e-6f));
+        k = mx::multiply(inv1, mx::fast::rms_norm(k, std::nullopt, 1e-6f));
 
         mx::array a_log = weights_.get(p + "A_log");
         mx::array dt_bias = weights_.get(p + "dt_bias");
-        auto [out, state] = lmp::model::mlxl::gated_delta_update(q, k, v, a, b, a_log, dt_bias, cache.delta_state);
-        cache.delta_state = state;
+        // deltakernel keeps the projections, the conv and the norms and removes only the
+        // fused recurrence, to split "the custom Metal kernel" from "everything else in
+        // this block". Removing the whole block (LMP_ABLATE=delta) cannot tell them apart.
+        mx::array out = mx::zeros({B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim},
+                                  mx::float32);
+        if (ablation() != Ablate::deltakernel) {
+            auto [o, state] =
+                lmp::model::mlxl::gated_delta_update(q, k, v, a, b, a_log, dt_bias, cache.delta_state);
+            out = o;
+            cache.delta_state = state;
+        }
         cache.offset += S;
 
         mx::array norm_w = weights_.get(p + "norm.weight");
@@ -307,10 +377,12 @@ private:
 
         auto [k_cat, v_cat] = cache.update_and_fetch(k, v);
         const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        mx::array attn = (L > 1)
-                             ? ff::scaled_dot_product_attention(queries, k_cat, v_cat, scale, "causal")
-                             : ff::scaled_dot_product_attention(
-                                   queries, k_cat, v_cat, scale, std::string{}, std::vector<mx::array>{});
+        // A single query attends to the whole cache, so decode wants no mask at all.
+        // Say that with mask_mode rather than an empty mask argument: the type of that
+        // argument changed between MLX 0.29 and 0.31 (vector<array> -> optional<array>),
+        // and naming it here is what made the build version-specific.
+        mx::array attn = ff::scaled_dot_product_attention(
+            queries, k_cat, v_cat, scale, (L > 1) ? "causal" : "");
         attn = mx::reshape(mx::transpose(attn, {0, 2, 1, 3}), {B, L, n_heads * head_dim});
         attn = mx::multiply(attn, mx::sigmoid(gate));
         return weights_.linear(attn, p + "o_proj");
