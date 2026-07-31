@@ -6,6 +6,7 @@
 #include "activations.hpp"
 #include "weight_store.hpp"
 
+
 #include <vector>
 
 #include "mlx/ops.h"
@@ -60,7 +61,12 @@ inline mx::array switch_glu_impl(const mx::array& x,
                                  const std::string& up_base,
                                  const std::string& down_base,
                                  const mx::array& indices) {
-    mx::array expanded = mx::expand_dims(mx::expand_dims(x, -2), -2);
+    // Both axes in one op, as mlx-lm's x[:, None, None, :] does. Two chained
+    // expand_dims built two nodes where one will do. Note the axes are {-3, -2}, not
+    // {-2, -2}: multi-axis expand_dims indexes into the OUTPUT shape, so the two
+    // insertion points are distinct there even though chaining inserts at -2 twice
+    // (and {-2, -2} is rejected outright as a duplicate axis).
+    mx::array expanded = mx::expand_dims(x, std::vector<int>{-3, -2});
     const bool do_sort = static_cast<int>(indices.size()) >= 64;
 
     mx::array idx = indices;
@@ -94,7 +100,10 @@ inline mx::array switch_glu(const mx::array& x,
 }
 
 inline std::pair<mx::array, mx::array> moe_topk(const mx::array& gate_logits, int top_k, bool norm_topk) {
-    const mx::array gates = mx::softmax(gate_logits, -1);
+    // precise=true accumulates in float32, which is what mlx-lm's SparseMoeBlock passes.
+    // Left at the bf16 default, 256 router logits land close enough together that the
+    // top-8 argpartition picks a different expert set than the reference does.
+    const mx::array gates = mx::softmax(gate_logits, -1, /*precise=*/true);
     const int experts = static_cast<int>(gates.shape()[2]);
     mx::array part_inds = mx::argpartition(gates, experts - top_k, 2);
     mx::array inds = mx::slice(part_inds, {0, 0, experts - top_k}, {gates.shape()[0], gates.shape()[1], experts});

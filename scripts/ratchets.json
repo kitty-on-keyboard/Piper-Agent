@@ -119,8 +119,12 @@
       "reason": "See StartParams."
     },
     {
-      "symbol": "ChecklistNotification",
-      "reason": "Emitted once the model's checklist is parsed from its plan turn (the ContextStore already carries it); the TS side renders it today. Remove this entry when the sidecar emits it."
+      "symbol": "MessageParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "MessageResult",
+      "reason": "See StartParams."
     },
     {
       "symbol": "EditNotification",

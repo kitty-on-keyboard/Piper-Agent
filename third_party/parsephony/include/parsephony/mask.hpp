@@ -199,9 +199,28 @@ private:
             if (pure) json_safe_[i >> 6] |= (1ull << (i & 63));
             else      json_sim_.push_back(uint32_t(i));
 
-            // Free-text classification: only a token containing the entire
-            // parameter terminator can leave the free-text state mid-token.
-            if (t.find(kTerm) != std::string::npos) {
+            // Free-text classification. A token must be simulated if it can do
+            // anything other than append itself to the value. Two ways:
+            //
+            //   - it carries the entire parameter terminator, and so leaves the
+            //     free-text state mid-token, out into constrained territory;
+            //   - it carries a control byte, which ToolCallGuard rejects outright
+            //     in a raw text value (push_byte: c < 0x20 and not \t \n \r ->
+            //     Error::ControlChar).
+            //
+            // Only the first was classified here originally, which left the mask
+            // MORE PERMISSIVE than the automaton for the 93 vocabulary entries that
+            // embed a control byte -- caught by LM-Pipe's mask/predicate equivalence
+            // test (tests/model/test_grammar.cpp), which compares this engine against
+            // a direct walk for every id at every state of a real tool call.
+            bool free_safe = t.find(kTerm) == std::string::npos;
+            for (unsigned char c : t) {
+                if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+                    free_safe = false;
+                    break;
+                }
+            }
+            if (!free_safe) {
                 free_sim_.push_back(uint32_t(i));
             }
         }

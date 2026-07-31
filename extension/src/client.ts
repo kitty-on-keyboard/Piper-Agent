@@ -10,9 +10,11 @@ import {
   PROTOCOL_VERSION,
   RunSettings,
   StartParams,
+  MessageResult,
   RunEndNotification,
   TurnNotification,
   TokenNotification,
+  ChecklistNotification,
   ApprovalRequestNotification,
   VerificationNotification,
   PerfNotification,
@@ -21,6 +23,7 @@ import {
 export interface SidecarEvents {
   token: TokenNotification;
   turn: TurnNotification;
+  checklist: ChecklistNotification;
   verification: VerificationNotification;
   approval_request: ApprovalRequestNotification;
   perf: PerfNotification;
@@ -132,6 +135,16 @@ export class SidecarClient extends EventEmitter {
 
   approve(requestId: string, approved: boolean): Promise<unknown> {
     return this.request("lmp/approve", { request_id: requestId, approved });
+  }
+
+  /** Say something to the agent.
+   *
+   *  One method, two outcomes, and the caller does not choose between them: with a run
+   *  in flight the text is steering and lands at the next turn boundary; with nothing
+   *  running it is a follow-up and starts a run over the same conversation. `started_run`
+   *  in the reply says which happened. */
+  message(runId: string, text: string): Promise<MessageResult> {
+    return this.request("lmp/message", { run_id: runId, text }) as Promise<MessageResult>;
   }
 
   shutdown(): Promise<unknown> {

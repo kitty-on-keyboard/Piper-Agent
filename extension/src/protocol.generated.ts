@@ -26,7 +26,11 @@ export interface RunSettings {
   max_iterations: number;
   wall_clock_seconds: number;
   sandbox_tier: number;
+  auto_approve_exec: boolean;
+  auto_approve_writes: boolean;
   require_approval: boolean;
+  system_prompt: string;
+  allowed_commands: string;
   context_budget_tokens: number;
 }
 
@@ -74,6 +78,16 @@ export interface ApproveResult {
   accepted: boolean;
 }
 
+export interface MessageParams {
+  run_id: string;
+  text: string;
+}
+export interface MessageResult {
+  accepted: boolean;
+  run_id: string;
+  started_run: boolean;
+}
+
 export interface ShutdownParams {
 }
 export interface ShutdownResult {
@@ -114,6 +128,8 @@ export interface ApprovalRequestNotification {
   run_id: string;
   tool_name: string;
   preview: string;
+  command: string;
+  irreversible: boolean;
   risk: number;
   capabilities: CapabilityChips;
 }
@@ -134,12 +150,14 @@ export interface RunEndNotification {
   termination_reason: string;
   iterations: number;
   completed: boolean;
+  unfinished_items: number;
 }
 
 export const METHODS = [
   "lmp/start",
   "lmp/cancel",
   "lmp/approve",
+  "lmp/message",
   "lmp/shutdown",
   "lmp/token",
   "lmp/turn",

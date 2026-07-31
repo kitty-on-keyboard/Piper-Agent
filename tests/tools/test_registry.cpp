@@ -50,7 +50,13 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     Registry reg = make_registry(root);
     // S6.1: resist growth; every tool is permanent surface area. Growing this pin
     // requires editing this test, which is the review moment.
-    CHECK_EQ(reg.decls().size(), std::size_t{11});
+    //
+    // 11 -> 15: git_status, git_diff and git_log (an agent that cannot read its own diff
+    // has no review surface), plus `plan`, which is declared here but executed by the
+    // loop because the checklist lives in the context store.
+    CHECK_EQ(reg.decls().size(), std::size_t{15});
+    CHECK(reg.find("git_diff") != nullptr);
+    CHECK(reg.find("plan") != nullptr);
     CHECK(reg.find("read_file") != nullptr);
     CHECK(reg.find("shell") != nullptr);
     CHECK(reg.find("no_such_tool") == nullptr);

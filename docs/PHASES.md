@@ -116,13 +116,15 @@ All nine phases landed. Below is what is real, what is measured, and what is not
 ## Measured on this machine (2026-07-30)
 
 ```
-gate                     19 tests, 5.7 s          (budget: 5 min)
+gate                     20 tests, 6.0 s          (budget: 5 min)
 gate reliability         5/5 = 100%, median 5.55 s, spread 0.09 s
 real model               Qwen3.6-35B-A3B-MLX-4bit, in-process via MLX
   end-to-end turn        prompt -> prefill -> masked decode -> grammar accept
   decode                 22.9 tok/s     ttft 1775 ms     300 tokens to a complete turn
 blast_radius engine      0 wmiss / 179-of-179 corpus;  15 wmiss / 34-of-42 HOLDOUT
-log_triage engine        34 weighted, 71-of-75 exact on the 25-tree corpus
+log_triage engine        15 weighted, 73-of-75 exact on the 25-tree corpus (round 2,
+                         2026-07-31; was 34 / 71-of-75). Holdout 0 / 21-of-21, but that
+                         column is NOT blind -- see the burned-case caveat in the README.
 mutation testing         3/8 killed, 5 survivors (below)
 ratchets                 6 of 6 live and green; each proven capable of red
 ```

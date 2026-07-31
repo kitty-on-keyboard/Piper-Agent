@@ -94,6 +94,31 @@ TEST(a_command_that_spins_forever_is_stopped) {
     CHECK_EQ(o.signal, SIGXCPU);
 }
 
+TEST(a_command_that_must_fork_still_runs) {
+    // RLIMIT_NPROC counts every process owned by the REAL UID, so applying
+    // max_processes as an absolute number makes fork() return EAGAIN the moment the
+    // desktop already owns that many -- which on any machine with an editor open it
+    // does. See nproc_ceiling() in sandbox.cpp.
+    //
+    // Every other test here runs a command simple enough that /bin/sh execs it without
+    // forking, so all of them passed while the real agent could not run one shell
+    // command: the first end-to-end run got `/bin/sh: fork: Resource temporarily
+    // unavailable` on all nine of its shell calls. A pipeline forces the fork that a
+    // builtin elides, which is what makes this test see the bug.
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const ExecutionGrant grant = grant_execution(SandboxTier::T1_Seatbelt);
+    const ExecOutcome o =
+        run_sandboxed(grant, "echo one | cat && echo two", root, root, limits(20));
+
+    CHECK(o.status == Status::Ok);
+    CHECK_EQ(o.exit_code, 0);
+    CHECK(o.output.find("one") != std::string::npos);
+    CHECK(o.output.find("two") != std::string::npos);
+    // The precise symptom, named so a regression is recognised on sight.
+    CHECK(o.output.find("Resource temporarily unavailable") == std::string::npos);
+}
+
 TEST(a_command_that_sleeps_forever_is_killed_at_the_wall_clock) {
     // The independent wall-clock killer (S7.3): this one burns no CPU, so RLIMIT_CPU
     // never fires and only the wall clock can stop it. An unattended run cannot afford

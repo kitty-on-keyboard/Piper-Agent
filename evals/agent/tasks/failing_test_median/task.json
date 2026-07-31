@@ -1,0 +1,13 @@
+{
+  "split": "corpus",
+  "mission": "The test suite is failing. Fix the bug in stats.py so that `python3 -m pytest -q` passes. Do not change the tests.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "python3 -m pytest -q",
+  "max_iterations": 25,
+  "wall_clock_seconds": 600,
+  "notes": "The plainest FAIL_TO_PASS shape there is. If this one regresses, something structural broke.",
+  "protect": [
+    "test_stats.py"
+  ]
+}

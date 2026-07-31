@@ -41,17 +41,88 @@ struct HitlThresholds {
 [[nodiscard]] Approval route_approval(const tools::RiskHint& hint,
                                       const HitlThresholds& thresholds);
 
+// Capabilities you cannot take back: destroying data, writing outside the workspace,
+// escalating privileges, rewriting history. These ALWAYS escalate -- above the risk
+// score and above the allowlist.
+//
+// The score cannot express this and should not be asked to. `rm -rf` carries exactly one
+// capability, so it scores 0.30 against a 0.35 auto-approve threshold and never raised a
+// card at all: the agent was told to delete every file in a workspace and did, on a run
+// configured to deny every approval, because no approval was ever requested. Nudging the
+// weight to 0.36 fixes that one command until some other combination lands under the bar.
+//
+// Irreversibility is a PROPERTY, not a quantity. Everything else stays scored.
+[[nodiscard]] bool is_irreversible(const tools::RiskHint& hint) noexcept;
+
+// Whether the operator has already said yes to this exact command.
+//
+// Matches on equality, or on `entry` followed by a space -- and NEVER on a command
+// carrying shell chaining (`;` `&&` `||` `|` backtick `$(` `>` `<` `&`), because
+// allowlisting `python3 -m pytest` must not authorise `python3 -m pytest; rm -rf ~`.
+// A chained command falls through to normal routing rather than being refused: it may
+// be perfectly ordinary, it just cannot be waved through on a prefix.
+[[nodiscard]] bool is_allowlisted(const std::string& command,
+                                  const std::vector<std::string>& allowed);
+
 // Returns true to allow. Injected so tests script it; the UI supplies the real one.
-using Approver = std::function<bool(const std::string& tool, const std::string& preview,
+//
+// `command` is the shell command verbatim, or empty for a call that is not one (a write,
+// say). It is separate from `preview` because preview truncates each argument for
+// display, and a truncated string is the wrong thing to build a remembered allowlist
+// rule from -- it would either never match again or match something shorter than what
+// the operator actually approved.
+using Approver = std::function<bool(const std::string& tool, const std::string& command,
+                                    const std::string& preview,
                                     const tools::RiskHint& hint)>;
+
+// Anything the user has said since the last time it was asked, oldest first.
+//
+// Polled at TURN BOUNDARIES, never mid-generation. Cancel is the violent interrupt and
+// sets a token in the middle of the token stream; steering is the gentle one, so the
+// model finishes the thought it is having and then reads the instruction before choosing
+// its next move. Injected for the same reason the approver is: the scripted loop suite
+// can hand the run a message at a chosen turn with no transport in the picture.
+using SteerSource = std::function<std::vector<std::string>()>;
 
 struct AgentConfig {
     Mode mode = Mode::Agent;
     Budget budget;
     HitlThresholds hitl;
-    std::size_t keep_recent_turns = 12;
+    // Qwen3's own recommended operating point by default (S5.9). Carried here rather
+    // than left to InferenceTask's defaults so the editor's settings can actually reach
+    // the sampler -- they could not before, which made every sampling knob in the
+    // extension inert.
+    model::SamplingParams sampling;
+    std::int32_t context_budget_tokens = 96000;
     std::int32_t max_new_tokens = 4096;
     std::uint64_t seed = 0;
+
+    // --- autonomy -----------------------------------------------------------
+    //
+    // How much the operator wants to be asked. Defaults are today's behaviour, so an
+    // absent setting changes nothing; each one below only ever LOOSENS on an explicit
+    // request and only ever TIGHTENS by default (S13).
+
+    // -1 keeps the mode's own tier. Otherwise this wins -- except in Plan mode, which
+    // pins 0 whatever is asked for: a mode that cannot execute cannot be talked into
+    // executing by a settings field.
+    int sandbox_tier_override = -1;
+
+    // false makes every command execution raise a card whatever its risk score. The
+    // default keeps risk routing, where only the 0.35-0.85 band escalates.
+    bool auto_approve_exec = true;
+
+    // false makes every workspace-mutating call raise a card. Writes had no HITL path at
+    // all before: mode policy decided whether they were allowed, and nothing asked about
+    // any individual one.
+    bool auto_approve_writes = true;
+
+    // Commands the operator has already said yes to. This is the half that makes the
+    // strict half survivable: without somewhere for "yes, and stop asking me about
+    // pytest" to go, the only way to escape card fatigue is to turn approvals off
+    // entirely -- which is how a harness ends up with nothing between the model and
+    // `rm -rf` again.
+    std::vector<std::string> allowed_commands;
 };
 
 // The UI feed. The Agent emits structured facts; the sidecar serializes them with the
@@ -63,6 +134,10 @@ struct Observer {
     std::function<void(const context::VerificationRecord&)> on_verification;
     std::function<void(const model::GenResult&, std::size_t ctx_used, std::size_t ctx_max)>
         on_perf;
+    // Fired whenever the checklist CHANGES, which is the only time it is news. The
+    // sidebar had a Checklist panel and nothing ever filled it: `lmp/checklist` was
+    // declared in the schema, generated on both sides, and emitted by nobody.
+    std::function<void(const std::vector<context::ChecklistItem>&)> on_checklist;
 };
 
 struct RunReport {
@@ -71,6 +146,11 @@ struct RunReport {
     int iterations = 0;
     bool completed = false;
     std::size_t compactions = 0;
+    // Checklist items still open at the end. Reported, never enforced -- see
+    // CompletionVerdict.
+    std::size_t unfinished_items = 0;
+    // Instructions that arrived mid-run and were taken up at a turn boundary.
+    std::size_t steers_received = 0;
 };
 
 class Agent {
@@ -81,6 +161,7 @@ class Agent {
 
     void set_approver(Approver a) { approver_ = std::move(a); }
     void set_observer(Observer o) { observer_ = std::move(o); }
+    void set_steer_source(SteerSource s) { steer_ = std::move(s); }
 
     [[nodiscard]] RunReport run(const model::CancelToken& cancel);
 
@@ -88,7 +169,25 @@ class Agent {
     [[nodiscard]] TurnResult step(const model::CancelToken& cancel);
 
   private:
+    // Never trim below this many verbatim turns, whatever the budget says: a run that
+    // cannot see its own last few observations cannot make a next move.
+    static constexpr std::size_t kMinRecentTurns = 4;
+
+    // Consecutive turns that executed nothing before a run is declared stalled. Three
+    // is enough to let the model think out loud between calls, and few enough that
+    // neither narration nor repeated token-cap truncation can burn the whole wall clock.
+    static constexpr int kMaxConsecutiveNoProgress = 3;
+
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
+    void compact_to_budget();
+    // Drains the steer source into the context. Returns how many instructions landed.
+    [[nodiscard]] std::size_t take_steering();
+    [[nodiscard]] TurnResult::PlanOutcome apply_plan(
+        const std::vector<tools::ToolParamValue>& params);
+    [[nodiscard]] std::string baseline_check();
+    [[nodiscard]] tools::ToolResult dispatch_call(
+        const std::string& name, const std::vector<tools::ToolParamValue>& params,
+        bool& executed);
     void apply_corrective(Corrective c, const TurnResult& turn);
 
     const model::QwenTokenizer& tok_;
@@ -102,7 +201,10 @@ class Agent {
     RepeatDetector repeats_;
     Approver approver_;
     Observer observer_;
+    SteerSource steer_;
+    Verifier verifier_;
     std::string tools_guidance_;
+    int consecutive_no_progress_ = 0;
     bool halted_ = false;
     std::string halt_reason_;
 };

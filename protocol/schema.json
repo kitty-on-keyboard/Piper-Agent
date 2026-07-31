@@ -39,8 +39,12 @@
       { "name": "sampling", "type": "SamplingSettings" },
       { "name": "max_iterations", "type": "int" },
       { "name": "wall_clock_seconds", "type": "int" },
-      { "name": "sandbox_tier", "type": "int" },
+      { "_comment": "0 no execution, 1 macOS Seatbelt, 2 container (refuses until wired), 3 UNSANDBOXED on the host. The number is an identity, not a rank -- 3 is the least contained, not the most. Plan mode pins this to 0 whatever is asked for: a mode that cannot execute cannot be talked into executing by a settings field.", "name": "sandbox_tier", "type": "int" },
+      { "_comment": "false makes EVERY command execution raise a card, whatever its risk score. true keeps the risk-routed behaviour, where only the 0.35-0.85 band escalates. Named for what the operator turns on -- 'run commands without asking me' -- rather than for the harness's internal routing.", "name": "auto_approve_exec", "type": "bool" },
+      { "_comment": "false makes every workspace-mutating call raise a card. Writes had no HITL path at all before: mode policy decided whether they were allowed and nothing asked about any individual one.", "name": "auto_approve_writes", "type": "bool" },
       { "name": "require_approval", "type": "bool" },
+      { "_comment": "Overrides the built-in persona. The editor keeps one per mode, so 'plan' can be told to think out loud and 'agent' to be terse. Empty means the built-in, which is the only reason this can be a plain string rather than a presence flag.", "name": "system_prompt", "type": "string" },
+      { "_comment": "Commands the operator has already said yes to, newline-separated (the generator has no array type, and a newline is the one character a shell command cannot contain unescaped). An entry matches a command that equals it, or that starts with it followed by a space. A command containing shell chaining -- ; && || | ` $( > < & -- NEVER matches, because `pytest` on the allowlist must not authorise `pytest; rm -rf ~`. The irreversible-capability gate sits ABOVE this: nothing on this list can auto-approve a call that destroys data, writes outside the workspace, escalates privileges or rewrites history.", "name": "allowed_commands", "type": "string" },
       { "name": "context_budget_tokens", "type": "int" }
     ],
     "CapabilityChips": [
@@ -84,6 +88,35 @@
       ],
       "result": [{ "name": "accepted", "type": "bool" }]
     },
+    "lmp/message": {
+      "_comment": [
+        "Talk to the agent. ONE method, two behaviours, decided by whether a run is",
+        "in flight -- because from the user's side there is only one act, 'say",
+        "something to it', and which of those two it turns out to be is the",
+        "harness's business rather than the caller's.",
+        "",
+        "IN FLIGHT: steering. The text lands in the run's context at the NEXT TURN",
+        "BOUNDARY, not mid-generation. Cancel is the violent one and sets a token",
+        "mid-token-stream; steering is gentle by design, so the model finishes the",
+        "thought it is having and reads the instruction before choosing its next",
+        "move. It also marks the plan stale, which makes `plan` the only callable",
+        "tool on the following turn -- so an instruction cannot be received and",
+        "then quietly ignored (S9.2: mechanism, not a sentence asking it to listen).",
+        "",
+        "IDLE: a follow-up. The same ContextStore, the same loaded weights, one more",
+        "user turn. `started_run` says which happened, and `run_id` names the run",
+        "the text went to either way."
+      ],
+      "params": [
+        { "name": "run_id", "type": "string" },
+        { "name": "text", "type": "string" }
+      ],
+      "result": [
+        { "name": "accepted", "type": "bool" },
+        { "name": "run_id", "type": "string" },
+        { "name": "started_run", "type": "bool" }
+      ]
+    },
     "lmp/shutdown": { "params": [], "result": [{ "name": "ok", "type": "bool" }] }
   },
 
@@ -118,6 +151,8 @@
       { "name": "run_id", "type": "string" },
       { "name": "tool_name", "type": "string" },
       { "name": "preview", "type": "string" },
+      { "_comment": "The command verbatim, when there is one. `preview` truncates each argument at 120 characters for display, so it is the wrong thing to remember an allowlist rule from -- a truncated rule would either never match again or, worse, match something shorter than what was approved.", "name": "command", "type": "string" },
+      { "_comment": "Whether this call carries a capability that cannot be undone. Computed by the loop and sent, rather than re-derived in the view from the chips, so the UI and the gate cannot disagree about which calls are unwaivable.", "name": "irreversible", "type": "bool" },
       { "name": "risk", "type": "double" },
       { "name": "capabilities", "type": "CapabilityChips" }
     ],
@@ -134,7 +169,8 @@
       { "name": "run_id", "type": "string" },
       { "name": "termination_reason", "type": "string" },
       { "name": "iterations", "type": "int" },
-      { "name": "completed", "type": "bool" }
+      { "name": "completed", "type": "bool" },
+      { "_comment": "Checklist items still open when the run ended. `completed` is an EVIDENTIAL verdict -- a recorded deliverable plus a falsifiable passing verification of the declared contract -- so it no longer waits on the model agreeing that it is done. This field reports the disagreement instead of hiding it: completed=true with unfinished_items>0 means the evidence says the mission is met and the model's own list says otherwise, and a human should look.", "name": "unfinished_items", "type": "int" }
     ]
   }
 }

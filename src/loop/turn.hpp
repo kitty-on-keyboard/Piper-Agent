@@ -38,14 +38,36 @@ enum class Outcome : std::uint8_t {
 [[nodiscard]] std::string_view to_string(Outcome o) noexcept;
 
 struct TurnResult {
+    // What applying a `plan` call did. Reported back to the model as the tool result, so
+    // a malformed checklist is a correctable observation rather than a silent no-op.
+    struct PlanOutcome {
+        bool ok = false;
+        std::string detail;
+    };
+
+    // A call batched into the same turn behind the first one. Each still gets its own
+    // history record and its own UI row -- batching changes how many prefills a turn
+    // costs, not how honestly its calls are reported.
+    struct ExtraCall {
+        std::string tool_name;
+        std::vector<tools::ToolParamValue> params;
+        tools::ToolResult result;
+    };
+
     Outcome outcome = Outcome::BackendError;
     std::string assistant_text;
     std::string reasoning;      // peeled off, surfaced separately, never in the answer
     std::string tool_name;
     std::vector<tools::ToolParamValue> tool_params;
     tools::ToolResult tool_result;
+    std::vector<ExtraCall> extra_calls;
     model::GenResult generation;
 };
+
+// Value of a named param, or empty. The grammar guarantees required params are present,
+// so an empty return means "not supplied" rather than "lost".
+[[nodiscard]] std::string param_value(const std::vector<tools::ToolParamValue>& params,
+                                      std::string_view name);
 
 // Mode policy is applied in ONE place (S9.3); the loop does not apply it itself, so a
 // config that skips the policy cannot run with writes enabled anyway.
@@ -114,11 +136,17 @@ struct Budget {
 
 // --- completion -------------------------------------------------------------
 
-// Driven by the checklist and the deliverable ledger, never by prose guessing whether
-// the model sounded finished (S10.4).
+// Driven by the deliverable and verification ledgers, never by prose guessing whether the
+// model sounded finished -- and, since the seventh pass, never by the model's checklist
+// ticks either, which are a self-report wearing a checkbox (S10.4).
+//
+// `open_items` is REPORTED, not enforced. completing with open_items > 0 means the
+// evidence says the mission is met while the model's own list says otherwise. That
+// disagreement is worth a human's attention and worth none of the harness's authority.
 struct CompletionVerdict {
     bool complete = false;
     std::string reason;
+    std::size_t open_items = 0;
 };
 
 [[nodiscard]] CompletionVerdict evaluate_completion(const context::ContextStore& ctx);
