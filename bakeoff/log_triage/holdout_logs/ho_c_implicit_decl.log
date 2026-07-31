@@ -1,0 +1,461 @@
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_00.c -o src/unit_00.o
+src/unit_00.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_00_value(int unused) { return 0; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_01.c -o src/unit_01.o
+src/unit_01.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_01_value(int unused) { return 1; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_02.c -o src/unit_02.o
+src/unit_02.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_02_value(int unused) { return 2; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_03.c -o src/unit_03.o
+src/unit_03.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_03_value(int unused) { return 3; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_04.c -o src/unit_04.o
+src/unit_04.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_04_value(int unused) { return 4; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_05.c -o src/unit_05.o
+src/unit_05.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_05_value(int unused) { return 5; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_06.c -o src/unit_06.o
+src/unit_06.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_06_value(int unused) { return 6; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_07.c -o src/unit_07.o
+src/unit_07.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_07_value(int unused) { return 7; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_08.c -o src/unit_08.o
+src/unit_08.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_08_value(int unused) { return 8; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_09.c -o src/unit_09.o
+src/unit_09.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_09_value(int unused) { return 9; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_10.c -o src/unit_10.o
+src/unit_10.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_10_value(int unused) { return 10; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_11.c -o src/unit_11.o
+src/unit_11.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_11_value(int unused) { return 11; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_12.c -o src/unit_12.o
+src/unit_12.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_12_value(int unused) { return 12; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_13.c -o src/unit_13.o
+src/unit_13.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_13_value(int unused) { return 13; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_14.c -o src/unit_14.o
+src/unit_14.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_14_value(int unused) { return 14; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_15.c -o src/unit_15.o
+src/unit_15.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_15_value(int unused) { return 15; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_16.c -o src/unit_16.o
+src/unit_16.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_16_value(int unused) { return 16; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_17.c -o src/unit_17.o
+src/unit_17.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_17_value(int unused) { return 17; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_18.c -o src/unit_18.o
+src/unit_18.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_18_value(int unused) { return 18; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_19.c -o src/unit_19.o
+src/unit_19.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_19_value(int unused) { return 19; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_20.c -o src/unit_20.o
+src/unit_20.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_20_value(int unused) { return 20; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_21.c -o src/unit_21.o
+src/unit_21.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_21_value(int unused) { return 21; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_22.c -o src/unit_22.o
+src/unit_22.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_22_value(int unused) { return 22; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_23.c -o src/unit_23.o
+src/unit_23.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_23_value(int unused) { return 23; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_24.c -o src/unit_24.o
+src/unit_24.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_24_value(int unused) { return 24; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_25.c -o src/unit_25.o
+src/unit_25.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_25_value(int unused) { return 25; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_26.c -o src/unit_26.o
+src/unit_26.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_26_value(int unused) { return 26; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_27.c -o src/unit_27.o
+src/unit_27.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_27_value(int unused) { return 27; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_28.c -o src/unit_28.o
+src/unit_28.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_28_value(int unused) { return 28; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_29.c -o src/unit_29.o
+src/unit_29.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_29_value(int unused) { return 29; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_30.c -o src/unit_30.o
+src/unit_30.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_30_value(int unused) { return 30; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_31.c -o src/unit_31.o
+src/unit_31.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_31_value(int unused) { return 31; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_32.c -o src/unit_32.o
+src/unit_32.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_32_value(int unused) { return 32; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_33.c -o src/unit_33.o
+src/unit_33.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_33_value(int unused) { return 33; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_34.c -o src/unit_34.o
+src/unit_34.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_34_value(int unused) { return 34; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_35.c -o src/unit_35.o
+src/unit_35.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_35_value(int unused) { return 35; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_36.c -o src/unit_36.o
+src/unit_36.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_36_value(int unused) { return 36; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_37.c -o src/unit_37.o
+src/unit_37.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_37_value(int unused) { return 37; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_38.c -o src/unit_38.o
+src/unit_38.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_38_value(int unused) { return 38; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_39.c -o src/unit_39.o
+src/unit_39.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_39_value(int unused) { return 39; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_40.c -o src/unit_40.o
+src/unit_40.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_40_value(int unused) { return 40; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_41.c -o src/unit_41.o
+src/unit_41.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_41_value(int unused) { return 41; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_42.c -o src/unit_42.o
+src/unit_42.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_42_value(int unused) { return 42; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_43.c -o src/unit_43.o
+src/unit_43.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_43_value(int unused) { return 43; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_44.c -o src/unit_44.o
+src/unit_44.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_44_value(int unused) { return 44; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_45.c -o src/unit_45.o
+src/unit_45.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_45_value(int unused) { return 45; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_46.c -o src/unit_46.o
+src/unit_46.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_46_value(int unused) { return 46; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_47.c -o src/unit_47.o
+src/unit_47.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_47_value(int unused) { return 47; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_48.c -o src/unit_48.o
+src/unit_48.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_48_value(int unused) { return 48; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_49.c -o src/unit_49.o
+src/unit_49.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_49_value(int unused) { return 49; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_50.c -o src/unit_50.o
+src/unit_50.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_50_value(int unused) { return 50; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_51.c -o src/unit_51.o
+src/unit_51.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_51_value(int unused) { return 51; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_52.c -o src/unit_52.o
+src/unit_52.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_52_value(int unused) { return 52; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_53.c -o src/unit_53.o
+src/unit_53.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_53_value(int unused) { return 53; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_54.c -o src/unit_54.o
+src/unit_54.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_54_value(int unused) { return 54; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_55.c -o src/unit_55.o
+src/unit_55.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_55_value(int unused) { return 55; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_56.c -o src/unit_56.o
+src/unit_56.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_56_value(int unused) { return 56; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_57.c -o src/unit_57.o
+src/unit_57.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_57_value(int unused) { return 57; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_58.c -o src/unit_58.o
+src/unit_58.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_58_value(int unused) { return 58; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_59.c -o src/unit_59.o
+src/unit_59.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_59_value(int unused) { return 59; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_60.c -o src/unit_60.o
+src/unit_60.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_60_value(int unused) { return 60; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_61.c -o src/unit_61.o
+src/unit_61.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_61_value(int unused) { return 61; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_62.c -o src/unit_62.o
+src/unit_62.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_62_value(int unused) { return 62; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_63.c -o src/unit_63.o
+src/unit_63.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_63_value(int unused) { return 63; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_64.c -o src/unit_64.o
+src/unit_64.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_64_value(int unused) { return 64; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_65.c -o src/unit_65.o
+src/unit_65.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_65_value(int unused) { return 65; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_66.c -o src/unit_66.o
+src/unit_66.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_66_value(int unused) { return 66; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_67.c -o src/unit_67.o
+src/unit_67.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_67_value(int unused) { return 67; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_68.c -o src/unit_68.o
+src/unit_68.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_68_value(int unused) { return 68; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_69.c -o src/unit_69.o
+src/unit_69.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_69_value(int unused) { return 69; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_70.c -o src/unit_70.o
+src/unit_70.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_70_value(int unused) { return 70; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_71.c -o src/unit_71.o
+src/unit_71.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_71_value(int unused) { return 71; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_72.c -o src/unit_72.o
+src/unit_72.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_72_value(int unused) { return 72; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_73.c -o src/unit_73.o
+src/unit_73.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_73_value(int unused) { return 73; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_74.c -o src/unit_74.o
+src/unit_74.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_74_value(int unused) { return 74; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_75.c -o src/unit_75.o
+src/unit_75.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_75_value(int unused) { return 75; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_76.c -o src/unit_76.o
+src/unit_76.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_76_value(int unused) { return 76; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_77.c -o src/unit_77.o
+src/unit_77.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_77_value(int unused) { return 77; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_78.c -o src/unit_78.o
+src/unit_78.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_78_value(int unused) { return 78; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_79.c -o src/unit_79.o
+src/unit_79.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_79_value(int unused) { return 79; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_80.c -o src/unit_80.o
+src/unit_80.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_80_value(int unused) { return 80; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_81.c -o src/unit_81.o
+src/unit_81.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_81_value(int unused) { return 81; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_82.c -o src/unit_82.o
+src/unit_82.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_82_value(int unused) { return 82; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_83.c -o src/unit_83.o
+src/unit_83.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_83_value(int unused) { return 83; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_84.c -o src/unit_84.o
+src/unit_84.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_84_value(int unused) { return 84; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_85.c -o src/unit_85.o
+src/unit_85.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_85_value(int unused) { return 85; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_86.c -o src/unit_86.o
+src/unit_86.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_86_value(int unused) { return 86; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_87.c -o src/unit_87.o
+src/unit_87.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_87_value(int unused) { return 87; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_88.c -o src/unit_88.o
+src/unit_88.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_88_value(int unused) { return 88; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/unit_89.c -o src/unit_89.o
+src/unit_89.c:2:23: warning: unused parameter 'unused' [-Wunused-parameter]
+    2 | int unit_89_value(int unused) { return 89; }
+      |                       ^
+1 warning generated.
+clang -std=c17 -Wall -Wextra -Iinclude -Iinclude/core -c src/checksum.c -o src/checksum.o
+src/checksum.c:3:12: error: call to undeclared library function 'strlen' with type 'unsigned long (const char *)'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+    3 |     return strlen(s) + missing_constant;
+      |            ^
+src/checksum.c:3:12: note: include the header <string.h> or explicitly provide a declaration for 'strlen'
+src/checksum.c:3:24: error: use of undeclared identifier 'missing_constant'
+    3 |     return strlen(s) + missing_constant;
+      |                        ^~~~~~~~~~~~~~~~
+2 errors generated.
+make: *** [src/checksum.o] Error 1
+make: Target `all' not remade because of errors.

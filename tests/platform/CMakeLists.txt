@@ -1,0 +1,5 @@
+lmp_add_test(test_arena          SOURCES test_arena.cpp          LABELS gate)
+lmp_add_test(test_clock          SOURCES test_clock.cpp          LABELS gate)
+lmp_add_test(test_spsc_channel   SOURCES test_spsc_channel.cpp   LABELS gate)
+lmp_add_test(test_event_log      SOURCES test_event_log.cpp      LABELS gate LINK lmp_platform)
+lmp_add_test(test_fs             SOURCES test_fs.cpp             LABELS gate LINK lmp_platform)

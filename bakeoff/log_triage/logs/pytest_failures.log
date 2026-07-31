@@ -1,0 +1,184 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.9.6, pytest-8.4.2, pluggy-1.6.0 -- /Applications/Xcode.app/Contents/Developer/usr/bin/python3
+rootdir: /work/proj
+plugins: anyio-4.12.1
+collecting ... collected 131 items
+
+tests/test_mod_00.py::test_ok_0_0 PASSED                                 [  0%]
+tests/test_mod_00.py::test_ok_0_1 PASSED                                 [  1%]
+tests/test_mod_00.py::test_ok_0_2 PASSED                                 [  2%]
+tests/test_mod_00.py::test_ok_0_3 PASSED                                 [  3%]
+tests/test_mod_00.py::test_ok_0_4 PASSED                                 [  3%]
+tests/test_mod_00.py::test_ok_0_5 PASSED                                 [  4%]
+tests/test_mod_00.py::test_ok_0_6 PASSED                                 [  5%]
+tests/test_mod_00.py::test_ok_0_7 PASSED                                 [  6%]
+tests/test_mod_01.py::test_ok_1_0 PASSED                                 [  6%]
+tests/test_mod_01.py::test_ok_1_1 PASSED                                 [  7%]
+tests/test_mod_01.py::test_ok_1_2 PASSED                                 [  8%]
+tests/test_mod_01.py::test_ok_1_3 PASSED                                 [  9%]
+tests/test_mod_01.py::test_ok_1_4 PASSED                                 [  9%]
+tests/test_mod_01.py::test_ok_1_5 PASSED                                 [ 10%]
+tests/test_mod_01.py::test_ok_1_6 PASSED                                 [ 11%]
+tests/test_mod_01.py::test_ok_1_7 PASSED                                 [ 12%]
+tests/test_mod_02.py::test_ok_2_0 PASSED                                 [ 12%]
+tests/test_mod_02.py::test_ok_2_1 PASSED                                 [ 13%]
+tests/test_mod_02.py::test_ok_2_2 PASSED                                 [ 14%]
+tests/test_mod_02.py::test_ok_2_3 PASSED                                 [ 15%]
+tests/test_mod_02.py::test_ok_2_4 PASSED                                 [ 16%]
+tests/test_mod_02.py::test_ok_2_5 PASSED                                 [ 16%]
+tests/test_mod_02.py::test_ok_2_6 PASSED                                 [ 17%]
+tests/test_mod_02.py::test_ok_2_7 PASSED                                 [ 18%]
+tests/test_mod_03.py::test_ok_3_0 PASSED                                 [ 19%]
+tests/test_mod_03.py::test_ok_3_1 PASSED                                 [ 19%]
+tests/test_mod_03.py::test_ok_3_2 PASSED                                 [ 20%]
+tests/test_mod_03.py::test_ok_3_3 PASSED                                 [ 21%]
+tests/test_mod_03.py::test_ok_3_4 PASSED                                 [ 22%]
+tests/test_mod_03.py::test_ok_3_5 PASSED                                 [ 22%]
+tests/test_mod_03.py::test_ok_3_6 PASSED                                 [ 23%]
+tests/test_mod_03.py::test_ok_3_7 PASSED                                 [ 24%]
+tests/test_mod_04.py::test_ok_4_0 PASSED                                 [ 25%]
+tests/test_mod_04.py::test_ok_4_1 PASSED                                 [ 25%]
+tests/test_mod_04.py::test_ok_4_2 PASSED                                 [ 26%]
+tests/test_mod_04.py::test_ok_4_3 PASSED                                 [ 27%]
+tests/test_mod_04.py::test_ok_4_4 PASSED                                 [ 28%]
+tests/test_mod_04.py::test_ok_4_5 PASSED                                 [ 29%]
+tests/test_mod_04.py::test_ok_4_6 PASSED                                 [ 29%]
+tests/test_mod_04.py::test_ok_4_7 PASSED                                 [ 30%]
+tests/test_mod_05.py::test_ok_5_0 PASSED                                 [ 31%]
+tests/test_mod_05.py::test_ok_5_1 PASSED                                 [ 32%]
+tests/test_mod_05.py::test_ok_5_2 PASSED                                 [ 32%]
+tests/test_mod_05.py::test_ok_5_3 PASSED                                 [ 33%]
+tests/test_mod_05.py::test_ok_5_4 PASSED                                 [ 34%]
+tests/test_mod_05.py::test_ok_5_5 PASSED                                 [ 35%]
+tests/test_mod_05.py::test_ok_5_6 PASSED                                 [ 35%]
+tests/test_mod_05.py::test_ok_5_7 PASSED                                 [ 36%]
+tests/test_mod_06.py::test_ok_6_0 PASSED                                 [ 37%]
+tests/test_mod_06.py::test_ok_6_1 PASSED                                 [ 38%]
+tests/test_mod_06.py::test_ok_6_2 PASSED                                 [ 38%]
+tests/test_mod_06.py::test_ok_6_3 PASSED                                 [ 39%]
+tests/test_mod_06.py::test_ok_6_4 PASSED                                 [ 40%]
+tests/test_mod_06.py::test_ok_6_5 PASSED                                 [ 41%]
+tests/test_mod_06.py::test_ok_6_6 PASSED                                 [ 41%]
+tests/test_mod_06.py::test_ok_6_7 PASSED                                 [ 42%]
+tests/test_mod_07.py::test_ok_7_0 PASSED                                 [ 43%]
+tests/test_mod_07.py::test_ok_7_1 PASSED                                 [ 44%]
+tests/test_mod_07.py::test_ok_7_2 PASSED                                 [ 45%]
+tests/test_mod_07.py::test_ok_7_3 PASSED                                 [ 45%]
+tests/test_mod_07.py::test_ok_7_4 PASSED                                 [ 46%]
+tests/test_mod_07.py::test_ok_7_5 PASSED                                 [ 47%]
+tests/test_mod_07.py::test_ok_7_6 PASSED                                 [ 48%]
+tests/test_mod_07.py::test_ok_7_7 PASSED                                 [ 48%]
+tests/test_mod_08.py::test_ok_8_0 PASSED                                 [ 49%]
+tests/test_mod_08.py::test_ok_8_1 PASSED                                 [ 50%]
+tests/test_mod_08.py::test_ok_8_2 PASSED                                 [ 51%]
+tests/test_mod_08.py::test_ok_8_3 PASSED                                 [ 51%]
+tests/test_mod_08.py::test_ok_8_4 PASSED                                 [ 52%]
+tests/test_mod_08.py::test_ok_8_5 PASSED                                 [ 53%]
+tests/test_mod_08.py::test_ok_8_6 PASSED                                 [ 54%]
+tests/test_mod_08.py::test_ok_8_7 PASSED                                 [ 54%]
+tests/test_mod_09.py::test_ok_9_0 PASSED                                 [ 55%]
+tests/test_mod_09.py::test_ok_9_1 PASSED                                 [ 56%]
+tests/test_mod_09.py::test_ok_9_2 PASSED                                 [ 57%]
+tests/test_mod_09.py::test_ok_9_3 PASSED                                 [ 58%]
+tests/test_mod_09.py::test_ok_9_4 PASSED                                 [ 58%]
+tests/test_mod_09.py::test_ok_9_5 PASSED                                 [ 59%]
+tests/test_mod_09.py::test_ok_9_6 PASSED                                 [ 60%]
+tests/test_mod_09.py::test_ok_9_7 PASSED                                 [ 61%]
+tests/test_mod_10.py::test_ok_10_0 PASSED                                [ 61%]
+tests/test_mod_10.py::test_ok_10_1 PASSED                                [ 62%]
+tests/test_mod_10.py::test_ok_10_2 PASSED                                [ 63%]
+tests/test_mod_10.py::test_ok_10_3 PASSED                                [ 64%]
+tests/test_mod_10.py::test_ok_10_4 PASSED                                [ 64%]
+tests/test_mod_10.py::test_ok_10_5 PASSED                                [ 65%]
+tests/test_mod_10.py::test_ok_10_6 PASSED                                [ 66%]
+tests/test_mod_10.py::test_ok_10_7 PASSED                                [ 67%]
+tests/test_mod_11.py::test_ok_11_0 PASSED                                [ 67%]
+tests/test_mod_11.py::test_ok_11_1 PASSED                                [ 68%]
+tests/test_mod_11.py::test_ok_11_2 PASSED                                [ 69%]
+tests/test_mod_11.py::test_ok_11_3 PASSED                                [ 70%]
+tests/test_mod_11.py::test_ok_11_4 PASSED                                [ 70%]
+tests/test_mod_11.py::test_ok_11_5 PASSED                                [ 71%]
+tests/test_mod_11.py::test_ok_11_6 PASSED                                [ 72%]
+tests/test_mod_11.py::test_ok_11_7 PASSED                                [ 73%]
+tests/test_mod_12.py::test_ok_12_0 PASSED                                [ 74%]
+tests/test_mod_12.py::test_ok_12_1 PASSED                                [ 74%]
+tests/test_mod_12.py::test_ok_12_2 PASSED                                [ 75%]
+tests/test_mod_12.py::test_ok_12_3 PASSED                                [ 76%]
+tests/test_mod_12.py::test_ok_12_4 PASSED                                [ 77%]
+tests/test_mod_12.py::test_ok_12_5 PASSED                                [ 77%]
+tests/test_mod_12.py::test_ok_12_6 PASSED                                [ 78%]
+tests/test_mod_12.py::test_ok_12_7 PASSED                                [ 79%]
+tests/test_mod_13.py::test_ok_13_0 PASSED                                [ 80%]
+tests/test_mod_13.py::test_ok_13_1 PASSED                                [ 80%]
+tests/test_mod_13.py::test_ok_13_2 PASSED                                [ 81%]
+tests/test_mod_13.py::test_ok_13_3 PASSED                                [ 82%]
+tests/test_mod_13.py::test_ok_13_4 PASSED                                [ 83%]
+tests/test_mod_13.py::test_ok_13_5 PASSED                                [ 83%]
+tests/test_mod_13.py::test_ok_13_6 PASSED                                [ 84%]
+tests/test_mod_13.py::test_ok_13_7 PASSED                                [ 85%]
+tests/test_mod_14.py::test_ok_14_0 PASSED                                [ 86%]
+tests/test_mod_14.py::test_ok_14_1 PASSED                                [ 87%]
+tests/test_mod_14.py::test_ok_14_2 PASSED                                [ 87%]
+tests/test_mod_14.py::test_ok_14_3 PASSED                                [ 88%]
+tests/test_mod_14.py::test_ok_14_4 PASSED                                [ 89%]
+tests/test_mod_14.py::test_ok_14_5 PASSED                                [ 90%]
+tests/test_mod_14.py::test_ok_14_6 PASSED                                [ 90%]
+tests/test_mod_14.py::test_ok_14_7 PASSED                                [ 91%]
+tests/test_mod_15.py::test_ok_15_0 PASSED                                [ 92%]
+tests/test_mod_15.py::test_ok_15_1 PASSED                                [ 93%]
+tests/test_mod_15.py::test_ok_15_2 PASSED                                [ 93%]
+tests/test_mod_15.py::test_ok_15_3 PASSED                                [ 94%]
+tests/test_mod_15.py::test_ok_15_4 PASSED                                [ 95%]
+tests/test_mod_15.py::test_ok_15_5 PASSED                                [ 96%]
+tests/test_mod_15.py::test_ok_15_6 PASSED                                [ 96%]
+tests/test_mod_15.py::test_ok_15_7 PASSED                                [ 97%]
+tests/test_pipeline.py::test_summarise_average FAILED                    [ 98%]
+tests/test_pipeline.py::test_summarise_missing_key FAILED                [ 99%]
+tests/test_pipeline.py::test_summarise_empty FAILED                      [100%]
+
+=================================== FAILURES ===================================
+____________________________ test_summarise_average ____________________________
+
+    def test_summarise_average():
+>       assert summarise([{'value': 2}, {'value': 4}]) == 4
+E       AssertionError: assert 3.0 == 4
+E        +  where 3.0 = summarise([{'value': 2}, {'value': 4}])
+
+tests/test_pipeline.py:7: AssertionError
+__________________________ test_summarise_missing_key __________________________
+
+    def test_summarise_missing_key():
+>       assert summarise([{'value': 2}, {'v': 4}]) == 3
+
+tests/test_pipeline.py:10: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_pipeline.py:4: in summarise
+    return sum(r['value'] for r in rows) / len(rows)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x106fe5670>
+
+>   return sum(r['value'] for r in rows) / len(rows)
+E   KeyError: 'value'
+
+tests/test_pipeline.py:4: KeyError
+_____________________________ test_summarise_empty _____________________________
+
+    def test_summarise_empty():
+>       assert summarise([]) == 0
+
+tests/test_pipeline.py:13: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+rows = []
+
+    def summarise(rows):
+>       return sum(r['value'] for r in rows) / len(rows)
+E       ZeroDivisionError: division by zero
+
+tests/test_pipeline.py:4: ZeroDivisionError
+=========================== short test summary info ============================
+FAILED tests/test_pipeline.py::test_summarise_average - AssertionError: asser...
+FAILED tests/test_pipeline.py::test_summarise_missing_key - KeyError: 'value'
+FAILED tests/test_pipeline.py::test_summarise_empty - ZeroDivisionError: divi...
+======================== 3 failed, 128 passed in 0.09s =========================
