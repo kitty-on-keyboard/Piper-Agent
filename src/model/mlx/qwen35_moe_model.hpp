@@ -99,6 +99,45 @@ public:
 
     [[nodiscard]] const Qwen35MoeConfig& qwen_config() const noexcept { return cfg_; }
 
+    // The three blocks a forward pass is made of, public so tests/model/diag_main.cpp
+    // can time them individually against the real weights. Attribution has to run the
+    // SAME code the model runs; a copy of these bodies in the driver would drift, and
+    // the profile would then describe a forward pass nobody executes (S19.3).
+    mx::array forward_moe(int layer, const mx::array& x) const {
+        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".mlp.";
+        const mx::array gate_logits = weights_.linear(x, p + "gate");
+        auto [inds, scores] = lmp::model::mlxl::moe_topk(gate_logits, cfg_.num_experts_per_tok, cfg_.norm_topk_prob);
+        mx::array y = lmp::model::mlxl::switch_glu(
+            x, weights_, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj", p + "switch_mlp.down_proj", inds);
+        y = mx::sum(mx::multiply(y, mx::expand_dims(scores, -1)), -2);
+
+        const mx::array shared = weights_.linear(
+            lmp::model::mlxl::swiglu(
+                weights_.linear(x, p + "shared_expert.gate_proj"),
+                weights_.linear(x, p + "shared_expert.up_proj")),
+            p + "shared_expert.down_proj");
+        const mx::array shared_gate = mx::sigmoid(weights_.linear(x, p + "shared_expert_gate"));
+        return mx::add(y, mx::multiply(shared_gate, shared));
+    }
+
+    mx::array forward_linear_layer(int layer, const mx::array& x, int seq_len) {
+        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
+        mx::array h = rms_norm(x, p + "input_layernorm.weight");
+        mx::array attn_out = forward_gated_delta(p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len);
+        h = mx::add(x, attn_out);
+        mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
+        return mx::add(h, forward_moe(layer, mlp_in));
+    }
+
+    mx::array forward_full_attn_layer(int layer, const mx::array& x, int seq_len) {
+        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
+        mx::array h = rms_norm(x, p + "input_layernorm.weight");
+        mx::array attn_out = forward_self_attn(p + "self_attn.", h, kv_caches_[static_cast<std::size_t>(layer)], seq_len);
+        h = mx::add(x, attn_out);
+        mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
+        return mx::add(h, forward_moe(layer, mlp_in));
+    }
+
 private:
     std::string prefix_;
     Qwen35MoeConfig cfg_{};
@@ -175,41 +214,6 @@ private:
             return weights_.tied_logits(h, prefix_ + "embed_tokens");
         }
         return weights_.linear(h, "language_model.lm_head");
-    }
-
-    mx::array forward_moe(int layer, const mx::array& x) const {
-        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".mlp.";
-        const mx::array gate_logits = weights_.linear(x, p + "gate");
-        auto [inds, scores] = lmp::model::mlxl::moe_topk(gate_logits, cfg_.num_experts_per_tok, cfg_.norm_topk_prob);
-        mx::array y = lmp::model::mlxl::switch_glu(
-            x, weights_, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj", p + "switch_mlp.down_proj", inds);
-        y = mx::sum(mx::multiply(y, mx::expand_dims(scores, -1)), -2);
-
-        const mx::array shared = weights_.linear(
-            lmp::model::mlxl::swiglu(
-                weights_.linear(x, p + "shared_expert.gate_proj"),
-                weights_.linear(x, p + "shared_expert.up_proj")),
-            p + "shared_expert.down_proj");
-        const mx::array shared_gate = mx::sigmoid(weights_.linear(x, p + "shared_expert_gate"));
-        return mx::add(y, mx::multiply(shared_gate, shared));
-    }
-
-    mx::array forward_linear_layer(int layer, const mx::array& x, int seq_len) {
-        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
-        mx::array h = rms_norm(x, p + "input_layernorm.weight");
-        mx::array attn_out = forward_gated_delta(p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len);
-        h = mx::add(x, attn_out);
-        mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        return mx::add(h, forward_moe(layer, mlp_in));
-    }
-
-    mx::array forward_full_attn_layer(int layer, const mx::array& x, int seq_len) {
-        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
-        mx::array h = rms_norm(x, p + "input_layernorm.weight");
-        mx::array attn_out = forward_self_attn(p + "self_attn.", h, kv_caches_[static_cast<std::size_t>(layer)], seq_len);
-        h = mx::add(x, attn_out);
-        mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        return mx::add(h, forward_moe(layer, mlp_in));
     }
 
     mx::array forward_gated_delta(const std::string& p, const mx::array& inputs, SsmCache& cache, int /*seq_len*/) {

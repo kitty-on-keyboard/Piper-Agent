@@ -172,3 +172,56 @@ TEST(the_mask_and_the_walk_agree) {
     }
     CHECK(g.phase() == TurnPhase::Done);
 }
+
+TEST(the_bulk_mask_and_the_predicate_agree_over_the_whole_vocabulary) {
+    // mask() is what the sampler consults; permitted() is what the grammar means. This
+    // is the test that keeps them the same function. It compares them for EVERY id at
+    // EVERY state of a real tool call -- including inside <tool_call>, where mask()
+    // stops being a cached denylist and becomes parsephony's TokenMaskT.
+    //
+    // The fast path is worth roughly 22.8 ms/token, which is more than enough motive to
+    // let it drift; nothing but this loop would notice.
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    const auto vocab = static_cast<TokenId>(tok().vocab_size());
+
+    std::vector<TokenId> walk;
+    walk.push_back(tok().specials().think_close);
+    walk.push_back(tok().specials().tool_call_open);
+    for (TokenId id : tok().encode_content(
+             "<function=read_file>\n<parameter=path>\na.txt\n</parameter>\n</function>\n")) {
+        walk.push_back(id);
+    }
+    walk.push_back(tok().specials().tool_call_close);
+
+    std::size_t disagreements = 0;
+    std::string first;
+    for (std::size_t step = 0; step <= walk.size(); ++step) {
+        const TokenMask& m = g.mask();
+        REQUIRE(m.size() == tok().vocab_size());
+        for (TokenId id = 0; id < vocab; ++id) {
+            if (m.allows(id) == g.permitted(id)) {
+                continue;
+            }
+            ++disagreements;
+            if (first.empty()) {
+                first = "step " + std::to_string(step) + " phase " +
+                        std::to_string(static_cast<int>(g.phase())) + " id " +
+                        std::to_string(id) + " mask=" + (m.allows(id) ? "1" : "0") +
+                        " permitted=" + (g.permitted(id) ? "1" : "0") + " bytes='" +
+                        std::string(tok().token_bytes(id)) + "'";
+            }
+        }
+        ++lmp::test::reg().checks;
+        if (step < walk.size()) {
+            REQUIRE(g.advance(walk[step]) != Advance::Rejected);
+        }
+    }
+    if (disagreements != 0) {
+        lmp::test::record_failure(__FILE__, __LINE__,
+                                  std::to_string(disagreements) +
+                                      " mask/predicate disagreements; first: " + first);
+    }
+    CHECK(g.phase() == TurnPhase::Done);
+}

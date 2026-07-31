@@ -36,12 +36,15 @@
 //
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include <parsephony/mask.hpp>
 #include <parsephony/toolcall.hpp>
 
 #include "src/model/qwen_tokenizer.hpp"
+#include "src/model/token_mask.hpp"
 
 namespace lmp::model {
 
@@ -58,21 +61,30 @@ enum class Advance : std::uint8_t {
     Rejected,  // not legal here (reachable only when generation is unmasked)
 };
 
-class TurnGrammar {
+class TurnGrammar final : public MaskSource {
   public:
     // `tools` must outlive the grammar (ToolCallGuard keeps a reference). An empty
     // registry means a text-only turn: <tool_call> itself is rejected.
     TurnGrammar(const QwenTokenizer& tok, const std::vector<parsephony::ToolSpec>& tools);
+    ~TurnGrammar() final;
 
     void reset();
 
     [[nodiscard]] Advance advance(TokenId id);
 
-    // True if `id` may follow the current state -- the sampler's mask predicate. Probes
-    // on a copy for structural ids and via ToolCallGuard's own probe path inside a
-    // call; parsephony's TokenMaskT is wired in the backend for the bulk-vocabulary
-    // case (S5.6).
+    // True if `id` may follow the current state. This is the DEFINITION of the mask --
+    // it is advance() minus the mutation -- and it is what mask() is tested against
+    // (test_grammar_realmodel). It is not what the sampler calls: at one call per id it
+    // costs 22.8 ms/token.
     [[nodiscard]] bool permitted(TokenId id) const;
+
+    // The same answer for the whole vocabulary at once, which is what the sampler
+    // consults (S5.6). Outside a tool call the legal set is "everything except a
+    // handful of structural ids", so it is a cached bitset per phase with no
+    // vocabulary walk at all. Inside one it is parsephony's TokenMaskT over
+    // ToolCallGuard: masks cached by state signature, candidates bucketed by first
+    // byte, string-safe tokens pre-classified.
+    [[nodiscard]] const TokenMask& mask() const final;
 
     [[nodiscard]] TurnPhase phase() const noexcept { return phase_; }
     [[nodiscard]] const std::vector<TokenId>& think_ids() const noexcept { return think_; }
@@ -91,6 +103,9 @@ class TurnGrammar {
     [[nodiscard]] Advance advance_text(TokenId id);
     [[nodiscard]] Advance advance_tool_call(TokenId id);
     [[nodiscard]] bool is_structural(TokenId id) const noexcept;
+    [[nodiscard]] std::vector<TokenId> structural_ids() const;
+    void build_structural_mask() const;
+    void build_tool_call_mask() const;
 
     const QwenTokenizer& tok_;
     const std::vector<parsephony::ToolSpec>& tools_;
@@ -99,6 +114,14 @@ class TurnGrammar {
     std::vector<TokenId> think_;
     std::vector<TokenId> text_;
     bool saw_tool_call_ = false;
+
+    // --- mask caches ---------------------------------------------------------
+    // Outside a call there are only a few distinct states (phase x saw_tool_call_),
+    // and each one's answer is the same bitset every time it recurs. The engine and
+    // its vocabulary copy are built on first entry into a tool call and not before:
+    // a text-only turn never pays for them.
+    struct MaskCache;
+    std::unique_ptr<MaskCache> cache_;
 };
 
 } // namespace lmp::model
