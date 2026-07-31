@@ -1,0 +1,140 @@
+{
+  "_comment": [
+    "The protocol, and the SINGLE SOURCE OF TRUTH for it (spec S4.4).",
+    "TypeScript interfaces and C++ parse/serialize code are BOTH generated from",
+    "this file by scripts/gen_protocol.py; the protocol ratchet regenerates and",
+    "diffs, so drift fails the build. A field that exists on one side only is a",
+    "build error, not a runtime mystery.",
+    "",
+    "NAMESPACE. `lmp/*`, private, and honest about it. v1 called itself MCP,",
+    "implemented none of the handshake, and the only occurrence of `initialize`",
+    "in its transport was a parser warm-up string literal. This is not MCP and",
+    "does not claim to be (S4.4)."
+  ],
+  "namespace": "lmp",
+  "version": "1.0.0",
+
+  "enums": {
+    "Mode": ["plan", "debug", "agent"],
+    "TurnOutcome": [
+      "tool_call_executed", "tool_call_refused", "text_only",
+      "length_capped", "cancelled", "backend_error"
+    ],
+    "ToolStatus": ["ok", "tool_error", "denied", "timeout", "refused", "cancelled"]
+  },
+
+  "structs": {
+    "SamplingSettings": [
+      { "name": "temperature", "type": "double" },
+      { "name": "top_p", "type": "double" },
+      { "name": "top_k", "type": "int" },
+      { "name": "min_p", "type": "double" },
+      { "name": "repetition_penalty", "type": "double" },
+      { "name": "seed", "type": "int" }
+    ],
+    "RunSettings": [
+      { "name": "model_dir", "type": "string" },
+      { "name": "workspace_root", "type": "string" },
+      { "name": "mode", "type": "Mode" },
+      { "name": "sampling", "type": "SamplingSettings" },
+      { "name": "max_iterations", "type": "int" },
+      { "name": "wall_clock_seconds", "type": "int" },
+      { "name": "sandbox_tier", "type": "int" },
+      { "name": "require_approval", "type": "bool" },
+      { "name": "context_budget_tokens", "type": "int" }
+    ],
+    "CapabilityChips": [
+      { "name": "writes_outside_workspace", "type": "bool" },
+      { "name": "reads_outside_workspace", "type": "bool" },
+      { "name": "destroys_data", "type": "bool" },
+      { "name": "rewrites_vcs_history", "type": "bool" },
+      { "name": "network_access", "type": "bool" },
+      { "name": "spawns_unbounded_process", "type": "bool" },
+      { "name": "signals_foreign_process", "type": "bool" },
+      { "name": "escalates_privileges", "type": "bool" },
+      { "name": "parse_status", "type": "string" }
+    ],
+    "PerfSample": [
+      { "name": "ttft_ms", "type": "double" },
+      { "name": "prefill_tok_per_s", "type": "double" },
+      { "name": "decode_tok_per_s", "type": "double" },
+      { "name": "context_used", "type": "int" },
+      { "name": "context_max", "type": "int" },
+      { "name": "tokens_generated", "type": "int" }
+    ]
+  },
+
+  "requests": {
+    "lmp/start": {
+      "params": [
+        { "name": "mission", "type": "string" },
+        { "name": "settings", "type": "RunSettings" }
+      ],
+      "result": [{ "name": "run_id", "type": "string" }]
+    },
+    "lmp/cancel": {
+      "_comment": "MUST be deliverable while the model is generating (S4.3). The reader thread parses the method field of a COMPLETE message and sets the cancel token; no substring matching on transport bytes, ever.",
+      "params": [{ "name": "run_id", "type": "string" }],
+      "result": [{ "name": "accepted", "type": "bool" }]
+    },
+    "lmp/approve": {
+      "params": [
+        { "name": "request_id", "type": "string" },
+        { "name": "approved", "type": "bool" }
+      ],
+      "result": [{ "name": "accepted", "type": "bool" }]
+    },
+    "lmp/shutdown": { "params": [], "result": [{ "name": "ok", "type": "bool" }] }
+  },
+
+  "notifications": {
+    "lmp/token": [
+      { "name": "run_id", "type": "string" },
+      { "name": "text", "type": "string" },
+      { "name": "channel", "type": "string" }
+    ],
+    "lmp/turn": [
+      { "name": "run_id", "type": "string" },
+      { "name": "outcome", "type": "TurnOutcome" },
+      { "name": "tool_name", "type": "string" },
+      { "name": "tool_args", "type": "string" },
+      { "name": "tool_status", "type": "ToolStatus" },
+      { "name": "summary", "type": "string" },
+      { "name": "duration_ms", "type": "double" }
+    ],
+    "lmp/checklist": [
+      { "name": "run_id", "type": "string" },
+      { "name": "items_json", "type": "string" }
+    ],
+    "lmp/verification": [
+      { "name": "run_id", "type": "string" },
+      { "name": "contract", "type": "string" },
+      { "name": "passed", "type": "bool" },
+      { "name": "falsifiable", "type": "bool" },
+      { "name": "detail", "type": "string" }
+    ],
+    "lmp/approval_request": [
+      { "name": "request_id", "type": "string" },
+      { "name": "run_id", "type": "string" },
+      { "name": "tool_name", "type": "string" },
+      { "name": "preview", "type": "string" },
+      { "name": "risk", "type": "double" },
+      { "name": "capabilities", "type": "CapabilityChips" }
+    ],
+    "lmp/edit": [
+      { "name": "run_id", "type": "string" },
+      { "name": "path", "type": "string" },
+      { "name": "new_content", "type": "string" }
+    ],
+    "lmp/perf": [
+      { "name": "run_id", "type": "string" },
+      { "name": "sample", "type": "PerfSample" }
+    ],
+    "lmp/run_end": [
+      { "name": "run_id", "type": "string" },
+      { "name": "termination_reason", "type": "string" },
+      { "name": "iterations", "type": "int" },
+      { "name": "completed", "type": "bool" }
+    ]
+  }
+}

@@ -1,0 +1,298 @@
+   Compiling shardpipe v0.1.0 (/work/proj)
+     Running `/Users/dev/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name shardpipe --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=3cc5c69b8e424cea -C extra-filename=-8350431b70933fb0 --out-dir /work/proj/target/debug/deps -C incremental=/work/proj/target/debug/incremental -L dependency=/work/proj/target/debug/deps`
+error[E0425]: cannot find value `missing_arg` in this scope
+ --> src/shard.rs:6:13
+  |
+6 |     ids.len(missing_arg)
+  |             ^^^^^^^^^^^ not found in this scope
+
+error[E0308]: mismatched types
+ --> src/shard.rs:2:25
+  |
+2 |     let first: String = ids[0];
+  |                ------   ^^^^^^ expected `String`, found `i32`
+  |                |
+  |                expected due to this
+  |
+help: try using a conversion method
+  |
+2 |     let first: String = ids[0].to_string();
+  |                               ++++++++++++
+
+error[E0061]: this method takes 0 arguments but 1 argument was supplied
+ --> src/shard.rs:6:9
+  |
+6 |     ids.len(missing_arg)
+  |         ^^^ ----------- unexpected argument
+  |
+note: method defined here
+ --> /rustc/31fca3adb283cc9dfd56b49cdee9a96eb9c96ffd/library/alloc/src/vec/mod.rs:3022:17
+help: remove the extra argument
+  |
+6 -     ids.len(missing_arg)
+6 +     ids.len()
+  |
+
+warning: variable does not need to be mutable
+ --> src/m00.rs:5:9
+  |
+5 |     let mut never_mutated = 1;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+  |
+  = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `unused_local`
+ --> src/m00.rs:4:9
+  |
+4 |     let unused_local = 1;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+ --> src/m01.rs:5:9
+  |
+5 |     let mut never_mutated = 2;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m01.rs:4:9
+  |
+4 |     let unused_local = 2;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m02.rs:5:9
+  |
+5 |     let mut never_mutated = 3;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m02.rs:4:9
+  |
+4 |     let unused_local = 3;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m03.rs:5:9
+  |
+5 |     let mut never_mutated = 4;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m03.rs:4:9
+  |
+4 |     let unused_local = 4;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m04.rs:5:9
+  |
+5 |     let mut never_mutated = 5;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m04.rs:4:9
+  |
+4 |     let unused_local = 5;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m05.rs:5:9
+  |
+5 |     let mut never_mutated = 6;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m05.rs:4:9
+  |
+4 |     let unused_local = 6;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m06.rs:5:9
+  |
+5 |     let mut never_mutated = 7;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m06.rs:4:9
+  |
+4 |     let unused_local = 7;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m07.rs:5:9
+  |
+5 |     let mut never_mutated = 8;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m07.rs:4:9
+  |
+4 |     let unused_local = 8;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m08.rs:5:9
+  |
+5 |     let mut never_mutated = 9;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m08.rs:4:9
+  |
+4 |     let unused_local = 9;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m09.rs:5:9
+  |
+5 |     let mut never_mutated = 10;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m09.rs:4:9
+  |
+4 |     let unused_local = 10;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m10.rs:5:9
+  |
+5 |     let mut never_mutated = 11;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m10.rs:4:9
+  |
+4 |     let unused_local = 11;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m11.rs:5:9
+  |
+5 |     let mut never_mutated = 12;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m11.rs:4:9
+  |
+4 |     let unused_local = 12;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m12.rs:5:9
+  |
+5 |     let mut never_mutated = 13;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m12.rs:4:9
+  |
+4 |     let unused_local = 13;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m13.rs:5:9
+  |
+5 |     let mut never_mutated = 14;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m13.rs:4:9
+  |
+4 |     let unused_local = 14;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m14.rs:5:9
+  |
+5 |     let mut never_mutated = 15;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m14.rs:4:9
+  |
+4 |     let unused_local = 15;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m15.rs:5:9
+  |
+5 |     let mut never_mutated = 16;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m15.rs:4:9
+  |
+4 |     let unused_local = 16;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m16.rs:5:9
+  |
+5 |     let mut never_mutated = 17;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m16.rs:4:9
+  |
+4 |     let unused_local = 17;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+warning: variable does not need to be mutable
+ --> src/m17.rs:5:9
+  |
+5 |     let mut never_mutated = 18;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unused_local`
+ --> src/m17.rs:4:9
+  |
+4 |     let unused_local = 18;
+  |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused_local`
+
+Some errors have detailed explanations: E0061, E0308, E0425.
+For more information about an error, try `rustc --explain E0061`.
+warning: `shardpipe` (lib) generated 36 warnings
+error: could not compile `shardpipe` (lib) due to 3 previous errors; 36 warnings emitted
+
+Caused by:
+  process didn't exit successfully: `/Users/dev/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name shardpipe --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=3cc5c69b8e424cea -C extra-filename=-8350431b70933fb0 --out-dir /work/proj/target/debug/deps -C incremental=/work/proj/target/debug/incremental -L dependency=/work/proj/target/debug/deps` (exit status: 1)

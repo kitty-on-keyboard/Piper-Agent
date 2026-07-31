@@ -1,0 +1,134 @@
+{
+  "_comment": [
+    "Configuration for scripts/run_ratchets.py (spec S15.3-S15.7).",
+    "",
+    "Every gate declares whether it is LIVE. A live gate must find at least",
+    "min_subjects things to inspect; a dormant gate must find exactly zero. That",
+    "second half is the important one: it means the day phase 4 lands a tool",
+    "registry, the tool-honesty gate stops being dormant BY FAILING, and someone",
+    "has to flip live:true deliberately. A dormant gate that silently reports",
+    "green is v1's `ctest -E realmodel` -- a selector that matched nothing while",
+    "printing a number that looked fine.",
+    "",
+    "Exemptions are by path, and every one carries a reason. There is no",
+    "wildcard-with-no-explanation entry, and adding one should be as awkward as",
+    "it looks."
+  ],
+  "limits": {
+    "max_file_lines": 800,
+    "max_function_lines": 80,
+    "max_nesting_depth": 3
+  },
+  "source_roots": [
+    "src",
+    "tests",
+    "scripts",
+    "cmake"
+  ],
+  "gates": {
+    "size": {
+      "live": true,
+      "min_subjects": 15
+    },
+    "layers": {
+      "live": true,
+      "min_subjects": 5
+    },
+    "dead_code": {
+      "live": true,
+      "min_subjects": 20
+    },
+    "protocol": {
+      "live": true,
+      "min_subjects": 1
+    },
+    "tool_honesty": {
+      "live": true,
+      "min_subjects": 5
+    },
+    "prose_correctives": {
+      "live": true,
+      "min_subjects": 3
+    }
+  },
+  "layers": {
+    "src/platform": 0,
+    "src/model": 1,
+    "src/tools": 2,
+    "src/context": 3,
+    "src/loop": 4,
+    "src/surface": 5
+  },
+  "size_exempt": [
+    {
+      "path": "bakeoff/",
+      "reason": "Ported verbatim from v1 (S18). These are the falsifiers; reformatting evidence to satisfy a line limit makes it no longer the thing that was measured. bakeoff/log_triage/generate_corpus.py is 1125 lines and stays that way."
+    },
+    {
+      "path": "third_party/",
+      "reason": "Vendored simdjson 4.6.1, upstream source."
+    },
+    {
+      "path": "src/security/blast_radius.hpp",
+      "reason": "The consolidated blast-radius engine, ported from v1 unmodified. It is graded by bakeoff/blast_radius (0 wmiss corpus, 15 wmiss holdout, re-measured 2026-07-30 in this repo) and the e00_merged scoreboard includes THIS header -- refactoring it to satisfy the line limits would detach the measured number from the shipped code. If it is ever rewritten, the rewrite must be re-scored first."
+    },
+    {
+      "path": "src/tools/graft_engine.hpp",
+      "reason": "Cookoff-merged edit engine ported from v1 unmodified; under the file limit today, exempted so a future verbatim upstream fix cannot be blocked by a formatting gate. Same measured-evidence argument as blast_radius.hpp."
+    }
+  ],
+  "dead_code_exempt": [
+    {
+      "symbol": "SystemClock",
+      "reason": "The production Clock. Referenced only from main() in the sidecar, which does not exist until phase 4; tests use ManualClock. Remove this entry when the sidecar lands."
+    },
+    {
+      "symbol": "base64_decode",
+      "reason": "The replay side of the byte-faithful trace pair (S2.1.4). Its only non-test caller is ReplayBackend, phase 2. Kept because shipping an encoder with no decoder is how a trace stops being replayable."
+    },
+    {
+      "symbol": "StartParams",
+      "reason": "Request payload types are the WIRE CONTRACT, consumed by the TypeScript client (extension/src/client.ts) and regenerated + diffed by the protocol gate. The sidecar reads request fields by name off the framed message rather than deserializing a struct, so the C++ mirror is unreferenced by construction. Deleting it would break the one-schema-two-sides property S4.4 exists for."
+    },
+    {
+      "symbol": "StartResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "CancelParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "CancelResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ApproveParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ApproveResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ShutdownParams",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ShutdownResult",
+      "reason": "See StartParams."
+    },
+    {
+      "symbol": "ChecklistNotification",
+      "reason": "Emitted once the model's checklist is parsed from its plan turn (the ContextStore already carries it); the TS side renders it today. Remove this entry when the sidecar emits it."
+    },
+    {
+      "symbol": "EditNotification",
+      "reason": "S12.4: workspace edits are applied via the extension's edit API so undo, dirty buffers and the diff UI work. The sidecar writes files directly today; this is the type that carries the handover. Remove this entry when the edit path moves through the extension."
+    },
+    {
+      "symbol": "ApprovalRequestNotification",
+      "reason": "Emitted when the HITL router escalates AND a UI approver is attached. The sidecar currently passes a null approver (deny-by-default when nobody is there to ask), so it is unreferenced until the extension wires the approver back."
+    }
+  ]
+}

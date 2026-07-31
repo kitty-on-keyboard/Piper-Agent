@@ -1,0 +1,25 @@
+main.cpp:3:9: error: cannot initialize a variable of type 'int' with an lvalue of type 'const char[5]'
+    3 |     int port = "8080";
+      |         ^      ~~~~~~
+main.cpp:4:17: error: no viable conversion from 'int' to 'std::string' (aka 'basic_string<char>')
+    4 |     std::string host = 42;
+      |                 ^      ~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string:1001:71: note: candidate constructor not viable: no known conversion from 'int' to 'const string &' for 1st argument
+ 1001 |   _LIBCPP_CONSTEXPR_SINCE_CXX20 _LIBCPP_STRING_INTERNAL_MEMORY_ACCESS basic_string(const basic_string& __str)
+      |                                                                       ^            ~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string:1021:55: note: candidate constructor not viable: no known conversion from 'int' to 'string &&' for 1st argument
+ 1021 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 basic_string(basic_string&& __str)
+      |                                                       ^            ~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string:1061:55: note: candidate constructor template not viable: no known conversion from 'int' to 'const char * _Nonnull' for 1st argument
+ 1061 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 basic_string(const _CharT* _LIBCPP_DIAGNOSE_NULLPTR __s) {
+      |                                                       ^            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string:1194:55: note: candidate constructor not viable: no known conversion from 'int' to 'initializer_list<char>' for 1st argument
+ 1194 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 basic_string(initializer_list<_CharT> __il) {
+      |                                                       ^            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string:986:64: note: explicit constructor is not a candidate
+  986 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 explicit basic_string(const allocator_type& __a)
+      |                                                                ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/string:1153:64: note: explicit constructor is not a candidate
+ 1153 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 explicit basic_string(const _Tp& __t) {
+      |                                                                ^
+2 errors generated.

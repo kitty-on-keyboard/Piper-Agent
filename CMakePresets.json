@@ -1,0 +1,58 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Development (assertions on)",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "LMP_BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASan + UBSan (S15.8)",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LMP_SANITIZE": "ON"
+      }
+    },
+    {
+      "name": "bakeoff",
+      "displayName": "Every per-entrant scoreboard",
+      "binaryDir": "${sourceDir}/build-bakeoff",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "LMP_BUILD_SCOREBOARDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "bakeoff", "configurePreset": "bakeoff" }
+  ],
+  "testPresets": [
+    {
+      "name": "gate",
+      "configurePreset": "dev",
+      "filter": { "include": { "label": "gate" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "gate-asan",
+      "configurePreset": "asan",
+      "filter": { "include": { "label": "gate" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "realmodel",
+      "configurePreset": "dev",
+      "filter": { "include": { "label": "realmodel" } },
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    }
+  ]
+}
