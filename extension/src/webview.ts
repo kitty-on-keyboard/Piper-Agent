@@ -726,14 +726,35 @@ window.addEventListener('message', (e) => {
     row.className = 'row';
     const yes = document.createElement('button'); yes.className = 'primary'; yes.textContent = 'Approve';
     const no = document.createElement('button'); no.className = 'ghost'; no.textContent = 'Deny';
-    const answer = (ok) => {
-      api.postMessage({ kind: 'approve', id: payload.request_id, approved: ok });
+    const answer = (ok, remember) => {
+      api.postMessage({ kind: 'approve', id: payload.request_id, approved: ok, remember });
       card.remove();
     };
     yes.onclick = () => answer(true);
     no.onclick = () => answer(false);
     row.append(yes, no);
+
+    // "Always allow" is offered only where it would actually do something. An
+    // irreversible call escalates whatever is on the allowlist, so offering to remember
+    // it would be a button that quietly does nothing -- worse than no button, because
+    // the user would believe they had stopped being asked.
+    if (payload.command && !payload.irreversible) {
+      const always = document.createElement('button');
+      always.className = 'ghost';
+      always.textContent = 'Always allow';
+      always.title = 'Remember this exact command: ' + payload.command;
+      always.onclick = () => answer(true, payload.command);
+      row.append(always);
+    }
     card.append(h, caps, pre, row);
+    if (payload.irreversible) {
+      const note = document.createElement('div');
+      note.className = 'warnbox';
+      note.textContent =
+        'This cannot be undone, so it always asks — no allowlist entry and no ' +
+        '"run without asking" setting will skip this card.';
+      card.append(note);
+    }
     add(card, '');
     busy(true, 'Waiting for you');
   }

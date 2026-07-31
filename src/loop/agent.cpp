@@ -59,6 +59,46 @@ double risk_score(const tools::RiskHint& hint) {
     return score > 1.0 ? 1.0 : score;
 }
 
+bool is_irreversible(const tools::RiskHint& hint) noexcept {
+    const auto& c = hint.caps;
+    return c.destroys_data || c.writes_outside_workspace || c.escalates_privileges ||
+           c.rewrites_vcs_history;
+}
+
+bool is_allowlisted(const std::string& command, const std::vector<std::string>& allowed) {
+    const auto trim = [](std::string s) {
+        const auto space = [](unsigned char ch) { return std::isspace(ch) == 0; };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), space));
+        s.erase(std::find_if(s.rbegin(), s.rend(), space).base(), s.end());
+        return s;
+    };
+    const std::string cmd = trim(command);
+    if (cmd.empty()) {
+        return false;
+    }
+    // Anything that can chain, substitute or redirect is out of scope for prefix
+    // matching. `pytest` on the list must never authorise `pytest; rm -rf ~`.
+    if (cmd.find_first_of(";|&`<>") != std::string::npos ||
+        cmd.find("$(") != std::string::npos) {
+        return false;
+    }
+    for (const std::string& raw : allowed) {
+        const std::string entry = trim(raw);
+        if (entry.empty()) {
+            continue;
+        }
+        if (cmd == entry) {
+            return true;
+        }
+        // Followed by a space, so `git st` never matches an entry of `git s`.
+        if (cmd.size() > entry.size() && cmd.compare(0, entry.size(), entry) == 0 &&
+            cmd[entry.size()] == ' ') {
+            return true;
+        }
+    }
+    return false;
+}
+
 Approval route_approval(const tools::RiskHint& hint, const HitlThresholds& t) {
     const double score = risk_score(hint);
     if (score >= t.reject_above_risk) {
@@ -353,14 +393,27 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // asked about because of what it definitely does, to a named path. There is no risk
     // score here and there should not be one -- the operator asked to see writes, so
     // every write is shown.
-    if (decl != nullptr && decl->mutates_workspace && !config_.auto_approve_writes) {
+    // A tool DECLARED irreversible always asks, exactly as an irreversible command does,
+    // and for the same reason -- but it has to be asked here, because a tool call has no
+    // command string for the blast-radius classifier to read. `delete_file` destroys data
+    // with no command in sight, so the entire risk-and-approval apparatus was watching
+    // `shell` while a run wiped a workspace through a tool it never scored.
+    const bool irreversible_tool = decl != nullptr && decl->irreversible;
+    if (decl != nullptr && decl->mutates_workspace &&
+        (!config_.auto_approve_writes || irreversible_tool)) {
+        tools::RiskHint hint;
+        // Declared, not inferred, and reported to the card as the fact it is.
+        hint.caps.destroys_data = irreversible_tool;
+        hint.status = blast_radius::ParseStatus::Parsed;
         const bool allowed =
-            approver_ && approver_(name, preview_of(name, params), tools::RiskHint{});
+            approver_ && approver_(name, "", preview_of(name, params), hint);
         if (!allowed) {
-            emit("tool_denied", {{"tool", name}, {"why", "write not approved"}});
+            emit("tool_denied", {{"tool", name},
+                                 {"why", irreversible_tool ? "irreversible, not approved"
+                                                           : "write not approved"}});
             return tools::ToolResult::refused(
-                approver_ ? "write denied by the operator"
-                          : "writes require approval and no approver is attached");
+                approver_ ? "denied by the operator"
+                          : "this call needs a human decision and no approver is attached");
         }
     }
 
@@ -370,14 +423,42 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         const tools::RiskHint hint =
             !cmd.empty() ? tools::classify_command(cmd, "", "") : tools::RiskHint{};
         Approval route = route_approval(hint, config_.hitl);
-        // With auto-exec off, the risk score stops deciding whether to ask -- it only
-        // decides whether to refuse outright. Everything survivable becomes a card.
-        if (!config_.auto_approve_exec && route == Approval::AutoApprove) {
+
+        // Three checks, and the ORDER is the design.
+        //
+        //   1. The allowlist can only ever loosen, and only for ordinary commands.
+        //   2. auto_approve_exec off can only ever tighten.
+        //   3. Irreversibility overrides both, in the tightening direction, always.
+        //
+        // Written as three separate steps rather than one condition because each is a
+        // different kind of claim -- "the operator said yes to this before", "the
+        // operator wants to see everything", "this cannot be undone" -- and collapsing
+        // them into one boolean is how the last one got lost.
+        const bool allowlisted = is_allowlisted(cmd, config_.allowed_commands);
+        if (allowlisted && route == Approval::Escalate) {
+            route = Approval::AutoApprove;
+        }
+        if (!config_.auto_approve_exec && route == Approval::AutoApprove && !allowlisted) {
             route = Approval::Escalate;
         }
+        if (is_irreversible(hint) && route == Approval::AutoApprove) {
+            emit("irreversible", {{"tool", name},
+                                  {"risk", std::to_string(risk_score(hint))},
+                                  {"allowlisted", allowlisted ? "1" : "0"}});
+            route = Approval::Escalate;
+        }
+
+        // An escalation with nobody to escalate TO is a denial, not a pass. This is the
+        // unattended path: an eval, a script, a dead editor. Deny-by-default (S7.2).
+        if (route == Approval::Escalate && !approver_) {
+            emit("tool_denied", {{"tool", name}, {"why", "escalation with no approver"}});
+            return tools::ToolResult::refused(
+                "this call needs a human decision and no approver is attached");
+        }
+
         bool allowed = route == Approval::AutoApprove;
         if (route == Approval::Escalate && approver_) {
-            allowed = approver_(name, preview_of(name, params), hint);
+            allowed = approver_(name, cmd, preview_of(name, params), hint);
         }
         if (!allowed) {
             emit("tool_denied",
@@ -479,7 +560,7 @@ std::size_t Agent::take_steering() {
         // A run that was drifting into narration has just been given something new to
         // act on. Holding the old count against it would end the run on the strength of
         // turns that happened before anyone spoke to it.
-        consecutive_text_only_ = 0;
+        consecutive_no_progress_ = 0;
     }
     return messages.size();
 }
@@ -561,6 +642,25 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         rec.observation = turn.tool_result.summary;
         rec.observation_is_error = !turn.tool_result.ok();
         rec.last_event_seq = log_.events_written();
+
+        // A turn that hit the token cap mid-thought leaves NOTHING behind: reasoning is
+        // not carried forward (S5.7), there is no answer body and no call ran. The
+        // record would be empty, the context would be unchanged, and the next turn would
+        // re-render a byte-identical prompt -- which at a fixed seed produces a
+        // byte-identical continuation. A deterministic infinite loop at ~50 s a turn.
+        //
+        // Observed: twelve consecutive turns, prompt `tokens=2044 messages=11` every
+        // time, generation `tokens=4096` every time, until the wall clock killed it.
+        //
+        // So the truncation itself becomes the observation. It is an observed fact about
+        // this run, which is exactly what T2 is for, and it perturbs the prompt enough
+        // that the next attempt is a different draw rather than the same one.
+        if (turn.outcome == Outcome::LengthCapped) {
+            rec.observation =
+                "(cut off at the generation cap before any tool call was made -- nothing "
+                "ran. Reason in fewer tokens, or take a smaller first step.)";
+            rec.observation_is_error = true;
+        }
         ctx_.add_turn(std::move(rec));
 
         if (turn.outcome == Outcome::ToolCallExecuted) {
@@ -630,13 +730,20 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // checklist was never empty, so the old guard stopped firing and a run that fell
         // into narration spun out 20 text-only turns until the wall clock cancelled it.
         // Ending on a plan is not more honest than ending without one.
-        consecutive_text_only_ = turn.outcome == Outcome::TextOnly
-                                     ? consecutive_text_only_ + 1
-                                     : 0;
+        // A turn that executed nothing made no move, and WHY it executed nothing does not
+        // change that. This used to count only TextOnly, so a run capped at the token
+        // limit every turn was never seen as stalled: LengthCapped is not TextOnly, the
+        // counter stayed at zero, and the only thing that could end the run was the
+        // budget. Twelve turns and 450 seconds of a fixed 600-second wall clock went
+        // that way before anything noticed.
+        const bool made_no_move = turn.outcome == Outcome::TextOnly ||
+                                  turn.outcome == Outcome::LengthCapped;
+        consecutive_no_progress_ = made_no_move ? consecutive_no_progress_ + 1 : 0;
+
         const bool stalled_without_plan = turn.outcome == Outcome::TextOnly &&
                                           report.iterations > 1 &&
                                           ctx_.checklist().empty();
-        const bool stalled_narrating = consecutive_text_only_ >= kMaxConsecutiveTextOnly;
+        const bool stalled_narrating = consecutive_no_progress_ >= kMaxConsecutiveNoProgress;
         if (stalled_without_plan || stalled_narrating) {
             // Last look at the inbox before giving up. A human watching a run drift into
             // narration is exactly the human who types "keep going" or "no, try the other
@@ -649,8 +756,13 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             if (rescued > 0) {
                 continue;
             }
+            // Named for what actually happened: "it narrated" and "it thought until
+            // the token cap" are different failures and want different responses.
             report.termination_reason =
-                stalled_without_plan ? "text_only_no_plan" : "text_only_no_progress";
+                stalled_without_plan
+                    ? "text_only_no_plan"
+                    : (turn.outcome == Outcome::LengthCapped ? "length_capped_no_progress"
+                                                             : "text_only_no_progress");
             break;
         }
     }

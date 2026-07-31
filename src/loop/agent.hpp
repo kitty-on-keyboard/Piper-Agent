@@ -41,8 +41,38 @@ struct HitlThresholds {
 [[nodiscard]] Approval route_approval(const tools::RiskHint& hint,
                                       const HitlThresholds& thresholds);
 
+// Capabilities you cannot take back: destroying data, writing outside the workspace,
+// escalating privileges, rewriting history. These ALWAYS escalate -- above the risk
+// score and above the allowlist.
+//
+// The score cannot express this and should not be asked to. `rm -rf` carries exactly one
+// capability, so it scores 0.30 against a 0.35 auto-approve threshold and never raised a
+// card at all: the agent was told to delete every file in a workspace and did, on a run
+// configured to deny every approval, because no approval was ever requested. Nudging the
+// weight to 0.36 fixes that one command until some other combination lands under the bar.
+//
+// Irreversibility is a PROPERTY, not a quantity. Everything else stays scored.
+[[nodiscard]] bool is_irreversible(const tools::RiskHint& hint) noexcept;
+
+// Whether the operator has already said yes to this exact command.
+//
+// Matches on equality, or on `entry` followed by a space -- and NEVER on a command
+// carrying shell chaining (`;` `&&` `||` `|` backtick `$(` `>` `<` `&`), because
+// allowlisting `python3 -m pytest` must not authorise `python3 -m pytest; rm -rf ~`.
+// A chained command falls through to normal routing rather than being refused: it may
+// be perfectly ordinary, it just cannot be waved through on a prefix.
+[[nodiscard]] bool is_allowlisted(const std::string& command,
+                                  const std::vector<std::string>& allowed);
+
 // Returns true to allow. Injected so tests script it; the UI supplies the real one.
-using Approver = std::function<bool(const std::string& tool, const std::string& preview,
+//
+// `command` is the shell command verbatim, or empty for a call that is not one (a write,
+// say). It is separate from `preview` because preview truncates each argument for
+// display, and a truncated string is the wrong thing to build a remembered allowlist
+// rule from -- it would either never match again or match something shorter than what
+// the operator actually approved.
+using Approver = std::function<bool(const std::string& tool, const std::string& command,
+                                    const std::string& preview,
                                     const tools::RiskHint& hint)>;
 
 // Anything the user has said since the last time it was asked, oldest first.
@@ -86,6 +116,13 @@ struct AgentConfig {
     // all before: mode policy decided whether they were allowed, and nothing asked about
     // any individual one.
     bool auto_approve_writes = true;
+
+    // Commands the operator has already said yes to. This is the half that makes the
+    // strict half survivable: without somewhere for "yes, and stop asking me about
+    // pytest" to go, the only way to escape card fatigue is to turn approvals off
+    // entirely -- which is how a harness ends up with nothing between the model and
+    // `rm -rf` again.
+    std::vector<std::string> allowed_commands;
 };
 
 // The UI feed. The Agent emits structured facts; the sidecar serializes them with the
@@ -136,10 +173,10 @@ class Agent {
     // cannot see its own last few observations cannot make a next move.
     static constexpr std::size_t kMinRecentTurns = 4;
 
-    // Consecutive text-only turns before a run is declared stalled. Three is enough to
-    // let the model think out loud between calls, and few enough that narration cannot
-    // burn the whole wall clock.
-    static constexpr int kMaxConsecutiveTextOnly = 3;
+    // Consecutive turns that executed nothing before a run is declared stalled. Three
+    // is enough to let the model think out loud between calls, and few enough that
+    // neither narration nor repeated token-cap truncation can burn the whole wall clock.
+    static constexpr int kMaxConsecutiveNoProgress = 3;
 
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
     void compact_to_budget();
@@ -167,7 +204,7 @@ class Agent {
     SteerSource steer_;
     Verifier verifier_;
     std::string tools_guidance_;
-    int consecutive_text_only_ = 0;
+    int consecutive_no_progress_ = 0;
     bool halted_ = false;
     std::string halt_reason_;
 };

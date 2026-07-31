@@ -30,6 +30,7 @@ export interface RunSettings {
   auto_approve_writes: boolean;
   require_approval: boolean;
   system_prompt: string;
+  allowed_commands: string;
   context_budget_tokens: number;
 }
 
@@ -127,6 +128,8 @@ export interface ApprovalRequestNotification {
   run_id: string;
   tool_name: string;
   preview: string;
+  command: string;
+  irreversible: boolean;
   risk: number;
   capabilities: CapabilityChips;
 }

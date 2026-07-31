@@ -202,14 +202,18 @@ class RunInbox {
         return out;
     }
 
-    bool ask(const std::string& tool, const std::string& preview,
-             const tools::RiskHint& hint) {
+    bool ask(const std::string& tool, const std::string& command,
+             const std::string& preview, const tools::RiskHint& hint) {
         const std::string request_id = run_id_ + "/" + std::to_string(++seq_);
         protocol::ApprovalRequestNotification req;
         req.request_id = request_id;
         req.run_id = run_id_;
         req.tool_name = tool;
         req.preview = preview;
+        req.command = command;
+        // Sent rather than re-derived in the view from the chips, so the UI and the gate
+        // cannot disagree about which calls are unwaivable.
+        req.irreversible = loop::is_irreversible(hint);
         req.risk = loop::risk_score(hint);
         req.capabilities = chips_of(hint);
         notify(req);
@@ -303,6 +307,59 @@ class RunInbox {
     bool shutdown_ = false;
 };
 
+// How much the operator wants to be asked, and what may run without asking.
+//
+// sandbox_tier and require_approval were on the wire, generated on both sides, and read
+// by NOBODY: the tier came from the mode and the approval routing came from the risk
+// thresholds, so both switches in the editor were decoration. The same failure as the
+// sampling block before it -- a setting that is plumbed but not consumed looks exactly
+// like one that works.
+[[nodiscard]] bool apply_autonomy(const std::string& id, const std::string& message,
+                                  loop::AgentConfig& config) {
+    const double tier = surface::double_field(message, "sandbox_tier", -1.0);
+    if (tier >= 0.0) {
+        const int t = static_cast<int>(tier);
+        if (t > 3) {
+            reply_error(id, "sandbox_tier must be 0 (no execution), 1 (Seatbelt), "
+                            "2 (container) or 3 (UNSANDBOXED on the host); got " +
+                                std::to_string(t));
+            return false;
+        }
+        config.sandbox_tier_override = t;
+    }
+
+    // Presence-checked, not just read: absent must keep the AgentConfig default rather
+    // than collapsing to false, or every client that predates these fields would silently
+    // have both switches flipped.
+    if (surface::has_field(message, "auto_approve_exec")) {
+        config.auto_approve_exec = surface::bool_field(message, "auto_approve_exec");
+    }
+    if (surface::has_field(message, "auto_approve_writes")) {
+        config.auto_approve_writes = surface::bool_field(message, "auto_approve_writes");
+    }
+    // require_approval is the operator saying "ask me about everything", so it is a FLOOR
+    // over the two specific switches rather than a third one competing with them. It can
+    // only ever tighten: `require_approval: true` beats `auto_approve_exec: true`, and
+    // never the other way round.
+    if (surface::bool_field(message, "require_approval")) {
+        config.auto_approve_exec = false;
+        config.auto_approve_writes = false;
+    }
+
+    // Newline-separated, because the generated protocol has no array type and a newline
+    // is the one character a shell command cannot carry unescaped.
+    const std::string allowed = surface::string_field(message, "allowed_commands");
+    for (std::size_t at = 0; at < allowed.size();) {
+        const std::size_t nl = allowed.find('\n', at);
+        const std::size_t end = nl == std::string::npos ? allowed.size() : nl;
+        if (end > at) {
+            config.allowed_commands.push_back(allowed.substr(at, end - at));
+        }
+        at = end + 1;
+    }
+    return true;
+}
+
 // Reads the run's settings off the start message into the config. Returns false (having
 // answered with an error) if a setting is present but unusable.
 //
@@ -350,43 +407,7 @@ class RunInbox {
     config.budget.wall_clock_seconds = static_cast<int>(surface::double_field(
         message, "wall_clock_seconds", config.budget.wall_clock_seconds));
 
-    // --- autonomy ----------------------------------------------------------
-    //
-    // sandbox_tier and require_approval were on the wire, generated on both sides, and
-    // read by NOBODY: the tier came from the mode and the approval routing came from the
-    // risk thresholds, so both switches in the editor were decoration. Same failure as
-    // the sampling block before it -- a setting that is plumbed but not consumed looks
-    // exactly like one that works.
-    const double tier = surface::double_field(message, "sandbox_tier", -1.0);
-    if (tier >= 0.0) {
-        const int t = static_cast<int>(tier);
-        if (t > 3) {
-            reply_error(id, "sandbox_tier must be 0 (no execution), 1 (Seatbelt), "
-                            "2 (container) or 3 (UNSANDBOXED on the host); got " +
-                                std::to_string(t));
-            return false;
-        }
-        config.sandbox_tier_override = t;
-    }
-
-    // Presence-checked, not just read: absent must keep the AgentConfig default rather
-    // than collapsing to false, or every client that predates these fields would silently
-    // have both switches flipped.
-    if (surface::has_field(message, "auto_approve_exec")) {
-        config.auto_approve_exec = surface::bool_field(message, "auto_approve_exec");
-    }
-    if (surface::has_field(message, "auto_approve_writes")) {
-        config.auto_approve_writes = surface::bool_field(message, "auto_approve_writes");
-    }
-    // require_approval is the operator saying "ask me about everything", so it is a FLOOR
-    // over the two specific switches rather than a third one competing with them. It can
-    // only ever tighten: `require_approval: true` beats `auto_approve_exec: true`, and
-    // never the other way round.
-    if (surface::bool_field(message, "require_approval")) {
-        config.auto_approve_exec = false;
-        config.auto_approve_writes = false;
-    }
-    return true;
+    return apply_autonomy(id, message, config);
 }
 
 // The repo's own conventions, in the order the surrounding ecosystem settled on. First
@@ -437,9 +458,10 @@ bool run_loop(const std::string& run_id, Session& session,
     agent.set_observer(make_observer(run_id));
 
     RunInbox run_inbox(inbox, run_id);
-    agent.set_approver([&run_inbox](const std::string& tool, const std::string& preview,
+    agent.set_approver([&run_inbox](const std::string& tool, const std::string& command,
+                                    const std::string& preview,
                                     const tools::RiskHint& hint) {
-        return run_inbox.ask(tool, preview, hint);
+        return run_inbox.ask(tool, command, preview, hint);
     });
     agent.set_steer_source([&run_inbox]() { return run_inbox.take_messages(); });
 

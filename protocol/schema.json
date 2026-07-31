@@ -44,6 +44,7 @@
       { "_comment": "false makes every workspace-mutating call raise a card. Writes had no HITL path at all before: mode policy decided whether they were allowed and nothing asked about any individual one.", "name": "auto_approve_writes", "type": "bool" },
       { "name": "require_approval", "type": "bool" },
       { "_comment": "Overrides the built-in persona. The editor keeps one per mode, so 'plan' can be told to think out loud and 'agent' to be terse. Empty means the built-in, which is the only reason this can be a plain string rather than a presence flag.", "name": "system_prompt", "type": "string" },
+      { "_comment": "Commands the operator has already said yes to, newline-separated (the generator has no array type, and a newline is the one character a shell command cannot contain unescaped). An entry matches a command that equals it, or that starts with it followed by a space. A command containing shell chaining -- ; && || | ` $( > < & -- NEVER matches, because `pytest` on the allowlist must not authorise `pytest; rm -rf ~`. The irreversible-capability gate sits ABOVE this: nothing on this list can auto-approve a call that destroys data, writes outside the workspace, escalates privileges or rewrites history.", "name": "allowed_commands", "type": "string" },
       { "name": "context_budget_tokens", "type": "int" }
     ],
     "CapabilityChips": [
@@ -150,6 +151,8 @@
       { "name": "run_id", "type": "string" },
       { "name": "tool_name", "type": "string" },
       { "name": "preview", "type": "string" },
+      { "_comment": "The command verbatim, when there is one. `preview` truncates each argument at 120 characters for display, so it is the wrong thing to remember an allowlist rule from -- a truncated rule would either never match again or, worse, match something shorter than what was approved.", "name": "command", "type": "string" },
+      { "_comment": "Whether this call carries a capability that cannot be undone. Computed by the loop and sent, rather than re-derived in the view from the chips, so the UI and the gate cannot disagree about which calls are unwaivable.", "name": "irreversible", "type": "bool" },
       { "name": "risk", "type": "double" },
       { "name": "capabilities", "type": "CapabilityChips" }
     ],

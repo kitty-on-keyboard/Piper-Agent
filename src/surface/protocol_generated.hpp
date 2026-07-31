@@ -88,6 +88,7 @@ struct RunSettings {
     bool auto_approve_writes = false;
     bool require_approval = false;
     std::string system_prompt;
+    std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
 };
 inline void append_value(std::string& out, const RunSettings& v) {
@@ -124,6 +125,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"system_prompt\":";
     append_value(out, v.system_prompt);
+    out += ",";
+    out += "\"allowed_commands\":";
+    append_value(out, v.allowed_commands);
     out += ",";
     out += "\"context_budget_tokens\":";
     append_value(out, v.context_budget_tokens);
@@ -356,6 +360,8 @@ struct ApprovalRequestNotification {
     std::string run_id;
     std::string tool_name;
     std::string preview;
+    std::string command;
+    bool irreversible = false;
     double risk = 0.0;
     CapabilityChips capabilities;
     static constexpr const char* kMethod = "lmp/approval_request";
@@ -373,6 +379,12 @@ struct ApprovalRequestNotification {
     out += ",";
     out += "\"preview\":";
     append_value(out, n.preview);
+    out += ",";
+    out += "\"command\":";
+    append_value(out, n.command);
+    out += ",";
+    out += "\"irreversible\":";
+    append_value(out, n.irreversible);
     out += ",";
     out += "\"risk\":";
     append_value(out, n.risk);

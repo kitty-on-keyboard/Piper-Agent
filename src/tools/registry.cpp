@@ -476,6 +476,8 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true)};
         d.mutates_workspace = true;
+        // Nothing in the workspace can undo this, so it always asks (S7.2).
+        d.irreversible = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
             const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
             if (abs.empty()) {
