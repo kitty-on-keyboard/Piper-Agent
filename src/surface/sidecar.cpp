@@ -446,6 +446,17 @@ bool run_loop(const std::string& run_id, Session& session,
     cancel.reset();
     const loop::RunReport report = agent.run(cancel);
 
+    // Anything said in the last moments of the run, after the loop's final drain.
+    //
+    // The window is narrow -- a message popped while an approval card was up, on a run
+    // that then ended before reaching another turn boundary -- but it was already
+    // ACKNOWLEDGED with accepted:true when it was popped. Dropping it on the floor would
+    // make the harness a liar about the one thing the user can see. It carries into the
+    // session instead, so the next follow-up starts with it already said.
+    for (const std::string& late : run_inbox.take_messages()) {
+        session.ctx->add_user_message(late);
+    }
+
     protocol::RunEndNotification end;
     end.run_id = run_id;
     end.termination_reason = report.termination_reason;

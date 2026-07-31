@@ -271,6 +271,58 @@ button.ghost {
 .ended b { color: var(--fg); font-weight: 590; }
 
 /* --- composer ------------------------------------------------------------ */
+/* --- settings drawer ------------------------------------------------------ */
+/* Live controls for the things worth changing between runs. They write straight back
+   to the editor's own settings, so the drawer and the Settings UI are the same state
+   rather than two copies that drift. */
+#gear {
+  position: absolute; top: 10px; right: 10px;
+  width: 24px; height: 24px; padding: 0; border-radius: 6px;
+  background: transparent; color: var(--dim); font-size: 13px;
+}
+#gear:hover { background: var(--surface-hi); color: var(--fg); }
+#head { position: sticky; }
+#drawer {
+  display: none; padding: 10px 0 2px; border-top: 1px solid var(--line); margin-top: 10px;
+}
+#drawer.open { display: block; animation: rise .22s var(--ease) both; }
+.set { margin-bottom: 11px; }
+.set > label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 11px; color: var(--dim); margin-bottom: 4px;
+}
+.set > label b { color: var(--fg); font-weight: 590; font-variant-numeric: tabular-nums; }
+.seg { display: flex; gap: 3px; background: var(--surface); border-radius: 8px; padding: 2px; }
+.seg button {
+  flex: 1; padding: 4px 6px; font-size: 11px; border-radius: 6px;
+  background: transparent; color: var(--dim); font-weight: 500;
+}
+.seg button.on { background: var(--vscode-sideBar-background); color: var(--fg); font-weight: 590;
+                 box-shadow: 0 1px 3px rgba(0,0,0,.16); }
+input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
+.toggle { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
+.toggle span { font-size: 12px; }
+.toggle .sw {
+  width: 34px; height: 19px; border-radius: 999px; background: var(--faint);
+  position: relative; cursor: pointer; transition: background .2s var(--ease); flex: none;
+}
+.toggle .sw::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
+  border-radius: 50%; background: #fff; transition: transform .2s var(--ease);
+}
+.toggle .sw.on { background: var(--accent); }
+.toggle .sw.on::after { transform: translateX(15px); }
+.warnbox {
+  font-size: 10px; color: var(--warn); margin-top: 4px; line-height: 1.4;
+}
+#promptBox {
+  width: 100%; min-height: 66px; max-height: 200px; resize: vertical;
+  background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px;
+  font-family: var(--vscode-editor-font-family); font-size: 11px; outline: none;
+}
+#promptBox:focus { border-color: var(--accent); }
+
 #foot {
   padding: 8px var(--pad) 10px;
   background: var(--vscode-sideBar-background);
@@ -311,8 +363,35 @@ button.ghost {
 function markup(): string {
   return `
 <div id="head">
+  <button id="gear" title="Settings">⚙</button>
   <div id="mission"></div>
   <div id="status"><span id="orb"></span><span id="statusText">Idle</span></div>
+  <div id="drawer">
+    <div class="set">
+      <label>Mode</label>
+      <div class="seg" id="segMode">
+        <button data-v="plan">Plan</button>
+        <button data-v="debug">Debug</button>
+        <button data-v="agent">Agent</button>
+      </div>
+    </div>
+    <div class="set">
+      <label>Containment</label>
+      <div class="seg" id="segTier">
+        <button data-v="0">None</button>
+        <button data-v="1">Sandbox</button>
+        <button data-v="3">Host</button>
+      </div>
+      <div class="warnbox" id="tierWarn"></div>
+    </div>
+    <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec"></div></div>
+    <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite"></div></div>
+    <div class="set" id="sliders"></div>
+    <div class="set">
+      <label>System prompt <b id="promptMode"></b></label>
+      <textarea id="promptBox" placeholder="Empty uses the built-in Piper persona"></textarea>
+    </div>
+  </div>
 </div>
 <div id="plan"></div>
 <div id="feed"></div>
@@ -414,9 +493,103 @@ box.addEventListener('keydown', (e) => {
 });
 busy(false, 'Idle');
 
+// --- settings drawer ------------------------------------------------------
+// Every control writes back to the editor's own configuration, so this drawer and the
+// Settings UI are one piece of state rather than two that drift.
+const SLIDERS = [
+  ['sampling.temperature', 'Temperature', 0, 2, 0.05,
+   'Qwen3 thinking-mode default is 0.6. Lower repeats, higher loosens the tool grammar.'],
+  ['sampling.topP', 'Top-p', 0.01, 1, 0.01, ''],
+  ['sampling.topK', 'Top-k', 0, 100, 1, ''],
+  ['sampling.minP', 'Min-p', 0, 0.5, 0.01, ''],
+  ['sampling.repetitionPenalty', 'Repetition penalty', 1, 1.5, 0.01, ''],
+];
+let settings = {};
+
+const put = (key, value) => {
+  settings[key] = value;
+  api.postMessage({ kind: 'setting', key, value });
+};
+
+$('gear').onclick = () => $('drawer').classList.toggle('open');
+
+function seg(id, key, cast) {
+  $(id).querySelectorAll('button').forEach((b) => {
+    b.onclick = () => {
+      put(key, cast(b.dataset.v));
+      paint();
+    };
+  });
+}
+seg('segMode', 'mode', String);
+seg('segTier', 'sandboxTier', Number);
+
+function sw(id, key) {
+  $(id).onclick = () => { put(key, !settings[key]); paint(); };
+}
+sw('swExec', 'autoApproveExec');
+sw('swWrite', 'autoApproveWrites');
+
+$('promptBox').addEventListener('change', () => {
+  put('prompts.' + (settings.mode || 'agent'), $('promptBox').value);
+});
+
+function buildSliders() {
+  const host = $('sliders');
+  host.innerHTML = '';
+  for (const [key, label, lo, hi, step] of SLIDERS) {
+    const wrap = document.createElement('div');
+    wrap.className = 'set';
+    const l = document.createElement('label');
+    const name = document.createElement('span');
+    name.textContent = label;
+    const val = document.createElement('b');
+    l.append(name, val);
+    const r = document.createElement('input');
+    r.type = 'range'; r.min = lo; r.max = hi; r.step = step;
+    r.oninput = () => { val.textContent = r.value; };
+    r.onchange = () => put(key, Number(r.value));
+    wrap.append(l, r);
+    host.append(wrap);
+    wrap.dataset.key = key;
+  }
+}
+buildSliders();
+
+function paint() {
+  $('segMode').querySelectorAll('button').forEach(
+    (b) => b.classList.toggle('on', b.dataset.v === settings.mode));
+  $('segTier').querySelectorAll('button').forEach(
+    (b) => b.classList.toggle('on', Number(b.dataset.v) === settings.sandboxTier));
+  $('swExec').classList.toggle('on', settings.autoApproveExec === true);
+  $('swWrite').classList.toggle('on', settings.autoApproveWrites === true);
+  // Tier 2 is a real setting the segmented control has no button for; say so rather
+  // than showing three buttons all unselected and looking broken.
+  $('tierWarn').textContent =
+    settings.sandboxTier === 3
+      ? 'UNSANDBOXED: commands run with your permissions. No filesystem jail, no egress denial. You will be asked to confirm before the run starts.'
+      : settings.sandboxTier === 0
+      ? 'No execution at all. The agent can read and plan, not run.'
+      : settings.sandboxTier === 2
+      ? 'Container tier is selected in settings.json. It refuses until the runtime is wired.'
+      : '';
+  for (const [key] of SLIDERS) {
+    const wrap = $('sliders').querySelector('[data-key="' + key + '"]');
+    if (!wrap) continue;
+    const v = settings[key];
+    if (v === undefined) continue;
+    wrap.querySelector('input').value = v;
+    wrap.querySelector('b').textContent = v;
+  }
+  $('promptMode').textContent = '· ' + (settings.mode || 'agent');
+  $('promptBox').value = settings['prompts.' + (settings.mode || 'agent')] || '';
+}
+
 // --- inbound --------------------------------------------------------------
 window.addEventListener('message', (e) => {
   const { kind, payload } = e.data;
+
+  if (kind === 'settings') { settings = payload; paint(); }
 
   if (kind === 'run_start') {
     $('mission').textContent = payload.mission;
