@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <variant>
 
 #include "src/model/sampler.hpp"
@@ -27,6 +28,26 @@ namespace mx = mlx::core;
 struct MlxBackend::Impl {
     mlxl::Qwen35MoeModel model;
 };
+
+// Tokens per prefill eval. Each chunk ends in a full synchronous barrier
+// (`eval_caches`), so the chunk size sets how often prefill drains the GPU and rebuilds
+// a 48-layer graph from the host. 512 made prefill roughly flat in prompt length
+// (1118 tok/s at 547 tokens, 1170 at 8240) because the per-chunk cost dominated; 2048 --
+// which is also mlx-lm's `prefill_step_size` default -- measures 1317 and 1684 on the
+// same prompts. Above 2048 it turns over again (1528 at 8240), so this is the knee.
+// It costs peak memory only on long prompts, where the bigger activation is live:
+// unchanged at 19.00 GB for a 547-token prompt, 19.08 -> 20.41 GB at 8240, against the
+// 20.18 GB mlx-lm peaks at on this checkpoint. Overridable so the sweep can be re-run
+// without a rebuild.
+std::size_t prefill_chunk() {
+    if (const char* s = std::getenv("LMP_PREFILL_CHUNK")) {
+        const int v = std::atoi(s);
+        if (v > 0) {
+            return static_cast<std::size_t>(v);
+        }
+    }
+    return 2048;
+}
 
 // MLX's wired limit defaults to 0: nothing is kept resident, so a 19 GB checkpoint is
 // re-made-resident by the OS around GPU dispatches. That is invisible to any op-level
@@ -127,7 +148,7 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     const auto t0 = clock_.mono();
 
     // --- chunked prefill ----------------------------------------------------
-    constexpr std::size_t kPrefillChunk = 512;
+    const std::size_t kPrefillChunk = prefill_chunk();
     std::vector<float> logits_host;
     const std::size_t prompt_n = task.prompt.size();
     // Everything before the last token is pure prefill; the last token's forward pass
