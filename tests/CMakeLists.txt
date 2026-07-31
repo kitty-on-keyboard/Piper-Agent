@@ -1,0 +1,7 @@
+add_library(lmp_testing INTERFACE)
+target_include_directories(lmp_testing INTERFACE "${PROJECT_SOURCE_DIR}")
+target_sources(lmp_testing INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/test_main.cpp")
+
+add_subdirectory(gate)
+add_subdirectory(platform)
+add_subdirectory(bakeoff)

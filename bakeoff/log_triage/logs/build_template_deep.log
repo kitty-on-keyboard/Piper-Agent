@@ -1,0 +1,438 @@
+-- The CXX compiler identification is AppleClang 21.0.0.21000101
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /work/proj/build
+/opt/homebrew/bin/cmake -S/work/proj -B/work/proj/build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/cmake -E cmake_progress_start /work/proj/build/CMakeFiles /work/proj/build//CMakeFiles/progress.marks
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/Makefile2 all
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/triage_bench.dir/build.make CMakeFiles/triage_bench.dir/depend
+cd /work/proj/build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /work/proj /work/proj /work/proj/build /work/proj/build /work/proj/build/CMakeFiles/triage_bench.dir/DependInfo.cmake "--color=" triage_bench
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/triage_bench.dir/build.make CMakeFiles/triage_bench.dir/build
+[  2%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_00.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_00.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_00.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_00.cpp.o -c /work/proj/src/mod_00.cpp
+[  4%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_01.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_01.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_01.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_01.cpp.o -c /work/proj/src/mod_01.cpp
+[  6%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_02.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_02.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_02.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_02.cpp.o -c /work/proj/src/mod_02.cpp
+[  8%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_03.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_03.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_03.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_03.cpp.o -c /work/proj/src/mod_03.cpp
+[ 10%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_04.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_04.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_04.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_04.cpp.o -c /work/proj/src/mod_04.cpp
+[ 12%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_05.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_05.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_05.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_05.cpp.o -c /work/proj/src/mod_05.cpp
+[ 14%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_06.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_06.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_06.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_06.cpp.o -c /work/proj/src/mod_06.cpp
+[ 16%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_07.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_07.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_07.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_07.cpp.o -c /work/proj/src/mod_07.cpp
+[ 18%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_08.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_08.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_08.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_08.cpp.o -c /work/proj/src/mod_08.cpp
+[ 20%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_09.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_09.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_09.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_09.cpp.o -c /work/proj/src/mod_09.cpp
+[ 22%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_10.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_10.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_10.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_10.cpp.o -c /work/proj/src/mod_10.cpp
+[ 24%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_11.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_11.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_11.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_11.cpp.o -c /work/proj/src/mod_11.cpp
+[ 26%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_12.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_12.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_12.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_12.cpp.o -c /work/proj/src/mod_12.cpp
+[ 28%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_13.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_13.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_13.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_13.cpp.o -c /work/proj/src/mod_13.cpp
+[ 30%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_14.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_14.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_14.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_14.cpp.o -c /work/proj/src/mod_14.cpp
+[ 32%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_15.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_15.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_15.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_15.cpp.o -c /work/proj/src/mod_15.cpp
+[ 34%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_16.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_16.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_16.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_16.cpp.o -c /work/proj/src/mod_16.cpp
+[ 36%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_17.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_17.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_17.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_17.cpp.o -c /work/proj/src/mod_17.cpp
+[ 38%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_18.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_18.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_18.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_18.cpp.o -c /work/proj/src/mod_18.cpp
+[ 40%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_19.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_19.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_19.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_19.cpp.o -c /work/proj/src/mod_19.cpp
+[ 42%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_20.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_20.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_20.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_20.cpp.o -c /work/proj/src/mod_20.cpp
+[ 44%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_21.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_21.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_21.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_21.cpp.o -c /work/proj/src/mod_21.cpp
+[ 46%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_22.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_22.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_22.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_22.cpp.o -c /work/proj/src/mod_22.cpp
+[ 48%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_23.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_23.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_23.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_23.cpp.o -c /work/proj/src/mod_23.cpp
+[ 51%] Building CXX object CMakeFiles/triage_bench.dir/src/sort_points.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/sort_points.cpp.o -MF CMakeFiles/triage_bench.dir/src/sort_points.cpp.o.d -o CMakeFiles/triage_bench.dir/src/sort_points.cpp.o -c /work/proj/src/sort_points.cpp
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:312:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__vector/comparison.h:12:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/equal.h:13:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:41:18: error: invalid operands to binary expression ('const Point' and 'const Point')
+   41 |     return __lhs < __rhs;
+      |            ~~~~~ ^ ~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sift_down.h:47:32: note: in instantiation of function template specialization 'std::__less<>::operator()<Point, Point>' requested here
+   47 |   if ((__child + 1) < __len && __comp(*__child_i, *(__child_i + difference_type(1)))) {
+      |                                ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/make_heap.h:39:12: note: in instantiation of function template specialization 'std::__sift_down<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   39 |       std::__sift_down<_AlgPolicy>(__first, __comp_ref, __n, __first + __start);
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:41:8: note: in instantiation of function template specialization 'std::__make_heap<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   41 |   std::__make_heap<_AlgPolicy>(__first, __middle, __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:65:12: note: in instantiation of function template specialization 'std::__partial_sort_impl<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, Point *>' requested here
+   65 |       std::__partial_sort_impl<_AlgPolicy>(__first, __middle, __last, static_cast<__comp_ref_type<_Compare> >(__comp));
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:934:10: note: in instantiation of function template specialization 'std::__partial_sort<std::_ClassicAlgPolicy, std::__less<void, void>, Point *, Point *>' requested here
+  934 |     std::__partial_sort<_AlgPolicy>(
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:945:8: note: in instantiation of function template specialization 'std::__sort_impl<std::_ClassicAlgPolicy, std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  945 |   std::__sort_impl<_ClassicAlgPolicy>(std::move(__first), std::move(__last), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:951:8: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  951 |   std::sort(__first, __last, __less<>());
+      |        ^
+/work/proj/src/sort_points.cpp:5:10: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>>' requested here
+    5 |     std::sort(pts.begin(), pts.end());
+      |          ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1875:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/make_heap.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sift_down.h:54:7: error: no matching function for call to object of type 'std::__less<void, void>'
+   54 |   if (__comp(*__child_i, *__start))
+      |       ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/make_heap.h:39:12: note: in instantiation of function template specialization 'std::__sift_down<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   39 |       std::__sift_down<_AlgPolicy>(__first, __comp_ref, __n, __first + __start);
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:41:8: note: in instantiation of function template specialization 'std::__make_heap<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   41 |   std::__make_heap<_AlgPolicy>(__first, __middle, __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:65:12: note: in instantiation of function template specialization 'std::__partial_sort_impl<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, Point *>' requested here
+   65 |       std::__partial_sort_impl<_AlgPolicy>(__first, __middle, __last, static_cast<__comp_ref_type<_Compare> >(__comp));
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:934:10: note: in instantiation of function template specialization 'std::__partial_sort<std::_ClassicAlgPolicy, std::__less<void, void>, Point *, Point *>' requested here
+  934 |     std::__partial_sort<_AlgPolicy>(
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:945:8: note: in instantiation of function template specialization 'std::__sort_impl<std::_ClassicAlgPolicy, std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  945 |   std::__sort_impl<_ClassicAlgPolicy>(std::move(__first), std::move(__last), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:951:8: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  951 |   std::sort(__first, __last, __less<>());
+      |        ^
+/work/proj/src/sort_points.cpp:5:10: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>>' requested here
+    5 |     std::sort(pts.begin(), pts.end());
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1875:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/make_heap.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sift_down.h:71:34: error: no matching function for call to object of type 'std::__less<void, void>'
+   71 |     if ((__child + 1) < __len && __comp(*__child_i, *(__child_i + difference_type(1)))) {
+      |                                  ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:17:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:46:9: error: no matching function for call to object of type 'std::__less<void, void>'
+   46 |     if (__comp(*__i, *__first)) {
+      |         ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:65:12: note: in instantiation of function template specialization 'std::__partial_sort_impl<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, Point *>' requested here
+   65 |       std::__partial_sort_impl<_AlgPolicy>(__first, __middle, __last, static_cast<__comp_ref_type<_Compare> >(__comp));
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:934:10: note: in instantiation of function template specialization 'std::__partial_sort<std::_ClassicAlgPolicy, std::__less<void, void>, Point *, Point *>' requested here
+  934 |     std::__partial_sort<_AlgPolicy>(
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:945:8: note: in instantiation of function template specialization 'std::__sort_impl<std::_ClassicAlgPolicy, std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  945 |   std::__sort_impl<_ClassicAlgPolicy>(std::move(__first), std::move(__last), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:951:8: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  951 |   std::sort(__first, __last, __less<>());
+      |        ^
+/work/proj/src/sort_points.cpp:5:10: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>>' requested here
+    5 |     std::sort(pts.begin(), pts.end());
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1875:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/make_heap.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sift_down.h:98:34: error: no matching function for call to object of type 'std::__less<void, void>'
+   98 |     if ((__child + 1) < __len && __comp(*__child_i, *(__child_i + difference_type(1)))) {
+      |                                  ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/pop_heap.h:47:41: note: in instantiation of function template specialization 'std::__floyd_sift_down<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   47 |     _RandomAccessIterator __hole = std::__floyd_sift_down<_AlgPolicy>(__first, __comp_ref, __len);
+      |                                         ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort_heap.h:40:10: note: in instantiation of function template specialization 'std::__pop_heap<std::_ClassicAlgPolicy, std::__less<void, void>, Point *>' requested here
+   40 |     std::__pop_heap<_AlgPolicy>(__first, __last, __comp_ref, __n);
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:51:8: note: in instantiation of function template specialization 'std::__sort_heap<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   51 |   std::__sort_heap<_AlgPolicy>(std::move(__first), std::move(__middle), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:65:12: note: in instantiation of function template specialization 'std::__partial_sort_impl<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, Point *>' requested here
+   65 |       std::__partial_sort_impl<_AlgPolicy>(__first, __middle, __last, static_cast<__comp_ref_type<_Compare> >(__comp));
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:934:10: note: in instantiation of function template specialization 'std::__partial_sort<std::_ClassicAlgPolicy, std::__less<void, void>, Point *, Point *>' requested here
+  934 |     std::__partial_sort<_AlgPolicy>(
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:945:8: note: in instantiation of function template specialization 'std::__sort_impl<std::_ClassicAlgPolicy, std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  945 |   std::__sort_impl<_ClassicAlgPolicy>(std::move(__first), std::move(__last), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:951:8: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  951 |   std::sort(__first, __last, __less<>());
+      |        ^
+/work/proj/src/sort_points.cpp:5:10: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>>' requested here
+    5 |     std::sort(pts.begin(), pts.end());
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:17:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:17:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort_heap.h:15:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/pop_heap.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/push_heap.h:42:9: error: no matching function for call to object of type 'std::__less<void, void>'
+   42 |     if (__comp(*__ptr, *--__last)) {
+      |         ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/pop_heap.h:56:12: note: in instantiation of function template specialization 'std::__sift_up<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   56 |       std::__sift_up<_AlgPolicy>(__first, __hole, __comp_ref, __hole - __first);
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort_heap.h:40:10: note: in instantiation of function template specialization 'std::__pop_heap<std::_ClassicAlgPolicy, std::__less<void, void>, Point *>' requested here
+   40 |     std::__pop_heap<_AlgPolicy>(__first, __last, __comp_ref, __n);
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:51:8: note: in instantiation of function template specialization 'std::__sort_heap<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *>' requested here
+   51 |   std::__sort_heap<_AlgPolicy>(std::move(__first), std::move(__middle), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:65:12: note: in instantiation of function template specialization 'std::__partial_sort_impl<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, Point *>' requested here
+   65 |       std::__partial_sort_impl<_AlgPolicy>(__first, __middle, __last, static_cast<__comp_ref_type<_Compare> >(__comp));
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:934:10: note: in instantiation of function template specialization 'std::__partial_sort<std::_ClassicAlgPolicy, std::__less<void, void>, Point *, Point *>' requested here
+  934 |     std::__partial_sort<_AlgPolicy>(
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:945:8: note: in instantiation of function template specialization 'std::__sort_impl<std::_ClassicAlgPolicy, std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  945 |   std::__sort_impl<_ClassicAlgPolicy>(std::move(__first), std::move(__last), __comp);
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:951:8: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>, std::__less<void, void>>' requested here
+  951 |   std::sort(__first, __last, __less<>());
+      |        ^
+/work/proj/src/sort_points.cpp:5:10: note: in instantiation of function template specialization 'std::sort<std::__wrap_iter<Point *>>' requested here
+    5 |     std::sort(pts.begin(), pts.end());
+      |          ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:736:11: error: no matching function for call to object of type 'std::__less<void, void>'
+  736 |       if (__comp(*--__last, *__first))
+      |           ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:872:8: note: in instantiation of function template specialization 'std::__introsort<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, false>' requested here
+  872 |   std::__introsort<_AlgPolicy, _Comp&, _RandomAccessIterator, __use_branchless_sort<_Comp, _RandomAccessIterator> >(
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:115:8: error: no matching function for call to object of type 'std::__less<void, void>'
+  115 |   if (!__c(*__y, *__x)) // if x <= y
+      |        ^~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:740:12: note: in instantiation of function template specialization 'std::__sort3<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, 0>' requested here
+  740 |       std::__sort3<_AlgPolicy, _Compare>(__first, __first + difference_type(1), --__last, __comp);
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:872:8: note: in instantiation of function template specialization 'std::__introsort<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, false>' requested here
+  872 |   std::__introsort<_AlgPolicy, _Comp&, _RandomAccessIterator, __use_branchless_sort<_Comp, _RandomAccessIterator> >(
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:125:7: error: no matching function for call to object of type 'std::__less<void, void>'
+  125 |   if (__c(*__z, *__y)) // x > y, if y > z
+      |       ^~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:132:7: error: no matching function for call to object of type 'std::__less<void, void>'
+  132 |   if (__c(*__z, *__y))         // if y > z
+      |       ^~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:17:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:65:7: error: no matching function for call to '__partial_sort_impl'
+   65 |       std::__partial_sort_impl<_AlgPolicy>(__first, __middle, __last, static_cast<__comp_ref_type<_Compare> >(__comp));
+      |       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:767:12: note: in instantiation of function template specialization 'std::__partial_sort<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, Point *>' requested here
+  767 |       std::__partial_sort<_AlgPolicy, _Compare>(__first, __last, __last, __comp);
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:872:8: note: in instantiation of function template specialization 'std::__introsort<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, false>' requested here
+  872 |   std::__introsort<_AlgPolicy, _Comp&, _RandomAccessIterator, __use_branchless_sort<_Comp, _RandomAccessIterator> >(
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/partial_sort.h:35:75: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, _Sentinel = Point *]
+   35 | _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX20 _RandomAccessIterator __partial_sort_impl(
+      |                                                                           ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:776:9: error: no matching function for call to '__sort3'
+  776 |         std::__sort3<_AlgPolicy, _Compare>(__first, __first + __half_len, __last - difference_type(1), __comp);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:872:8: note: in instantiation of function template specialization 'std::__introsort<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, false>' requested here
+  872 |   std::__introsort<_AlgPolicy, _Comp&, _RandomAccessIterator, __use_branchless_sort<_Comp, _RandomAccessIterator> >(
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:101:1: note: candidate template ignored: requirement '__use_branchless_sort<std::__less<void, void> &, Point *>' was not satisfied [with $0 = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *]
+  101 | __sort3(_RandomAccessIterator __x1, _RandomAccessIterator __x2, _RandomAccessIterator __x3, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:112:1: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, $3 = 0]
+  112 | __sort3(_RandomAccessIterator __x, _RandomAccessIterator __y, _RandomAccessIterator __z, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:777:9: error: no matching function for call to '__sort3'
+  777 |         std::__sort3<_AlgPolicy, _Compare>(
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:101:1: note: candidate template ignored: requirement '__use_branchless_sort<std::__less<void, void> &, Point *>' was not satisfied [with $0 = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *]
+  101 | __sort3(_RandomAccessIterator __x1, _RandomAccessIterator __x2, _RandomAccessIterator __x3, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:112:1: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, $3 = 0]
+  112 | __sort3(_RandomAccessIterator __x, _RandomAccessIterator __y, _RandomAccessIterator __z, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:779:9: error: no matching function for call to '__sort3'
+  779 |         std::__sort3<_AlgPolicy, _Compare>(
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:101:1: note: candidate template ignored: requirement '__use_branchless_sort<std::__less<void, void> &, Point *>' was not satisfied [with $0 = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *]
+  101 | __sort3(_RandomAccessIterator __x1, _RandomAccessIterator __x2, _RandomAccessIterator __x3, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:112:1: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, $3 = 0]
+  112 | __sort3(_RandomAccessIterator __x, _RandomAccessIterator __y, _RandomAccessIterator __z, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:781:9: error: no matching function for call to '__sort3'
+  781 |         std::__sort3<_AlgPolicy, _Compare>(
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:101:1: note: candidate template ignored: requirement '__use_branchless_sort<std::__less<void, void> &, Point *>' was not satisfied [with $0 = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *]
+  101 | __sort3(_RandomAccessIterator __x1, _RandomAccessIterator __x2, _RandomAccessIterator __x3, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:112:1: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, $3 = 0]
+  112 | __sort3(_RandomAccessIterator __x, _RandomAccessIterator __y, _RandomAccessIterator __z, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:785:9: error: no matching function for call to '__sort3'
+  785 |         std::__sort3<_AlgPolicy, _Compare>(__first + __half_len, __first, __last - difference_type(1), __comp);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:101:1: note: candidate template ignored: requirement '__use_branchless_sort<std::__less<void, void> &, Point *>' was not satisfied [with $0 = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *]
+  101 | __sort3(_RandomAccessIterator __x1, _RandomAccessIterator __x2, _RandomAccessIterator __x3, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:112:1: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, $3 = 0]
+  112 | __sort3(_RandomAccessIterator __x, _RandomAccessIterator __y, _RandomAccessIterator __z, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:796:25: error: no matching function for call to object of type 'std::__less<void, void>'
+  796 |     if (!__leftmost && !__comp(*(__first - difference_type(1)), *__first)) {
+      |                         ^~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+In file included from /work/proj/src/sort_points.cpp:1:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/vector:352:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/algorithm:1888:
+In file included from /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/nth_element.h:15:
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:167:3: error: no matching function for call to '__sort3'
+  167 |   std::__sort3<_AlgPolicy, _Compare>(__x1, __x2, __x3, __c);
+      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:743:12: note: in instantiation of function template specialization 'std::__sort4<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, 0>' requested here
+  743 |       std::__sort4<_AlgPolicy, _Compare>(
+      |            ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:872:8: note: in instantiation of function template specialization 'std::__introsort<std::_ClassicAlgPolicy, std::__less<void, void> &, Point *, false>' requested here
+  872 |   std::__introsort<_AlgPolicy, _Comp&, _RandomAccessIterator, __use_branchless_sort<_Comp, _RandomAccessIterator> >(
+      |        ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:101:1: note: candidate template ignored: requirement '__use_branchless_sort<std::__less<void, void> &, Point *>' was not satisfied [with $0 = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *]
+  101 | __sort3(_RandomAccessIterator __x1, _RandomAccessIterator __x2, _RandomAccessIterator __x3, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:112:1: note: candidate template ignored: substitution failure [with _AlgPolicy = std::_ClassicAlgPolicy, _Compare = std::__less<void, void> &, _RandomAccessIterator = Point *, $3 = 0]
+  112 | __sort3(_RandomAccessIterator __x, _RandomAccessIterator __y, _RandomAccessIterator __z, _Compare __c) {
+      | ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/sort.h:168:7: error: no matching function for call to object of type 'std::__less<void, void>'
+  168 |   if (__c(*__x4, *__x3)) {
+      |       ^~~
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1/__algorithm/comp.h:40:60: note: candidate template ignored: substitution failure [with _Tp = Point, _Up = Point]
+   40 |   _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX14 bool operator()(const _Tp& __lhs, const _Up& __rhs) const {
+      |                                                            ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.
+make[2]: *** [CMakeFiles/triage_bench.dir/src/sort_points.cpp.o] Error 1
+[ 53%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_25.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_25.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_25.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_25.cpp.o -c /work/proj/src/mod_25.cpp
+[ 55%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_26.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_26.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_26.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_26.cpp.o -c /work/proj/src/mod_26.cpp
+[ 57%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_27.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_27.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_27.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_27.cpp.o -c /work/proj/src/mod_27.cpp
+[ 59%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_28.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_28.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_28.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_28.cpp.o -c /work/proj/src/mod_28.cpp
+[ 61%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_29.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_29.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_29.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_29.cpp.o -c /work/proj/src/mod_29.cpp
+[ 63%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_30.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_30.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_30.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_30.cpp.o -c /work/proj/src/mod_30.cpp
+[ 65%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_31.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_31.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_31.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_31.cpp.o -c /work/proj/src/mod_31.cpp
+[ 67%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_32.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_32.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_32.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_32.cpp.o -c /work/proj/src/mod_32.cpp
+[ 69%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_33.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_33.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_33.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_33.cpp.o -c /work/proj/src/mod_33.cpp
+[ 71%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_34.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_34.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_34.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_34.cpp.o -c /work/proj/src/mod_34.cpp
+[ 73%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_35.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_35.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_35.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_35.cpp.o -c /work/proj/src/mod_35.cpp
+[ 75%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_36.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_36.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_36.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_36.cpp.o -c /work/proj/src/mod_36.cpp
+[ 77%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_37.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_37.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_37.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_37.cpp.o -c /work/proj/src/mod_37.cpp
+[ 79%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_38.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_38.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_38.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_38.cpp.o -c /work/proj/src/mod_38.cpp
+[ 81%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_39.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_39.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_39.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_39.cpp.o -c /work/proj/src/mod_39.cpp
+[ 83%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_40.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_40.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_40.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_40.cpp.o -c /work/proj/src/mod_40.cpp
+[ 85%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_41.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_41.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_41.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_41.cpp.o -c /work/proj/src/mod_41.cpp
+[ 87%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_42.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_42.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_42.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_42.cpp.o -c /work/proj/src/mod_42.cpp
+[ 89%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_43.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_43.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_43.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_43.cpp.o -c /work/proj/src/mod_43.cpp
+[ 91%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_44.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_44.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_44.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_44.cpp.o -c /work/proj/src/mod_44.cpp
+[ 93%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_45.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_45.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_45.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_45.cpp.o -c /work/proj/src/mod_45.cpp
+[ 95%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_46.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_46.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_46.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_46.cpp.o -c /work/proj/src/mod_46.cpp
+[ 97%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_47.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_47.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_47.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_47.cpp.o -c /work/proj/src/mod_47.cpp
+make[2]: Target `CMakeFiles/triage_bench.dir/build' not remade because of errors.
+make[1]: *** [CMakeFiles/triage_bench.dir/all] Error 2
+make[1]: Target `all' not remade because of errors.
+make: *** [all] Error 2
+make: Target `default_target' not remade because of errors.

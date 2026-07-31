@@ -1,0 +1,1081 @@
+-- The CXX compiler identification is AppleClang 21.0.0.21000101
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /work/proj/build
+/opt/homebrew/bin/cmake -S/work/proj -B/work/proj/build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/cmake -E cmake_progress_start /work/proj/build/CMakeFiles /work/proj/build//CMakeFiles/progress.marks
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/Makefile2 all
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/triage_bench.dir/build.make CMakeFiles/triage_bench.dir/depend
+cd /work/proj/build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /work/proj /work/proj /work/proj/build /work/proj/build /work/proj/build/CMakeFiles/triage_bench.dir/DependInfo.cmake "--color=" triage_bench
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/triage_bench.dir/build.make CMakeFiles/triage_bench.dir/build
+[  2%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_00.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_00.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_00.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_00.cpp.o -c /work/proj/src/mod_00.cpp
+[  4%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_01.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_01.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_01.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_01.cpp.o -c /work/proj/src/mod_01.cpp
+[  6%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_02.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_02.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_02.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_02.cpp.o -c /work/proj/src/mod_02.cpp
+[  8%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_03.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_03.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_03.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_03.cpp.o -c /work/proj/src/mod_03.cpp
+[ 10%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_04.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_04.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_04.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_04.cpp.o -c /work/proj/src/mod_04.cpp
+[ 12%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_05.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_05.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_05.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_05.cpp.o -c /work/proj/src/mod_05.cpp
+[ 14%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_06.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_06.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_06.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_06.cpp.o -c /work/proj/src/mod_06.cpp
+[ 16%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_07.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_07.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_07.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_07.cpp.o -c /work/proj/src/mod_07.cpp
+[ 18%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_08.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_08.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_08.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_08.cpp.o -c /work/proj/src/mod_08.cpp
+[ 20%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_09.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_09.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_09.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_09.cpp.o -c /work/proj/src/mod_09.cpp
+[ 22%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_10.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_10.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_10.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_10.cpp.o -c /work/proj/src/mod_10.cpp
+[ 24%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_11.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_11.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_11.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_11.cpp.o -c /work/proj/src/mod_11.cpp
+[ 26%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_12.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_12.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_12.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_12.cpp.o -c /work/proj/src/mod_12.cpp
+[ 28%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_13.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_13.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_13.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_13.cpp.o -c /work/proj/src/mod_13.cpp
+[ 30%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_14.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_14.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_14.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_14.cpp.o -c /work/proj/src/mod_14.cpp
+[ 32%] Building CXX object CMakeFiles/triage_bench.dir/src/legacy_math.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/legacy_math.cpp.o -MF CMakeFiles/triage_bench.dir/src/legacy_math.cpp.o.d -o CMakeFiles/triage_bench.dir/src/legacy_math.cpp.o -c /work/proj/src/legacy_math.cpp
+/work/proj/src/legacy_math.cpp:3:16: warning: unused parameter 'unused_0' [-Wunused-parameter]
+    3 | int warn_0(int unused_0) { int s = -1; unsigned u = 2u; return (s < u) ? 0 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:3:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    3 | int warn_0(int unused_0) { int s = -1; unsigned u = 2u; return (s < u) ? 0 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:4:16: warning: unused parameter 'unused_1' [-Wunused-parameter]
+    4 | int warn_1(int unused_1) { int s = -1; unsigned u = 2u; return (s < u) ? 1 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:4:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    4 | int warn_1(int unused_1) { int s = -1; unsigned u = 2u; return (s < u) ? 1 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:5:16: warning: unused parameter 'unused_2' [-Wunused-parameter]
+    5 | int warn_2(int unused_2) { int s = -1; unsigned u = 2u; return (s < u) ? 2 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:5:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    5 | int warn_2(int unused_2) { int s = -1; unsigned u = 2u; return (s < u) ? 2 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:6:16: warning: unused parameter 'unused_3' [-Wunused-parameter]
+    6 | int warn_3(int unused_3) { int s = -1; unsigned u = 2u; return (s < u) ? 3 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:6:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    6 | int warn_3(int unused_3) { int s = -1; unsigned u = 2u; return (s < u) ? 3 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:7:16: warning: unused parameter 'unused_4' [-Wunused-parameter]
+    7 | int warn_4(int unused_4) { int s = -1; unsigned u = 2u; return (s < u) ? 4 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:7:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    7 | int warn_4(int unused_4) { int s = -1; unsigned u = 2u; return (s < u) ? 4 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:8:16: warning: unused parameter 'unused_5' [-Wunused-parameter]
+    8 | int warn_5(int unused_5) { int s = -1; unsigned u = 2u; return (s < u) ? 5 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:8:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    8 | int warn_5(int unused_5) { int s = -1; unsigned u = 2u; return (s < u) ? 5 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:9:16: warning: unused parameter 'unused_6' [-Wunused-parameter]
+    9 | int warn_6(int unused_6) { int s = -1; unsigned u = 2u; return (s < u) ? 6 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:9:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+    9 | int warn_6(int unused_6) { int s = -1; unsigned u = 2u; return (s < u) ? 6 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:10:16: warning: unused parameter 'unused_7' [-Wunused-parameter]
+   10 | int warn_7(int unused_7) { int s = -1; unsigned u = 2u; return (s < u) ? 7 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:10:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   10 | int warn_7(int unused_7) { int s = -1; unsigned u = 2u; return (s < u) ? 7 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:11:16: warning: unused parameter 'unused_8' [-Wunused-parameter]
+   11 | int warn_8(int unused_8) { int s = -1; unsigned u = 2u; return (s < u) ? 8 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:11:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   11 | int warn_8(int unused_8) { int s = -1; unsigned u = 2u; return (s < u) ? 8 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:12:16: warning: unused parameter 'unused_9' [-Wunused-parameter]
+   12 | int warn_9(int unused_9) { int s = -1; unsigned u = 2u; return (s < u) ? 9 : 0; }
+      |                ^
+/work/proj/src/legacy_math.cpp:12:67: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   12 | int warn_9(int unused_9) { int s = -1; unsigned u = 2u; return (s < u) ? 9 : 0; }
+      |                                                                 ~ ^ ~
+/work/proj/src/legacy_math.cpp:13:17: warning: unused parameter 'unused_10' [-Wunused-parameter]
+   13 | int warn_10(int unused_10) { int s = -1; unsigned u = 2u; return (s < u) ? 10 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:13:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   13 | int warn_10(int unused_10) { int s = -1; unsigned u = 2u; return (s < u) ? 10 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:14:17: warning: unused parameter 'unused_11' [-Wunused-parameter]
+   14 | int warn_11(int unused_11) { int s = -1; unsigned u = 2u; return (s < u) ? 11 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:14:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   14 | int warn_11(int unused_11) { int s = -1; unsigned u = 2u; return (s < u) ? 11 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:15:17: warning: unused parameter 'unused_12' [-Wunused-parameter]
+   15 | int warn_12(int unused_12) { int s = -1; unsigned u = 2u; return (s < u) ? 12 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:15:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   15 | int warn_12(int unused_12) { int s = -1; unsigned u = 2u; return (s < u) ? 12 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:16:17: warning: unused parameter 'unused_13' [-Wunused-parameter]
+   16 | int warn_13(int unused_13) { int s = -1; unsigned u = 2u; return (s < u) ? 13 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:16:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   16 | int warn_13(int unused_13) { int s = -1; unsigned u = 2u; return (s < u) ? 13 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:17:17: warning: unused parameter 'unused_14' [-Wunused-parameter]
+   17 | int warn_14(int unused_14) { int s = -1; unsigned u = 2u; return (s < u) ? 14 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:17:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   17 | int warn_14(int unused_14) { int s = -1; unsigned u = 2u; return (s < u) ? 14 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:18:17: warning: unused parameter 'unused_15' [-Wunused-parameter]
+   18 | int warn_15(int unused_15) { int s = -1; unsigned u = 2u; return (s < u) ? 15 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:18:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   18 | int warn_15(int unused_15) { int s = -1; unsigned u = 2u; return (s < u) ? 15 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:19:17: warning: unused parameter 'unused_16' [-Wunused-parameter]
+   19 | int warn_16(int unused_16) { int s = -1; unsigned u = 2u; return (s < u) ? 16 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:19:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   19 | int warn_16(int unused_16) { int s = -1; unsigned u = 2u; return (s < u) ? 16 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:20:17: warning: unused parameter 'unused_17' [-Wunused-parameter]
+   20 | int warn_17(int unused_17) { int s = -1; unsigned u = 2u; return (s < u) ? 17 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:20:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   20 | int warn_17(int unused_17) { int s = -1; unsigned u = 2u; return (s < u) ? 17 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:21:17: warning: unused parameter 'unused_18' [-Wunused-parameter]
+   21 | int warn_18(int unused_18) { int s = -1; unsigned u = 2u; return (s < u) ? 18 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:21:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   21 | int warn_18(int unused_18) { int s = -1; unsigned u = 2u; return (s < u) ? 18 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:22:17: warning: unused parameter 'unused_19' [-Wunused-parameter]
+   22 | int warn_19(int unused_19) { int s = -1; unsigned u = 2u; return (s < u) ? 19 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:22:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   22 | int warn_19(int unused_19) { int s = -1; unsigned u = 2u; return (s < u) ? 19 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:23:17: warning: unused parameter 'unused_20' [-Wunused-parameter]
+   23 | int warn_20(int unused_20) { int s = -1; unsigned u = 2u; return (s < u) ? 20 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:23:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   23 | int warn_20(int unused_20) { int s = -1; unsigned u = 2u; return (s < u) ? 20 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:24:17: warning: unused parameter 'unused_21' [-Wunused-parameter]
+   24 | int warn_21(int unused_21) { int s = -1; unsigned u = 2u; return (s < u) ? 21 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:24:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   24 | int warn_21(int unused_21) { int s = -1; unsigned u = 2u; return (s < u) ? 21 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:25:17: warning: unused parameter 'unused_22' [-Wunused-parameter]
+   25 | int warn_22(int unused_22) { int s = -1; unsigned u = 2u; return (s < u) ? 22 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:25:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   25 | int warn_22(int unused_22) { int s = -1; unsigned u = 2u; return (s < u) ? 22 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:26:17: warning: unused parameter 'unused_23' [-Wunused-parameter]
+   26 | int warn_23(int unused_23) { int s = -1; unsigned u = 2u; return (s < u) ? 23 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:26:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   26 | int warn_23(int unused_23) { int s = -1; unsigned u = 2u; return (s < u) ? 23 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:27:17: warning: unused parameter 'unused_24' [-Wunused-parameter]
+   27 | int warn_24(int unused_24) { int s = -1; unsigned u = 2u; return (s < u) ? 24 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:27:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   27 | int warn_24(int unused_24) { int s = -1; unsigned u = 2u; return (s < u) ? 24 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:28:17: warning: unused parameter 'unused_25' [-Wunused-parameter]
+   28 | int warn_25(int unused_25) { int s = -1; unsigned u = 2u; return (s < u) ? 25 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:28:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   28 | int warn_25(int unused_25) { int s = -1; unsigned u = 2u; return (s < u) ? 25 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:29:17: warning: unused parameter 'unused_26' [-Wunused-parameter]
+   29 | int warn_26(int unused_26) { int s = -1; unsigned u = 2u; return (s < u) ? 26 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:29:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   29 | int warn_26(int unused_26) { int s = -1; unsigned u = 2u; return (s < u) ? 26 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:30:17: warning: unused parameter 'unused_27' [-Wunused-parameter]
+   30 | int warn_27(int unused_27) { int s = -1; unsigned u = 2u; return (s < u) ? 27 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:30:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   30 | int warn_27(int unused_27) { int s = -1; unsigned u = 2u; return (s < u) ? 27 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:31:17: warning: unused parameter 'unused_28' [-Wunused-parameter]
+   31 | int warn_28(int unused_28) { int s = -1; unsigned u = 2u; return (s < u) ? 28 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:31:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   31 | int warn_28(int unused_28) { int s = -1; unsigned u = 2u; return (s < u) ? 28 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:32:17: warning: unused parameter 'unused_29' [-Wunused-parameter]
+   32 | int warn_29(int unused_29) { int s = -1; unsigned u = 2u; return (s < u) ? 29 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:32:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   32 | int warn_29(int unused_29) { int s = -1; unsigned u = 2u; return (s < u) ? 29 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:33:17: warning: unused parameter 'unused_30' [-Wunused-parameter]
+   33 | int warn_30(int unused_30) { int s = -1; unsigned u = 2u; return (s < u) ? 30 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:33:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   33 | int warn_30(int unused_30) { int s = -1; unsigned u = 2u; return (s < u) ? 30 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:34:17: warning: unused parameter 'unused_31' [-Wunused-parameter]
+   34 | int warn_31(int unused_31) { int s = -1; unsigned u = 2u; return (s < u) ? 31 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:34:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   34 | int warn_31(int unused_31) { int s = -1; unsigned u = 2u; return (s < u) ? 31 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:35:17: warning: unused parameter 'unused_32' [-Wunused-parameter]
+   35 | int warn_32(int unused_32) { int s = -1; unsigned u = 2u; return (s < u) ? 32 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:35:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   35 | int warn_32(int unused_32) { int s = -1; unsigned u = 2u; return (s < u) ? 32 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:36:17: warning: unused parameter 'unused_33' [-Wunused-parameter]
+   36 | int warn_33(int unused_33) { int s = -1; unsigned u = 2u; return (s < u) ? 33 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:36:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   36 | int warn_33(int unused_33) { int s = -1; unsigned u = 2u; return (s < u) ? 33 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:37:17: warning: unused parameter 'unused_34' [-Wunused-parameter]
+   37 | int warn_34(int unused_34) { int s = -1; unsigned u = 2u; return (s < u) ? 34 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:37:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   37 | int warn_34(int unused_34) { int s = -1; unsigned u = 2u; return (s < u) ? 34 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:38:17: warning: unused parameter 'unused_35' [-Wunused-parameter]
+   38 | int warn_35(int unused_35) { int s = -1; unsigned u = 2u; return (s < u) ? 35 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:38:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   38 | int warn_35(int unused_35) { int s = -1; unsigned u = 2u; return (s < u) ? 35 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:39:17: warning: unused parameter 'unused_36' [-Wunused-parameter]
+   39 | int warn_36(int unused_36) { int s = -1; unsigned u = 2u; return (s < u) ? 36 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:39:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   39 | int warn_36(int unused_36) { int s = -1; unsigned u = 2u; return (s < u) ? 36 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:40:17: warning: unused parameter 'unused_37' [-Wunused-parameter]
+   40 | int warn_37(int unused_37) { int s = -1; unsigned u = 2u; return (s < u) ? 37 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:40:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   40 | int warn_37(int unused_37) { int s = -1; unsigned u = 2u; return (s < u) ? 37 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:41:17: warning: unused parameter 'unused_38' [-Wunused-parameter]
+   41 | int warn_38(int unused_38) { int s = -1; unsigned u = 2u; return (s < u) ? 38 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:41:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   41 | int warn_38(int unused_38) { int s = -1; unsigned u = 2u; return (s < u) ? 38 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:42:17: warning: unused parameter 'unused_39' [-Wunused-parameter]
+   42 | int warn_39(int unused_39) { int s = -1; unsigned u = 2u; return (s < u) ? 39 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:42:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   42 | int warn_39(int unused_39) { int s = -1; unsigned u = 2u; return (s < u) ? 39 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:43:17: warning: unused parameter 'unused_40' [-Wunused-parameter]
+   43 | int warn_40(int unused_40) { int s = -1; unsigned u = 2u; return (s < u) ? 40 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:43:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   43 | int warn_40(int unused_40) { int s = -1; unsigned u = 2u; return (s < u) ? 40 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:44:17: warning: unused parameter 'unused_41' [-Wunused-parameter]
+   44 | int warn_41(int unused_41) { int s = -1; unsigned u = 2u; return (s < u) ? 41 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:44:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   44 | int warn_41(int unused_41) { int s = -1; unsigned u = 2u; return (s < u) ? 41 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:45:17: warning: unused parameter 'unused_42' [-Wunused-parameter]
+   45 | int warn_42(int unused_42) { int s = -1; unsigned u = 2u; return (s < u) ? 42 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:45:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   45 | int warn_42(int unused_42) { int s = -1; unsigned u = 2u; return (s < u) ? 42 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:46:17: warning: unused parameter 'unused_43' [-Wunused-parameter]
+   46 | int warn_43(int unused_43) { int s = -1; unsigned u = 2u; return (s < u) ? 43 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:46:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   46 | int warn_43(int unused_43) { int s = -1; unsigned u = 2u; return (s < u) ? 43 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:47:17: warning: unused parameter 'unused_44' [-Wunused-parameter]
+   47 | int warn_44(int unused_44) { int s = -1; unsigned u = 2u; return (s < u) ? 44 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:47:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   47 | int warn_44(int unused_44) { int s = -1; unsigned u = 2u; return (s < u) ? 44 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:48:17: warning: unused parameter 'unused_45' [-Wunused-parameter]
+   48 | int warn_45(int unused_45) { int s = -1; unsigned u = 2u; return (s < u) ? 45 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:48:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   48 | int warn_45(int unused_45) { int s = -1; unsigned u = 2u; return (s < u) ? 45 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:49:17: warning: unused parameter 'unused_46' [-Wunused-parameter]
+   49 | int warn_46(int unused_46) { int s = -1; unsigned u = 2u; return (s < u) ? 46 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:49:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   49 | int warn_46(int unused_46) { int s = -1; unsigned u = 2u; return (s < u) ? 46 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:50:17: warning: unused parameter 'unused_47' [-Wunused-parameter]
+   50 | int warn_47(int unused_47) { int s = -1; unsigned u = 2u; return (s < u) ? 47 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:50:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   50 | int warn_47(int unused_47) { int s = -1; unsigned u = 2u; return (s < u) ? 47 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:51:17: warning: unused parameter 'unused_48' [-Wunused-parameter]
+   51 | int warn_48(int unused_48) { int s = -1; unsigned u = 2u; return (s < u) ? 48 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:51:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   51 | int warn_48(int unused_48) { int s = -1; unsigned u = 2u; return (s < u) ? 48 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:52:17: warning: unused parameter 'unused_49' [-Wunused-parameter]
+   52 | int warn_49(int unused_49) { int s = -1; unsigned u = 2u; return (s < u) ? 49 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:52:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   52 | int warn_49(int unused_49) { int s = -1; unsigned u = 2u; return (s < u) ? 49 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:53:17: warning: unused parameter 'unused_50' [-Wunused-parameter]
+   53 | int warn_50(int unused_50) { int s = -1; unsigned u = 2u; return (s < u) ? 50 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:53:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   53 | int warn_50(int unused_50) { int s = -1; unsigned u = 2u; return (s < u) ? 50 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:54:17: warning: unused parameter 'unused_51' [-Wunused-parameter]
+   54 | int warn_51(int unused_51) { int s = -1; unsigned u = 2u; return (s < u) ? 51 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:54:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   54 | int warn_51(int unused_51) { int s = -1; unsigned u = 2u; return (s < u) ? 51 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:55:17: warning: unused parameter 'unused_52' [-Wunused-parameter]
+   55 | int warn_52(int unused_52) { int s = -1; unsigned u = 2u; return (s < u) ? 52 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:55:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   55 | int warn_52(int unused_52) { int s = -1; unsigned u = 2u; return (s < u) ? 52 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:56:17: warning: unused parameter 'unused_53' [-Wunused-parameter]
+   56 | int warn_53(int unused_53) { int s = -1; unsigned u = 2u; return (s < u) ? 53 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:56:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   56 | int warn_53(int unused_53) { int s = -1; unsigned u = 2u; return (s < u) ? 53 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:57:17: warning: unused parameter 'unused_54' [-Wunused-parameter]
+   57 | int warn_54(int unused_54) { int s = -1; unsigned u = 2u; return (s < u) ? 54 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:57:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   57 | int warn_54(int unused_54) { int s = -1; unsigned u = 2u; return (s < u) ? 54 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:58:17: warning: unused parameter 'unused_55' [-Wunused-parameter]
+   58 | int warn_55(int unused_55) { int s = -1; unsigned u = 2u; return (s < u) ? 55 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:58:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   58 | int warn_55(int unused_55) { int s = -1; unsigned u = 2u; return (s < u) ? 55 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:59:17: warning: unused parameter 'unused_56' [-Wunused-parameter]
+   59 | int warn_56(int unused_56) { int s = -1; unsigned u = 2u; return (s < u) ? 56 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:59:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   59 | int warn_56(int unused_56) { int s = -1; unsigned u = 2u; return (s < u) ? 56 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:60:17: warning: unused parameter 'unused_57' [-Wunused-parameter]
+   60 | int warn_57(int unused_57) { int s = -1; unsigned u = 2u; return (s < u) ? 57 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:60:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   60 | int warn_57(int unused_57) { int s = -1; unsigned u = 2u; return (s < u) ? 57 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:61:17: warning: unused parameter 'unused_58' [-Wunused-parameter]
+   61 | int warn_58(int unused_58) { int s = -1; unsigned u = 2u; return (s < u) ? 58 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:61:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   61 | int warn_58(int unused_58) { int s = -1; unsigned u = 2u; return (s < u) ? 58 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:62:17: warning: unused parameter 'unused_59' [-Wunused-parameter]
+   62 | int warn_59(int unused_59) { int s = -1; unsigned u = 2u; return (s < u) ? 59 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:62:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   62 | int warn_59(int unused_59) { int s = -1; unsigned u = 2u; return (s < u) ? 59 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:63:17: warning: unused parameter 'unused_60' [-Wunused-parameter]
+   63 | int warn_60(int unused_60) { int s = -1; unsigned u = 2u; return (s < u) ? 60 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:63:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   63 | int warn_60(int unused_60) { int s = -1; unsigned u = 2u; return (s < u) ? 60 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:64:17: warning: unused parameter 'unused_61' [-Wunused-parameter]
+   64 | int warn_61(int unused_61) { int s = -1; unsigned u = 2u; return (s < u) ? 61 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:64:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   64 | int warn_61(int unused_61) { int s = -1; unsigned u = 2u; return (s < u) ? 61 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:65:17: warning: unused parameter 'unused_62' [-Wunused-parameter]
+   65 | int warn_62(int unused_62) { int s = -1; unsigned u = 2u; return (s < u) ? 62 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:65:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   65 | int warn_62(int unused_62) { int s = -1; unsigned u = 2u; return (s < u) ? 62 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:66:17: warning: unused parameter 'unused_63' [-Wunused-parameter]
+   66 | int warn_63(int unused_63) { int s = -1; unsigned u = 2u; return (s < u) ? 63 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:66:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   66 | int warn_63(int unused_63) { int s = -1; unsigned u = 2u; return (s < u) ? 63 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:67:17: warning: unused parameter 'unused_64' [-Wunused-parameter]
+   67 | int warn_64(int unused_64) { int s = -1; unsigned u = 2u; return (s < u) ? 64 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:67:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   67 | int warn_64(int unused_64) { int s = -1; unsigned u = 2u; return (s < u) ? 64 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:68:17: warning: unused parameter 'unused_65' [-Wunused-parameter]
+   68 | int warn_65(int unused_65) { int s = -1; unsigned u = 2u; return (s < u) ? 65 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:68:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   68 | int warn_65(int unused_65) { int s = -1; unsigned u = 2u; return (s < u) ? 65 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:69:17: warning: unused parameter 'unused_66' [-Wunused-parameter]
+   69 | int warn_66(int unused_66) { int s = -1; unsigned u = 2u; return (s < u) ? 66 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:69:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   69 | int warn_66(int unused_66) { int s = -1; unsigned u = 2u; return (s < u) ? 66 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:70:17: warning: unused parameter 'unused_67' [-Wunused-parameter]
+   70 | int warn_67(int unused_67) { int s = -1; unsigned u = 2u; return (s < u) ? 67 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:70:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   70 | int warn_67(int unused_67) { int s = -1; unsigned u = 2u; return (s < u) ? 67 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:71:17: warning: unused parameter 'unused_68' [-Wunused-parameter]
+   71 | int warn_68(int unused_68) { int s = -1; unsigned u = 2u; return (s < u) ? 68 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:71:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   71 | int warn_68(int unused_68) { int s = -1; unsigned u = 2u; return (s < u) ? 68 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:72:17: warning: unused parameter 'unused_69' [-Wunused-parameter]
+   72 | int warn_69(int unused_69) { int s = -1; unsigned u = 2u; return (s < u) ? 69 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:72:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   72 | int warn_69(int unused_69) { int s = -1; unsigned u = 2u; return (s < u) ? 69 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:73:17: warning: unused parameter 'unused_70' [-Wunused-parameter]
+   73 | int warn_70(int unused_70) { int s = -1; unsigned u = 2u; return (s < u) ? 70 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:73:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   73 | int warn_70(int unused_70) { int s = -1; unsigned u = 2u; return (s < u) ? 70 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:74:17: warning: unused parameter 'unused_71' [-Wunused-parameter]
+   74 | int warn_71(int unused_71) { int s = -1; unsigned u = 2u; return (s < u) ? 71 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:74:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   74 | int warn_71(int unused_71) { int s = -1; unsigned u = 2u; return (s < u) ? 71 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:75:17: warning: unused parameter 'unused_72' [-Wunused-parameter]
+   75 | int warn_72(int unused_72) { int s = -1; unsigned u = 2u; return (s < u) ? 72 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:75:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   75 | int warn_72(int unused_72) { int s = -1; unsigned u = 2u; return (s < u) ? 72 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:76:17: warning: unused parameter 'unused_73' [-Wunused-parameter]
+   76 | int warn_73(int unused_73) { int s = -1; unsigned u = 2u; return (s < u) ? 73 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:76:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   76 | int warn_73(int unused_73) { int s = -1; unsigned u = 2u; return (s < u) ? 73 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:77:17: warning: unused parameter 'unused_74' [-Wunused-parameter]
+   77 | int warn_74(int unused_74) { int s = -1; unsigned u = 2u; return (s < u) ? 74 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:77:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   77 | int warn_74(int unused_74) { int s = -1; unsigned u = 2u; return (s < u) ? 74 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:78:17: warning: unused parameter 'unused_75' [-Wunused-parameter]
+   78 | int warn_75(int unused_75) { int s = -1; unsigned u = 2u; return (s < u) ? 75 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:78:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   78 | int warn_75(int unused_75) { int s = -1; unsigned u = 2u; return (s < u) ? 75 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:79:17: warning: unused parameter 'unused_76' [-Wunused-parameter]
+   79 | int warn_76(int unused_76) { int s = -1; unsigned u = 2u; return (s < u) ? 76 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:79:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   79 | int warn_76(int unused_76) { int s = -1; unsigned u = 2u; return (s < u) ? 76 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:80:17: warning: unused parameter 'unused_77' [-Wunused-parameter]
+   80 | int warn_77(int unused_77) { int s = -1; unsigned u = 2u; return (s < u) ? 77 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:80:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   80 | int warn_77(int unused_77) { int s = -1; unsigned u = 2u; return (s < u) ? 77 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:81:17: warning: unused parameter 'unused_78' [-Wunused-parameter]
+   81 | int warn_78(int unused_78) { int s = -1; unsigned u = 2u; return (s < u) ? 78 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:81:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   81 | int warn_78(int unused_78) { int s = -1; unsigned u = 2u; return (s < u) ? 78 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:82:17: warning: unused parameter 'unused_79' [-Wunused-parameter]
+   82 | int warn_79(int unused_79) { int s = -1; unsigned u = 2u; return (s < u) ? 79 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:82:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   82 | int warn_79(int unused_79) { int s = -1; unsigned u = 2u; return (s < u) ? 79 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:83:17: warning: unused parameter 'unused_80' [-Wunused-parameter]
+   83 | int warn_80(int unused_80) { int s = -1; unsigned u = 2u; return (s < u) ? 80 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:83:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   83 | int warn_80(int unused_80) { int s = -1; unsigned u = 2u; return (s < u) ? 80 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:84:17: warning: unused parameter 'unused_81' [-Wunused-parameter]
+   84 | int warn_81(int unused_81) { int s = -1; unsigned u = 2u; return (s < u) ? 81 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:84:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   84 | int warn_81(int unused_81) { int s = -1; unsigned u = 2u; return (s < u) ? 81 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:85:17: warning: unused parameter 'unused_82' [-Wunused-parameter]
+   85 | int warn_82(int unused_82) { int s = -1; unsigned u = 2u; return (s < u) ? 82 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:85:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   85 | int warn_82(int unused_82) { int s = -1; unsigned u = 2u; return (s < u) ? 82 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:86:17: warning: unused parameter 'unused_83' [-Wunused-parameter]
+   86 | int warn_83(int unused_83) { int s = -1; unsigned u = 2u; return (s < u) ? 83 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:86:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   86 | int warn_83(int unused_83) { int s = -1; unsigned u = 2u; return (s < u) ? 83 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:87:17: warning: unused parameter 'unused_84' [-Wunused-parameter]
+   87 | int warn_84(int unused_84) { int s = -1; unsigned u = 2u; return (s < u) ? 84 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:87:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   87 | int warn_84(int unused_84) { int s = -1; unsigned u = 2u; return (s < u) ? 84 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:88:17: warning: unused parameter 'unused_85' [-Wunused-parameter]
+   88 | int warn_85(int unused_85) { int s = -1; unsigned u = 2u; return (s < u) ? 85 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:88:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   88 | int warn_85(int unused_85) { int s = -1; unsigned u = 2u; return (s < u) ? 85 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:89:17: warning: unused parameter 'unused_86' [-Wunused-parameter]
+   89 | int warn_86(int unused_86) { int s = -1; unsigned u = 2u; return (s < u) ? 86 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:89:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   89 | int warn_86(int unused_86) { int s = -1; unsigned u = 2u; return (s < u) ? 86 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:90:17: warning: unused parameter 'unused_87' [-Wunused-parameter]
+   90 | int warn_87(int unused_87) { int s = -1; unsigned u = 2u; return (s < u) ? 87 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:90:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   90 | int warn_87(int unused_87) { int s = -1; unsigned u = 2u; return (s < u) ? 87 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:91:17: warning: unused parameter 'unused_88' [-Wunused-parameter]
+   91 | int warn_88(int unused_88) { int s = -1; unsigned u = 2u; return (s < u) ? 88 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:91:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   91 | int warn_88(int unused_88) { int s = -1; unsigned u = 2u; return (s < u) ? 88 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:92:17: warning: unused parameter 'unused_89' [-Wunused-parameter]
+   92 | int warn_89(int unused_89) { int s = -1; unsigned u = 2u; return (s < u) ? 89 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:92:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   92 | int warn_89(int unused_89) { int s = -1; unsigned u = 2u; return (s < u) ? 89 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:93:17: warning: unused parameter 'unused_90' [-Wunused-parameter]
+   93 | int warn_90(int unused_90) { int s = -1; unsigned u = 2u; return (s < u) ? 90 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:93:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   93 | int warn_90(int unused_90) { int s = -1; unsigned u = 2u; return (s < u) ? 90 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:94:17: warning: unused parameter 'unused_91' [-Wunused-parameter]
+   94 | int warn_91(int unused_91) { int s = -1; unsigned u = 2u; return (s < u) ? 91 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:94:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   94 | int warn_91(int unused_91) { int s = -1; unsigned u = 2u; return (s < u) ? 91 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:95:17: warning: unused parameter 'unused_92' [-Wunused-parameter]
+   95 | int warn_92(int unused_92) { int s = -1; unsigned u = 2u; return (s < u) ? 92 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:95:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   95 | int warn_92(int unused_92) { int s = -1; unsigned u = 2u; return (s < u) ? 92 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:96:17: warning: unused parameter 'unused_93' [-Wunused-parameter]
+   96 | int warn_93(int unused_93) { int s = -1; unsigned u = 2u; return (s < u) ? 93 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:96:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   96 | int warn_93(int unused_93) { int s = -1; unsigned u = 2u; return (s < u) ? 93 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:97:17: warning: unused parameter 'unused_94' [-Wunused-parameter]
+   97 | int warn_94(int unused_94) { int s = -1; unsigned u = 2u; return (s < u) ? 94 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:97:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   97 | int warn_94(int unused_94) { int s = -1; unsigned u = 2u; return (s < u) ? 94 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:98:17: warning: unused parameter 'unused_95' [-Wunused-parameter]
+   98 | int warn_95(int unused_95) { int s = -1; unsigned u = 2u; return (s < u) ? 95 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:98:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   98 | int warn_95(int unused_95) { int s = -1; unsigned u = 2u; return (s < u) ? 95 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:99:17: warning: unused parameter 'unused_96' [-Wunused-parameter]
+   99 | int warn_96(int unused_96) { int s = -1; unsigned u = 2u; return (s < u) ? 96 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:99:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+   99 | int warn_96(int unused_96) { int s = -1; unsigned u = 2u; return (s < u) ? 96 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:100:17: warning: unused parameter 'unused_97' [-Wunused-parameter]
+  100 | int warn_97(int unused_97) { int s = -1; unsigned u = 2u; return (s < u) ? 97 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:100:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  100 | int warn_97(int unused_97) { int s = -1; unsigned u = 2u; return (s < u) ? 97 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:101:17: warning: unused parameter 'unused_98' [-Wunused-parameter]
+  101 | int warn_98(int unused_98) { int s = -1; unsigned u = 2u; return (s < u) ? 98 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:101:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  101 | int warn_98(int unused_98) { int s = -1; unsigned u = 2u; return (s < u) ? 98 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:102:17: warning: unused parameter 'unused_99' [-Wunused-parameter]
+  102 | int warn_99(int unused_99) { int s = -1; unsigned u = 2u; return (s < u) ? 99 : 0; }
+      |                 ^
+/work/proj/src/legacy_math.cpp:102:69: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  102 | int warn_99(int unused_99) { int s = -1; unsigned u = 2u; return (s < u) ? 99 : 0; }
+      |                                                                   ~ ^ ~
+/work/proj/src/legacy_math.cpp:103:18: warning: unused parameter 'unused_100' [-Wunused-parameter]
+  103 | int warn_100(int unused_100) { int s = -1; unsigned u = 2u; return (s < u) ? 100 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:103:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  103 | int warn_100(int unused_100) { int s = -1; unsigned u = 2u; return (s < u) ? 100 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:104:18: warning: unused parameter 'unused_101' [-Wunused-parameter]
+  104 | int warn_101(int unused_101) { int s = -1; unsigned u = 2u; return (s < u) ? 101 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:104:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  104 | int warn_101(int unused_101) { int s = -1; unsigned u = 2u; return (s < u) ? 101 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:105:18: warning: unused parameter 'unused_102' [-Wunused-parameter]
+  105 | int warn_102(int unused_102) { int s = -1; unsigned u = 2u; return (s < u) ? 102 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:105:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  105 | int warn_102(int unused_102) { int s = -1; unsigned u = 2u; return (s < u) ? 102 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:106:18: warning: unused parameter 'unused_103' [-Wunused-parameter]
+  106 | int warn_103(int unused_103) { int s = -1; unsigned u = 2u; return (s < u) ? 103 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:106:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  106 | int warn_103(int unused_103) { int s = -1; unsigned u = 2u; return (s < u) ? 103 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:107:18: warning: unused parameter 'unused_104' [-Wunused-parameter]
+  107 | int warn_104(int unused_104) { int s = -1; unsigned u = 2u; return (s < u) ? 104 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:107:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  107 | int warn_104(int unused_104) { int s = -1; unsigned u = 2u; return (s < u) ? 104 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:108:18: warning: unused parameter 'unused_105' [-Wunused-parameter]
+  108 | int warn_105(int unused_105) { int s = -1; unsigned u = 2u; return (s < u) ? 105 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:108:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  108 | int warn_105(int unused_105) { int s = -1; unsigned u = 2u; return (s < u) ? 105 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:109:18: warning: unused parameter 'unused_106' [-Wunused-parameter]
+  109 | int warn_106(int unused_106) { int s = -1; unsigned u = 2u; return (s < u) ? 106 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:109:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  109 | int warn_106(int unused_106) { int s = -1; unsigned u = 2u; return (s < u) ? 106 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:110:18: warning: unused parameter 'unused_107' [-Wunused-parameter]
+  110 | int warn_107(int unused_107) { int s = -1; unsigned u = 2u; return (s < u) ? 107 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:110:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  110 | int warn_107(int unused_107) { int s = -1; unsigned u = 2u; return (s < u) ? 107 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:111:18: warning: unused parameter 'unused_108' [-Wunused-parameter]
+  111 | int warn_108(int unused_108) { int s = -1; unsigned u = 2u; return (s < u) ? 108 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:111:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  111 | int warn_108(int unused_108) { int s = -1; unsigned u = 2u; return (s < u) ? 108 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:112:18: warning: unused parameter 'unused_109' [-Wunused-parameter]
+  112 | int warn_109(int unused_109) { int s = -1; unsigned u = 2u; return (s < u) ? 109 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:112:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  112 | int warn_109(int unused_109) { int s = -1; unsigned u = 2u; return (s < u) ? 109 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:113:18: warning: unused parameter 'unused_110' [-Wunused-parameter]
+  113 | int warn_110(int unused_110) { int s = -1; unsigned u = 2u; return (s < u) ? 110 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:113:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  113 | int warn_110(int unused_110) { int s = -1; unsigned u = 2u; return (s < u) ? 110 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:114:18: warning: unused parameter 'unused_111' [-Wunused-parameter]
+  114 | int warn_111(int unused_111) { int s = -1; unsigned u = 2u; return (s < u) ? 111 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:114:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  114 | int warn_111(int unused_111) { int s = -1; unsigned u = 2u; return (s < u) ? 111 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:115:18: warning: unused parameter 'unused_112' [-Wunused-parameter]
+  115 | int warn_112(int unused_112) { int s = -1; unsigned u = 2u; return (s < u) ? 112 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:115:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  115 | int warn_112(int unused_112) { int s = -1; unsigned u = 2u; return (s < u) ? 112 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:116:18: warning: unused parameter 'unused_113' [-Wunused-parameter]
+  116 | int warn_113(int unused_113) { int s = -1; unsigned u = 2u; return (s < u) ? 113 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:116:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  116 | int warn_113(int unused_113) { int s = -1; unsigned u = 2u; return (s < u) ? 113 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:117:18: warning: unused parameter 'unused_114' [-Wunused-parameter]
+  117 | int warn_114(int unused_114) { int s = -1; unsigned u = 2u; return (s < u) ? 114 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:117:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  117 | int warn_114(int unused_114) { int s = -1; unsigned u = 2u; return (s < u) ? 114 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:118:18: warning: unused parameter 'unused_115' [-Wunused-parameter]
+  118 | int warn_115(int unused_115) { int s = -1; unsigned u = 2u; return (s < u) ? 115 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:118:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  118 | int warn_115(int unused_115) { int s = -1; unsigned u = 2u; return (s < u) ? 115 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:119:18: warning: unused parameter 'unused_116' [-Wunused-parameter]
+  119 | int warn_116(int unused_116) { int s = -1; unsigned u = 2u; return (s < u) ? 116 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:119:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  119 | int warn_116(int unused_116) { int s = -1; unsigned u = 2u; return (s < u) ? 116 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:120:18: warning: unused parameter 'unused_117' [-Wunused-parameter]
+  120 | int warn_117(int unused_117) { int s = -1; unsigned u = 2u; return (s < u) ? 117 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:120:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  120 | int warn_117(int unused_117) { int s = -1; unsigned u = 2u; return (s < u) ? 117 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:121:18: warning: unused parameter 'unused_118' [-Wunused-parameter]
+  121 | int warn_118(int unused_118) { int s = -1; unsigned u = 2u; return (s < u) ? 118 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:121:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  121 | int warn_118(int unused_118) { int s = -1; unsigned u = 2u; return (s < u) ? 118 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:122:18: warning: unused parameter 'unused_119' [-Wunused-parameter]
+  122 | int warn_119(int unused_119) { int s = -1; unsigned u = 2u; return (s < u) ? 119 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:122:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  122 | int warn_119(int unused_119) { int s = -1; unsigned u = 2u; return (s < u) ? 119 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:123:18: warning: unused parameter 'unused_120' [-Wunused-parameter]
+  123 | int warn_120(int unused_120) { int s = -1; unsigned u = 2u; return (s < u) ? 120 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:123:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  123 | int warn_120(int unused_120) { int s = -1; unsigned u = 2u; return (s < u) ? 120 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:124:18: warning: unused parameter 'unused_121' [-Wunused-parameter]
+  124 | int warn_121(int unused_121) { int s = -1; unsigned u = 2u; return (s < u) ? 121 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:124:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  124 | int warn_121(int unused_121) { int s = -1; unsigned u = 2u; return (s < u) ? 121 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:125:18: warning: unused parameter 'unused_122' [-Wunused-parameter]
+  125 | int warn_122(int unused_122) { int s = -1; unsigned u = 2u; return (s < u) ? 122 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:125:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  125 | int warn_122(int unused_122) { int s = -1; unsigned u = 2u; return (s < u) ? 122 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:126:18: warning: unused parameter 'unused_123' [-Wunused-parameter]
+  126 | int warn_123(int unused_123) { int s = -1; unsigned u = 2u; return (s < u) ? 123 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:126:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  126 | int warn_123(int unused_123) { int s = -1; unsigned u = 2u; return (s < u) ? 123 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:127:18: warning: unused parameter 'unused_124' [-Wunused-parameter]
+  127 | int warn_124(int unused_124) { int s = -1; unsigned u = 2u; return (s < u) ? 124 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:127:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  127 | int warn_124(int unused_124) { int s = -1; unsigned u = 2u; return (s < u) ? 124 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:128:18: warning: unused parameter 'unused_125' [-Wunused-parameter]
+  128 | int warn_125(int unused_125) { int s = -1; unsigned u = 2u; return (s < u) ? 125 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:128:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  128 | int warn_125(int unused_125) { int s = -1; unsigned u = 2u; return (s < u) ? 125 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:129:18: warning: unused parameter 'unused_126' [-Wunused-parameter]
+  129 | int warn_126(int unused_126) { int s = -1; unsigned u = 2u; return (s < u) ? 126 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:129:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  129 | int warn_126(int unused_126) { int s = -1; unsigned u = 2u; return (s < u) ? 126 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:130:18: warning: unused parameter 'unused_127' [-Wunused-parameter]
+  130 | int warn_127(int unused_127) { int s = -1; unsigned u = 2u; return (s < u) ? 127 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:130:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  130 | int warn_127(int unused_127) { int s = -1; unsigned u = 2u; return (s < u) ? 127 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:131:18: warning: unused parameter 'unused_128' [-Wunused-parameter]
+  131 | int warn_128(int unused_128) { int s = -1; unsigned u = 2u; return (s < u) ? 128 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:131:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  131 | int warn_128(int unused_128) { int s = -1; unsigned u = 2u; return (s < u) ? 128 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:132:18: warning: unused parameter 'unused_129' [-Wunused-parameter]
+  132 | int warn_129(int unused_129) { int s = -1; unsigned u = 2u; return (s < u) ? 129 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:132:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  132 | int warn_129(int unused_129) { int s = -1; unsigned u = 2u; return (s < u) ? 129 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:133:18: warning: unused parameter 'unused_130' [-Wunused-parameter]
+  133 | int warn_130(int unused_130) { int s = -1; unsigned u = 2u; return (s < u) ? 130 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:133:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  133 | int warn_130(int unused_130) { int s = -1; unsigned u = 2u; return (s < u) ? 130 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:134:18: warning: unused parameter 'unused_131' [-Wunused-parameter]
+  134 | int warn_131(int unused_131) { int s = -1; unsigned u = 2u; return (s < u) ? 131 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:134:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  134 | int warn_131(int unused_131) { int s = -1; unsigned u = 2u; return (s < u) ? 131 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:135:18: warning: unused parameter 'unused_132' [-Wunused-parameter]
+  135 | int warn_132(int unused_132) { int s = -1; unsigned u = 2u; return (s < u) ? 132 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:135:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  135 | int warn_132(int unused_132) { int s = -1; unsigned u = 2u; return (s < u) ? 132 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:136:18: warning: unused parameter 'unused_133' [-Wunused-parameter]
+  136 | int warn_133(int unused_133) { int s = -1; unsigned u = 2u; return (s < u) ? 133 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:136:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  136 | int warn_133(int unused_133) { int s = -1; unsigned u = 2u; return (s < u) ? 133 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:137:18: warning: unused parameter 'unused_134' [-Wunused-parameter]
+  137 | int warn_134(int unused_134) { int s = -1; unsigned u = 2u; return (s < u) ? 134 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:137:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  137 | int warn_134(int unused_134) { int s = -1; unsigned u = 2u; return (s < u) ? 134 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:138:18: warning: unused parameter 'unused_135' [-Wunused-parameter]
+  138 | int warn_135(int unused_135) { int s = -1; unsigned u = 2u; return (s < u) ? 135 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:138:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  138 | int warn_135(int unused_135) { int s = -1; unsigned u = 2u; return (s < u) ? 135 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:139:18: warning: unused parameter 'unused_136' [-Wunused-parameter]
+  139 | int warn_136(int unused_136) { int s = -1; unsigned u = 2u; return (s < u) ? 136 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:139:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  139 | int warn_136(int unused_136) { int s = -1; unsigned u = 2u; return (s < u) ? 136 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:140:18: warning: unused parameter 'unused_137' [-Wunused-parameter]
+  140 | int warn_137(int unused_137) { int s = -1; unsigned u = 2u; return (s < u) ? 137 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:140:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  140 | int warn_137(int unused_137) { int s = -1; unsigned u = 2u; return (s < u) ? 137 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:141:18: warning: unused parameter 'unused_138' [-Wunused-parameter]
+  141 | int warn_138(int unused_138) { int s = -1; unsigned u = 2u; return (s < u) ? 138 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:141:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  141 | int warn_138(int unused_138) { int s = -1; unsigned u = 2u; return (s < u) ? 138 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:142:18: warning: unused parameter 'unused_139' [-Wunused-parameter]
+  142 | int warn_139(int unused_139) { int s = -1; unsigned u = 2u; return (s < u) ? 139 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:142:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  142 | int warn_139(int unused_139) { int s = -1; unsigned u = 2u; return (s < u) ? 139 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:143:18: warning: unused parameter 'unused_140' [-Wunused-parameter]
+  143 | int warn_140(int unused_140) { int s = -1; unsigned u = 2u; return (s < u) ? 140 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:143:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  143 | int warn_140(int unused_140) { int s = -1; unsigned u = 2u; return (s < u) ? 140 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:144:18: warning: unused parameter 'unused_141' [-Wunused-parameter]
+  144 | int warn_141(int unused_141) { int s = -1; unsigned u = 2u; return (s < u) ? 141 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:144:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  144 | int warn_141(int unused_141) { int s = -1; unsigned u = 2u; return (s < u) ? 141 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:145:18: warning: unused parameter 'unused_142' [-Wunused-parameter]
+  145 | int warn_142(int unused_142) { int s = -1; unsigned u = 2u; return (s < u) ? 142 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:145:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  145 | int warn_142(int unused_142) { int s = -1; unsigned u = 2u; return (s < u) ? 142 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:146:18: warning: unused parameter 'unused_143' [-Wunused-parameter]
+  146 | int warn_143(int unused_143) { int s = -1; unsigned u = 2u; return (s < u) ? 143 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:146:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  146 | int warn_143(int unused_143) { int s = -1; unsigned u = 2u; return (s < u) ? 143 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:147:18: warning: unused parameter 'unused_144' [-Wunused-parameter]
+  147 | int warn_144(int unused_144) { int s = -1; unsigned u = 2u; return (s < u) ? 144 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:147:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  147 | int warn_144(int unused_144) { int s = -1; unsigned u = 2u; return (s < u) ? 144 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:148:18: warning: unused parameter 'unused_145' [-Wunused-parameter]
+  148 | int warn_145(int unused_145) { int s = -1; unsigned u = 2u; return (s < u) ? 145 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:148:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  148 | int warn_145(int unused_145) { int s = -1; unsigned u = 2u; return (s < u) ? 145 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:149:18: warning: unused parameter 'unused_146' [-Wunused-parameter]
+  149 | int warn_146(int unused_146) { int s = -1; unsigned u = 2u; return (s < u) ? 146 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:149:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  149 | int warn_146(int unused_146) { int s = -1; unsigned u = 2u; return (s < u) ? 146 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:150:18: warning: unused parameter 'unused_147' [-Wunused-parameter]
+  150 | int warn_147(int unused_147) { int s = -1; unsigned u = 2u; return (s < u) ? 147 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:150:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  150 | int warn_147(int unused_147) { int s = -1; unsigned u = 2u; return (s < u) ? 147 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:151:18: warning: unused parameter 'unused_148' [-Wunused-parameter]
+  151 | int warn_148(int unused_148) { int s = -1; unsigned u = 2u; return (s < u) ? 148 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:151:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  151 | int warn_148(int unused_148) { int s = -1; unsigned u = 2u; return (s < u) ? 148 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:152:18: warning: unused parameter 'unused_149' [-Wunused-parameter]
+  152 | int warn_149(int unused_149) { int s = -1; unsigned u = 2u; return (s < u) ? 149 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:152:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  152 | int warn_149(int unused_149) { int s = -1; unsigned u = 2u; return (s < u) ? 149 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:153:18: warning: unused parameter 'unused_150' [-Wunused-parameter]
+  153 | int warn_150(int unused_150) { int s = -1; unsigned u = 2u; return (s < u) ? 150 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:153:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  153 | int warn_150(int unused_150) { int s = -1; unsigned u = 2u; return (s < u) ? 150 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:154:18: warning: unused parameter 'unused_151' [-Wunused-parameter]
+  154 | int warn_151(int unused_151) { int s = -1; unsigned u = 2u; return (s < u) ? 151 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:154:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  154 | int warn_151(int unused_151) { int s = -1; unsigned u = 2u; return (s < u) ? 151 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:155:18: warning: unused parameter 'unused_152' [-Wunused-parameter]
+  155 | int warn_152(int unused_152) { int s = -1; unsigned u = 2u; return (s < u) ? 152 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:155:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  155 | int warn_152(int unused_152) { int s = -1; unsigned u = 2u; return (s < u) ? 152 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:156:18: warning: unused parameter 'unused_153' [-Wunused-parameter]
+  156 | int warn_153(int unused_153) { int s = -1; unsigned u = 2u; return (s < u) ? 153 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:156:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  156 | int warn_153(int unused_153) { int s = -1; unsigned u = 2u; return (s < u) ? 153 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:157:18: warning: unused parameter 'unused_154' [-Wunused-parameter]
+  157 | int warn_154(int unused_154) { int s = -1; unsigned u = 2u; return (s < u) ? 154 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:157:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  157 | int warn_154(int unused_154) { int s = -1; unsigned u = 2u; return (s < u) ? 154 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:158:18: warning: unused parameter 'unused_155' [-Wunused-parameter]
+  158 | int warn_155(int unused_155) { int s = -1; unsigned u = 2u; return (s < u) ? 155 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:158:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  158 | int warn_155(int unused_155) { int s = -1; unsigned u = 2u; return (s < u) ? 155 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:159:18: warning: unused parameter 'unused_156' [-Wunused-parameter]
+  159 | int warn_156(int unused_156) { int s = -1; unsigned u = 2u; return (s < u) ? 156 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:159:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  159 | int warn_156(int unused_156) { int s = -1; unsigned u = 2u; return (s < u) ? 156 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:160:18: warning: unused parameter 'unused_157' [-Wunused-parameter]
+  160 | int warn_157(int unused_157) { int s = -1; unsigned u = 2u; return (s < u) ? 157 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:160:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  160 | int warn_157(int unused_157) { int s = -1; unsigned u = 2u; return (s < u) ? 157 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:161:18: warning: unused parameter 'unused_158' [-Wunused-parameter]
+  161 | int warn_158(int unused_158) { int s = -1; unsigned u = 2u; return (s < u) ? 158 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:161:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  161 | int warn_158(int unused_158) { int s = -1; unsigned u = 2u; return (s < u) ? 158 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:162:18: warning: unused parameter 'unused_159' [-Wunused-parameter]
+  162 | int warn_159(int unused_159) { int s = -1; unsigned u = 2u; return (s < u) ? 159 : 0; }
+      |                  ^
+/work/proj/src/legacy_math.cpp:162:71: warning: comparison of integers of different signs: 'int' and 'unsigned int' [-Wsign-compare]
+  162 | int warn_159(int unused_159) { int s = -1; unsigned u = 2u; return (s < u) ? 159 : 0; }
+      |                                                                     ~ ^ ~
+/work/proj/src/legacy_math.cpp:163:27: error: use of undeclared identifier 'not_a_symbol_at_all'
+  163 | int broken(void) { return not_a_symbol_at_all; }
+      |                           ^~~~~~~~~~~~~~~~~~~
+320 warnings and 1 error generated.
+make[2]: *** [CMakeFiles/triage_bench.dir/src/legacy_math.cpp.o] Error 1
+[ 34%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_16.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_16.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_16.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_16.cpp.o -c /work/proj/src/mod_16.cpp
+[ 36%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_17.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_17.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_17.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_17.cpp.o -c /work/proj/src/mod_17.cpp
+[ 38%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_18.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_18.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_18.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_18.cpp.o -c /work/proj/src/mod_18.cpp
+[ 40%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_19.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_19.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_19.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_19.cpp.o -c /work/proj/src/mod_19.cpp
+[ 42%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_20.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_20.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_20.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_20.cpp.o -c /work/proj/src/mod_20.cpp
+[ 44%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_21.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_21.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_21.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_21.cpp.o -c /work/proj/src/mod_21.cpp
+[ 46%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_22.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_22.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_22.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_22.cpp.o -c /work/proj/src/mod_22.cpp
+[ 48%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_23.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_23.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_23.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_23.cpp.o -c /work/proj/src/mod_23.cpp
+[ 51%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_24.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_24.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_24.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_24.cpp.o -c /work/proj/src/mod_24.cpp
+[ 53%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_25.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_25.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_25.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_25.cpp.o -c /work/proj/src/mod_25.cpp
+[ 55%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_26.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_26.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_26.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_26.cpp.o -c /work/proj/src/mod_26.cpp
+[ 57%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_27.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_27.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_27.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_27.cpp.o -c /work/proj/src/mod_27.cpp
+[ 59%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_28.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_28.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_28.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_28.cpp.o -c /work/proj/src/mod_28.cpp
+[ 61%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_29.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_29.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_29.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_29.cpp.o -c /work/proj/src/mod_29.cpp
+[ 63%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_30.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_30.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_30.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_30.cpp.o -c /work/proj/src/mod_30.cpp
+[ 65%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_31.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_31.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_31.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_31.cpp.o -c /work/proj/src/mod_31.cpp
+[ 67%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_32.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_32.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_32.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_32.cpp.o -c /work/proj/src/mod_32.cpp
+[ 69%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_33.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_33.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_33.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_33.cpp.o -c /work/proj/src/mod_33.cpp
+[ 71%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_34.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_34.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_34.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_34.cpp.o -c /work/proj/src/mod_34.cpp
+[ 73%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_35.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_35.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_35.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_35.cpp.o -c /work/proj/src/mod_35.cpp
+[ 75%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_36.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_36.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_36.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_36.cpp.o -c /work/proj/src/mod_36.cpp
+[ 77%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_37.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_37.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_37.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_37.cpp.o -c /work/proj/src/mod_37.cpp
+[ 79%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_38.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_38.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_38.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_38.cpp.o -c /work/proj/src/mod_38.cpp
+[ 81%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_39.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_39.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_39.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_39.cpp.o -c /work/proj/src/mod_39.cpp
+[ 83%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_40.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_40.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_40.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_40.cpp.o -c /work/proj/src/mod_40.cpp
+[ 85%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_41.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_41.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_41.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_41.cpp.o -c /work/proj/src/mod_41.cpp
+[ 87%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_42.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_42.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_42.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_42.cpp.o -c /work/proj/src/mod_42.cpp
+[ 89%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_43.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_43.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_43.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_43.cpp.o -c /work/proj/src/mod_43.cpp
+[ 91%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_44.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_44.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_44.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_44.cpp.o -c /work/proj/src/mod_44.cpp
+[ 93%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_45.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_45.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_45.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_45.cpp.o -c /work/proj/src/mod_45.cpp
+[ 95%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_46.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_46.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_46.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_46.cpp.o -c /work/proj/src/mod_46.cpp
+[ 97%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_47.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_47.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_47.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_47.cpp.o -c /work/proj/src/mod_47.cpp
+make[2]: Target `CMakeFiles/triage_bench.dir/build' not remade because of errors.
+make[1]: *** [CMakeFiles/triage_bench.dir/all] Error 2
+make[1]: Target `all' not remade because of errors.
+make: *** [all] Error 2
+make: Target `default_target' not remade because of errors.

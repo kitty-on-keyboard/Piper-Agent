@@ -1,0 +1,77 @@
+{
+  "_comment": [
+    "Configuration for scripts/run_ratchets.py (spec S15.3-S15.7).",
+    "",
+    "Every gate declares whether it is LIVE. A live gate must find at least",
+    "min_subjects things to inspect; a dormant gate must find exactly zero. That",
+    "second half is the important one: it means the day phase 4 lands a tool",
+    "registry, the tool-honesty gate stops being dormant BY FAILING, and someone",
+    "has to flip live:true deliberately. A dormant gate that silently reports",
+    "green is v1's `ctest -E realmodel` -- a selector that matched nothing while",
+    "printing a number that looked fine.",
+    "",
+    "Exemptions are by path, and every one carries a reason. There is no",
+    "wildcard-with-no-explanation entry, and adding one should be as awkward as",
+    "it looks."
+  ],
+
+  "limits": {
+    "max_file_lines": 800,
+    "max_function_lines": 80,
+    "max_nesting_depth": 3
+  },
+
+  "source_roots": ["src", "tests", "scripts", "cmake"],
+
+  "gates": {
+    "size": { "live": true, "min_subjects": 15 },
+    "layers": { "live": true, "min_subjects": 5 },
+    "dead_code": { "live": true, "min_subjects": 20 },
+    "protocol": {
+      "live": false,
+      "activates_in_phase": 4,
+      "note": "protocol/schema.json does not exist yet. S4.4: generated TS and C++ are regenerated and diffed; drift fails."
+    },
+    "tool_honesty": {
+      "live": false,
+      "activates_in_phase": 4,
+      "note": "No tool registry yet. S6.3: any tool name a description or error string mentions must resolve to a registered tool. v1 audited this once and 7 of 13 tools were lying."
+    },
+    "prose_correctives": {
+      "live": false,
+      "activates_in_phase": 7,
+      "note": "No loop yet. S9.2: the count of prose-only corrective sites must be 0. v1 had 11 of 34, including one named ForceWrite that forced nothing."
+    }
+  },
+
+  "layers": {
+    "src/platform": 0,
+    "src/model": 1,
+    "src/tools": 2,
+    "src/context": 3,
+    "src/loop": 4,
+    "src/surface": 5
+  },
+
+  "size_exempt": [
+    {
+      "path": "bakeoff/",
+      "reason": "Ported verbatim from v1 (S18). These are the falsifiers; reformatting evidence to satisfy a line limit makes it no longer the thing that was measured. bakeoff/log_triage/generate_corpus.py is 1125 lines and stays that way."
+    },
+    {
+      "path": "third_party/",
+      "reason": "Vendored simdjson 4.6.1, upstream source."
+    }
+  ],
+
+  "dead_code_exempt": [
+    {
+      "symbol": "SystemClock",
+      "reason": "The production Clock. Referenced only from main() in the sidecar, which does not exist until phase 4; tests use ManualClock. Remove this entry when the sidecar lands."
+    },
+    {
+      "symbol": "base64_decode",
+      "reason": "The replay side of the byte-faithful trace pair (S2.1.4). Its only non-test caller is ReplayBackend, phase 2. Kept because shipping an encoder with no decoder is how a trace stops being replayable."
+    }
+  ]
+}

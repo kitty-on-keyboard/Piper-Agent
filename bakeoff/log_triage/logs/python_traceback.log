@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/work/proj/pipeline.py", line 9, in <module>
+    print(summarise([{'value': 1}, {'v': 2}]))
+  File "/work/proj/pipeline.py", line 5, in summarise
+    values = load(rows)
+  File "/work/proj/pipeline.py", line 2, in load
+    return [r['value'] for r in rows]
+  File "/work/proj/pipeline.py", line 2, in <listcomp>
+    return [r['value'] for r in rows]
+KeyError: 'value'
