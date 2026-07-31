@@ -28,7 +28,7 @@ void TurnGrammar::reset() {
     phase_ = TurnPhase::Think;
     think_.clear();
     text_.clear();
-    saw_tool_call_ = false;
+    calls_.clear();
     guard_ = tools_.empty() ? nullptr
                             : std::make_unique<parsephony::ToolCallGuard>(tools_);
 }
@@ -68,9 +68,10 @@ Advance TurnGrammar::advance_text(TokenId id) {
         return Advance::Accepted;
     }
     if (id == s.tool_call_open) {
-        if (saw_tool_call_ || guard_ == nullptr) {
-            // One call per turn -- one turn, one outcome (S9.1). And with no registry,
-            // a tool call has nowhere to go: rejected, not silently narrated.
+        if (at_call_cap() || guard_ == nullptr) {
+            // Bounded, not forbidden: a turn may batch up to kMaxCallsPerTurn calls, and
+            // past that the open is rejected. With no registry a tool call has nowhere
+            // to go: rejected, not silently narrated.
             return Advance::Rejected;
         }
         phase_ = TurnPhase::ToolCall;
@@ -97,9 +98,14 @@ Advance TurnGrammar::advance_tool_call(TokenId id) {
         if (guard_->feed(bytes) != parsephony::Error::Ok || !guard_->complete()) {
             return Advance::Rejected;
         }
-        saw_tool_call_ = true;
-        phase_ = TurnPhase::Done;
-        return Advance::Accepted;
+        // Copied out NOW: the guard is reset before the next call, and a reference into
+        // it would dangle the moment the model opens another one.
+        calls_.push_back({guard_->tool_name(), guard_->params()});
+        // Back to Text rather than Done. The turn ends on <|im_end|>, which is what
+        // Qwen's own template emits after a call -- so the common single-call turn pays
+        // one extra token, and a batched turn pays nothing.
+        phase_ = TurnPhase::Text;
+        return Advance::Ok;
     }
     if (is_structural(id)) {
         return Advance::Rejected;
@@ -150,7 +156,12 @@ bool TurnGrammar::permitted(TokenId id) const {
     // from advance() because it IS advance().
     TurnGrammar probe(tok_, tools_);
     probe.phase_ = phase_;
-    probe.saw_tool_call_ = saw_tool_call_;
+    // The probe only needs the one bit advance() consults outside a call: whether
+    // another <tool_call> may open here. Seeding the count to the cap reproduces it
+    // without copying parsed calls the probe will never read.
+    if (at_call_cap()) {
+        probe.calls_.resize(kMaxCallsPerTurn);
+    }
     return probe.advance(id) != Advance::Rejected;
 }
 
@@ -158,8 +169,8 @@ bool TurnGrammar::permitted(TokenId id) const {
 
 namespace {
 
-std::uint32_t state_key(TurnPhase phase, bool saw_tool_call) {
-    return (static_cast<std::uint32_t>(phase) << 1U) | (saw_tool_call ? 1U : 0U);
+std::uint32_t state_key(TurnPhase phase, bool at_call_cap) {
+    return (static_cast<std::uint32_t>(phase) << 1U) | (at_call_cap ? 1U : 0U);
 }
 
 } // namespace
@@ -179,7 +190,7 @@ void TurnGrammar::build_structural_mask() const {
             }
         }
     }
-    cache_->structural.insert_or_assign(state_key(phase_, saw_tool_call_), std::move(m));
+    cache_->structural.insert_or_assign(state_key(phase_, at_call_cap()), std::move(m));
 }
 
 void TurnGrammar::build_tool_call_mask() const {
@@ -216,7 +227,7 @@ const TokenMask& TurnGrammar::mask() const {
         build_tool_call_mask();
         return cache_->tool_call;
     }
-    const std::uint32_t key = state_key(phase_, saw_tool_call_);
+    const std::uint32_t key = state_key(phase_, at_call_cap());
     auto it = cache_->structural.find(key);
     if (it == cache_->structural.end()) {
         build_structural_mask();

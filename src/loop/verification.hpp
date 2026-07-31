@@ -31,6 +31,14 @@ class Verifier {
     // whether it passed. Nothing else in the codebase writes a VerificationRecord.
     bool run_and_record(const std::string& command, int approved_tier);
 
+    // Same, but filed under `contract_id` rather than under the command's own canonical
+    // form. The loop uses this so that every way the model spells its check --
+    // `pytest x`, `cd d && python3 -m pytest x`, the same with a `tail` on the end --
+    // lands on the ONE contract the run declared. Filing them separately gave each
+    // variation a fresh identity with no history, so none could ever be falsifiable.
+    bool run_and_record_as(const std::string& command, int approved_tier,
+                           const std::string& contract_id);
+
     // Proves the check can fail, by intervention: `breaker` mutates the workspace so
     // the check MUST fail, the check is re-run and required to be red, then `restore`
     // puts it back and it is required to be green again. Only after that does a pass

@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <cstdlib>
 #include <vector>
 
 namespace lmp::surface {
@@ -38,6 +39,25 @@ std::string extract_string(std::string_view message, std::string_view key) {
     return out;
 }
 
+// Finds "key" and returns the raw token that follows the colon, unquoted and
+// untrimmed at the far end -- enough to recognise a JSON literal.
+std::string_view extract_literal(std::string_view message, std::string_view key) {
+    const std::string needle = "\"" + std::string(key) + "\"";
+    std::size_t at = message.find(needle);
+    if (at == std::string_view::npos) {
+        return {};
+    }
+    at = message.find(':', at + needle.size());
+    if (at == std::string_view::npos) {
+        return {};
+    }
+    ++at;
+    while (at < message.size() && message[at] == ' ') {
+        ++at;
+    }
+    return message.substr(at);
+}
+
 } // namespace
 
 std::string method_of(std::string_view message) {
@@ -46,6 +66,23 @@ std::string method_of(std::string_view message) {
 
 std::string string_field(std::string_view message, std::string_view key) {
     return extract_string(message, key);
+}
+
+bool bool_field(std::string_view message, std::string_view key) {
+    return extract_literal(message, key).substr(0, 4) == "true";
+}
+
+double double_field(std::string_view message, std::string_view key, double fallback) {
+    const std::string_view literal = extract_literal(message, key);
+    if (literal.empty()) {
+        return fallback;
+    }
+    // strtod needs a terminator, and the view is the whole message tail.
+    const std::string text(literal.substr(0, 64));
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double value = std::strtod(begin, &end);
+    return end == begin ? fallback : value;
 }
 
 StdinReader::~StdinReader() { join(); }

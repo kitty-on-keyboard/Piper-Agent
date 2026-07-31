@@ -236,12 +236,23 @@ TEST(the_mission_and_pinned_state_survive_every_trim) {
     (void)ctx.compact_oldest(2);
 
     const std::vector<context::Message> msgs = ctx.render("");
-    REQUIRE(!msgs.empty());
+    REQUIRE(msgs.size() >= 2);
+
+    // The mission is T0 and stays in the system message, which never changes within a
+    // run -- that is what keeps the KV prefix reusable.
     const std::string& system = msgs[0].content;
     CHECK(system.find("THE MISSION: ship the parser") != std::string::npos);
-    CHECK(system.find("- [x] write it") != std::string::npos);
-    CHECK(system.find("- [ ] test it") != std::string::npos);
-    CHECK(system.find("src/parser.cpp") != std::string::npos);
+
+    // The pinned ledgers survive the trim too, but they render LAST, not in the system
+    // message. They change on almost every turn, and in front of the prompt each change
+    // rewrote token 0 and forced a full re-prefill of the whole context.
+    const std::string& live = msgs.back().content;
+    CHECK(live.find("- [x] write it") != std::string::npos);
+    CHECK(live.find("- [ ] test it") != std::string::npos);
+    CHECK(live.find("src/parser.cpp") != std::string::npos);
+
+    // And they are NOT in the stable head, which is the property being protected.
+    CHECK(system.find("- [x] write it") == std::string::npos);
 }
 
 // --- HITL routing (S7.6) -----------------------------------------------------

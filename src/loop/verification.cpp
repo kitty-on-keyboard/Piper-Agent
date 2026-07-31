@@ -57,20 +57,44 @@ std::string canonicalize_check(std::string_view command) {
 
 bool Verifier::is_proven(const std::string& command) const {
     const std::string canon = canonicalize_check(command);
-    return std::find(proven_.begin(), proven_.end(), canon) != proven_.end();
+    if (std::find(proven_.begin(), proven_.end(), canon) != proven_.end()) {
+        return true;
+    }
+    // A red OBSERVED earlier in this run is the proof, and it is free.
+    //
+    // This is the FAIL_TO_PASS discipline: run the check before the fix, see it red, fix,
+    // see it green. That sequence is exactly "this check has been shown capable of
+    // failing", and it is what the surrounding industry actually does -- reverting a
+    // patch to manufacture a red is mutation testing, a QA activity, not an inline agent
+    // step. prove_falsifiable() remains for checks a run wants to prove deliberately.
+    //
+    // A refusal is skipped: the command never ran, so it is not evidence (S6.2).
+    for (const context::VerificationRecord& v : ctx_.verifications()) {
+        if (v.ran && !v.passed && v.contract == canon) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Verifier::run_and_record(const std::string& command, int approved_tier) {
+    return run_and_record_as(command, approved_tier, canonicalize_check(command));
+}
+
+bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
+                                 const std::string& contract_id) {
     const tools::ToolResult r =
         registry_.execute("shell", {{"command", command}}, approved_tier);
 
     context::VerificationRecord rec;
-    rec.contract = canonicalize_check(command);
+    rec.contract = contract_id;
     // Refused is NOT failed (S6.2): the command never ran, so it is not evidence in
     // either direction, and recording it as a failure would send the agent off fixing
     // a build that was never attempted.
     rec.passed = r.status == tools::Status::Ok;
-    rec.falsifiable = is_proven(command);
+    rec.ran = r.status != tools::Status::Refused;
+    // Asked BEFORE this record joins the ledger, so a check cannot prove itself.
+    rec.falsifiable = is_proven(contract_id);
     rec.detail = r.status == tools::Status::Refused
                      ? "REFUSED (never ran): " + r.summary
                      : r.summary;

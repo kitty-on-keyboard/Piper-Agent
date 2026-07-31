@@ -1,0 +1,7 @@
+# The package ships compiled JS and the sidecar binary. Nothing else.
+src/**
+scripts/**
+node_modules/**
+tsconfig.json
+out/**/*.map
+.vscodeignore
