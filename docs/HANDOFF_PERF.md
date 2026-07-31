@@ -1,7 +1,10 @@
 # Handoff: LM_Pipe v2 vs LM Studio, sixth pass
 
-Paste this whole file as the opening prompt of a fresh session in
-`/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `perf/mask-and-scan`).
+**This line of work is CLOSED. Both exit criteria pass.** Do not open a seventh pass.
+The active handoff is `docs/HANDOFF_AGENT.md`, and the goal there is a working agent, not
+a faster one. Keep this document for reference when touching `src/model/` — it is a
+record of six passes' worth of measurement, four wrong instruments and six retractions —
+but do not treat it as a work queue.
 
 Every number here was measured in this repo on 2026-07-31. Nothing is quoted from a
 previous handoff without being reproduced first (S19.6) — the fifth pass's headline
