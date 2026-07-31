@@ -89,13 +89,28 @@ class TurnGrammar final : public MaskSource {
     [[nodiscard]] TurnPhase phase() const noexcept { return phase_; }
     [[nodiscard]] const std::vector<TokenId>& think_ids() const noexcept { return think_; }
     [[nodiscard]] const std::vector<TokenId>& text_ids() const noexcept { return text_; }
-    [[nodiscard]] bool has_tool_call() const noexcept { return saw_tool_call_; }
+    // One turn may carry several calls (S9.1 amended): the model batches independent
+    // reads, and serialising them cost a full prefill+decode round-trip each. The guard
+    // is reset between calls, so each is parsed by the same automaton -- parsing is not
+    // relaxed by allowing more than one.
+    struct ParsedCall {
+        std::string name;
+        std::vector<parsephony::ToolCallGuard::Param> params;
+    };
 
-    // Valid once has_tool_call() && phase()==Done: the parsed call, straight from the
-    // automaton. No extractor pass ever runs over decoded text.
-    [[nodiscard]] const std::string& tool_name() const { return guard_->tool_name(); }
+    // Bounded so a stuck model cannot emit calls forever inside one turn.
+    static constexpr std::size_t kMaxCallsPerTurn = 4;
+
+    [[nodiscard]] bool has_tool_call() const noexcept { return !calls_.empty(); }
+    [[nodiscard]] const std::vector<ParsedCall>& tool_calls() const noexcept {
+        return calls_;
+    }
+
+    // The FIRST call. Valid once has_tool_call(); copied out of the automaton at the
+    // moment it completed, because the guard is reset before the next one.
+    [[nodiscard]] const std::string& tool_name() const { return calls_.front().name; }
     [[nodiscard]] const std::vector<parsephony::ToolCallGuard::Param>& tool_params() const {
-        return guard_->params();
+        return calls_.front().params;
     }
 
   private:
@@ -113,7 +128,14 @@ class TurnGrammar final : public MaskSource {
     TurnPhase phase_ = TurnPhase::Think;
     std::vector<TokenId> think_;
     std::vector<TokenId> text_;
-    bool saw_tool_call_ = false;
+    std::vector<ParsedCall> calls_;
+
+    // The mask outside a call turns on exactly one bit: may another <tool_call> open
+    // here? That keeps the cache key a bool, as it was when the answer was "have we
+    // seen one yet".
+    [[nodiscard]] bool at_call_cap() const noexcept {
+        return calls_.size() >= kMaxCallsPerTurn;
+    }
 
     // --- mask caches ---------------------------------------------------------
     // Outside a call there are only a few distinct states (phase x saw_tool_call_),

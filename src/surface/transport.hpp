@@ -37,6 +37,20 @@ inline constexpr std::size_t kReadBlockBytes = 64 * 1024;
 // Extracts a top-level string field. Same contract: whole messages only.
 [[nodiscard]] std::string string_field(std::string_view message, std::string_view key);
 
+// Extracts a boolean field. Returns true ONLY for a literal `true`; a missing key, a
+// malformed value and an explicit `false` are all false. That asymmetry is deliberate:
+// the one caller is the approval reply, where anything we failed to understand must
+// read as "not approved" (S7.2).
+[[nodiscard]] bool bool_field(std::string_view message, std::string_view key);
+
+// Extracts a numeric field. Returns `fallback` when the key is absent or its value is
+// not a bare JSON number -- so a caller passes the value it already intends to use and
+// a missing setting keeps it, rather than collapsing to zero. A quoted number is NOT a
+// number: "0.6" is a string, and silently coercing it would make a typo in a settings
+// file look like a deliberate choice.
+[[nodiscard]] double double_field(std::string_view message, std::string_view key,
+                                  double fallback);
+
 class StdinReader {
   public:
     StdinReader(platform::SpscChannel<std::string>& out, model::CancelToken& cancel)

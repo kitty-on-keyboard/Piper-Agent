@@ -122,6 +122,16 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
     return Corrective::None;
 }
 
+std::string param_value(const std::vector<tools::ToolParamValue>& params,
+                        std::string_view name) {
+    for (const tools::ToolParamValue& p : params) {
+        if (p.name == name) {
+            return p.value;
+        }
+    }
+    return {};
+}
+
 CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
     // Driven by the checklist and the ledgers. Nothing here reads the model's prose for
     // a sense that it sounded finished (S10.4).

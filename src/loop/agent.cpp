@@ -1,5 +1,6 @@
 #include "src/loop/agent.hpp"
 
+#include <algorithm>
 #include <chrono>
 
 namespace lmp::loop {
@@ -74,8 +75,103 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
              platform::EventLogWriter& log, const platform::Clock& clock,
              AgentConfig config)
     : tok_(tok), backend_(backend), registry_(registry), ctx_(ctx), log_(log),
-      clock_(clock), config_(config), policy_(ModePolicy::for_mode(config.mode)) {
+      clock_(clock), config_(config), policy_(ModePolicy::for_mode(config.mode)),
+      verifier_(registry, ctx) {
     tools_guidance_ = registry_.tools_json();
+}
+
+// `plan` is declared by the registry but executed HERE: the checklist lives in the
+// context store, which the registry has no business reaching into.
+//
+// Restating replaces the whole list, so ticking an item off is the same call as writing
+// it -- one idempotent operation instead of a second tool and a synchronisation problem.
+TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValue>& params) {
+    std::vector<context::ChecklistItem> items;
+    const std::string* raw = nullptr;
+    for (const auto& p : params) {
+        if (p.name == "items") {
+            raw = &p.value;
+        } else if (p.name == "verify_with" && !p.value.empty()) {
+            verify_contract_ = p.value;
+        }
+    }
+    if (raw == nullptr) {
+        return {false, "plan requires 'items'"};
+    }
+    std::size_t at = 0;
+    while (at < raw->size()) {
+        std::size_t nl = raw->find('\n', at);
+        if (nl == std::string::npos) {
+            nl = raw->size();
+        }
+        std::string line = raw->substr(at, nl - at);
+        at = nl + 1;
+        // Tolerate a leading "- " and either bracket style; the model writes prose-ish
+        // markdown and refusing it over a dash would be theatre.
+        std::size_t i = line.find_first_not_of(" \t-*");
+        if (i == std::string::npos) {
+            continue;
+        }
+        bool done = false;
+        if (line.compare(i, 3, "[x]") == 0 || line.compare(i, 3, "[X]") == 0) {
+            done = true;
+            i += 3;
+        } else if (line.compare(i, 3, "[ ]") == 0) {
+            i += 3;
+        }
+        const std::size_t text_at = line.find_first_not_of(" \t", i);
+        if (text_at == std::string::npos) {
+            continue;
+        }
+        items.push_back({line.substr(text_at), done});
+    }
+    if (items.empty()) {
+        return {false, "plan produced no items; give one item per line"};
+    }
+    const std::size_t open = static_cast<std::size_t>(std::count_if(
+        items.begin(), items.end(), [](const context::ChecklistItem& c) { return !c.done; }));
+    const std::size_t total = items.size();
+    ctx_.set_checklist(std::move(items));
+    emit("plan", {{"items", std::to_string(total)},
+                  {"open", std::to_string(open)},
+                  {"verify_with", verify_contract_}});
+    std::string s = "checklist set: " + std::to_string(total - open) + "/" +
+                    std::to_string(total) + " done";
+    if (!verify_contract_.empty()) {
+        s += "; completion requires '" + verify_contract_ + "' to pass";
+        s += baseline_check();
+    }
+    return {true, std::move(s)};
+}
+
+// Runs the declared contract ONCE, at the moment it is declared -- before any edit.
+//
+// This is pre-patch validation, the FAIL_TO_PASS baseline: if the check is red now and
+// green later, that pair is the proof it can fail, captured for the price of one run and
+// without reverting anything. Without it the common order of work (fix first, test after)
+// never produces a red, so every green stays UNPROVEN and no run can ever complete.
+//
+// A baseline that comes back GREEN is a finding, not a failure: either the mission is
+// already done, or the check does not exercise what the mission is about. Both are worth
+// telling the model, and neither is worth pretending otherwise.
+std::string Agent::baseline_check() {
+    const std::string canon = canonicalize_check(verify_contract_);
+    for (const context::VerificationRecord& v : ctx_.verifications()) {
+        if (v.contract == canon) {
+            return {}; // already have a reading for this contract
+        }
+    }
+    const bool passed =
+        verifier_.run_and_record_as(verify_contract_, policy_.sandbox_tier, canon);
+    emit("baseline_check", {{"contract", canon}, {"passed", passed ? "1" : "0"}});
+    if (observer_.on_verification && !ctx_.verifications().empty()) {
+        observer_.on_verification(ctx_.verifications().back());
+    }
+    return passed ? "\nBaseline: that command already PASSES. Either the mission is "
+                    "already satisfied, or it does not test what the mission describes -- "
+                    "say which before doing anything else."
+                  : "\nBaseline: that command currently FAILS, as expected. Making it "
+                    "pass is now provable evidence rather than an unproven green.";
 }
 
 void Agent::emit(const std::string& kind, std::vector<platform::EventField> fields) {
@@ -94,6 +190,9 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     model::InferenceTask task;
     task.prompt = tmpl.render(messages, tools_guidance_);
     task.max_new_tokens = config_.max_new_tokens;
+    task.sampling = config_.sampling;
+    // config_.seed stays authoritative over the sampling block's own field: it is the
+    // one the run is reproducible from.
     task.sampling.seed = config_.seed;
 
     // Every harness->model append is an event. This invariant is what makes "did the
@@ -103,7 +202,43 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
                     {"compactions", std::to_string(ctx_.compaction_count())}});
 
     // --- constrained generation --------------------------------------------
-    model::TurnGrammar grammar(tok_, registry_.guard_specs());
+    //
+    // Until the run has a checklist, `plan` is the ONLY callable tool. That is a
+    // mechanism, not a sentence asking the model to plan first (S9.2): the mask makes
+    // every other call unsamplable, so a run cannot begin work it has not stated.
+    //
+    // Needed because the tool alone was not enough. With `plan` merely available and its
+    // description saying to call it first, a real run ignored it for all 14 turns, so the
+    // checklist stayed empty, no verification contract was ever declared, and completion
+    // remained unreachable -- the same symptom as having no mechanism at all.
+    //
+    // `specs` must outlive `grammar`: TurnGrammar keeps a reference.
+    // The mirror of plan-first, at the other end: once the declared contract has passed
+    // and been proven falsifiable, the only thing left is to reconcile the checklist.
+    // A run reached exactly that state and then narrated instead of ticking, so it ended
+    // `text_only_no_progress` on work that was demonstrably finished.
+    bool must_reconcile = false;
+    if (!ctx_.checklist().empty()) {
+        const bool proven = std::any_of(
+            ctx_.verifications().begin(), ctx_.verifications().end(),
+            [](const context::VerificationRecord& v) { return v.passed && v.falsifiable; });
+        const bool open = std::any_of(
+            ctx_.checklist().begin(), ctx_.checklist().end(),
+            [](const context::ChecklistItem& c) { return !c.done; });
+        must_reconcile = proven && open;
+    }
+
+    std::vector<parsephony::ToolSpec> specs;
+    if (ctx_.checklist().empty() || must_reconcile) {
+        for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
+            if (s.name == "plan") {
+                specs.push_back(s);
+            }
+        }
+    } else {
+        specs = registry_.guard_specs();
+    }
+    model::TurnGrammar grammar(tok_, specs);
     task.mask = &grammar;
     GrammarSink sink(grammar);
     turn.generation = backend_.generate(task, sink, cancel);
@@ -137,60 +272,143 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         return turn;
     }
 
-    // --- the call ----------------------------------------------------------
-    turn.tool_name = grammar.tool_name();
-    for (const auto& p : grammar.tool_params()) {
+    // --- the call(s) --------------------------------------------------------
+    //
+    // A turn may carry several calls (S9.1 amended: one turn, one OUTCOME, but the model
+    // may batch independent work into it). The first call is the turn's outcome; the rest
+    // execute in order and each gets its own history record. Reading four files used to
+    // cost four full prefill+decode round-trips.
+    const auto& calls = grammar.tool_calls();
+    turn.tool_name = calls.front().name;
+    for (const auto& p : calls.front().params) {
         turn.tool_params.push_back({p.name, p.value});
     }
+    bool executed = false;
+    turn.tool_result = dispatch_call(turn.tool_name, turn.tool_params, executed);
+    turn.outcome = classify_turn(turn.generation, grammar, executed, !executed);
 
-    const tools::ToolDecl* decl = registry_.find(turn.tool_name);
-    // Mode policy is applied HERE, in one place (S9.3).
+    for (std::size_t i = 1; i < calls.size(); ++i) {
+        TurnResult::ExtraCall extra;
+        extra.tool_name = calls[i].name;
+        for (const auto& p : calls[i].params) {
+            extra.params.push_back({p.name, p.value});
+        }
+        bool ran = false;
+        extra.result = dispatch_call(extra.tool_name, extra.params, ran);
+        turn.extra_calls.push_back(std::move(extra));
+    }
+    return turn;
+}
+
+// One call: mode policy, HITL, the checklist, the verification contract and the
+// deliverable ledger -- all applied in ONE place (S9.3), so a batched call is governed
+// exactly as a lone one is. `executed` answers "did this actually run?", which is what
+// classification turns on (S9.1).
+tools::ToolResult Agent::dispatch_call(const std::string& name,
+                                       const std::vector<tools::ToolParamValue>& params,
+                                       bool& executed) {
+    executed = false;
+
+    // `plan` never reaches the registry: the loop owns the checklist.
+    if (name == "plan") {
+        const TurnResult::PlanOutcome r = apply_plan(params);
+        executed = r.ok;
+        return r.ok ? tools::ToolResult::okay(r.detail)
+                    : tools::ToolResult::error(tools::ErrorClass::Malformed, true, r.detail);
+    }
+
+    const tools::ToolDecl* decl = registry_.find(name);
     if (decl != nullptr && decl->mutates_workspace && !policy_.allow_workspace_writes) {
-        turn.tool_result = tools::ToolResult::refused(
-            "this mode does not permit workspace writes");
-        turn.outcome = classify_turn(turn.generation, grammar, false, true);
-        emit("tool_refused", {{"tool", turn.tool_name}, {"why", "mode policy"}});
-        return turn;
+        emit("tool_refused", {{"tool", name}, {"why", "mode policy"}});
+        return tools::ToolResult::refused("this mode does not permit workspace writes");
     }
 
     // --- HITL --------------------------------------------------------------
     if (decl != nullptr && decl->executes_commands) {
-        const std::string* cmd = nullptr;
-        for (const auto& p : turn.tool_params) {
-            if (p.name == "command") {
-                cmd = &p.value;
-            }
-        }
+        const std::string cmd = param_value(params, "command");
         const tools::RiskHint hint =
-            cmd != nullptr ? tools::classify_command(*cmd, "", "") : tools::RiskHint{};
+            !cmd.empty() ? tools::classify_command(cmd, "", "") : tools::RiskHint{};
         const Approval route = route_approval(hint, config_.hitl);
         bool allowed = route == Approval::AutoApprove;
         if (route == Approval::Escalate && approver_) {
-            allowed = approver_(turn.tool_name,
-                                preview_of(turn.tool_name, turn.tool_params), hint);
+            allowed = approver_(name, preview_of(name, params), hint);
         }
         if (!allowed) {
-            turn.tool_result = tools::ToolResult::refused(
-                route == Approval::Reject
-                    ? "rejected: risk score above the reject threshold"
-                    : "denied by the operator");
-            turn.outcome = classify_turn(turn.generation, grammar, false, true);
-            emit("tool_denied", {{"tool", turn.tool_name},
-                                 {"risk", std::to_string(risk_score(hint))}});
-            return turn;
+            emit("tool_denied",
+                 {{"tool", name}, {"risk", std::to_string(risk_score(hint))}});
+            return tools::ToolResult::refused(
+                route == Approval::Reject ? "rejected: risk score above the reject threshold"
+                                          : "denied by the operator");
         }
     }
 
-    turn.tool_result =
-        registry_.execute(turn.tool_name, turn.tool_params, policy_.sandbox_tier);
-    // Refused means the tool NEVER RAN, so it is not an execution (S9.1).
-    const bool executed = turn.tool_result.status != tools::Status::Refused;
-    turn.outcome = classify_turn(turn.generation, grammar, executed, !executed);
+    // A shell call whose command IS the declared verification contract goes through the
+    // Verifier, the only thing that may write the ledger (S10.1). Without this the agent
+    // ran its own tests through the raw shell tool, saw them pass, and the ledger stayed
+    // empty -- so a finished run could never be recognised as finished.
+    tools::ToolResult result;
+    const std::string cmd = param_value(params, "command");
+    // Containment, not equality. The declared contract is `pytest test_stats.py`, and
+    // what the model actually runs is `cd /abs/path && python3 -m pytest test_stats.py`.
+    // Requiring an exact match meant the check never matched, the Verifier never saw it,
+    // and the ledger stayed empty while the agent watched its own tests pass.
+    const std::string canon_cmd = canonicalize_check(cmd);
+    const std::string canon_contract = canonicalize_check(verify_contract_);
+    const bool is_the_check = name == "shell" && !canon_contract.empty() &&
+                              canon_cmd.find(canon_contract) != std::string::npos;
+    if (is_the_check) {
+        const std::size_t before = ctx_.verifications().size();
+        // Filed under the DECLARED contract, so every spelling of the check accumulates
+        // history on one identity instead of minting a fresh, historyless one.
+        (void)verifier_.run_and_record_as(cmd, policy_.sandbox_tier, canon_contract);
+        const context::VerificationRecord& rec = ctx_.verifications().back();
+        result = rec.passed ? tools::ToolResult::okay(rec.detail)
+                            : tools::ToolResult::error(tools::ErrorClass::Transient, true,
+                                                       rec.detail);
+        if (observer_.on_verification) {
+            for (std::size_t i = before; i < ctx_.verifications().size(); ++i) {
+                observer_.on_verification(ctx_.verifications()[i]);
+            }
+        }
+    } else {
+        result = registry_.execute(name, params, policy_.sandbox_tier);
+    }
 
-    emit("tool_result", {{"tool", turn.tool_name},
-                         {"status", std::string(tools::to_string(turn.tool_result.status))},
-                         {"summary", turn.tool_result.summary}});
-    return turn;
+    // Refused means the tool NEVER RAN, so it is not an execution (S9.1).
+    executed = result.status != tools::Status::Refused;
+
+    // A successful write IS the deliverable. Nothing recorded these before, so the
+    // completion check's "no deliverable was recorded" gate could never be satisfied.
+    if (decl != nullptr && decl->mutates_workspace && result.ok()) {
+        const std::string path = param_value(params, "path");
+        if (!path.empty()) {
+            ctx_.record_deliverable(path);
+        }
+    }
+
+    emit("tool_result", {{"tool", name},
+                         {"status", std::string(tools::to_string(result.status))},
+                         {"summary", result.summary}});
+    return result;
+}
+
+void Agent::compact_to_budget() {
+    // Measured in REAL tokens, not an estimate: the prompt is rendered and tokenized
+    // anyway, so asking the tokenizer costs nothing extra and a character heuristic
+    // would be wrong exactly where it matters (code and diffs tokenize badly).
+    model::ChatTemplate tmpl(tok_);
+    while (ctx_.recent().size() > kMinRecentTurns) {
+        const std::size_t tokens =
+            tmpl.render(ctx_.render(tools_guidance_), tools_guidance_).size();
+        if (tokens <= static_cast<std::size_t>(config_.context_budget_tokens)) {
+            return;
+        }
+        if (ctx_.compact_oldest(ctx_.recent().size() - 1) == 0) {
+            return;
+        }
+        emit("compaction", {{"tokens_before", std::to_string(tokens)},
+                            {"recent_turns", std::to_string(ctx_.recent().size())}});
+    }
 }
 
 void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
@@ -273,8 +491,40 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             repeats_.record(turn.tool_name, turn.tool_params);
         }
 
-        // Compaction, not eviction (S8.3).
-        (void)ctx_.compact_oldest(config_.keep_recent_turns);
+        // Calls batched behind the first each get their own record and their own UI row.
+        for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
+            context::TurnRecord er;
+            er.tool_name = extra.tool_name;
+            er.tool_args_summary = param_value(extra.params, "path");
+            if (er.tool_args_summary.empty()) {
+                er.tool_args_summary = param_value(extra.params, "command");
+            }
+            er.observation = extra.result.summary;
+            er.observation_is_error = !extra.result.ok();
+            er.first_event_seq = log_.events_written();
+            er.last_event_seq = er.first_event_seq;
+            ctx_.add_turn(std::move(er));
+
+            if (observer_.on_turn) {
+                TurnResult as_turn;
+                as_turn.outcome = extra.result.status == tools::Status::Refused
+                                      ? Outcome::ToolCallRefused
+                                      : Outcome::ToolCallExecuted;
+                as_turn.tool_name = extra.tool_name;
+                as_turn.tool_params = extra.params;
+                as_turn.tool_result = extra.result;
+                observer_.on_turn(as_turn, 0.0);
+            }
+        }
+
+        // Compaction, not eviction (S8.3) -- and only when the BUDGET says so.
+        //
+        // This used to run unconditionally every turn against a turn-count limit, so a
+        // run compacted 18 times in 29 turns while holding ~3k tokens against a 96k
+        // budget: it discarded its own history at 3% of capacity, then re-read the same
+        // files because it no longer remembered reading them. The budget was never
+        // consulted at all. Now a trim happens when the prompt actually needs one.
+        compact_to_budget();
 
         // At most ONE corrective per turn, chosen by rank (S9.2).
         apply_corrective(choose_corrective(turn, repeats_, report.iterations,
@@ -295,10 +545,23 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             report.termination_reason = "completed";
             break;
         }
+        // A run that has stopped calling tools has stopped working. Two ways to see it:
+        // no checklist at all, or a checklist it is no longer acting on.
+        //
+        // The second case is new and was found the hard way: once `plan` was enforced the
+        // checklist was never empty, so the old guard stopped firing and a run that fell
+        // into narration spun out 20 text-only turns until the wall clock cancelled it.
+        // Ending on a plan is not more honest than ending without one.
+        consecutive_text_only_ = turn.outcome == Outcome::TextOnly
+                                     ? consecutive_text_only_ + 1
+                                     : 0;
         if (turn.outcome == Outcome::TextOnly && report.iterations > 1 &&
             ctx_.checklist().empty()) {
-            // A text-only turn with no checklist cannot progress; ending is honest.
             report.termination_reason = "text_only_no_plan";
+            break;
+        }
+        if (consecutive_text_only_ >= kMaxConsecutiveTextOnly) {
+            report.termination_reason = "text_only_no_progress";
             break;
         }
     }

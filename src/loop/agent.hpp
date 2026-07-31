@@ -49,7 +49,12 @@ struct AgentConfig {
     Mode mode = Mode::Agent;
     Budget budget;
     HitlThresholds hitl;
-    std::size_t keep_recent_turns = 12;
+    // Qwen3's own recommended operating point by default (S5.9). Carried here rather
+    // than left to InferenceTask's defaults so the editor's settings can actually reach
+    // the sampler -- they could not before, which made every sampling knob in the
+    // extension inert.
+    model::SamplingParams sampling;
+    std::int32_t context_budget_tokens = 96000;
     std::int32_t max_new_tokens = 4096;
     std::uint64_t seed = 0;
 };
@@ -88,7 +93,23 @@ class Agent {
     [[nodiscard]] TurnResult step(const model::CancelToken& cancel);
 
   private:
+    // Never trim below this many verbatim turns, whatever the budget says: a run that
+    // cannot see its own last few observations cannot make a next move.
+    static constexpr std::size_t kMinRecentTurns = 4;
+
+    // Consecutive text-only turns before a run is declared stalled. Three is enough to
+    // let the model think out loud between calls, and few enough that narration cannot
+    // burn the whole wall clock.
+    static constexpr int kMaxConsecutiveTextOnly = 3;
+
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
+    void compact_to_budget();
+    [[nodiscard]] TurnResult::PlanOutcome apply_plan(
+        const std::vector<tools::ToolParamValue>& params);
+    [[nodiscard]] std::string baseline_check();
+    [[nodiscard]] tools::ToolResult dispatch_call(
+        const std::string& name, const std::vector<tools::ToolParamValue>& params,
+        bool& executed);
     void apply_corrective(Corrective c, const TurnResult& turn);
 
     const model::QwenTokenizer& tok_;
@@ -102,7 +123,11 @@ class Agent {
     RepeatDetector repeats_;
     Approver approver_;
     Observer observer_;
+    Verifier verifier_;
+    // The command the run declared, via `plan`, as the proof that the mission is done.
+    std::string verify_contract_;
     std::string tools_guidance_;
+    int consecutive_text_only_ = 0;
     bool halted_ = false;
     std::string halt_reason_;
 };

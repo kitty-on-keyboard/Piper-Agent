@@ -7,6 +7,11 @@
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Programming Languages", "Machine Learning"],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:lmPipe.sidebar",
+    "onCommand:lmPipe.start",
+    "onCommand:lmPipe.cancel"
+  ],
   "contributes": {
     "commands": [
       { "command": "lmPipe.start", "title": "LM_Pipe: Start a run" },
@@ -77,11 +82,16 @@
   },
   "scripts": {
     "compile": "tsc -p .",
-    "watch": "tsc -w -p ."
+    "watch": "tsc -w -p .",
+    "stage-sidecar": "node scripts/stage-sidecar.js",
+    "vscode:prepublish": "npm run compile && npm run stage-sidecar",
+    "package": "vsce package --no-dependencies --allow-missing-repository --out lm-pipe.vsix",
+    "install-local": "npm run package && node scripts/install-local.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vsce": "^2.15.0"
   }
 }

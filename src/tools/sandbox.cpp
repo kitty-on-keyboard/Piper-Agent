@@ -1,6 +1,7 @@
 #include "src/tools/sandbox.hpp"
 
 #include <fcntl.h>
+#include <libproc.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/resource.h>
@@ -82,7 +83,39 @@ struct Pipe {
     }
 };
 
-void apply_rlimits_in_child(const ExecLimits& limits) {
+// RLIMIT_NPROC counts every process owned by the REAL UID -- not the ones in this
+// process group, and not the ones this child goes on to spawn. That is BSD semantics and
+// macOS inherits them, so `max_processes` cannot be applied as an absolute number: on a
+// desktop with an editor or two already open the uid is several hundred processes deep,
+// and the very first fork() in the sandbox returns EAGAIN.
+//
+// It failed exactly that way. Every shell call in the first end-to-end run came back
+// `/bin/sh: fork: Resource temporarily unavailable`, so the agent could not run a test,
+// a build, or anything else -- it fixed its mission's bug and then reported failure
+// because it could not prove it.
+//
+// So the limit is a HEADROOM over what the uid is already using: a runaway may add
+// max_processes and no more, which is the containment the number was always meant to
+// express. Computed in the PARENT because it is not async-signal-safe: between fork and
+// exec, only async-signal-safe calls are legal.
+[[nodiscard]] rlim_t nproc_ceiling(int headroom) {
+    int in_use = 0;
+    const int bytes = ::proc_listpids(PROC_UID_ONLY, ::getuid(), nullptr, 0);
+    if (bytes > 0) {
+        in_use = bytes / static_cast<int>(sizeof(pid_t));
+    }
+    rlim_t want = static_cast<rlim_t>(in_use) + static_cast<rlim_t>(headroom);
+    // Raising a hard limit needs privilege we do not have and must not acquire, so the
+    // ceiling is clamped to the one we inherited rather than allowed to fail silently.
+    rlimit current{};
+    if (::getrlimit(RLIMIT_NPROC, &current) == 0 && current.rlim_max != RLIM_INFINITY &&
+        want > current.rlim_max) {
+        want = current.rlim_max;
+    }
+    return want;
+}
+
+void apply_rlimits_in_child(const ExecLimits& limits, rlim_t nproc) {
     const auto set = [](int what, rlim_t v) {
         rlimit rl{v, v};
         (void)::setrlimit(what, &rl);
@@ -90,7 +123,7 @@ void apply_rlimits_in_child(const ExecLimits& limits) {
     set(RLIMIT_CPU, static_cast<rlim_t>(limits.cpu_seconds));
     set(RLIMIT_AS, static_cast<rlim_t>(limits.memory_bytes));
     set(RLIMIT_NOFILE, static_cast<rlim_t>(limits.max_open_files));
-    set(RLIMIT_NPROC, static_cast<rlim_t>(limits.max_processes));
+    set(RLIMIT_NPROC, nproc);
 }
 
 // Reads until EOF or cap, then drains without storing. The wall-clock killer runs in
@@ -165,6 +198,9 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         return out;
     }
 
+    // Before the fork: see nproc_ceiling().
+    const rlim_t nproc = nproc_ceiling(limits.max_processes);
+
     const pid_t pid = ::fork();
     if (pid < 0) {
         out.output = std::string("fork: ") + std::strerror(errno);
@@ -187,7 +223,7 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         // A new process group, so the wall-clock killer can take down the whole tree a
         // shell may have spawned rather than just the shell.
         ::setpgid(0, 0);
-        apply_rlimits_in_child(limits);
+        apply_rlimits_in_child(limits, nproc);
         // sandbox-exec applies the Seatbelt profile then execs the shell. Deprecated in
         // the headers, load-bearing across macOS tooling, and the ONLY per-process
         // profile API without an entitlement; the T2 container is the successor path.

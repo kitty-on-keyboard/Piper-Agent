@@ -252,6 +252,10 @@ TOOL_MENTION_RE = re.compile(r"\b([a-z]+_[a-z_]+)\b")
 TOOL_MENTION_STOPLIST = {
     "wall_clock", "old_text", "new_text", "start_line", "end_line", "workspace_root",
     "max_result_bytes", "tool_name", "error_class", "exit_code",
+    # `plan`'s parameter naming the command that proves the mission complete. A
+    # parameter, not a tool -- the gate is here to catch descriptions that promise tools
+    # which do not exist, and this promises nothing.
+    "verify_with",
     # blast-radius capability flags: model-facing vocabulary from the S7 contract,
     # deliberately shown to the model by job_status's advisory output.
     "write_out", "read_out",

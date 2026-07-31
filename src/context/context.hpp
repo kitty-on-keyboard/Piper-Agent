@@ -22,6 +22,7 @@
 //
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,10 @@ struct VerificationRecord {
     std::string contract;   // the canonical check, e.g. "cmake --build build"
     bool passed = false;
     bool falsifiable = false; // this exact check has been PROVEN capable of red
+    // Whether the command actually EXECUTED. A refusal is not evidence in either
+    // direction (S6.2), so it must never be mistaken for the red that proves a check
+    // capable of failing.
+    bool ran = false;
     std::string detail;
 };
 
@@ -71,9 +76,24 @@ class ContextStore {
     [[nodiscard]] const std::vector<VerificationRecord>& verifications() const noexcept {
         return verifications_;
     }
-    void record_deliverable(std::string path) { deliverables_.push_back(std::move(path)); }
+    // Deduplicated: editing one file four times produces one deliverable, not four.
+    void record_deliverable(std::string path) {
+        if (std::find(deliverables_.begin(), deliverables_.end(), path) ==
+            deliverables_.end()) {
+            deliverables_.push_back(std::move(path));
+        }
+    }
     [[nodiscard]] const std::vector<std::string>& deliverables() const noexcept {
         return deliverables_;
+    }
+
+    // The repo's own conventions (AGENTS.md / CLAUDE.md / .cursorrules), loaded once and
+    // pinned in the STABLE part of the prompt -- they never change within a run.
+    void set_project_instructions(std::string text) {
+        project_instructions_ = std::move(text);
+    }
+    [[nodiscard]] const std::string& project_instructions() const noexcept {
+        return project_instructions_;
     }
 
     // --- T2 recent ----------------------------------------------------------
@@ -101,8 +121,12 @@ class ContextStore {
         return spans_;
     }
 
+    // The mutable block, rendered LAST by render(). Exposed so a caller can size it.
+    [[nodiscard]] std::string render_live_state() const;
+
   private:
     const std::string mission_;
+    std::string project_instructions_;
     std::vector<ChecklistItem> checklist_;
     std::vector<VerificationRecord> verifications_;
     std::vector<std::string> deliverables_;

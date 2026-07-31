@@ -77,6 +77,10 @@ class Registry {
 
     void declare(ToolDecl decl, Handler handler);
 
+    // Runs `git <args>` in the workspace under the same sandbox as any other command.
+    // `args` is composed by the registry, never supplied by the model.
+    [[nodiscard]] ToolResult run_git(const std::string& args, int approved_tier);
+
     WorkspaceContext ctx_;
     std::vector<ToolDecl> decls_;
     std::vector<parsephony::ToolSpec> specs_;

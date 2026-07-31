@@ -116,3 +116,53 @@ TEST(a_partial_trailing_message_is_held_not_delivered) {
     REQUIRE(rest.size() == 1);
     CHECK_EQ(surface::method_of(rest[0]), std::string("incomplete"));
 }
+
+TEST(an_approval_boolean_is_true_only_for_a_literal_true) {
+    // Deny-by-default lives in this function. The approval reply is the one place a
+    // parse failure could turn into an execution, so anything that is not an
+    // unambiguous JSON `true` must read as "not approved" (S7.2).
+    CHECK(surface::bool_field(R"({"approved":true})", "approved"));
+    CHECK(surface::bool_field(R"({"approved": true})", "approved"));
+
+    CHECK(!surface::bool_field(R"({"approved":false})", "approved"));
+    CHECK(!surface::bool_field(R"({})", "approved"));
+    // A quoted "true" is a string, not the boolean the schema declares.
+    CHECK(!surface::bool_field(R"({"approved":"true"})", "approved"));
+    CHECK(!surface::bool_field(R"({"approved":1})", "approved"));
+    // A key that merely STARTS with the one we want must not answer for it.
+    CHECK(!surface::bool_field(R"({"approved_by":"sean"})", "approved"));
+}
+
+TEST(an_approval_reply_is_matched_by_request_id_not_by_arrival_order) {
+    // The stale-card path in the sidecar's ApprovalBridge turns on these two fields
+    // being readable from one framed message. request_id must not be shadowed by the
+    // envelope's own id, which appears FIRST in the message.
+    const std::string reply =
+        R"({"jsonrpc":"2.0","id":"7","method":"lmp/approve",)"
+        R"("params":{"request_id":"3/2","approved":true}})";
+    CHECK_EQ(surface::method_of(reply), std::string("lmp/approve"));
+    CHECK_EQ(surface::string_field(reply, "id"), std::string("7"));
+    CHECK_EQ(surface::string_field(reply, "request_id"), std::string("3/2"));
+    CHECK(surface::bool_field(reply, "approved"));
+}
+
+TEST(a_numeric_setting_falls_back_to_the_value_the_caller_already_holds) {
+    // The sampling block carries Qwen3's recommended operating point (S5.9). A missing
+    // field must therefore keep the caller's pinned default, NOT collapse to zero --
+    // temperature 0 is greedy decoding, which Qwen3 specifically warns against, and it
+    // is exactly what a fallback of 0.0 would silently produce.
+    const std::string settings =
+        R"({"sampling":{"temperature":0.6,"top_p":0.95,"top_k":20,"min_p":0.0,)"
+        R"("repetition_penalty":1.05,"seed":0}})";
+    CHECK_EQ(surface::double_field(settings, "temperature", 9.0), 0.6);
+    CHECK_EQ(surface::double_field(settings, "top_p", 9.0), 0.95);
+    CHECK_EQ(surface::double_field(settings, "top_k", 9.0), 20.0);
+    CHECK_EQ(surface::double_field(settings, "min_p", 9.0), 0.0);
+    CHECK_EQ(surface::double_field(settings, "repetition_penalty", 9.0), 1.05);
+
+    // Absent, and so kept.
+    CHECK_EQ(surface::double_field(settings, "top_a", 0.6), 0.6);
+    CHECK_EQ(surface::double_field("{}", "temperature", 0.6), 0.6);
+    // A quoted number is a string. Coercing it would make a settings typo look chosen.
+    CHECK_EQ(surface::double_field(R"({"temperature":"0.1"})", "temperature", 0.6), 0.6);
+}
