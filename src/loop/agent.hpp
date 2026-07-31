@@ -66,6 +66,26 @@ struct AgentConfig {
     std::int32_t context_budget_tokens = 96000;
     std::int32_t max_new_tokens = 4096;
     std::uint64_t seed = 0;
+
+    // --- autonomy -----------------------------------------------------------
+    //
+    // How much the operator wants to be asked. Defaults are today's behaviour, so an
+    // absent setting changes nothing; each one below only ever LOOSENS on an explicit
+    // request and only ever TIGHTENS by default (S13).
+
+    // -1 keeps the mode's own tier. Otherwise this wins -- except in Plan mode, which
+    // pins 0 whatever is asked for: a mode that cannot execute cannot be talked into
+    // executing by a settings field.
+    int sandbox_tier_override = -1;
+
+    // false makes every command execution raise a card whatever its risk score. The
+    // default keeps risk routing, where only the 0.35-0.85 band escalates.
+    bool auto_approve_exec = true;
+
+    // false makes every workspace-mutating call raise a card. Writes had no HITL path at
+    // all before: mode policy decided whether they were allowed, and nothing asked about
+    // any individual one.
+    bool auto_approve_writes = true;
 };
 
 // The UI feed. The Agent emits structured facts; the sidecar serializes them with the

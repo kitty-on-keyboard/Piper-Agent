@@ -26,7 +26,10 @@ export interface RunSettings {
   max_iterations: number;
   wall_clock_seconds: number;
   sandbox_tier: number;
+  auto_approve_exec: boolean;
+  auto_approve_writes: boolean;
   require_approval: boolean;
+  system_prompt: string;
   context_budget_tokens: number;
 }
 

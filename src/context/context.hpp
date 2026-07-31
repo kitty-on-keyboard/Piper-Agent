@@ -140,6 +140,14 @@ class ContextStore {
         return project_instructions_;
     }
 
+    // Replaces the built-in persona. The editor keeps one of these per mode, so `plan`
+    // can be told to think out loud where `agent` is told to be terse. Empty keeps the
+    // built-in -- which is why this can be a plain string rather than an optional.
+    //
+    // It sits at the very front of the STABLE block, so changing it between runs costs a
+    // full re-prefill and changing it within one is impossible by construction.
+    void set_persona(std::string text) { persona_ = std::move(text); }
+
     // --- T2 recent ----------------------------------------------------------
     // The ONLY door for run facts. Everything it stores was observed through a tool
     // result in this run.
@@ -198,6 +206,7 @@ class ContextStore {
     // user_turns_[0] is the opening mission and never changes; the rest are instructions
     // that arrived later. front() is therefore always valid.
     std::vector<std::string> user_turns_;
+    std::string persona_;
     std::string project_instructions_;
     std::string verify_contract_;
     std::vector<ChecklistItem> checklist_;

@@ -1,0 +1,13 @@
+{
+  "split": "holdout",
+  "mission": "The integration test fails. Find and fix the cause. `python3 -m pytest -q` must pass and the tests must not change.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "python3 -m pytest -q",
+  "max_iterations": 35,
+  "wall_clock_seconds": 900,
+  "notes": "The failing assertion is in the file that is CORRECT; the bug is a unit mismatch two files away (grams vs kilograms). Rewards reading the chain instead of patching where it hurts.",
+  "protect": [
+    "test_pipeline.py"
+  ]
+}

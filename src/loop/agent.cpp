@@ -78,6 +78,16 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
       clock_(clock), config_(config), policy_(ModePolicy::for_mode(config.mode)),
       verifier_(registry, ctx) {
     tools_guidance_ = registry_.tools_json();
+
+    // The operator's tier, when they named one. Plan mode is exempt in the one direction
+    // that matters: it pins T0, so "no execution" cannot be undone by a settings field.
+    if (config_.sandbox_tier_override >= 0 && config_.mode != Mode::Plan) {
+        policy_.sandbox_tier = config_.sandbox_tier_override;
+    }
+    emit("policy", {{"mode", std::to_string(static_cast<int>(config_.mode))},
+                    {"sandbox_tier", std::to_string(policy_.sandbox_tier)},
+                    {"auto_approve_exec", config_.auto_approve_exec ? "1" : "0"},
+                    {"auto_approve_writes", config_.auto_approve_writes ? "1" : "0"}});
 }
 
 // `plan` is declared by the registry but executed HERE: the checklist lives in the
@@ -333,12 +343,35 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         return tools::ToolResult::refused("this mode does not permit workspace writes");
     }
 
-    // --- HITL --------------------------------------------------------------
+    // --- HITL: writes -------------------------------------------------------
+    //
+    // Separate from the command gate below because the question is different. A command
+    // is asked about because of what it MIGHT do, inferred from a string; a write is
+    // asked about because of what it definitely does, to a named path. There is no risk
+    // score here and there should not be one -- the operator asked to see writes, so
+    // every write is shown.
+    if (decl != nullptr && decl->mutates_workspace && !config_.auto_approve_writes) {
+        const bool allowed =
+            approver_ && approver_(name, preview_of(name, params), tools::RiskHint{});
+        if (!allowed) {
+            emit("tool_denied", {{"tool", name}, {"why", "write not approved"}});
+            return tools::ToolResult::refused(
+                approver_ ? "write denied by the operator"
+                          : "writes require approval and no approver is attached");
+        }
+    }
+
+    // --- HITL: commands -----------------------------------------------------
     if (decl != nullptr && decl->executes_commands) {
         const std::string cmd = param_value(params, "command");
         const tools::RiskHint hint =
             !cmd.empty() ? tools::classify_command(cmd, "", "") : tools::RiskHint{};
-        const Approval route = route_approval(hint, config_.hitl);
+        Approval route = route_approval(hint, config_.hitl);
+        // With auto-exec off, the risk score stops deciding whether to ask -- it only
+        // decides whether to refuse outright. Everything survivable becomes a card.
+        if (!config_.auto_approve_exec && route == Approval::AutoApprove) {
+            route = Approval::Escalate;
+        }
         bool allowed = route == Approval::AutoApprove;
         if (route == Approval::Escalate && approver_) {
             allowed = approver_(name, preview_of(name, params), hint);

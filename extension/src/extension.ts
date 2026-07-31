@@ -13,14 +13,17 @@ import { RunSettings } from "./protocol.generated";
 
 let client: SidecarClient | undefined;
 let output: vscode.OutputChannel;
+/** Set once the operator has confirmed an unsandboxed run in this window. */
+let unsandboxedAcknowledged = false;
 
 function settingsFromConfig(): RunSettings {
   const cfg = vscode.workspace.getConfiguration("lmPipe");
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  const mode = cfg.get<"plan" | "debug" | "agent">("mode", "agent");
   return {
     model_dir: cfg.get<string>("modelDir", ""),
     workspace_root: root,
-    mode: cfg.get<"plan" | "debug" | "agent">("mode", "agent"),
+    mode,
     sampling: {
       // Qwen defaults, pinned (S5.9). Changing them must move a benchmark first.
       temperature: cfg.get<number>("sampling.temperature", 0.6),
@@ -33,7 +36,12 @@ function settingsFromConfig(): RunSettings {
     max_iterations: cfg.get<number>("maxIterations", 40),
     wall_clock_seconds: cfg.get<number>("wallClockSeconds", 900),
     sandbox_tier: cfg.get<number>("sandboxTier", 1),
-    require_approval: cfg.get<boolean>("requireApproval", true),
+    auto_approve_exec: cfg.get<boolean>("autoApproveExec", true),
+    auto_approve_writes: cfg.get<boolean>("autoApproveWrites", true),
+    require_approval: cfg.get<boolean>("requireApproval", false),
+    // One prompt per mode, so switching mode switches persona. Empty is meaningful:
+    // it means the built-in.
+    system_prompt: cfg.get<string>(`prompts.${mode}`, ""),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
   };
 }
@@ -45,8 +53,8 @@ function validate(settings: RunSettings): string[] {
   const errors: string[] = [];
   if (!settings.model_dir) errors.push("lmPipe.modelDir is required and is empty.");
   if (!settings.workspace_root) errors.push("Open a folder first: there is no workspace root.");
-  if (settings.sandbox_tier < 0 || settings.sandbox_tier > 2)
-    errors.push(`lmPipe.sandboxTier must be 0, 1 or 2 (got ${settings.sandbox_tier}).`);
+  if (settings.sandbox_tier < 0 || settings.sandbox_tier > 3)
+    errors.push(`lmPipe.sandboxTier must be 0, 1, 2 or 3 (got ${settings.sandbox_tier}).`);
   if (settings.sampling.temperature < 0 || settings.sampling.temperature > 2)
     errors.push(`sampling.temperature must be in [0, 2] (got ${settings.sampling.temperature}).`);
   if (settings.sampling.top_p <= 0 || settings.sampling.top_p > 1)
@@ -89,6 +97,26 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showErrorMessage(`LM_Pipe settings are invalid:\n${errors.join("\n")}`);
         return;
       }
+      // T3 drops the filesystem jail and the egress denial. It is a legitimate choice on
+      // your own machine and it is not the default, so it is confirmed once per session
+      // rather than nagged about or quietly honoured.
+      if (settings.sandbox_tier === 3 && !unsandboxedAcknowledged) {
+        const choice = await vscode.window.showWarningMessage(
+          "LM_Pipe is set to run commands UNSANDBOXED (tier 3). The agent's shell will " +
+            "have your permissions: no filesystem jail, no egress denial. Wall-clock, " +
+            "memory and output limits still apply.",
+          { modal: true },
+          "Run unsandboxed",
+          "Use the sandbox instead"
+        );
+        if (choice === undefined) return;
+        if (choice === "Use the sandbox instead") {
+          settings.sandbox_tier = 1;
+        } else {
+          unsandboxedAcknowledged = true;
+        }
+      }
+
       const mission = await vscode.window.showInputBox({
         prompt: "Mission — the one place the deliverable is named",
         placeHolder: "e.g. Fix the failing parser test and prove it passes",

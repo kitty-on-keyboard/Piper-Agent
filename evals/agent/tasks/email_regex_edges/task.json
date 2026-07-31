@@ -1,0 +1,13 @@
+{
+  "split": "holdout",
+  "mission": "is_valid_email accepts addresses it should reject. Fix it so `python3 -m pytest -q` passes without changing the tests.",
+  "mode": "agent",
+  "expect": "solved",
+  "check": "python3 -m pytest -q",
+  "max_iterations": 35,
+  "wall_clock_seconds": 900,
+  "notes": "Several failing cases at once, and a naive fix for one breaks another. Measures whether it re-runs the suite after each change rather than after the first.",
+  "protect": [
+    "test_validate.py"
+  ]
+}
