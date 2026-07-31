@@ -1,0 +1,104 @@
+#pragma once
+//
+// TurnGrammar -- structural constraint over TOKEN IDS (spec S5.4-S5.6).
+//
+// Replaces three v1 files totalling 2,177 lines:
+//   stop_heuristics.hpp (543)        -> stopping is "grammar accepting AND terminal id
+//                                       emitted". Nothing else. No text matching.
+//   tool_call_extractor.hpp (1,403)  -> ONE syntax, enforced at decode time, extractor
+//                                       built into the automaton -- no second pass
+//   streaming_token_decoder.hpp (231)-> frankentok owns decode (S5.3)
+//
+// THE SYNTAX IS QWEN 3.6's OWN, WHICH IS XML, NOT JSON. The build spec's S5.6 pins the
+// JSON form ({"name": ..., "arguments": ...}); that was written for Qwen3, and the
+// model this project actually loads emits -- per its own chat_template.jinja, verified
+// by parsephone -- the XML framing:
+//
+//     <tool_call>
+//     <function=get_weather>
+//     <parameter=city>
+//     Denver
+//     </parameter>
+//     </function>
+//     </tool_call>
+//
+// S19.6 (re-measure before acting on any document, including the spec) resolves the
+// conflict in favour of the model's template. Enforcing the spec's JSON form with a
+// mask would force the model off its trained distribution on every call.
+//
+// The enforcement inside <tool_call> is parsephony::ToolCallGuard: schema-aware, byte
+// by byte -- the model cannot name an unregistered tool, misspell or repeat a
+// parameter, close </function> with a required parameter missing, or emit a malformed
+// typed value. Measured in its own repo: 1000/1000 valid constrained generations,
+// 17.7 ns steady-state mask cost.
+//
+// Turn shape:  <think> ... </think>  text  [ tool_call ]  <|im_end|>
+//
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <parsephony/toolcall.hpp>
+
+#include "src/model/qwen_tokenizer.hpp"
+
+namespace lmp::model {
+
+enum class TurnPhase : std::uint8_t {
+    Think,     // inside <think> ... </think>
+    Text,      // after </think>, before any structure
+    ToolCall,  // inside <tool_call>, ToolCallGuard is the authority
+    Done,      // accepted
+};
+
+enum class Advance : std::uint8_t {
+    Ok,        // consumed, still generating
+    Accepted,  // consumed, turn complete -- STOP now, not a token later
+    Rejected,  // not legal here (reachable only when generation is unmasked)
+};
+
+class TurnGrammar {
+  public:
+    // `tools` must outlive the grammar (ToolCallGuard keeps a reference). An empty
+    // registry means a text-only turn: <tool_call> itself is rejected.
+    TurnGrammar(const QwenTokenizer& tok, const std::vector<parsephony::ToolSpec>& tools);
+
+    void reset();
+
+    [[nodiscard]] Advance advance(TokenId id);
+
+    // True if `id` may follow the current state -- the sampler's mask predicate. Probes
+    // on a copy for structural ids and via ToolCallGuard's own probe path inside a
+    // call; parsephony's TokenMaskT is wired in the backend for the bulk-vocabulary
+    // case (S5.6).
+    [[nodiscard]] bool permitted(TokenId id) const;
+
+    [[nodiscard]] TurnPhase phase() const noexcept { return phase_; }
+    [[nodiscard]] const std::vector<TokenId>& think_ids() const noexcept { return think_; }
+    [[nodiscard]] const std::vector<TokenId>& text_ids() const noexcept { return text_; }
+    [[nodiscard]] bool has_tool_call() const noexcept { return saw_tool_call_; }
+
+    // Valid once has_tool_call() && phase()==Done: the parsed call, straight from the
+    // automaton. No extractor pass ever runs over decoded text.
+    [[nodiscard]] const std::string& tool_name() const { return guard_->tool_name(); }
+    [[nodiscard]] const std::vector<parsephony::ToolCallGuard::Param>& tool_params() const {
+        return guard_->params();
+    }
+
+  private:
+    [[nodiscard]] Advance advance_think(TokenId id);
+    [[nodiscard]] Advance advance_text(TokenId id);
+    [[nodiscard]] Advance advance_tool_call(TokenId id);
+    [[nodiscard]] bool is_structural(TokenId id) const noexcept;
+
+    const QwenTokenizer& tok_;
+    const std::vector<parsephony::ToolSpec>& tools_;
+    std::unique_ptr<parsephony::ToolCallGuard> guard_;
+    TurnPhase phase_ = TurnPhase::Think;
+    std::vector<TokenId> think_;
+    std::vector<TokenId> text_;
+    bool saw_tool_call_ = false;
+};
+
+} // namespace lmp::model

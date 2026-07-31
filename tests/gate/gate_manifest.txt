@@ -1,0 +1,38 @@
+# The pinned contents of `ctest -L gate`, read by tests/gate/test_gate_manifest.cpp.
+#
+# The count and the names are recorded SEPARATELY and on purpose. Adding a test without
+# touching this file fails on the count; renaming one fails on the names. Neither half
+# can be satisfied by editing the other, which is the only reason the number means
+# anything. v1 ran `ctest -E realmodel` for months -- `-E` excludes by name, it matched
+# nothing, and every "48/48" it printed was a count of a set nobody had checked.
+#
+# When you add a test: add its name below AND bump `count`. That is two edits, and it is
+# meant to be.
+
+count 19
+
+test_arena
+test_bakeoff_pins
+test_extension_typecheck
+test_backend_seam
+test_assertions_enabled
+test_check_framework
+test_clock
+test_corpus_loads
+test_event_log
+test_fs
+test_gate_manifest
+test_loop
+test_ratchets
+test_registry
+test_sandbox
+test_ratchets_falsifiable
+test_spsc_channel
+test_transport
+test_verifier
+
+# Real-model tests are labelled `realmodel` and excluded from the gate (S11.6). They also
+# must never run in parallel: concurrent large model loads exhaust unified memory and take
+# the machine down. Zero until phase 3 lands the MLX backend; the day it does, this pin
+# fails and someone has to state the new number rather than discover it later.
+realmodel_count 2

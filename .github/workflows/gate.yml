@@ -1,0 +1,56 @@
+name: gate
+
+# S15.2: `ctest -L gate` green is required to merge. Nothing lands red.
+# S15.9: CI never commits. There is no write permission below, and no step that pushes.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    # Apple Silicon only (S1). Unified memory is assumed, not abstracted over -- an
+    # x86 runner would be testing a configuration that cannot ship.
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The log corpus survived the clone
+        # S18: `.gitignore`'s `*.log` will silently swallow a committed log corpus. The
+        # negation is in .gitignore and test_corpus_loads asserts the bytes, but this
+        # runs before the build so a swallowed corpus fails in seconds with an obvious
+        # message rather than as a puzzling assertion 90 seconds later.
+        run: |
+          logs=$(ls bakeoff/log_triage/logs/*.log | wc -l | tr -d ' ')
+          holdout=$(ls bakeoff/log_triage/holdout_logs/*.log | wc -l | tr -d ' ')
+          bytes=$(cat bakeoff/log_triage/logs/*.log | wc -c | tr -d ' ')
+          echo "logs=$logs holdout=$holdout bytes=$bytes"
+          test "$logs" = "25" && test "$holdout" = "7" && test "$bytes" = "971544"
+
+      - name: Configure
+        run: cmake --preset dev
+
+      - name: Build
+        run: cmake --build --preset dev -j3
+
+      - name: Gate
+        run: ctest --preset gate
+
+      - name: Scoreboards still compile
+        # A benchmark that stopped building six weeks ago is a benchmark already lost.
+        run: cmake --build --preset dev --target blast_radius_score_e12 log_triage_score_incumbent
+
+  sanitizers:
+    # S15.8: ASan/UBSan on the gate suite.
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake --preset asan
+      - run: cmake --build --preset asan -j3
+      - run: ctest --preset gate-asan

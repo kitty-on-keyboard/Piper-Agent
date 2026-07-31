@@ -1,0 +1,1720 @@
+error[E0308]: mismatched types
+   --> shard.rs:602:25
+    |
+602 |     let first: String = ids[0];
+    |                ------   ^^^^^^ expected `String`, found `i32`
+    |                |
+    |                expected due to this
+    |
+help: try using a conversion method
+    |
+602 |     let first: String = ids[0].to_string();
+    |                               ++++++++++++
+
+error[E0308]: mismatched types
+   --> shard.rs:607:26
+    |
+607 |     println!("{}", label(v));
+    |                    ----- ^ expected `&Vec<i32>`, found `Vec<{integer}>`
+    |                    |
+    |                    arguments to this function are incorrect
+    |
+    = note: expected reference `&Vec<i32>`
+                  found struct `Vec<{integer}>`
+note: function defined here
+   --> shard.rs:601:4
+    |
+601 | fn label(ids: &Vec<i32>) -> String {
+    |    ^^^^^ --------------
+help: consider borrowing here
+    |
+607 |     println!("{}", label(&v));
+    |                          +
+
+warning: variable does not need to be mutable
+ --> shard.rs:3:9
+  |
+3 |     let mut never_mutated = 0;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+  |
+  = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `unusedCamel`
+ --> shard.rs:2:9
+  |
+2 |     let unusedCamel = 0;
+  |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+ --> shard.rs:8:9
+  |
+8 |     let mut never_mutated = 1;
+  |         ----^^^^^^^^^^^^^
+  |         |
+  |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+ --> shard.rs:7:9
+  |
+7 |     let unusedCamel = 1;
+  |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:13:9
+   |
+13 |     let mut never_mutated = 2;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:12:9
+   |
+12 |     let unusedCamel = 2;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:18:9
+   |
+18 |     let mut never_mutated = 3;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:17:9
+   |
+17 |     let unusedCamel = 3;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:23:9
+   |
+23 |     let mut never_mutated = 4;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:22:9
+   |
+22 |     let unusedCamel = 4;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:28:9
+   |
+28 |     let mut never_mutated = 5;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:27:9
+   |
+27 |     let unusedCamel = 5;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:33:9
+   |
+33 |     let mut never_mutated = 6;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:32:9
+   |
+32 |     let unusedCamel = 6;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:38:9
+   |
+38 |     let mut never_mutated = 7;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:37:9
+   |
+37 |     let unusedCamel = 7;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:43:9
+   |
+43 |     let mut never_mutated = 8;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:42:9
+   |
+42 |     let unusedCamel = 8;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:48:9
+   |
+48 |     let mut never_mutated = 9;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:47:9
+   |
+47 |     let unusedCamel = 9;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:53:9
+   |
+53 |     let mut never_mutated = 10;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:52:9
+   |
+52 |     let unusedCamel = 10;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:58:9
+   |
+58 |     let mut never_mutated = 11;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:57:9
+   |
+57 |     let unusedCamel = 11;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:63:9
+   |
+63 |     let mut never_mutated = 12;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:62:9
+   |
+62 |     let unusedCamel = 12;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:68:9
+   |
+68 |     let mut never_mutated = 13;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:67:9
+   |
+67 |     let unusedCamel = 13;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:73:9
+   |
+73 |     let mut never_mutated = 14;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:72:9
+   |
+72 |     let unusedCamel = 14;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:78:9
+   |
+78 |     let mut never_mutated = 15;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:77:9
+   |
+77 |     let unusedCamel = 15;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:83:9
+   |
+83 |     let mut never_mutated = 16;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:82:9
+   |
+82 |     let unusedCamel = 16;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:88:9
+   |
+88 |     let mut never_mutated = 17;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:87:9
+   |
+87 |     let unusedCamel = 17;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:93:9
+   |
+93 |     let mut never_mutated = 18;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:92:9
+   |
+92 |     let unusedCamel = 18;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+  --> shard.rs:98:9
+   |
+98 |     let mut never_mutated = 19;
+   |         ----^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+  --> shard.rs:97:9
+   |
+97 |     let unusedCamel = 19;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:103:9
+    |
+103 |     let mut never_mutated = 20;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:102:9
+    |
+102 |     let unusedCamel = 20;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:108:9
+    |
+108 |     let mut never_mutated = 21;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:107:9
+    |
+107 |     let unusedCamel = 21;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:113:9
+    |
+113 |     let mut never_mutated = 22;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:112:9
+    |
+112 |     let unusedCamel = 22;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:118:9
+    |
+118 |     let mut never_mutated = 23;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:117:9
+    |
+117 |     let unusedCamel = 23;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:123:9
+    |
+123 |     let mut never_mutated = 24;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:122:9
+    |
+122 |     let unusedCamel = 24;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:128:9
+    |
+128 |     let mut never_mutated = 25;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:127:9
+    |
+127 |     let unusedCamel = 25;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:133:9
+    |
+133 |     let mut never_mutated = 26;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:132:9
+    |
+132 |     let unusedCamel = 26;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:138:9
+    |
+138 |     let mut never_mutated = 27;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:137:9
+    |
+137 |     let unusedCamel = 27;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:143:9
+    |
+143 |     let mut never_mutated = 28;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:142:9
+    |
+142 |     let unusedCamel = 28;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:148:9
+    |
+148 |     let mut never_mutated = 29;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:147:9
+    |
+147 |     let unusedCamel = 29;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:153:9
+    |
+153 |     let mut never_mutated = 30;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:152:9
+    |
+152 |     let unusedCamel = 30;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:158:9
+    |
+158 |     let mut never_mutated = 31;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:157:9
+    |
+157 |     let unusedCamel = 31;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:163:9
+    |
+163 |     let mut never_mutated = 32;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:162:9
+    |
+162 |     let unusedCamel = 32;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:168:9
+    |
+168 |     let mut never_mutated = 33;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:167:9
+    |
+167 |     let unusedCamel = 33;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:173:9
+    |
+173 |     let mut never_mutated = 34;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:172:9
+    |
+172 |     let unusedCamel = 34;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:178:9
+    |
+178 |     let mut never_mutated = 35;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:177:9
+    |
+177 |     let unusedCamel = 35;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:183:9
+    |
+183 |     let mut never_mutated = 36;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:182:9
+    |
+182 |     let unusedCamel = 36;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:188:9
+    |
+188 |     let mut never_mutated = 37;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:187:9
+    |
+187 |     let unusedCamel = 37;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:193:9
+    |
+193 |     let mut never_mutated = 38;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:192:9
+    |
+192 |     let unusedCamel = 38;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:198:9
+    |
+198 |     let mut never_mutated = 39;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:197:9
+    |
+197 |     let unusedCamel = 39;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:203:9
+    |
+203 |     let mut never_mutated = 40;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:202:9
+    |
+202 |     let unusedCamel = 40;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:208:9
+    |
+208 |     let mut never_mutated = 41;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:207:9
+    |
+207 |     let unusedCamel = 41;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:213:9
+    |
+213 |     let mut never_mutated = 42;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:212:9
+    |
+212 |     let unusedCamel = 42;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:218:9
+    |
+218 |     let mut never_mutated = 43;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:217:9
+    |
+217 |     let unusedCamel = 43;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:223:9
+    |
+223 |     let mut never_mutated = 44;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:222:9
+    |
+222 |     let unusedCamel = 44;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:228:9
+    |
+228 |     let mut never_mutated = 45;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:227:9
+    |
+227 |     let unusedCamel = 45;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:233:9
+    |
+233 |     let mut never_mutated = 46;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:232:9
+    |
+232 |     let unusedCamel = 46;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:238:9
+    |
+238 |     let mut never_mutated = 47;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:237:9
+    |
+237 |     let unusedCamel = 47;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:243:9
+    |
+243 |     let mut never_mutated = 48;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:242:9
+    |
+242 |     let unusedCamel = 48;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:248:9
+    |
+248 |     let mut never_mutated = 49;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:247:9
+    |
+247 |     let unusedCamel = 49;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:253:9
+    |
+253 |     let mut never_mutated = 50;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:252:9
+    |
+252 |     let unusedCamel = 50;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:258:9
+    |
+258 |     let mut never_mutated = 51;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:257:9
+    |
+257 |     let unusedCamel = 51;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:263:9
+    |
+263 |     let mut never_mutated = 52;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:262:9
+    |
+262 |     let unusedCamel = 52;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:268:9
+    |
+268 |     let mut never_mutated = 53;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:267:9
+    |
+267 |     let unusedCamel = 53;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:273:9
+    |
+273 |     let mut never_mutated = 54;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:272:9
+    |
+272 |     let unusedCamel = 54;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:278:9
+    |
+278 |     let mut never_mutated = 55;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:277:9
+    |
+277 |     let unusedCamel = 55;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:283:9
+    |
+283 |     let mut never_mutated = 56;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:282:9
+    |
+282 |     let unusedCamel = 56;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:288:9
+    |
+288 |     let mut never_mutated = 57;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:287:9
+    |
+287 |     let unusedCamel = 57;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:293:9
+    |
+293 |     let mut never_mutated = 58;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:292:9
+    |
+292 |     let unusedCamel = 58;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:298:9
+    |
+298 |     let mut never_mutated = 59;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:297:9
+    |
+297 |     let unusedCamel = 59;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:303:9
+    |
+303 |     let mut never_mutated = 60;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:302:9
+    |
+302 |     let unusedCamel = 60;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:308:9
+    |
+308 |     let mut never_mutated = 61;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:307:9
+    |
+307 |     let unusedCamel = 61;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:313:9
+    |
+313 |     let mut never_mutated = 62;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:312:9
+    |
+312 |     let unusedCamel = 62;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:318:9
+    |
+318 |     let mut never_mutated = 63;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:317:9
+    |
+317 |     let unusedCamel = 63;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:323:9
+    |
+323 |     let mut never_mutated = 64;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:322:9
+    |
+322 |     let unusedCamel = 64;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:328:9
+    |
+328 |     let mut never_mutated = 65;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:327:9
+    |
+327 |     let unusedCamel = 65;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:333:9
+    |
+333 |     let mut never_mutated = 66;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:332:9
+    |
+332 |     let unusedCamel = 66;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:338:9
+    |
+338 |     let mut never_mutated = 67;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:337:9
+    |
+337 |     let unusedCamel = 67;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:343:9
+    |
+343 |     let mut never_mutated = 68;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:342:9
+    |
+342 |     let unusedCamel = 68;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:348:9
+    |
+348 |     let mut never_mutated = 69;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:347:9
+    |
+347 |     let unusedCamel = 69;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:353:9
+    |
+353 |     let mut never_mutated = 70;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:352:9
+    |
+352 |     let unusedCamel = 70;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:358:9
+    |
+358 |     let mut never_mutated = 71;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:357:9
+    |
+357 |     let unusedCamel = 71;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:363:9
+    |
+363 |     let mut never_mutated = 72;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:362:9
+    |
+362 |     let unusedCamel = 72;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:368:9
+    |
+368 |     let mut never_mutated = 73;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:367:9
+    |
+367 |     let unusedCamel = 73;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:373:9
+    |
+373 |     let mut never_mutated = 74;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:372:9
+    |
+372 |     let unusedCamel = 74;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:378:9
+    |
+378 |     let mut never_mutated = 75;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:377:9
+    |
+377 |     let unusedCamel = 75;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:383:9
+    |
+383 |     let mut never_mutated = 76;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:382:9
+    |
+382 |     let unusedCamel = 76;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:388:9
+    |
+388 |     let mut never_mutated = 77;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:387:9
+    |
+387 |     let unusedCamel = 77;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:393:9
+    |
+393 |     let mut never_mutated = 78;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:392:9
+    |
+392 |     let unusedCamel = 78;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:398:9
+    |
+398 |     let mut never_mutated = 79;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:397:9
+    |
+397 |     let unusedCamel = 79;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:403:9
+    |
+403 |     let mut never_mutated = 80;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:402:9
+    |
+402 |     let unusedCamel = 80;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:408:9
+    |
+408 |     let mut never_mutated = 81;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:407:9
+    |
+407 |     let unusedCamel = 81;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:413:9
+    |
+413 |     let mut never_mutated = 82;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:412:9
+    |
+412 |     let unusedCamel = 82;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:418:9
+    |
+418 |     let mut never_mutated = 83;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:417:9
+    |
+417 |     let unusedCamel = 83;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:423:9
+    |
+423 |     let mut never_mutated = 84;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:422:9
+    |
+422 |     let unusedCamel = 84;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:428:9
+    |
+428 |     let mut never_mutated = 85;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:427:9
+    |
+427 |     let unusedCamel = 85;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:433:9
+    |
+433 |     let mut never_mutated = 86;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:432:9
+    |
+432 |     let unusedCamel = 86;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:438:9
+    |
+438 |     let mut never_mutated = 87;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:437:9
+    |
+437 |     let unusedCamel = 87;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:443:9
+    |
+443 |     let mut never_mutated = 88;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:442:9
+    |
+442 |     let unusedCamel = 88;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:448:9
+    |
+448 |     let mut never_mutated = 89;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:447:9
+    |
+447 |     let unusedCamel = 89;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:453:9
+    |
+453 |     let mut never_mutated = 90;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:452:9
+    |
+452 |     let unusedCamel = 90;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:458:9
+    |
+458 |     let mut never_mutated = 91;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:457:9
+    |
+457 |     let unusedCamel = 91;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:463:9
+    |
+463 |     let mut never_mutated = 92;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:462:9
+    |
+462 |     let unusedCamel = 92;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:468:9
+    |
+468 |     let mut never_mutated = 93;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:467:9
+    |
+467 |     let unusedCamel = 93;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:473:9
+    |
+473 |     let mut never_mutated = 94;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:472:9
+    |
+472 |     let unusedCamel = 94;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:478:9
+    |
+478 |     let mut never_mutated = 95;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:477:9
+    |
+477 |     let unusedCamel = 95;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:483:9
+    |
+483 |     let mut never_mutated = 96;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:482:9
+    |
+482 |     let unusedCamel = 96;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:488:9
+    |
+488 |     let mut never_mutated = 97;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:487:9
+    |
+487 |     let unusedCamel = 97;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:493:9
+    |
+493 |     let mut never_mutated = 98;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:492:9
+    |
+492 |     let unusedCamel = 98;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:498:9
+    |
+498 |     let mut never_mutated = 99;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:497:9
+    |
+497 |     let unusedCamel = 99;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:503:9
+    |
+503 |     let mut never_mutated = 100;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:502:9
+    |
+502 |     let unusedCamel = 100;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:508:9
+    |
+508 |     let mut never_mutated = 101;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:507:9
+    |
+507 |     let unusedCamel = 101;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:513:9
+    |
+513 |     let mut never_mutated = 102;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:512:9
+    |
+512 |     let unusedCamel = 102;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:518:9
+    |
+518 |     let mut never_mutated = 103;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:517:9
+    |
+517 |     let unusedCamel = 103;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:523:9
+    |
+523 |     let mut never_mutated = 104;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:522:9
+    |
+522 |     let unusedCamel = 104;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:528:9
+    |
+528 |     let mut never_mutated = 105;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:527:9
+    |
+527 |     let unusedCamel = 105;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:533:9
+    |
+533 |     let mut never_mutated = 106;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:532:9
+    |
+532 |     let unusedCamel = 106;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:538:9
+    |
+538 |     let mut never_mutated = 107;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:537:9
+    |
+537 |     let unusedCamel = 107;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:543:9
+    |
+543 |     let mut never_mutated = 108;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:542:9
+    |
+542 |     let unusedCamel = 108;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:548:9
+    |
+548 |     let mut never_mutated = 109;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:547:9
+    |
+547 |     let unusedCamel = 109;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:553:9
+    |
+553 |     let mut never_mutated = 110;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:552:9
+    |
+552 |     let unusedCamel = 110;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:558:9
+    |
+558 |     let mut never_mutated = 111;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:557:9
+    |
+557 |     let unusedCamel = 111;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:563:9
+    |
+563 |     let mut never_mutated = 112;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:562:9
+    |
+562 |     let unusedCamel = 112;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:568:9
+    |
+568 |     let mut never_mutated = 113;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:567:9
+    |
+567 |     let unusedCamel = 113;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:573:9
+    |
+573 |     let mut never_mutated = 114;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:572:9
+    |
+572 |     let unusedCamel = 114;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:578:9
+    |
+578 |     let mut never_mutated = 115;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:577:9
+    |
+577 |     let unusedCamel = 115;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:583:9
+    |
+583 |     let mut never_mutated = 116;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:582:9
+    |
+582 |     let unusedCamel = 116;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:588:9
+    |
+588 |     let mut never_mutated = 117;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:587:9
+    |
+587 |     let unusedCamel = 117;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:593:9
+    |
+593 |     let mut never_mutated = 118;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:592:9
+    |
+592 |     let unusedCamel = 118;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+warning: variable does not need to be mutable
+   --> shard.rs:598:9
+    |
+598 |     let mut never_mutated = 119;
+    |         ----^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `unusedCamel`
+   --> shard.rs:597:9
+    |
+597 |     let unusedCamel = 119;
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_unusedCamel`
+
+error: aborting due to 2 previous errors; 240 warnings emitted
+
+For more information about this error, try `rustc --explain E0308`.

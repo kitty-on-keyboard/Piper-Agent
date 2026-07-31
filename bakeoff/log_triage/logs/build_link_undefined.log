@@ -1,0 +1,88 @@
+-- The CXX compiler identification is AppleClang 21.0.0.21000101
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /work/proj/build
+/opt/homebrew/bin/cmake -S/work/proj -B/work/proj/build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/cmake -E cmake_progress_start /work/proj/build/CMakeFiles /work/proj/build//CMakeFiles/progress.marks
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/Makefile2 all
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/triage_bench.dir/build.make CMakeFiles/triage_bench.dir/depend
+cd /work/proj/build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /work/proj /work/proj /work/proj/build /work/proj/build /work/proj/build/CMakeFiles/triage_bench.dir/DependInfo.cmake "--color=" triage_bench
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/triage_bench.dir/build.make CMakeFiles/triage_bench.dir/build
+[  3%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_00.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_00.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_00.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_00.cpp.o -c /work/proj/src/mod_00.cpp
+[  7%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_01.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_01.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_01.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_01.cpp.o -c /work/proj/src/mod_01.cpp
+[ 11%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_02.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_02.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_02.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_02.cpp.o -c /work/proj/src/mod_02.cpp
+[ 14%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_03.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_03.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_03.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_03.cpp.o -c /work/proj/src/mod_03.cpp
+[ 18%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_04.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_04.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_04.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_04.cpp.o -c /work/proj/src/mod_04.cpp
+[ 22%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_05.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_05.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_05.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_05.cpp.o -c /work/proj/src/mod_05.cpp
+[ 25%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_06.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_06.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_06.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_06.cpp.o -c /work/proj/src/mod_06.cpp
+[ 29%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_07.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_07.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_07.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_07.cpp.o -c /work/proj/src/mod_07.cpp
+[ 33%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_08.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_08.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_08.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_08.cpp.o -c /work/proj/src/mod_08.cpp
+[ 37%] Building CXX object CMakeFiles/triage_bench.dir/src/checksum_user.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/checksum_user.cpp.o -MF CMakeFiles/triage_bench.dir/src/checksum_user.cpp.o.d -o CMakeFiles/triage_bench.dir/src/checksum_user.cpp.o -c /work/proj/src/checksum_user.cpp
+[ 40%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_10.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_10.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_10.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_10.cpp.o -c /work/proj/src/mod_10.cpp
+[ 44%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_11.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_11.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_11.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_11.cpp.o -c /work/proj/src/mod_11.cpp
+[ 48%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_12.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_12.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_12.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_12.cpp.o -c /work/proj/src/mod_12.cpp
+[ 51%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_13.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_13.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_13.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_13.cpp.o -c /work/proj/src/mod_13.cpp
+[ 55%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_14.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_14.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_14.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_14.cpp.o -c /work/proj/src/mod_14.cpp
+[ 59%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_15.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_15.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_15.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_15.cpp.o -c /work/proj/src/mod_15.cpp
+[ 62%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_16.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_16.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_16.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_16.cpp.o -c /work/proj/src/mod_16.cpp
+[ 66%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_17.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_17.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_17.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_17.cpp.o -c /work/proj/src/mod_17.cpp
+[ 70%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_18.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_18.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_18.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_18.cpp.o -c /work/proj/src/mod_18.cpp
+[ 74%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_19.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_19.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_19.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_19.cpp.o -c /work/proj/src/mod_19.cpp
+[ 77%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_20.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_20.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_20.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_20.cpp.o -c /work/proj/src/mod_20.cpp
+[ 81%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_21.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_21.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_21.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_21.cpp.o -c /work/proj/src/mod_21.cpp
+[ 85%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_22.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_22.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_22.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_22.cpp.o -c /work/proj/src/mod_22.cpp
+[ 88%] Building CXX object CMakeFiles/triage_bench.dir/src/mod_23.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/triage_bench.dir/src/mod_23.cpp.o -MF CMakeFiles/triage_bench.dir/src/mod_23.cpp.o.d -o CMakeFiles/triage_bench.dir/src/mod_23.cpp.o -c /work/proj/src/mod_23.cpp
+[ 92%] Linking CXX static library libtriage_bench.a
+/opt/homebrew/bin/cmake -P CMakeFiles/triage_bench.dir/cmake_clean_target.cmake
+/opt/homebrew/bin/cmake -E cmake_link_script CMakeFiles/triage_bench.dir/link.txt --verbose=1
+/usr/bin/ar qc libtriage_bench.a CMakeFiles/triage_bench.dir/src/mod_00.cpp.o CMakeFiles/triage_bench.dir/src/mod_01.cpp.o CMakeFiles/triage_bench.dir/src/mod_02.cpp.o CMakeFiles/triage_bench.dir/src/mod_03.cpp.o CMakeFiles/triage_bench.dir/src/mod_04.cpp.o CMakeFiles/triage_bench.dir/src/mod_05.cpp.o CMakeFiles/triage_bench.dir/src/mod_06.cpp.o CMakeFiles/triage_bench.dir/src/mod_07.cpp.o CMakeFiles/triage_bench.dir/src/mod_08.cpp.o CMakeFiles/triage_bench.dir/src/checksum_user.cpp.o CMakeFiles/triage_bench.dir/src/mod_10.cpp.o CMakeFiles/triage_bench.dir/src/mod_11.cpp.o CMakeFiles/triage_bench.dir/src/mod_12.cpp.o CMakeFiles/triage_bench.dir/src/mod_13.cpp.o CMakeFiles/triage_bench.dir/src/mod_14.cpp.o CMakeFiles/triage_bench.dir/src/mod_15.cpp.o CMakeFiles/triage_bench.dir/src/mod_16.cpp.o CMakeFiles/triage_bench.dir/src/mod_17.cpp.o CMakeFiles/triage_bench.dir/src/mod_18.cpp.o CMakeFiles/triage_bench.dir/src/mod_19.cpp.o CMakeFiles/triage_bench.dir/src/mod_20.cpp.o CMakeFiles/triage_bench.dir/src/mod_21.cpp.o CMakeFiles/triage_bench.dir/src/mod_22.cpp.o CMakeFiles/triage_bench.dir/src/mod_23.cpp.o
+/usr/bin/ranlib libtriage_bench.a
+[ 92%] Built target triage_bench
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/app.dir/build.make CMakeFiles/app.dir/depend
+cd /work/proj/build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /work/proj /work/proj /work/proj/build /work/proj/build /work/proj/build/CMakeFiles/app.dir/DependInfo.cmake "--color=" app
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/app.dir/build.make CMakeFiles/app.dir/build
+[ 96%] Building CXX object CMakeFiles/app.dir/src/main.cpp.o
+/usr/bin/c++  -I/work/proj/include -I/work/proj/include/engine -I/work/proj/include/backend -I/work/proj/third_party/inc -O3 -DNDEBUG -std=gnu++20 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wall -Wextra -MD -MT CMakeFiles/app.dir/src/main.cpp.o -MF CMakeFiles/app.dir/src/main.cpp.o.d -o CMakeFiles/app.dir/src/main.cpp.o -c /work/proj/src/main.cpp
+[100%] Linking CXX executable app
+/opt/homebrew/bin/cmake -E cmake_link_script CMakeFiles/app.dir/link.txt --verbose=1
+Undefined symbols for architecture arm64:
+  "compute_checksum(int)", referenced from:
+      use_checksum() in libtriage_bench.a[11](checksum_user.cpp.o)
+ld: symbol(s) not found for architecture arm64
+clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+/usr/bin/c++ -O3 -DNDEBUG -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/app.dir/src/main.cpp.o -o app  libtriage_bench.a
+make[2]: *** [app] Error 1
+make[2]: Target `CMakeFiles/app.dir/build' not remade because of errors.
+make[1]: *** [CMakeFiles/app.dir/all] Error 2
+make[1]: Target `all' not remade because of errors.
+make: *** [all] Error 2
+make: Target `default_target' not remade because of errors.

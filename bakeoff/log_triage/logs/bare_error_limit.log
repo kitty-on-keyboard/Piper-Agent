@@ -1,0 +1,59 @@
+main.cpp:2:14: error: use of undeclared identifier 'missing_0'
+    2 |     int v0 = missing_0;
+      |              ^~~~~~~~~
+main.cpp:3:14: error: use of undeclared identifier 'missing_1'
+    3 |     int v1 = missing_1;
+      |              ^~~~~~~~~
+main.cpp:4:14: error: use of undeclared identifier 'missing_2'
+    4 |     int v2 = missing_2;
+      |              ^~~~~~~~~
+main.cpp:5:14: error: use of undeclared identifier 'missing_3'
+    5 |     int v3 = missing_3;
+      |              ^~~~~~~~~
+main.cpp:6:14: error: use of undeclared identifier 'missing_4'
+    6 |     int v4 = missing_4;
+      |              ^~~~~~~~~
+main.cpp:7:14: error: use of undeclared identifier 'missing_5'
+    7 |     int v5 = missing_5;
+      |              ^~~~~~~~~
+main.cpp:8:14: error: use of undeclared identifier 'missing_6'
+    8 |     int v6 = missing_6;
+      |              ^~~~~~~~~
+main.cpp:9:14: error: use of undeclared identifier 'missing_7'
+    9 |     int v7 = missing_7;
+      |              ^~~~~~~~~
+main.cpp:10:14: error: use of undeclared identifier 'missing_8'
+   10 |     int v8 = missing_8;
+      |              ^~~~~~~~~
+main.cpp:11:14: error: use of undeclared identifier 'missing_9'
+   11 |     int v9 = missing_9;
+      |              ^~~~~~~~~
+main.cpp:12:15: error: use of undeclared identifier 'missing_10'
+   12 |     int v10 = missing_10;
+      |               ^~~~~~~~~~
+main.cpp:13:15: error: use of undeclared identifier 'missing_11'
+   13 |     int v11 = missing_11;
+      |               ^~~~~~~~~~
+main.cpp:14:15: error: use of undeclared identifier 'missing_12'
+   14 |     int v12 = missing_12;
+      |               ^~~~~~~~~~
+main.cpp:15:15: error: use of undeclared identifier 'missing_13'
+   15 |     int v13 = missing_13;
+      |               ^~~~~~~~~~
+main.cpp:16:15: error: use of undeclared identifier 'missing_14'
+   16 |     int v14 = missing_14;
+      |               ^~~~~~~~~~
+main.cpp:17:15: error: use of undeclared identifier 'missing_15'
+   17 |     int v15 = missing_15;
+      |               ^~~~~~~~~~
+main.cpp:18:15: error: use of undeclared identifier 'missing_16'
+   18 |     int v16 = missing_16;
+      |               ^~~~~~~~~~
+main.cpp:19:15: error: use of undeclared identifier 'missing_17'
+   19 |     int v17 = missing_17;
+      |               ^~~~~~~~~~
+main.cpp:20:15: error: use of undeclared identifier 'missing_18'
+   20 |     int v18 = missing_18;
+      |               ^~~~~~~~~~
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.
