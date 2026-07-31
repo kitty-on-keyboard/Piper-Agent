@@ -111,6 +111,22 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     turn.reasoning = tok_.decode(grammar.think_ids());
     turn.assistant_text = tok_.decode(grammar.text_ids());
 
+    // Reasoning is surfaced on its own channel, never inlined into the answer (S5.7).
+    // The split happened by TOKEN ID upstream; this only routes it.
+    if (observer_.on_token) {
+        if (!turn.reasoning.empty()) {
+            observer_.on_token("thinking", turn.reasoning);
+        }
+        if (!turn.assistant_text.empty()) {
+            observer_.on_token("answer", turn.assistant_text);
+        }
+    }
+    if (observer_.on_perf) {
+        observer_.on_perf(turn.generation, task.prompt.size(),
+                          static_cast<std::size_t>(config_.max_new_tokens) +
+                              task.prompt.size());
+    }
+
     emit("generation", {{"status", std::to_string(static_cast<int>(turn.generation.status))},
                         {"tokens", std::to_string(turn.generation.tokens_generated)},
                         {"ttft_ms", std::to_string(turn.generation.ttft_ms)},
@@ -238,6 +254,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             break;
         }
 
+        if (observer_.on_turn) {
+            observer_.on_turn(turn, turn.generation.ttft_ms);
+        }
+        const std::size_t before = ctx_.verifications().size();
+
         // Record the turn -- observations only, nothing inferred (S8.4).
         context::TurnRecord rec;
         rec.assistant_text = turn.assistant_text;
@@ -259,6 +280,14 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         apply_corrective(choose_corrective(turn, repeats_, report.iterations,
                                            config_.budget, out_of_time),
                          turn);
+
+        // Any verification a corrective produced flows to the UI from the ledger --
+        // the one choke point, so nothing can report a result that was not recorded.
+        if (observer_.on_verification) {
+            for (std::size_t i = before; i < ctx_.verifications().size(); ++i) {
+                observer_.on_verification(ctx_.verifications()[i]);
+            }
+        }
 
         const CompletionVerdict verdict = evaluate_completion(ctx_);
         if (verdict.complete) {

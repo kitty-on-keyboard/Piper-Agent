@@ -128,7 +128,12 @@ TEST(chat_template_golden_ids) {
     const std::string text = tok.decode(ids);
     CHECK(text.find("<|im_start|>system\nYou are a coding agent.<|im_end|>") == 0);
     CHECK(text.find("<|im_start|>user\nhi<|im_end|>") != std::string::npos);
-    CHECK(text.find("<|im_start|>assistant\n<think>\n") == text.size() - 32);
+    // Suffix check, not an offset: the first version hardcoded a byte offset that was
+    // simply wrong arithmetic, and a wrong constant in a golden test is a failure that
+    // teaches nothing.
+    const std::string primer = "<|im_start|>assistant\n<think>\n";
+    REQUIRE(text.size() >= primer.size());
+    CHECK_EQ(text.substr(text.size() - primer.size()), primer);
 }
 
 TEST(model_generates_a_grammatical_turn) {
@@ -164,7 +169,12 @@ TEST(model_generates_a_grammatical_turn) {
         {{Role::System, "You are a terse assistant."},
          {Role::User, "Reply with one short sentence: what is 2+2?"}},
         "");
-    task.max_new_tokens = 512;
+    // 2048, not 512. Measured: this model spends ~300 tokens reasoning on a trivial
+    // arithmetic question and several hundred more on anything real -- 512 capped it
+    // mid-thought, and the resulting LengthCapped was a budget that was too tight, not
+    // a stack that was broken. Attributed by watching the actual token stream
+    // (tests/model/diag_main.cpp), not by guessing from the status code.
+    task.max_new_tokens = 2048;
     task.sampling.seed = 7;
     task.mask = [&grammar](TokenId id) { return grammar.permitted(id); };
 
