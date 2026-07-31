@@ -153,10 +153,12 @@ TEST(mask_is_applied_before_shaping) {
     p.top_k = 1;
     Sampler s(p);
     std::vector<float> logits = {0.0F, 10.0F, 0.0F, 5.0F};
+    TokenMask m(4);
+    m.allow_all();
+    m.deny(1);
     // The argmax id 1 is masked out; top-k=1 must then keep id 3, not produce nothing.
     // Masking after top-k would have kept only id 1 and left zero legal candidates.
-    const SampleResult r =
-        s.sample(logits, [](TokenId id) { return id != 1; }, {});
+    const SampleResult r = s.sample(logits, &m, {});
     CHECK(!r.no_legal_token);
     CHECK_EQ(r.id, TokenId{3});
 }
@@ -164,9 +166,49 @@ TEST(mask_is_applied_before_shaping) {
 TEST(all_masked_is_a_typed_failure) {
     Sampler s(SamplingParams{});
     std::vector<float> logits = {1.0F, 2.0F};
-    const SampleResult r = s.sample(logits, [](TokenId) { return false; }, {});
+    const TokenMask m(2); // constructed empty: nothing allowed
+    const SampleResult r = s.sample(logits, &m, {});
     CHECK(r.no_legal_token);
     CHECK_EQ(r.id, kInvalidToken);
+}
+
+TEST(ids_past_the_vocabulary_are_not_emittable) {
+    // The model's logits row is wider than the tokenizer's vocabulary (248,320 vs
+    // 248,077 on this checkpoint). Those rows decode to nothing, and the old
+    // per-id predicate happily permitted them: is_structural() said no, advance()
+    // said Ok. Width is now part of the mask's answer.
+    SamplingParams p;
+    p.temperature = 0.0001F;
+    p.top_k = 1;
+    Sampler s(p);
+    std::vector<float> logits = {1.0F, 2.0F, 99.0F}; // id 2 is past the vocabulary
+    TokenMask m(2);
+    m.allow_all();
+    CHECK(!m.allows(2));
+    const SampleResult r = s.sample(logits, &m, {});
+    CHECK(!r.no_legal_token);
+    CHECK_EQ(r.id, TokenId{1});
+}
+
+TEST(token_mask_words_round_trip) {
+    TokenMask m(130);
+    m.allow_all();
+    CHECK_EQ(m.count(), std::size_t{130});
+    CHECK_EQ(m.words().size(), std::size_t{3});
+    m.deny(0);
+    m.deny(129);
+    CHECK(!m.allows(0));
+    CHECK(m.allows(1));
+    CHECK(!m.allows(129));
+    CHECK_EQ(m.count(), std::size_t{128});
+    // Adopting a foreign bitset keeps the caller's width, not the source's.
+    TokenMask other;
+    other.adopt(m.words(), 64);
+    CHECK_EQ(other.size(), std::size_t{64});
+    CHECK(!other.allows(0));
+    CHECK(other.allows(63));
+    other.reset(8);
+    CHECK_EQ(other.count(), std::size_t{0});
 }
 
 TEST(repetition_penalty_discourages_recent_ids) {

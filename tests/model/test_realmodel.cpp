@@ -176,7 +176,7 @@ TEST(model_generates_a_grammatical_turn) {
     // (tests/model/diag_main.cpp), not by guessing from the status code.
     task.max_new_tokens = 2048;
     task.sampling.seed = 7;
-    task.mask = [&grammar](TokenId id) { return grammar.permitted(id); };
+    task.mask = &grammar;
 
     GrammarSink sink(grammar);
     CancelToken cancel;

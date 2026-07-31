@@ -128,7 +128,11 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
             r.status = GenStatus::Cancelled;
             return r;
         }
-        const SampleResult pick = sampler.sample(logits_host, task.mask, recent);
+        const auto t_s0 = clock_.mono();
+        // ONE mask lookup per step, not one predicate call per vocabulary id.
+        const TokenMask* mask = task.mask != nullptr ? &task.mask->mask() : nullptr;
+        const SampleResult pick = sampler.sample(logits_host, mask, recent);
+        r.sample_ms += ms_between(t_s0, clock_.mono());
         if (pick.no_legal_token) {
             r.status = GenStatus::BackendError;
             r.error = "constrained decode: no legal token -- the grammar and the "
@@ -153,9 +157,14 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
             break;
         }
 
+        const auto t_f0 = clock_.mono();
         mx::array ids = mx::array(&pick.id, {1, 1}, mx::int32);
         mx::array logits = impl_->model.forward_logits(ids);
+        const auto t_f1 = clock_.mono();
         logits_to_host(logits, logits_host);
+        const auto t_f2 = clock_.mono();
+        r.forward_ms += ms_between(t_f0, t_f1);
+        r.logits_copy_ms += ms_between(t_f1, t_f2);
     }
     if (r.status != GenStatus::Complete) {
         r.status = GenStatus::LengthCapped;

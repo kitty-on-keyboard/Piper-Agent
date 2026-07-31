@@ -1,6 +1,7 @@
 #include "src/model/sampler.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -8,6 +9,38 @@ namespace lmp::model {
 namespace {
 
 constexpr float kNegInf = -std::numeric_limits<float>::infinity();
+
+// One candidate that survived top-k. Everything after selection works on this list --
+// at k=20 that is twenty entries instead of five full passes over 248,320 floats.
+struct Cand {
+    std::size_t id = 0;
+    float logit = kNegInf;
+};
+
+// Word-at-a-time: where the mask is dense (Think and Text allow all but eight ids) a
+// fully-allowed word is one compare for sixty-four tokens.
+void apply_mask(std::vector<float>& logits, const TokenMask* mask) {
+    if (mask == nullptr) {
+        return;
+    }
+    const std::vector<std::uint64_t>& words = mask->words();
+    for (std::size_t wi = 0; wi < words.size(); ++wi) {
+        std::uint64_t denied = ~words[wi];
+        while (denied != 0) {
+            const auto bit = static_cast<std::size_t>(std::countr_zero(denied));
+            denied &= denied - 1;
+            const std::size_t id = (wi << 6U) + bit;
+            if (id < logits.size()) {
+                logits[id] = kNegInf;
+            }
+        }
+    }
+    // The logits row is wider than the vocabulary the mask covers (248,320 vs 248,077
+    // on this checkpoint). Those rows decode to nothing, so they are not emittable.
+    for (std::size_t i = mask->size(); i < logits.size(); ++i) {
+        logits[i] = kNegInf;
+    }
+}
 
 void apply_repetition_penalty(std::vector<float>& logits, const std::vector<TokenId>& recent,
                               float penalty) {
@@ -23,52 +56,60 @@ void apply_repetition_penalty(std::vector<float>& logits, const std::vector<Toke
     }
 }
 
-// Keeps the k highest logits, -inf elsewhere.
-void apply_top_k(std::vector<float>& logits, std::int32_t k) {
-    if (k <= 0 || static_cast<std::size_t>(k) >= logits.size()) {
-        return;
+// The k highest finite logits, returned in ascending id order. A masked-out or
+// otherwise -inf logit is never a candidate: softmax gave it zero weight anyway, so
+// selecting over the finite entries only is the same distribution.
+std::vector<Cand> select_top_k(const std::vector<float>& logits, std::int32_t k) {
+    const bool bounded = k > 0 && static_cast<std::size_t>(k) < logits.size();
+    const auto cmp = [](const Cand& a, const Cand& b) { return a.logit > b.logit; };
+    std::vector<Cand> heap;
+    if (bounded) {
+        heap.reserve(static_cast<std::size_t>(k) + 1);
     }
-    std::vector<float> copy = logits;
-    std::nth_element(copy.begin(), copy.begin() + (k - 1), copy.end(), std::greater<>());
-    const float cutoff = copy[static_cast<std::size_t>(k - 1)];
-    std::int32_t kept = 0;
-    for (float& l : logits) {
-        if (l > cutoff) {
-            ++kept;
+    for (std::size_t i = 0; i < logits.size(); ++i) {
+        if (logits[i] == kNegInf) {
+            continue;
+        }
+        if (!bounded) {
+            heap.push_back({i, logits[i]});
+            continue;
+        }
+        // Strict >: on a tie the id encountered first keeps the slot, matching the
+        // left-to-right tie-break the previous full-sort selection used.
+        if (heap.size() == static_cast<std::size_t>(k) && !(logits[i] > heap.front().logit)) {
+            continue;
+        }
+        heap.push_back({i, logits[i]});
+        std::push_heap(heap.begin(), heap.end(), cmp);
+        if (heap.size() > static_cast<std::size_t>(k)) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.pop_back();
         }
     }
-    // Ties at the cutoff are kept left-to-right until k is full, so the kept count is
-    // exactly k rather than "k plus however many tied".
-    for (float& l : logits) {
-        if (l < cutoff) {
-            l = kNegInf;
-        } else if (l == cutoff) {
-            l = (kept < k) ? (++kept, l) : kNegInf;
-        }
-    }
+    std::sort(heap.begin(), heap.end(),
+              [](const Cand& a, const Cand& b) { return a.id < b.id; });
+    return heap;
 }
 
 struct Dist {
-    std::vector<float> probs;   // over all ids; zero where excluded
+    std::vector<float> probs; // parallel to the candidate list
     float total = 0.0F;
 };
 
-Dist softmax(const std::vector<float>& logits, float temperature) {
+Dist softmax(const std::vector<Cand>& cands, float temperature) {
     Dist d;
-    d.probs.assign(logits.size(), 0.0F);
+    d.probs.assign(cands.size(), 0.0F);
     const float t = temperature <= 0.0F ? 1.0F : temperature;
     float max_logit = kNegInf;
-    for (float l : logits) {
-        max_logit = std::max(max_logit, l);
+    for (const Cand& c : cands) {
+        max_logit = std::max(max_logit, c.logit);
     }
     if (max_logit == kNegInf) {
         return d; // everything masked
     }
-    for (std::size_t i = 0; i < logits.size(); ++i) {
-        if (logits[i] != kNegInf) {
-            d.probs[i] = std::exp((logits[i] - max_logit) / t);
-            d.total += d.probs[i];
-        }
+    for (std::size_t i = 0; i < cands.size(); ++i) {
+        d.probs[i] = std::exp((cands[i].logit - max_logit) / t);
+        d.total += d.probs[i];
     }
     return d;
 }
@@ -94,6 +135,8 @@ void apply_top_p(Dist& d, float top_p) {
     if (top_p >= 1.0F || d.total <= 0.0F) {
         return;
     }
+    // Ordering the survivors, not the vocabulary: top-k already ran, so this sorts
+    // twenty entries rather than std::sort over 248,320 indices per token.
     std::vector<std::size_t> order(d.probs.size());
     for (std::size_t i = 0; i < order.size(); ++i) {
         order[i] = i;
@@ -130,21 +173,15 @@ std::uint64_t Sampler::next_u64() noexcept {
     return z ^ (z >> 31U);
 }
 
-SampleResult Sampler::sample(std::vector<float>& logits,
-                             const std::function<bool(TokenId)>& mask,
+SampleResult Sampler::sample(std::vector<float>& logits, const TokenMask* mask,
                              const std::vector<TokenId>& recent) {
-    // Mask first (see header).
-    if (mask) {
-        for (std::size_t i = 0; i < logits.size(); ++i) {
-            if (!mask(static_cast<TokenId>(i))) {
-                logits[i] = kNegInf;
-            }
-        }
-    }
+    // Mask first (see header): an id the grammar forbids must have probability zero
+    // regardless of how the distribution is shaped afterwards.
+    apply_mask(logits, mask);
     apply_repetition_penalty(logits, recent, params_.repetition_penalty);
-    apply_top_k(logits, params_.top_k);
 
-    Dist d = softmax(logits, params_.temperature);
+    const std::vector<Cand> cands = select_top_k(logits, params_.top_k);
+    Dist d = softmax(cands, params_.temperature);
     apply_min_p(d, params_.min_p);
     apply_top_p(d, params_.top_p);
 
@@ -157,13 +194,13 @@ SampleResult Sampler::sample(std::vector<float>& logits,
     for (std::size_t i = 0; i < d.probs.size(); ++i) {
         target -= static_cast<double>(d.probs[i]);
         if (target <= 0.0 && d.probs[i] > 0.0F) {
-            return {static_cast<TokenId>(i), false};
+            return {static_cast<TokenId>(cands[i].id), false};
         }
     }
     // Rounding fell off the end; return the last nonzero.
     for (std::size_t i = d.probs.size(); i > 0; --i) {
         if (d.probs[i - 1] > 0.0F) {
-            return {static_cast<TokenId>(i - 1), false};
+            return {static_cast<TokenId>(cands[i - 1].id), false};
         }
     }
     return {kInvalidToken, true};

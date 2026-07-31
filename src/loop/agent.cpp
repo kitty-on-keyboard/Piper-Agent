@@ -104,7 +104,7 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
 
     // --- constrained generation --------------------------------------------
     model::TurnGrammar grammar(tok_, registry_.guard_specs());
-    task.mask = [&grammar](model::TokenId id) { return grammar.permitted(id); };
+    task.mask = &grammar;
     GrammarSink sink(grammar);
     turn.generation = backend_.generate(task, sink, cancel);
 

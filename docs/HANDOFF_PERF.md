@@ -1,151 +1,220 @@
-# Handoff: make LM_Pipe v2 faster than LM Studio
+# Handoff: LM_Pipe v2 vs LM Studio, second pass
 
 Paste this whole file as the opening prompt of a fresh session in
-`/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `main`, all work merged).
+`/Users/dev/Desktop/seans_projects_local/LM_Pipe_2` (branch `main`).
+
+Everything below was re-measured in this repo on 2026-07-30. No number here is quoted
+from the previous handoff without being reproduced first (S19.6).
 
 ---
 
-## The job
+## Baselines, re-derived
 
-We run Qwen3.6-35B-A3B in-process via MLX. LM Studio runs the **same checkpoint on the
-same machine** through a generic stack. We are losing badly. Fix it.
+`scripts/lmstudio_baseline.py` rebuilds LM Studio's numbers from `~/.lmstudio/server-logs`
+(34 files, real prior usage of this exact checkpoint). Timestamps are 1-second
+resolution, so it reports two views: all windows, and windows >= 5 s where the clock
+error is small.
 
-We have advantages LM Studio does not: no HTTP hop, no process boundary, direct MLX
-calls, our own SPSC transport, and a KV ledger we control. **Losing is not acceptable
-and matching is not the target — beating these numbers is the minimum bar.**
+```
+all windows:      prefill n=1963 median 1145.0   decode n=134 median 78.5
+windows >= 5s:    prefill n=740  median 1338.9   decode n=17  median 87.7
+```
 
-| | LM Studio (measured) | Ours (measured) | Gap |
+The previous handoff's 78.5 / 1347 reproduce. **Exit criterion stays decode > 78.5,
+prefill > 1347.**
+
+## Where we are
+
+Matched before/after, same prompt and seed, `test_realmodel`:
+
+| | before | after | LM Studio |
 |---|---|---|---|
-| decode | **78.5 tok/s** median (n=133) | 22.9 | **3.4× slower** |
-| prefill | **1347 tok/s** median (n=62) | 19.2 | **70× slower** |
+| decode | 22.7 tok/s | **28.4 tok/s** | 78.5 |
+| prefill | 45.8 tok/s | **119.1 tok/s** | 1347 |
 
-Exit criterion: **decode > 78.5 tok/s and prefill > 1347 tok/s**, reported as an N-run
-ledger (≥3 runs, median + spread), on the same prompt shape. Do not report a single
-number — v1 measured 462 s, then 275 s and 258 s on an identical binary (spec §11.5).
-
-## Reproduce both sides before changing anything
-
-Re-measure first (§19.6). Do not trust the numbers above because they are written down.
-
-**Our numbers** — `tests/model/test_realmodel.cpp::model_generates_a_grammatical_turn`
-prints a `[perf]` line:
-```bash
-cmake --preset dev && cmake --build --preset dev -j8
-cd build && ctest -L realmodel -j1 --output-on-failure 2>&1 | grep perf
-```
-
-**LM Studio's numbers** — derived from `~/.lmstudio/server-logs/*/*.log`, which contain
-real prior usage of this exact model. Timestamps are 1-second resolution, so short
-requests carry real error; that is why the medians above use n=133 / n=62. The
-extraction script is in this session's history; rewrite it, don't trust my summary.
-Fields: `Prompt processing progress: 0.0%` / `100.0%` timestamps, `uncached_tokens=`,
-`"completion_tokens":`, and the `Generated prediction` timestamp.
-
-## Three confirmed causes, measured
-
-### 1. The grammar mask costs 22.8 ms/token and rejects 8 tokens (decode killer)
-
-Measured on this machine with `tests/model/diag_main.cpp`:
+`lmp_diag bench 4 512 200` (547-token prompt, 200 new tokens) — a new instrument, so
+there is no pre-change measurement at this shape:
 
 ```
-vocab = 248077
-mask over full vocab       :  27.6 ms/token   (248069 of 248077 allowed)
-sampler, no mask           :   1.7 ms/token
-sampler + mask (as shipped):  22.8 ms/token
-=> CPU-side ceiling from this alone: 43.8 tok/s
+prefill  n=4 median 591.5 tok/s  min 520.7 max 592.6    [0.44x LM Studio]
+decode   n=4 median  27.9 tok/s  min  27.8 max  28.0    [0.35x LM Studio]
 ```
 
-`Sampler::sample` (`src/model/sampler.cpp:131`) calls `mask(id)` for **every one of
-248,077 ids, every token**. Each call lands in `TurnGrammar::permitted`
-(`src/model/grammar.cpp:104`), and in the Think/Text phases that path does:
+Not there. Two of the three named causes are closed; the third turned out not to be a
+cause at all, and the real one is now located precisely.
 
-```cpp
-TurnGrammar probe(tok_, tools_);   // ctor -> reset() -> make_unique<ToolCallGuard>(tools_)
+---
+
+## Closed
+
+### 1. The grammar mask — 22.8 ms/token to 0.00
+
+`Sampler::sample` took `std::function<bool(TokenId)>` and called it once per vocabulary
+id. `TurnGrammar::permitted` is now the *definition* of the mask, not the hot path; the
+sampler consults `TurnGrammar::mask()`, which returns a `TokenMask` bitset
+(`src/model/token_mask.hpp`).
+
+Outside a tool call the legal set is "everything except a handful of structural ids", so
+it is a bitset cached per (phase, saw_tool_call) — no vocabulary walk at all. Inside one
+it is parsephony's `TokenMaskT<ToolCallGuard>`, finally wired up.
+
+`lmp_diag mask`:
+
+```
+permitted() over full vocab :    28.29 ms/token
+bulk mask, warm             :     0.000 ms/token
+sampler, no mask            :     0.18 ms/token   (was 1.7 -- top_p no longer
+sampler + mask (as shipped) :     0.17 ms/token    std::sort's 248k indices)
 ```
 
-**A heap allocation and a full ToolCallGuard construction, 248,077 times per token**, to
-reject 8 structural ids.
+Two correctness results fell out of it, both pinned by tests:
 
-The fix is not a micro-optimisation. In Think/Text the mask is "everything except a
-handful of structural ids" — that is a tiny denylist, computable without touching the
-vocabulary at all. Only inside `TurnPhase::ToolCall` does it need real work, and
-**parsephony already ships the engine for that and we never wired it up**:
-`third_party/parsephony/include/parsephony/mask.hpp`, `TokenMaskT`, which caches masks
-by `state_signature()`, pre-classifies string-safe tokens, and buckets candidates by
-first byte. Its own repo measures **17.7 ns per sampling step**. `ToolCallGuard` already
-implements the full contract it needs (`state_signature`, `mask_class`, `allowed_bytes`,
-`probe_byte`, `mute`) — verified.
+- **parsephony's free-text mask was more permissive than its own automaton.**
+  `classify()` only simulated tokens containing the parameter terminator, but
+  `ToolCallGuard` also rejects control bytes in a raw text value — 93 vocabulary entries
+  the fast mask allowed and the grammar denies. Fixed in
+  `third_party/parsephony/include/parsephony/mask.hpp`. Found by the new test
+  `the_bulk_mask_and_the_predicate_agree_over_the_whole_vocabulary`, which compares
+  `mask()` against `permitted()` for every id at every state of a real tool call. **Keep
+  that test.** It is the only thing standing between a 22 ms saving and a mask that lies
+  to the sampler.
+- **Ids past the vocabulary are no longer emittable.** The logits row is 248,320 wide and
+  the tokenizer has 248,077 entries; the old predicate permitted the difference.
 
-Also in `src/model/sampler.cpp`: `apply_top_p` does a full `std::sort` over all 248,077
-indices per token. Partial selection (`nth_element`) over the top-k survivors is enough,
-and top-k already ran.
+### 2. Prefill's op-per-timestep scan — 20-25x
 
-### 2. Prefill runs one MLX op-set per token position (prefill killer)
+`gated_delta_update` ran one MLX op-set per token position: ~8,600 sequential launches
+for a 287-token prompt.
 
-`src/model/mlx/gated_delta.hpp`, `gated_delta_update`:
+The fix was not a chunked associative scan. **mlx-lm already ships a fused Metal kernel
+for this** (`mlx_lm/models/gated_delta.py`), and LM Studio runs it — our C++ had ported
+mlx-lm's *reference* loop, the one it labels `gated_delta_ops`.
+`gated_delta_update_kernel` is that kernel: the whole T-step recurrence in one launch,
+state held in registers.
 
-```cpp
-for (int t = 0; t < T; ++t) { ... gated_delta_step(...) ... }
+Same arithmetic in the same order, so the deviation is fp32 association only.
+`lmp_diag scan`:
+
+```
+     T         ops ms      kernel ms   speedup   rel|dy|   rel|dstate|
+     1            1.4           0.73      1.9x   1.9e-07     0.0e+00
+   287           27.2           1.15     23.6x   1.1e-07     9.4e-08
+  1024           79.1           3.12     25.3x   1.5e-07     9.4e-08
 ```
 
-30 of 40 layers take this path (`is_linear_layer` = `(idx+1) % 4 != 0`). A 287-token
-prompt is therefore ~8,600 sequential kernel launches where LM Studio issues a handful
-of batched ones. Decode is unaffected (T=1, one iteration) — which is exactly why decode
-is 3.4× off and prefill is 70× off. That asymmetry is the evidence this is the cause.
+The reference loop is kept as `gated_delta_update_ops` — it is the definition the kernel
+is tested against. If you touch the kernel, `lmp_diag scan` is the check.
 
-The gated-delta recurrence is sequential in principle but has the standard associative-
-scan structure: process in chunks, batch the intra-chunk math, carry state between
-chunks. Reference implementations chunk it. **Numerics must not change** — this code was
-debugged against this exact checkpoint. Prove equivalence against the current
-implementation on a fixed seed before trusting any speedup.
+One note on that diagnostic: feed it raw normals for `k` and *both* implementations
+diverge, because `(I - beta k k^T)` is only contractive once `k` is rms-normed and scaled
+by `1/sqrt(Dk)` the way `forward_gated_delta` does. The first version of the check got
+that wrong and reported 1e16 deviations that were entirely its own inputs.
 
-### 3. Full logits row copied GPU→CPU every step
+### 3. The logits copy — measured, then left alone
 
-`src/model/mlx_backend.cpp`, `logits_to_host`: `mx::eval` + copy of all 248,077 floats
-(~1 MB) per decode token, so the CPU sampler can run. Options: mask and sample
-on-device; or narrow to top-k on-device and copy only that. This is the smallest of the
-three — measure it before spending time on it.
+0.07 ms/token (`copy=14ms` over 200 tokens). It was the smallest of the three and it is
+not worth touching. Closed by measurement rather than by work.
+
+---
+
+## The remaining gap is one block
+
+`lmp_diag layers 1` runs the model's own block functions, chained the way a step chains
+them:
+
+```
+  linear layer (delta+moe)   1.139 ms/layer  x30 =  34.17 ms
+  attn layer (attn+moe)      0.791 ms/layer  x10 =   7.91 ms
+    of which moe             0.674 ms/layer  x40 =  26.98 ms
+```
+
+**The MoE block is 27 ms/token of a 35 ms decode step.** And `lmp_diag blocks 1` says its
+actual GPU work is 0.085 ms/layer:
+
+```
+  moe gate                   latency  0.343  cpu  0.000  marginal  0.020 ms
+  moe switch_glu (8/256)     latency  0.232  cpu  0.003  marginal  0.048 ms
+  moe shared expert          latency  0.172  cpu  0.001  marginal  0.019 ms
+```
+
+So ~0.59 ms per MoE block is neither compute nor CPU graph construction. It is the cost
+of ~27 MLX ops that cannot overlap. `lmp_diag chain` prices that directly:
+
+```
+  dependent chain   :  5.22 us/op        independent :  4.08 us/op
+```
+
+Three things were tried against it and **all three did nothing**, which is worth knowing
+before trying them again:
+
+- **`mx::compile` on the elementwise clusters** (silu, swiglu, precise_rms_norm_gated,
+  compute_g). In isolation it is real — compute_g goes 18.4 us -> 3.3 us per call. End to
+  end: 28.1 -> 27.9 tok/s, inside noise. Reverted; the comment on `compute_g` records why.
+- **`MLX_MAX_OPS_PER_BUFFER`** (50 / 200 / 500). Moves the `chain` micro-benchmark 1.9x,
+  moves real decode by 0.1 tok/s. MLX already batches inside our single `mx::eval`.
+- **CPU-side graph construction** as a suspect: measured at under 1 ms per step. It is not
+  the problem, so `mx::async_eval` has nothing to hide and was not pursued.
+
+### What to try next
+
+The cost is in the MoE's *heavy* ops, not its elementwise ones — that is what the failed
+fusion experiment established. Two leads, cheapest first:
+
+1. **MLX version.** LM Studio ships **MLX 0.31.2**; we link **0.29.3** (the pip package
+   `src/model/CMakeLists.txt` probes). Its engine source is on this machine, and its
+   `SparseMoeBlock` and `SwitchGLU` are structurally identical to ours:
+   `~/.lmstudio/extensions/backends/vendor/_amphibian/`
+   `app-mlx-generate-mac14-arm64@29/lib/python3.11/site-packages/mlx_lm/models/`.
+   Same op graph, 2.8x the throughput, newer MLX. Upgrading and re-running
+   `lmp_diag layers 1` is a one-line experiment and should be the first one.
+
+2. **Time forward_moe's pieces chained, not batched.** `lmp_diag blocks` batches them,
+   which is exactly what hides this; that measurement is the one this session did not get
+   to. Build it incrementally — the shared-expert path is naturally chainable through
+   [1,1,2048] — and diff. Prime suspects: the three `gather_qmm` calls, then
+   `argpartition` + `take_along_axis` over 256 experts. If one op carries most of the
+   0.59 ms, that is a different fix from "too many ops".
+
+Prefill is the same story: the scan is fixed, so prefill is now MoE-bound too.
+
+---
+
+## Instruments
+
+`tests/model/diag_main.cpp` (`cmake --build --preset dev --target lmp_diag`):
+
+| | |
+|---|---|
+| `lmp_diag scan [T...]` | fused kernel vs reference loop: deviation and wall time |
+| `lmp_diag mask` | one decode step outside the forward pass |
+| `lmp_diag blocks [T]` | per-block cost, batched — latency / cpu / marginal |
+| `lmp_diag layers [T]` | per-layer cost, chained, via the model's own blocks |
+| `lmp_diag chain [n]` | what a dependent MLX op costs on this machine |
+| `lmp_diag bench [runs] [prompt] [max_new]` | N-run ledger against the LM Studio numbers |
+
+`scripts/lmstudio_baseline.py` re-derives the other side.
+
+`Qwen35MoeModel::forward_{linear_layer,full_attn_layer,moe}` are public so `layers` times
+the code the model actually runs rather than a copy of it.
+
+`GenResult` now carries `forward_ms`, `logits_copy_ms`, `sample_ms`, so "decode is slow"
+is answerable with *where* without reaching for a profiler.
+
+## Guardrails — all green as of this handoff
+
+`ctest -L gate` 19/19 · `./scripts/run_ratchets.py --root .` 6/6 clean ·
+`ctest -L realmodel` 2/2 · `./scripts/eval.py --root . score` unmoved
+(corpus wmiss=0 179/179 pinned, holdout wmiss=15 34/42 pinned).
 
 ## Do not
 
-- **Do not change the numerics** in `src/model/mlx/` to gain speed. It is v1's debugged
-  forward pass for this checkpoint. Equivalence first, speed second.
-- **Do not weaken the grammar** to make the mask cheap. A malformed tool call must stay
-  unrepresentable (§5.6). Speed comes from *how* the mask is computed, not from
-  constraining less.
-- **Do not quote a throughput number without a baseline next to it.** That is the
-  mistake that produced this handoff: 22.9 tok/s was reported as a working result
-  without ever comparing it to the LM Studio numbers already sitting on this machine
-  (§16: no metric quoted without checking what it counts).
+- Do not delete `gated_delta_update_ops`, or the equivalence tests in
+  `tests/model/test_grammar.cpp`. They are what make the fast paths falsifiable.
+- Do not re-apply `mx::compile` on the strength of a micro-benchmark. It was measured end
+  to end and it was zero.
+- Do not weaken the grammar to make the mask cheap. Speed came from *how* the mask is
+  computed; the tool-call automaton constrains exactly as much as it did before.
+- Do not reach for speculative decoding. The MoE block is 27 ms of a 35 ms step; stacking
+  a throughput trick on top would hide it, not fix it.
 - Do not re-litigate settled decisions: Apple Silicon only, MLX in-process, Qwen3 only,
-  XML tool-call syntax (the model's own `chat_template.jinja` — see
-  `docs/PHASES.md` for why the spec's §5.6 JSON form was overruled).
-
-## Guardrails
-
-`ctest -L gate` (19 tests, ~6 s) must stay green, and all six ratchets
-(`./scripts/run_ratchets.py --root .`) must stay clean. Both are required to merge.
-
-Watch these specifically while optimising:
-- `test_grammar_realmodel` pins that `permitted()` and `advance()` agree. A fast mask
-  that disagrees with the walk is a mask that lies to the sampler — that test is the
-  one that catches it. Keep it.
-- `test_backend_seam::mask_is_applied_before_shaping` pins mask-before-top-k ordering.
-  Masking after top-k can leave zero legal candidates.
-- The bake-off pins (`./scripts/eval.py --root . score`) must not move.
-
-## Also worth knowing
-
-- **Prefix caching across turns.** LM Studio's logs show `cached_tokens` and
-  `lifetime_efficiency`. We have `KvCacheLedger` doing verified id-by-id prefix reuse,
-  but the agent loop rebuilds the prompt every iteration and the sidecar constructs a
-  fresh backend per run. In a loop that re-sends a growing conversation, that is a large
-  repeated prefill cost — and it compounds with cause #2.
-- `tests/model/diag_main.cpp` is a scratch driver (built via
-  `cmake --build --preset dev --target lmp_diag`, EXCLUDE_FROM_ALL). It currently holds
-  the mask/sampler micro-benchmark above. Overwrite it freely; it exists so a failure
-  can be attributed by observation rather than guessed at (§19.3).
-- `docs/PHASES.md` lists what else is unfinished (T2 containers, speculative decoding,
-  the approval round-trip, `.vsix` packaging). **None of that is this session's job.**
-  Speculative decoding in particular is a tempting throughput lever — it is not the
-  bug, and stacking it on top of a 22 ms/token mask would only hide the defect.
+  XML tool-call syntax (see `docs/PHASES.md`).
