@@ -7,3 +7,5 @@
 add_subdirectory(platform)
 add_subdirectory(model)
 add_subdirectory(tools)
+add_subdirectory(context)
+add_subdirectory(loop)
