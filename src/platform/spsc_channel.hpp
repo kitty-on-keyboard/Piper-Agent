@@ -40,11 +40,20 @@ class SpscChannel {
 
     // Producer thread only. Returns false if full; the caller decides whether that is
     // backpressure or an error, because only the caller knows.
+    //
+    // The opposite index is read from a thread-local cache and refreshed only when the
+    // queue LOOKS full. head_ is written by the consumer, so loading it every push pulls a
+    // cache line off the other core on every call; a queue that is rarely full then pays
+    // that on every single push for an answer that is almost always "no". Safe because the
+    // cache is a stale LOWER bound: head_ only increases, so `tail - head_cached_` can only
+    // over-estimate the occupancy, and an over-estimate costs a refresh, never a lost slot.
     [[nodiscard]] bool try_push(T&& value) noexcept {
         const std::size_t tail = tail_.load(std::memory_order_relaxed);
-        const std::size_t head = head_.load(std::memory_order_acquire);
-        if (tail - head >= slots_.size()) {
-            return false;
+        if (tail - head_cached_ >= slots_.size()) {
+            head_cached_ = head_.load(std::memory_order_acquire);
+            if (tail - head_cached_ >= slots_.size()) {
+                return false;
+            }
         }
         slots_[tail & mask_] = std::move(value);
         tail_.store(tail + 1, std::memory_order_release);
@@ -52,11 +61,18 @@ class SpscChannel {
     }
 
     // Consumer thread only. Returns false if empty.
+    //
+    // Same cache, same argument. The happens-before that makes the slot's contents visible
+    // still holds: tail_cached_ came from an earlier ACQUIRE load of tail_, which
+    // synchronised-with the producer's release store, and every slot below that value was
+    // written before it. Reading only slots below tail_cached_ stays inside that guarantee.
     [[nodiscard]] bool try_pop(T& out) noexcept {
         const std::size_t head = head_.load(std::memory_order_relaxed);
-        const std::size_t tail = tail_.load(std::memory_order_acquire);
-        if (head == tail) {
-            return false;
+        if (head == tail_cached_) {
+            tail_cached_ = tail_.load(std::memory_order_acquire);
+            if (head == tail_cached_) {
+                return false;
+            }
         }
         out = std::move(slots_[head & mask_]);
         slots_[head & mask_] = T{};
@@ -103,8 +119,15 @@ class SpscChannel {
 
     const std::size_t mask_;
     std::vector<T> slots_;
+
+    // Each cache sits on the line of the index ITS OWN thread writes, so refreshing one
+    // never dirties the other side's line. head_ and tail_cached_ are consumer-owned;
+    // tail_ and head_cached_ are producer-owned. Giving each cache its own padded line
+    // instead would be correct but would burn two more lines to no purpose.
     alignas(kCacheLinePad) std::atomic<std::size_t> head_{0};
+    std::size_t tail_cached_ = 0;
     alignas(kCacheLinePad) std::atomic<std::size_t> tail_{0};
+    std::size_t head_cached_ = 0;
     alignas(kCacheLinePad) std::atomic<bool> closed_{false};
 };
 
