@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "src/loop/agent.hpp"
@@ -22,7 +23,19 @@ namespace {
 
 using namespace lmp;
 
+// Two threads reach this now: the run thread for turn/verification/perf notifications, and
+// the token streamer for per-token text (S5.7 streaming). stdio locks each FILE* call on
+// its own, which is not enough -- the payload and its newline are two calls, so without a
+// lock here another thread's line can land between them and both messages are corrupt.
+// The lock is held across the flush deliberately: a half-written line must never be
+// visible to the extension's line-oriented reader.
+std::mutex& stdout_lock() {
+    static std::mutex m;
+    return m;
+}
+
 void write_line(const std::string& s) {
+    const std::lock_guard<std::mutex> guard(stdout_lock());
     std::fwrite(s.data(), 1, s.size(), stdout);
     std::fputc('\n', stdout);
     std::fflush(stdout);

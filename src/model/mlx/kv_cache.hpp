@@ -3,6 +3,7 @@
 
 #if LMP_HAVE_MLX
 
+#include <algorithm>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -66,6 +67,17 @@ struct KVCache {
                 mx::slice(*values, {0, 0, 0, 0}, {B, n_kv, offset, vd})};
     }
 
+    // Rollback, for speculative decoding. `offset` is the ONLY thing that says how much of
+    // the over-allocated buffer is real -- update_and_fetch slices to it, and forward_self_attn
+    // reads it as rope's position base -- so discarding a tail is an integer assignment, not
+    // a reallocation. The stale keys and values past `n` are never read: the next append
+    // overwrites them in place before any slice can reach them.
+    //
+    // Clamped rather than asserted. `n > offset` is a caller bug either way, but growing the
+    // cache by moving an index would hand attention rows of uninitialised scratch and produce
+    // a plausible wrong answer; refusing to grow produces a slow one instead.
+    void truncate_to(int n) noexcept { offset = std::clamp(n, 0, offset); }
+
     void sync() const {
         if (keys) {
             mx::eval({*keys});
@@ -85,6 +97,38 @@ struct SsmCache {
         conv_state.reset();
         delta_state.reset();
         offset = 0;
+    }
+
+    // The linear layers' half of rollback, and the reason it is snapshot/restore rather
+    // than KVCache's index assignment: conv_state and delta_state are a running recurrence
+    // over the whole sequence, so there is no prefix of them left to keep. What makes that
+    // affordable is that neither has a sequence axis -- conv_state is
+    // [B, kernel_dim - 1, conv_dim] and delta_state is [B, Hv, Dv, Dk] -- so the cost is
+    // independent of both draft length and context length.
+    //
+    // Cheaper, in fact, than the "two small tensor copies" this was estimated at.
+    // mx::array is an immutable refcounted handle and forward_gated_delta REPLACES
+    // cache.conv_state / cache.delta_state rather than writing through them, so capturing
+    // a snapshot is two refcount bumps; the buffers are kept alive, never duplicated.
+    struct Snapshot {
+        std::optional<mx::array> conv_state;
+        std::optional<mx::array> delta_state;
+        int offset{0};
+    };
+
+    [[nodiscard]] Snapshot snapshot() const {
+        // Forced to buffers on capture. An unevaluated handle would pin every input of the
+        // pass that produced it for as long as the checkpoint lives, which for a checkpoint
+        // held across a speculative block is the block's whole activation set. A no-op when
+        // the caller has already synced, which the decode loop has.
+        sync();
+        return Snapshot{conv_state, delta_state, offset};
+    }
+
+    void restore(const Snapshot& s) {
+        conv_state = s.conv_state;
+        delta_state = s.delta_state;
+        offset = s.offset;
     }
 
     void sync() const {

@@ -106,6 +106,24 @@ class MaskSource {
     virtual ~MaskSource() = default;
 
     [[nodiscard]] virtual const TokenMask& mask() const = 0;
+
+    // True when mask() depends only on state that drafted-but-uncommitted tokens cannot
+    // move -- so one snapshot of it is valid for a whole speculative block.
+    //
+    // Speculative decoding needs the mask at positions the model has not committed yet,
+    // and TurnGrammar can neither be rolled back nor copied. This is the honest way out:
+    // a source that says false is decoded one token at a time. Defaults to false so a new
+    // MaskSource is conservative by omission rather than by accident.
+    [[nodiscard]] virtual bool mask_is_block_stable() const { return false; }
+
+    // True when `id` could move this source out of its current block-stable state, so a
+    // speculative draft must be truncated before it. Defaults to TRUE -- conservative by
+    // omission: a source that has not thought about this speculates on nothing rather
+    // than speculating on a mask that has silently stopped applying.
+    [[nodiscard]] virtual bool is_block_boundary(TokenId id) const {
+        (void)id;
+        return true;
+    }
 };
 
 } // namespace lmp::model

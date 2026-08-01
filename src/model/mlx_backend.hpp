@@ -28,6 +28,7 @@
 #include <string>
 
 #include "src/model/backend.hpp"
+#include "src/model/speculative.hpp"
 #include "src/model/kv_cache.hpp"
 #include "src/platform/clock.hpp"
 
@@ -35,7 +36,14 @@ namespace lmp::model {
 
 struct MlxBackendConfig {
     std::string model_dir; // required (S7.5: no defaultable security-relevant input)
-    std::string draft_model_dir; // speculative decoding seam; empty = off
+    std::string draft_model_dir; // a DRAFT MODEL seam; empty = off. Unrelated to the
+                                 // model-free speculative path below, which needs no
+                                 // second checkpoint (and could not have one: 19 GB
+                                 // already, on a 48 GB host).
+    // Model-free speculative decoding (src/model/speculative.hpp). Off by default; the
+    // plain decode path stays the reference. LMP_SPECULATIVE=1 turns it on without a
+    // rebuild so the two can be measured against each other on the same binary.
+    SpecConfig speculative{};
 };
 
 class MlxBackend final : public InferenceBackend {
@@ -60,6 +68,7 @@ class MlxBackend final : public InferenceBackend {
     std::unique_ptr<Impl> impl_;
     const platform::Clock& clock_;
     KvCacheLedger ledger_;
+    SpecConfig spec_{};
     bool loaded_ = false;
 };
 
