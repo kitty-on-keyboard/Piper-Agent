@@ -27,6 +27,26 @@ struct SampleResult {
     bool no_legal_token = false;
 };
 
+// The step's distribution AFTER everything that shapes it: repetition penalty, the
+// grammar mask, temperature, top-k, min-p, top-p. Small -- top-k survivors, not 248,320
+// entries -- and in ascending id order.
+//
+// Exposed because speculative decoding has to VERIFY against this row rather than against
+// raw softmax. Verifying against the unshaped distribution would make the committed tokens
+// follow neither law, and -- because the mask is applied here -- would let speculation
+// commit a token the grammar forbids (S5.6 makes that a build defect, not a stylistic
+// preference). See speculative.hpp.
+struct TokenDist {
+    std::vector<TokenId> ids;  // ascending
+    std::vector<float> probs;  // parallel to ids, UNNORMALISED
+    float total = 0.0F;
+
+    [[nodiscard]] bool empty() const noexcept { return total <= 0.0F || ids.empty(); }
+    // Normalised probability of `id`, or 0 when it did not survive shaping -- which
+    // includes every token the grammar masked out.
+    [[nodiscard]] float prob_of(TokenId id) const noexcept;
+};
+
 class Sampler {
   public:
     explicit Sampler(const SamplingParams& params) : params_(params), rng_(params.seed) {}
@@ -37,6 +57,14 @@ class Sampler {
     // `recent` feeds repetition penalty (applied to ids present in it).
     [[nodiscard]] SampleResult sample(std::vector<float>& logits, const TokenMask* mask,
                                       const std::vector<TokenId>& recent);
+
+    // sample(), split at the point where the distribution is known. Consumes no
+    // randomness, so a caller may build a row without perturbing the sampling stream.
+    // `logits` is modified in place, exactly as sample() modifies it.
+    [[nodiscard]] TokenDist distribution(std::vector<float>& logits, const TokenMask* mask,
+                                         const std::vector<TokenId>& recent) const;
+    // The draw half. sample() is exactly draw(distribution(...)).
+    [[nodiscard]] SampleResult draw(const TokenDist& dist);
 
   private:
     [[nodiscard]] std::uint64_t next_u64() noexcept;

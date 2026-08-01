@@ -1,3 +1,12 @@
+# The amalgamated draft proposer from the round-1 cook-off, compiled as a library rather
+# than copied into src/. It is EVIDENCE as much as code -- bakeoff/draft_proposer/ carries
+# its scoreboard and README -- and a copy here would drift from the thing that was
+# measured. -w for the same reason bakeoff/CMakeLists.txt gives: an entrant reformatted to
+# satisfy this project's warning flags is no longer what the scoreboard scored.
+add_library(lmp_draft "${PROJECT_SOURCE_DIR}/bakeoff/draft_proposer/suffix_proposer.cpp")
+target_include_directories(lmp_draft PUBLIC "${PROJECT_SOURCE_DIR}")
+target_compile_options(lmp_draft PRIVATE -w)
+
 add_library(lmp_model
   backend.cpp
   chat_template.cpp
@@ -6,11 +15,13 @@ add_library(lmp_model
   mlx_backend.cpp
   qwen_tokenizer.cpp
   sampler.cpp
+  spec_verifier.cpp
+  speculative.cpp
 )
 target_include_directories(lmp_model PUBLIC "${PROJECT_SOURCE_DIR}")
 target_link_libraries(lmp_model
   PRIVATE lmp_warnings lmp_assertions simdjson
-  PUBLIC lmp_platform frankentok parsephony)
+  PUBLIC lmp_platform frankentok parsephony lmp_draft)
 
 # --- MLX discovery ----------------------------------------------------------
 #

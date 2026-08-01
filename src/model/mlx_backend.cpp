@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <variant>
 
@@ -91,6 +92,7 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
                        "safetensors)"};
     }
     wire_working_set();
+    spec_ = config.speculative;
     loaded_ = true;
     return {true, {}};
 }
@@ -120,6 +122,173 @@ void logits_to_host(const mx::array& logits, std::vector<float>& out) {
 
 double ms_between(platform::MonoTime a, platform::MonoTime b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
+}
+
+// Speculation on without a rebuild, so the two paths can be compared on one binary --
+// which matters because the only number that settles this is a real end-to-end run.
+bool speculative_env_override(bool from_config) {
+    if (const char* s = std::getenv("LMP_SPECULATIVE")) {
+        return std::atoi(s) != 0;
+    }
+    return from_config;
+}
+
+// The model, as src/model/speculative.hpp needs to see it. Everything MLX-shaped lives
+// here so the block algebra itself stays testable without a GPU.
+class MlxSpecForward final : public SpecForward {
+  public:
+    MlxSpecForward(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger)
+        : model_(model), ledger_(ledger) {}
+
+    void forward_all(std::span<const TokenId> tokens,
+                     std::vector<std::vector<float>>& rows) override {
+        rows.clear();
+        if (tokens.empty()) {
+            return;
+        }
+        mx::array ids = mx::array(tokens.data(), {1, static_cast<int>(tokens.size())}, mx::int32);
+        // The opt-in all-position path: verification needs a row per drafted position,
+        // and forward_logits() would slice all but the last away.
+        mx::array logits = mx::astype(impl_forward_all(ids), mx::float32);
+        mx::eval(logits);
+        const int seq = static_cast<int>(logits.shape()[1]);
+        const int vocab = static_cast<int>(logits.shape()[2]);
+        const float* data = logits.data<float>();
+        rows.reserve(static_cast<std::size_t>(seq));
+        for (int s = 0; s < seq; ++s) {
+            rows.emplace_back(data + static_cast<std::ptrdiff_t>(s) * vocab,
+                              data + static_cast<std::ptrdiff_t>(s + 1) * vocab);
+        }
+        // The ledger tracks what the MODEL consumed, drafts included -- restore() puts it
+        // back in step with the caches.
+        ledger_.append(tokens);
+    }
+
+    void forward_last(std::span<const TokenId> tokens, std::vector<float>& row) override {
+        if (tokens.empty()) {
+            return;
+        }
+        mx::array ids = mx::array(tokens.data(), {1, static_cast<int>(tokens.size())}, mx::int32);
+        mx::array logits = impl_forward_last(ids);
+        mx::eval(logits);
+        logits_to_host(logits, row);
+        ledger_.append(tokens);
+    }
+
+    void checkpoint() override {
+        mark_ = model_.checkpoint();
+        ledger_mark_ = ledger_.size();
+    }
+
+    void restore() override {
+        model_.restore(mark_);
+        // Exactly the same position the caches went back to. A ledger that disagreed with
+        // the caches is the silent-stale-context failure S5.10 exists to prevent.
+        ledger_.truncate_to(ledger_mark_);
+    }
+
+  private:
+    mx::array impl_forward_all(const mx::array& ids) { return model_.forward_logits_all(ids); }
+    mx::array impl_forward_last(const mx::array& ids) { return model_.forward_logits(ids); }
+
+    mlxl::Qwen35MoeModel& model_;
+    KvCacheLedger& ledger_;
+    mlxl::Qwen35MoeModel::CacheCheckpoint mark_{};
+    std::size_t ledger_mark_ = 0;
+};
+
+// The speculative decode loop. Separate from generate() so the plain path keeps the shape
+// it was tuned in, and so this stays under the function-size ratchet.
+GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
+                             const InferenceTask& task, TokenSink& sink,
+                             const CancelToken& cancel, const platform::Clock& clock,
+                             std::vector<float>& logits_host, GenResult r,
+                             platform::MonoTime t0, SpecConfig cfg) {
+    SpeculativeDecoder decoder(task.sampling, cfg);
+    MlxSpecForward fwd(model, ledger);
+    // The proposer matches against history, so it has to have seen the prompt: an agent
+    // turn reuses the tool output and the code it just read, which is the whole premise.
+    decoder.observe(std::span<const TokenId>(task.prompt));
+
+    const auto is_special = [&task](TokenId id) {
+        return task.mask != nullptr && task.mask->is_block_boundary(id);
+    };
+
+    std::vector<TokenId> recent;
+    bool first_token = true;
+    auto t_decode_start = clock.mono();
+    bool stop = false;
+
+    while (!stop && r.tokens_generated < task.max_new_tokens) {
+        if (cancel.cancelled()) {
+            r.status = GenStatus::Cancelled;
+            return r;
+        }
+        const TokenMask* mask = task.mask != nullptr ? &task.mask->mask() : nullptr;
+        const bool may_speculate = task.mask == nullptr || task.mask->mask_is_block_stable();
+
+        const auto t_s0 = clock.mono();
+        // ledger.ids() is the exact history the model consumed, which is what the
+        // proposer must match against -- not the prompt, and not the emitted text.
+        SpecStep st = decoder.step(logits_host, mask, recent,
+                                   std::span<const TokenId>(ledger.ids()), may_speculate,
+                                   is_special, fwd);
+        r.forward_ms += ms_between(t_s0, clock.mono());
+
+        if (st.no_legal_token) {
+            r.status = GenStatus::BackendError;
+            r.error = "constrained decode: no legal token -- the grammar and the "
+                      "vocabulary disagree, which is a build defect";
+            return r;
+        }
+
+        for (TokenId id : st.committed) {
+            if (first_token) {
+                r.ttft_ms = ms_between(t0, clock.mono());
+                t_decode_start = clock.mono();
+                first_token = false;
+            }
+            ++r.tokens_generated;
+            recent.push_back(id);
+            if (recent.size() > 64) {
+                recent.erase(recent.begin());
+            }
+            // The sink is the authority on when a turn ends (S5.5). A block may commit
+            // several tokens at once, and the grammar must not be advanced past the one
+            // that accepted -- so stop feeding at the first refusal and drop the rest.
+            if (!sink.on_token(id)) {
+                r.status = GenStatus::Complete;
+                stop = true;
+                break;
+            }
+            if (r.tokens_generated >= task.max_new_tokens) {
+                stop = true;
+                break;
+            }
+        }
+        decoder.observe(std::span<const TokenId>(st.committed));
+        logits_host = std::move(st.next_logits);
+    }
+
+    if (r.status != GenStatus::Complete) {
+        r.status = GenStatus::LengthCapped;
+    }
+    const double decode_ms = ms_between(t_decode_start, clock.mono());
+    r.decode_tok_per_s =
+        decode_ms > 0 ? static_cast<double>(r.tokens_generated) / (decode_ms / 1000.0) : 0.0;
+    const SpecStats& s = decoder.stats();
+    // Printed, not silently accumulated: a speculative run whose acceptance rate is on the
+    // floor is slower than not speculating, and that has to be visible without a profiler.
+    std::fprintf(stderr,
+                 "  [spec] blocks=%llu drafted=%llu accepted=%llu (%.1f%%) committed=%llu "
+                 "fallbacks=%llu\n",
+                 static_cast<unsigned long long>(s.blocks),
+                 static_cast<unsigned long long>(s.drafted),
+                 static_cast<unsigned long long>(s.accepted_drafts),
+                 100.0 * s.acceptance_rate(),
+                 static_cast<unsigned long long>(s.committed),
+                 static_cast<unsigned long long>(s.fallbacks));
+    return r;
 }
 
 } // namespace
@@ -176,6 +345,17 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     r.prefill_tok_per_s = prefill_ms > 0 ? prefilled / (prefill_ms / 1000.0) : 0.0;
 
     // --- decode -------------------------------------------------------------
+    //
+    // Two loops, not one with branches in it. The plain path below is tuned and is the
+    // reference: when speculation is off it must run the code it ran before speculation
+    // existed, not a version of it carrying an `if` per step.
+    if (speculative_env_override(spec_.enabled)) {
+        SpecConfig cfg = spec_;
+        cfg.enabled = true;
+        return decode_speculative(impl_->model, ledger_, task, sink, cancel, clock_,
+                                  logits_host, r, t0, cfg);
+    }
+
     Sampler sampler(task.sampling);
     std::vector<TokenId> recent;
     bool first_token = true;
