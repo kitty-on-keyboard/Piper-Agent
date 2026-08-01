@@ -86,6 +86,18 @@ class TurnGrammar final : public MaskSource {
     // byte, string-safe tokens pre-classified.
     [[nodiscard]] const TokenMask& mask() const final;
 
+    // Think and Text mask by PHASE, not by history: outside a tool call the legal set is
+    // a cached bitset of "everything except a handful of structural ids", and only a
+    // structural (special) token moves the phase. Inside a tool call parsephony's mask is
+    // state-dependent per token, so a block-wide snapshot would be wrong -- speculation
+    // falls back to one-at-a-time there. See src/model/speculative.hpp.
+    [[nodiscard]] bool mask_is_block_stable() const final {
+        return phase_ == TurnPhase::Think || phase_ == TurnPhase::Text;
+    }
+
+    // Only a structural id moves the phase, so only a structural id ends the block.
+    [[nodiscard]] bool is_block_boundary(TokenId id) const final { return is_structural(id); }
+
     [[nodiscard]] TurnPhase phase() const noexcept { return phase_; }
     [[nodiscard]] const std::vector<TokenId>& think_ids() const noexcept { return think_; }
     [[nodiscard]] const std::vector<TokenId>& text_ids() const noexcept { return text_; }

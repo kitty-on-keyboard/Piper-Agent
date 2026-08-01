@@ -173,8 +173,19 @@ std::uint64_t Sampler::next_u64() noexcept {
     return z ^ (z >> 31U);
 }
 
-SampleResult Sampler::sample(std::vector<float>& logits, const TokenMask* mask,
-                             const std::vector<TokenId>& recent) {
+float TokenDist::prob_of(TokenId id) const noexcept {
+    if (total <= 0.0F) {
+        return 0.0F;
+    }
+    const auto it = std::lower_bound(ids.begin(), ids.end(), id);
+    if (it == ids.end() || *it != id) {
+        return 0.0F;
+    }
+    return probs[static_cast<std::size_t>(it - ids.begin())] / total;
+}
+
+TokenDist Sampler::distribution(std::vector<float>& logits, const TokenMask* mask,
+                                const std::vector<TokenId>& recent) const {
     // Mask first (see header): an id the grammar forbids must have probability zero
     // regardless of how the distribution is shaped afterwards.
     apply_mask(logits, mask);
@@ -185,25 +196,44 @@ SampleResult Sampler::sample(std::vector<float>& logits, const TokenMask* mask,
     apply_min_p(d, params_.min_p);
     apply_top_p(d, params_.top_p);
 
-    if (d.total <= 0.0F) {
+    TokenDist out;
+    out.ids.reserve(cands.size());
+    out.probs.reserve(cands.size());
+    for (std::size_t i = 0; i < cands.size(); ++i) {
+        out.ids.push_back(static_cast<TokenId>(cands[i].id));
+        out.probs.push_back(d.probs[i]);
+    }
+    out.total = d.total;
+    return out;
+}
+
+SampleResult Sampler::draw(const TokenDist& dist) {
+    if (dist.total <= 0.0F) {
         return {kInvalidToken, true};
     }
-
     const double u = static_cast<double>(next_u64() >> 11U) * 0x1.0p-53;
-    double target = u * static_cast<double>(d.total);
-    for (std::size_t i = 0; i < d.probs.size(); ++i) {
-        target -= static_cast<double>(d.probs[i]);
-        if (target <= 0.0 && d.probs[i] > 0.0F) {
-            return {static_cast<TokenId>(cands[i].id), false};
+    double target = u * static_cast<double>(dist.total);
+    for (std::size_t i = 0; i < dist.probs.size(); ++i) {
+        target -= static_cast<double>(dist.probs[i]);
+        if (target <= 0.0 && dist.probs[i] > 0.0F) {
+            return {dist.ids[i], false};
         }
     }
     // Rounding fell off the end; return the last nonzero.
-    for (std::size_t i = d.probs.size(); i > 0; --i) {
-        if (d.probs[i - 1] > 0.0F) {
-            return {static_cast<TokenId>(cands[i - 1].id), false};
+    for (std::size_t i = dist.probs.size(); i > 0; --i) {
+        if (dist.probs[i - 1] > 0.0F) {
+            return {dist.ids[i - 1], false};
         }
     }
     return {kInvalidToken, true};
+}
+
+SampleResult Sampler::sample(std::vector<float>& logits, const TokenMask* mask,
+                             const std::vector<TokenId>& recent) {
+    // Split into distribution() + draw() so speculative decoding can verify against the
+    // same shaped row this path samples from. The order of operations, and the point at
+    // which randomness is consumed, are unchanged.
+    return draw(distribution(logits, mask, recent));
 }
 
 } // namespace lmp::model
