@@ -417,10 +417,10 @@ let bubble = null;          // the assistant bubble currently being typed into
 let caret = null;
 
 // --- typewriter -----------------------------------------------------------
-// The sidecar hands over a whole turn's text at once, so this is what turns a slab
-// into something readable as it lands. The drain rate scales with how far behind it
-// is: a short answer types at a human pace, a 4,000-character one does not take a
-// minute to appear.
+// The sidecar now streams token by token, so this is no longer turning a slab into
+// something readable -- it is smoothing arrival jitter. Keep it: the drain rate scales
+// with how far behind it is, so a burst that lands after a stall still catches up rather
+// than typing out at a leisurely pace, and a paused-then-resumed reader does not crawl.
 const queue = [];
 let typing = false;
 
@@ -460,9 +460,14 @@ function add(el, cls) {
   return el;
 }
 
+// Ends BOTH streaming regions. Every section boundary (run_start, said, turn,
+// verification, approval, run_end) already called this, so routing the thought through it
+// means a new section can never land inside a still-open disclosure -- rather than six
+// call sites each having to remember a second call.
 function closeBubble() {
   if (caret) { caret.remove(); caret = null; }
   bubble = null;
+  closeThought();
 }
 
 function openBubble() {
@@ -472,6 +477,39 @@ function openBubble() {
   caret.className = 'caret';
   bubble.append(caret);
   return bubble;
+}
+
+// The one the streaming path wants. Tokens now arrive one at a time, so calling
+// openBubble() per token would start a new assistant bubble for every token -- which is
+// exactly what happened before the sidecar streamed, and went unnoticed because the
+// notification only ever fired once per turn.
+function currentBubble() {
+  return bubble ?? openBubble();
+}
+
+// Reasoning gets ONE disclosure per turn, appended to, for the same reason.
+let thought = null;         // the <details> body currently being streamed into
+let thoughtSummary = null;
+
+function closeThought() {
+  if (thoughtSummary) thoughtSummary.textContent = 'Thought for a moment';
+  thought = null;
+  thoughtSummary = null;
+}
+
+function openThought() {
+  if (thought) return thought;
+  closeBubble();  // before the fields below are set: closeBubble() clears them
+  const d = document.createElement('details');
+  d.className = 'thought';
+  thoughtSummary = document.createElement('summary');
+  thoughtSummary.textContent = 'Thinking…';
+  const b = document.createElement('div');
+  b.className = 'body';
+  d.append(thoughtSummary, b);
+  add(d, '');
+  thought = b;
+  return b;
 }
 
 // --- composer -------------------------------------------------------------
@@ -613,19 +651,13 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'token') {
     if (payload.channel === 'thinking') {
-      const d = document.createElement('details');
-      d.className = 'thought';
-      const s = document.createElement('summary');
-      s.textContent = 'Thought for a moment';
-      const b = document.createElement('div');
-      b.className = 'body';
-      b.textContent = payload.text;
-      d.append(s, b);
-      closeBubble();
-      add(d, '');
-      busy(true, 'Writing');
+      typeInto(openThought(), payload.text);
+      busy(true, 'Thinking');
     } else {
-      typeInto(openBubble(), payload.text);
+      // Reasoning always precedes the answer within a turn, so the first answer token is
+      // the signal that the thought is finished.
+      closeThought();
+      typeInto(currentBubble(), payload.text);
       busy(true, 'Writing');
     }
   }

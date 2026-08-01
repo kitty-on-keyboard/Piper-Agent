@@ -15,6 +15,7 @@
 #include "activations.hpp"
 #include "gated_delta.hpp"
 #include "kv_cache.hpp"
+#include "moe_trace.hpp"
 #include "switch_glu.hpp"
 #include "weight_store.hpp"
 
@@ -78,6 +79,11 @@ public:
     mx::array forward_logits(const mx::array& input_ids) {
         mx::array h = embed_tokens(input_ids);
         const int seq_len = static_cast<int>(input_ids.shape()[1]);
+        if (MoeTrace::instance().enabled() && seq_len == 1) {
+            mx::array t = mx::astype(mx::reshape(input_ids, {-1}), mx::int32);
+            mx::eval(t);
+            MoeTrace::instance().set_token(t.data<int>()[0]);
+        }
 
         for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
             if (cfg_.is_linear_layer(layer)) {
@@ -140,6 +146,15 @@ public:
         }
         const mx::array gate_logits = weights_.linear(x, p + "gate");
         auto [inds, scores] = lmp::model::mlxl::moe_topk(gate_logits, cfg_.num_experts_per_tok, cfg_.norm_topk_prob);
+        // Diagnostic capture (S19.3). Off unless LMP_MOE_TRACE is set; see moe_trace.hpp
+        // for why it is a runtime branch rather than a compile-time one, and why a traced
+        // run's throughput figures must be discarded.
+        if (MoeTrace::instance().enabled() && x.shape()[1] == 1) {
+            mx::array ids = mx::astype(mx::reshape(inds, {-1}), mx::int32);
+            mx::eval(ids);
+            MoeTrace::instance().record(layer, ids.data<int>(),
+                                        static_cast<std::size_t>(ids.size()));
+        }
         mx::array y = mx::zeros_like(x);
         if (ablation() != Ablate::routed) {
             y = lmp::model::mlxl::switch_glu(

@@ -188,6 +188,11 @@ class Agent {
     [[nodiscard]] tools::ToolResult dispatch_call(
         const std::string& name, const std::vector<tools::ToolParamValue>& params,
         bool& executed);
+    // Whether a batched call may be executed off the agent thread, and the serial tail
+    // such a call still owes. See parallel_calls.hpp.
+    [[nodiscard]] bool can_run_in_parallel(const std::string& name) const;
+    [[nodiscard]] bool adopt_readonly_result(const std::string& name,
+                                             const tools::ToolResult& result);
     void apply_corrective(Corrective c, const TurnResult& turn);
 
     const model::QwenTokenizer& tok_;
