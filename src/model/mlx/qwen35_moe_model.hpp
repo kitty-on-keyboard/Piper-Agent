@@ -8,9 +8,12 @@
 
 #include "qwen35_moe_config.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "activations.hpp"
 #include "gated_delta.hpp"
@@ -53,8 +56,7 @@ public:
     [[nodiscard]] int cache_seq_len() const noexcept {
         // kv_caches_.front() is layer 0, which is a linear (gated-delta/SSM) layer
         // under the full_attention_interval hybrid schedule -- forward_linear_layer
-        // never touches kv_caches_[layer], only ssm_caches_[layer] (whose own
-        // offset field is likewise never incremented; see forward_gated_delta).
+        // never touches kv_caches_[layer], only ssm_caches_[layer].
         // Reading front() here always reported 0 regardless of how many tokens
         // were actually prefilled, which made the caller's "empty cache but
         // baked_turns != 0" invariant check fire every iteration once baked_turns
@@ -77,28 +79,78 @@ public:
     // prefill chunks whose logits nobody reads skip the lm_head projection entirely.
     // It also lets `lmp_diag step` time graph construction apart from execution.
     mx::array forward_logits(const mx::array& input_ids) {
-        mx::array h = embed_tokens(input_ids);
         const int seq_len = static_cast<int>(input_ids.shape()[1]);
-        if (MoeTrace::instance().enabled() && seq_len == 1) {
-            mx::array t = mx::astype(mx::reshape(input_ids, {-1}), mx::int32);
-            mx::eval(t);
-            MoeTrace::instance().set_token(t.data<int>()[0]);
-        }
-
-        for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
-            if (cfg_.is_linear_layer(layer)) {
-                h = forward_linear_layer(layer, h, seq_len);
-            } else {
-                h = forward_full_attn_layer(layer, h, seq_len);
-            }
-        }
-
-        h = rms_norm(h, prefix_ + "norm.weight");
+        mx::array h = forward_hidden(input_ids, seq_len);
         // Contract: only the final position's
         // logits are ever consumed downstream. No-op when seq_len == 1 (decode).
         const int hidden = static_cast<int>(h.shape()[2]);
         mx::array h_last = mx::slice(h, {0, seq_len - 1, 0}, {1, seq_len, hidden});
         return logits_from_hidden(h_last);
+    }
+
+    // The opt-in path out of that contract: verifying a k-token speculative draft needs the
+    // model's distribution at EVERY drafted position, not just the last one. Returns
+    // [1, seq_len, vocab] -- one row per input position -- unevaluated, on the same terms as
+    // forward_logits.
+    //
+    // A second entry point rather than a flag on the first, deliberately. The decode path is
+    // tuned and its graph is load-bearing: HANDOFF_PERF.md records that folding the float32
+    // cast into this graph measured WORSE (84.8 -> 83.9 tok/s) despite removing a GPU
+    // round-trip, because it extended the step's critical path. So forward_logits still
+    // builds the graph it built before this function existed. What the two share is the
+    // layer stack, which they need verbatim and identically; the only divergence is the
+    // final-position slice that one does and the other skips.
+    //
+    // Not free at the vocabulary this model has: the lm_head projection runs on seq_len rows
+    // instead of one, and each row is 248,320 wide. That is the right trade only when the
+    // extra rows are actually verified against -- never call this from the single-token
+    // decode path, where it would pay for a slice it then throws away.
+    mx::array forward_logits_all(const mx::array& input_ids) {
+        const int seq_len = static_cast<int>(input_ids.shape()[1]);
+        return logits_from_hidden(forward_hidden(input_ids, seq_len));
+    }
+
+    // A restore point for speculative decoding: everything needed to put the caches back the
+    // way they were before a block of drafted tokens was forwarded.
+    //
+    // Qwen 3.6 is a HYBRID and the two kinds of layer roll back differently.
+    // Full-attention layers keep a per-token history, so any earlier position is reachable
+    // by moving an index. Linear (gated-delta) layers keep a recurrence with no per-token
+    // history, so only positions that were snapshotted in advance are reachable at all.
+    // That asymmetry is why this is checkpoint/restore rather than the `rollback_to(int n)`
+    // the plan sketched: a rollback to an arbitrary n is not implementable for 30 of this
+    // model's 40 layers, and an API promising it would be a lie whose only symptom is drift
+    // in the output.
+    struct CacheCheckpoint {
+        int seq_len{0};
+        // Indexed by layer, including the full-attention layers, whose SsmCache is empty.
+        // Keeping the vector layer-aligned rather than packing the linear layers means
+        // restore() cannot silently mis-pair a snapshot with a layer if the hybrid schedule
+        // ever changes.
+        std::vector<SsmCache::Snapshot> ssm;
+    };
+
+    [[nodiscard]] CacheCheckpoint checkpoint() const {
+        CacheCheckpoint cp;
+        cp.seq_len = cache_seq_len();
+        cp.ssm.reserve(ssm_caches_.size());
+        for (const auto& c : ssm_caches_) {
+            cp.ssm.push_back(c.snapshot());
+        }
+        return cp;
+    }
+
+    void restore(const CacheCheckpoint& cp) {
+        // truncate_to clamps upward-to-current, so the linear layers' unused KVCaches --
+        // which sit at offset 0 forever -- are left alone rather than being grown to
+        // cp.seq_len tokens of scratch.
+        for (auto& c : kv_caches_) {
+            c.truncate_to(cp.seq_len);
+        }
+        const std::size_t n = std::min(ssm_caches_.size(), cp.ssm.size());
+        for (std::size_t i = 0; i < n; ++i) {
+            ssm_caches_[i].restore(cp.ssm[i]);
+        }
     }
 
     void eval_caches() {
@@ -266,6 +318,27 @@ private:
             w.insert_or_assign(std::move(k), std::move(v));
         }
 
+    }
+
+    // The layer stack, shared verbatim by forward_logits and forward_logits_all so the two
+    // cannot drift apart. Returns the final-normed hidden state, [1, seq_len, hidden].
+    mx::array forward_hidden(const mx::array& input_ids, int seq_len) {
+        mx::array h = embed_tokens(input_ids);
+        if (MoeTrace::instance().enabled() && seq_len == 1) {
+            mx::array t = mx::astype(mx::reshape(input_ids, {-1}), mx::int32);
+            mx::eval(t);
+            MoeTrace::instance().set_token(t.data<int>()[0]);
+        }
+
+        for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+            if (cfg_.is_linear_layer(layer)) {
+                h = forward_linear_layer(layer, h, seq_len);
+            } else {
+                h = forward_full_attn_layer(layer, h, seq_len);
+            }
+        }
+
+        return rms_norm(h, prefix_ + "norm.weight");
     }
 
     [[nodiscard]] mx::array embed_tokens(const mx::array& ids) const {
