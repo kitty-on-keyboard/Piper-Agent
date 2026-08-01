@@ -2,24 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
+
+#include "src/loop/parallel_calls.hpp"
+#include "src/loop/token_stream.hpp"
 
 namespace lmp::loop {
 namespace {
-
-// Collects tokens, walks the grammar, and stops the instant the grammar accepts --
-// not a token later (S5.5).
-class GrammarSink final : public model::TokenSink {
-  public:
-    explicit GrammarSink(model::TurnGrammar& g) : g_(g) {}
-    bool on_token(model::TokenId id) override {
-        last = g_.advance(id);
-        return last == model::Advance::Ok;
-    }
-    model::Advance last = model::Advance::Ok;
-
-  private:
-    model::TurnGrammar& g_;
-};
 
 std::string preview_of(const std::string& tool,
                        const std::vector<tools::ToolParamValue>& params) {
@@ -36,79 +25,6 @@ std::string preview_of(const std::string& tool,
 }
 
 } // namespace
-
-double risk_score(const tools::RiskHint& hint) {
-    // The published weights from bakeoff/blast_radius: write_out, destroy and priv are
-    // worth three ordinary capabilities. Partial parse is itself risk -- it is the
-    // signal that says "sandbox this regardless of the flags".
-    const auto& c = hint.caps;
-    double score = 0.0;
-    score += c.writes_outside_workspace ? 0.30 : 0.0;
-    score += c.destroys_data ? 0.30 : 0.0;
-    score += c.escalates_privileges ? 0.30 : 0.0;
-    score += c.rewrites_vcs_history ? 0.10 : 0.0;
-    score += c.reads_outside_workspace ? 0.10 : 0.0;
-    score += c.network_access ? 0.10 : 0.0;
-    score += c.spawns_unbounded_process ? 0.10 : 0.0;
-    score += c.signals_foreign_process ? 0.15 : 0.0;
-    if (hint.status == blast_radius::ParseStatus::PartiallyParsed) {
-        score += 0.20;
-    } else if (hint.status == blast_radius::ParseStatus::Unparseable) {
-        score += 0.40;
-    }
-    return score > 1.0 ? 1.0 : score;
-}
-
-bool is_irreversible(const tools::RiskHint& hint) noexcept {
-    const auto& c = hint.caps;
-    return c.destroys_data || c.writes_outside_workspace || c.escalates_privileges ||
-           c.rewrites_vcs_history;
-}
-
-bool is_allowlisted(const std::string& command, const std::vector<std::string>& allowed) {
-    const auto trim = [](std::string s) {
-        const auto space = [](unsigned char ch) { return std::isspace(ch) == 0; };
-        s.erase(s.begin(), std::find_if(s.begin(), s.end(), space));
-        s.erase(std::find_if(s.rbegin(), s.rend(), space).base(), s.end());
-        return s;
-    };
-    const std::string cmd = trim(command);
-    if (cmd.empty()) {
-        return false;
-    }
-    // Anything that can chain, substitute or redirect is out of scope for prefix
-    // matching. `pytest` on the list must never authorise `pytest; rm -rf ~`.
-    if (cmd.find_first_of(";|&`<>") != std::string::npos ||
-        cmd.find("$(") != std::string::npos) {
-        return false;
-    }
-    for (const std::string& raw : allowed) {
-        const std::string entry = trim(raw);
-        if (entry.empty()) {
-            continue;
-        }
-        if (cmd == entry) {
-            return true;
-        }
-        // Followed by a space, so `git st` never matches an entry of `git s`.
-        if (cmd.size() > entry.size() && cmd.compare(0, entry.size(), entry) == 0 &&
-            cmd[entry.size()] == ' ') {
-            return true;
-        }
-    }
-    return false;
-}
-
-Approval route_approval(const tools::RiskHint& hint, const HitlThresholds& t) {
-    const double score = risk_score(hint);
-    if (score >= t.reject_above_risk) {
-        return Approval::Reject;
-    }
-    if (score <= t.auto_approve_below_risk) {
-        return Approval::AutoApprove;
-    }
-    return Approval::Escalate;
-}
 
 Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
              tools::Registry& registry, context::ContextStore& ctx,
@@ -303,22 +219,28 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     }
     model::TurnGrammar grammar(tok_, specs);
     task.mask = &grammar;
-    GrammarSink sink(grammar);
-    turn.generation = backend_.generate(task, sink, cancel);
-
-    turn.reasoning = tok_.decode(grammar.think_ids());
-    turn.assistant_text = tok_.decode(grammar.text_ids());
 
     // Reasoning is surfaced on its own channel, never inlined into the answer (S5.7).
-    // The split happened by TOKEN ID upstream; this only routes it.
+    // The split happens by TOKEN ID upstream; the streamer only routes it, one token at a
+    // time, on its own thread so a slow reader cannot throttle the decode loop.
+    std::unique_ptr<TokenStreamer> streamer;
     if (observer_.on_token) {
-        if (!turn.reasoning.empty()) {
-            observer_.on_token("thinking", turn.reasoning);
-        }
-        if (!turn.assistant_text.empty()) {
-            observer_.on_token("answer", turn.assistant_text);
-        }
+        streamer = std::make_unique<TokenStreamer>(tok_, observer_.on_token);
     }
+    GrammarSink sink(grammar, streamer.get());
+    turn.generation = backend_.generate(task, sink, cancel);
+
+    // Drained and joined BEFORE the text below is read, so what the surface showed and
+    // what the transcript records cannot disagree about a turn that is already over.
+    if (streamer) {
+        streamer->finish();
+    }
+
+    // Still decoded in one piece for the transcript and the context store. The streamed
+    // concatenation is byte-identical to these (test_token_stream asserts it), so this is
+    // the same text, not a second opinion about it.
+    turn.reasoning = tok_.decode(grammar.think_ids());
+    turn.assistant_text = tok_.decode(grammar.text_ids());
     if (observer_.on_perf) {
         observer_.on_perf(turn.generation, task.prompt.size(),
                           static_cast<std::size_t>(config_.max_new_tokens) +
@@ -342,23 +264,65 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // execute in order and each gets its own history record. Reading four files used to
     // cost four full prefill+decode round-trips.
     const auto& calls = grammar.tool_calls();
-    turn.tool_name = calls.front().name;
-    for (const auto& p : calls.front().params) {
-        turn.tool_params.push_back({p.name, p.value});
-    }
-    bool executed = false;
-    turn.tool_result = dispatch_call(turn.tool_name, turn.tool_params, executed);
-    turn.outcome = classify_turn(turn.generation, grammar, executed, !executed);
 
-    for (std::size_t i = 1; i < calls.size(); ++i) {
-        TurnResult::ExtraCall extra;
-        extra.tool_name = calls[i].name;
+    // Params up front for every call, because the concurrent pass below needs them all
+    // before it starts and the serial pass wants the same values.
+    std::vector<std::vector<tools::ToolParamValue>> params(calls.size());
+    for (std::size_t i = 0; i < calls.size(); ++i) {
         for (const auto& p : calls[i].params) {
-            extra.params.push_back({p.name, p.value});
+            params[i].push_back({p.name, p.value});
         }
+    }
+
+    // The read-only calls of this batch run at once; everything else stays exactly where
+    // it was. See parallel_calls.hpp for which calls qualify and why the others cannot.
+    std::vector<std::size_t> parallel;
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+        if (can_run_in_parallel(calls[i].name)) {
+            parallel.push_back(i);
+        }
+    }
+    std::vector<tools::ToolResult> precomputed;
+    if (parallel.size() > 1) {
+        precomputed = run_calls_concurrently(parallel, [this, &calls, &params](std::size_t i) {
+            // ONLY the registry. Every gate and every ledger write stays on this thread,
+            // below, in call order.
+            return registry_.execute(calls[i].name, params[i], policy_.sandbox_tier);
+        });
+    }
+    const auto precomputed_for = [&](std::size_t i) -> const tools::ToolResult* {
+        for (std::size_t k = 0; k < precomputed.size(); ++k) {
+            if (parallel[k] == i) {
+                return &precomputed[k];
+            }
+        }
+        return nullptr;
+    };
+
+    // Serial from here, in index order, so the emits, the history records and the UI rows
+    // are what the fully serial path produced. Parallelism must not be observable.
+    for (std::size_t i = 0; i < calls.size(); ++i) {
         bool ran = false;
-        extra.result = dispatch_call(extra.tool_name, extra.params, ran);
-        turn.extra_calls.push_back(std::move(extra));
+        tools::ToolResult result;
+        if (const tools::ToolResult* done = precomputed_for(i); done != nullptr) {
+            result = *done;
+            ran = adopt_readonly_result(calls[i].name, result);
+        } else {
+            result = dispatch_call(calls[i].name, params[i], ran);
+        }
+
+        if (i == 0) {
+            turn.tool_name = calls[0].name;
+            turn.tool_params = params[0];
+            turn.tool_result = std::move(result);
+            turn.outcome = classify_turn(turn.generation, grammar, ran, !ran);
+        } else {
+            TurnResult::ExtraCall extra;
+            extra.tool_name = calls[i].name;
+            extra.params = params[i];
+            extra.result = std::move(result);
+            turn.extra_calls.push_back(std::move(extra));
+        }
     }
     return turn;
 }
@@ -367,6 +331,38 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
 // deliverable ledger -- all applied in ONE place (S9.3), so a batched call is governed
 // exactly as a lone one is. `executed` answers "did this actually run?", which is what
 // classification turns on (S9.1).
+// May this call be run off the agent thread? Only if dispatch_call would have reached
+// `Registry::execute` and touched nothing else on the way.
+//
+// Stated as the properties that make the other branches unreachable, not as a list of tool
+// names, so a tool added later is excluded until it is declared harmless: `plan` mutates
+// the checklist, `mutates_workspace` opens the write gate and the deliverable ledger,
+// `executes_commands` opens the risk classifier, the approver and the verification ledger.
+// An unregistered name is not eligible either -- dispatch_call has to be the one to
+// produce the typed NotFound.
+bool Agent::can_run_in_parallel(const std::string& name) const {
+    if (name == "plan") {
+        return false;
+    }
+    const tools::ToolDecl* decl = registry_.find(name);
+    if (decl == nullptr) {
+        return false;
+    }
+    return !decl->mutates_workspace && !decl->executes_commands && !decl->irreversible;
+}
+
+// The tail dispatch_call would have run for such a call, minus everything the eligibility
+// test already proved unreachable: no deliverable to record (nothing was written), no
+// ledger, no approval. What remains is the executed flag and the event, and BOTH must
+// happen here on the agent thread, in call order.
+bool Agent::adopt_readonly_result(const std::string& name, const tools::ToolResult& result) {
+    emit("tool_result", {{"tool", name},
+                         {"status", std::string(tools::to_string(result.status))},
+                         {"summary", result.summary}});
+    // Refused means the tool NEVER RAN, so it is not an execution (S9.1).
+    return result.status != tools::Status::Refused;
+}
+
 tools::ToolResult Agent::dispatch_call(const std::string& name,
                                        const std::vector<tools::ToolParamValue>& params,
                                        bool& executed) {
