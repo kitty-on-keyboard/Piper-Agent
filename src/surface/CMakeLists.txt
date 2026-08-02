@@ -1,7 +1,9 @@
-add_library(lmp_surface transport.cpp protocol.cpp)
+add_library(lmp_surface transport.cpp protocol.cpp mcp_settings.cpp)
 target_include_directories(lmp_surface PUBLIC "${PROJECT_SOURCE_DIR}")
+# lmp_tools is PUBLIC because mcp_settings.hpp hands back tools:: types. Surface is the
+# top layer (S3), so depending downward on tools is the allowed direction.
 target_link_libraries(lmp_surface PRIVATE lmp_warnings lmp_assertions
-  PUBLIC lmp_platform lmp_model)
+  PUBLIC lmp_platform lmp_model lmp_tools)
 
 # The sidecar: one process, one model, one loop (S4.1).
 add_executable(lmp_sidecar sidecar.cpp)

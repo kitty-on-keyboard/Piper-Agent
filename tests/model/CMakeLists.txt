@@ -25,6 +25,16 @@ lmp_add_test(test_mini_vocab SOURCES test_mini_vocab.cpp LABELS gate LINK lmp_mo
 add_dependencies(test_mini_vocab lmp_mini_vocab)
 target_compile_definitions(test_mini_vocab PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
 
+# The turn grammar runs in BOTH suites off one source (R1). It reads token bytes, so it
+# needs a vocabulary -- but a vocabulary is not a GPU, and labelling it `realmodel` meant
+# CI never ran it: commit 4300a3c changed what closing a tool call means and this file
+# asserted the old contract, red and unseen, for two days. The gate variant on the
+# miniature vocabulary is what closes that hole; the realmodel variant below keeps the
+# real checkpoint's merges under test.
+lmp_add_test(test_grammar SOURCES test_grammar.cpp LABELS gate LINK lmp_model TIMEOUT 300)
+add_dependencies(test_grammar lmp_mini_vocab)
+target_compile_definitions(test_grammar PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
+
 # Real-model tests (S11.6): excluded from the gate, and `ctest --preset realmodel`
 # pins jobs=1 -- concurrent large model loads exhaust unified memory.
 lmp_add_test(test_grammar_realmodel SOURCES test_grammar.cpp LABELS realmodel LINK lmp_model TIMEOUT 300)

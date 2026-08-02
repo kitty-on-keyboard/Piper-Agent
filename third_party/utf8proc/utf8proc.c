@@ -388,7 +388,15 @@ static utf8proc_ssize_t seqindex_write_char_decomposed(utf8proc_uint16_t seqinde
   for (; len >= 0; entry++, len--) {
     utf8proc_int32_t entry_cp = seqindex_decode_entry(&entry);
 
-    written += utf8proc_decompose_char(entry_cp, dst+written,
+    /* LOCAL MODIFICATION (LM_Pipe). Upstream computes `dst+written` unconditionally.
+       utf8proc's own documented two-pass idiom calls with dst==NULL and bufsize==0 to
+       measure the required length -- frankentok/src/normalizer.cpp:37 does exactly that
+       -- so this forms NULL+4, which is undefined behaviour even though bufsize is 0 and
+       nothing is ever written through it. Benign on every real ABI, but the build sets
+       -fno-sanitize-recover=undefined, so it ABORTS the NFC path under UBSan. Guarding
+       the offset is behaviour-preserving: when dst is NULL, bufsize is 0 and
+       utf8proc_decompose_char only counts. Re-apply on any utf8proc upgrade. */
+    written += utf8proc_decompose_char(entry_cp, dst ? dst+written : NULL,
       (bufsize > written) ? (bufsize - written) : 0, options,
     last_boundclass);
     if (written < 0) return UTF8PROC_ERROR_OVERFLOW;
@@ -577,8 +585,16 @@ UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_decompose_custom(
       if (custom_func != NULL) {
         uc = custom_func(uc, custom_data);   /* user-specified custom mapping */
       }
+      /* LOCAL MODIFICATION (LM_Pipe). Same class of bug as the guard on `dst` inside
+         seqindex_write_char_decomposed above, and the same fix: the documented two-pass
+         idiom calls this with buffer==NULL, bufsize==0 to measure the required length, so
+         `buffer + wpos` forms pointer arithmetic on a null base -- UB even at wpos==0 --
+         whenever a caller uses that idiom directly against utf8proc_decompose(_custom)
+         rather than through seqindex_write_char_decomposed. Guarding is behaviour-
+         preserving: decomp_result below only ever writes through the pointer when
+         bufsize > wpos, which is false whenever buffer is NULL. Re-apply on any upgrade. */
       decomp_result = utf8proc_decompose_char(
-        uc, buffer + wpos, (bufsize > wpos) ? (bufsize - wpos) : 0, options,
+        uc, buffer ? buffer + wpos : NULL, (bufsize > wpos) ? (bufsize - wpos) : 0, options,
         &boundclass
       );
       if (decomp_result < 0) return decomp_result;

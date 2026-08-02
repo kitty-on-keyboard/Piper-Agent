@@ -9,7 +9,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { SidecarClient } from "./client";
 import { SidebarProvider } from "./sidebar";
-import { RunSettings } from "./protocol.generated";
+import { McpServerSettings, RunSettings } from "./protocol.generated";
 
 let client: SidecarClient | undefined;
 let output: vscode.OutputChannel;
@@ -52,6 +52,23 @@ function settingsFromConfig(): RunSettings {
     // sidecar writes directly; it must never be assumed, or an unattended run blocks
     // forever on a reply nobody will send.
     applies_edits: true,
+    // MCP servers connected at run start; their tools register as mcp__<name>__<tool>.
+    //
+    // Normalised field by field rather than passed through, because this comes from user
+    // settings JSON and TypeScript's type assertion on cfg.get is a claim, not a check.
+    // `trusted` in particular is compared to `true` rather than coerced: it is the
+    // operator vouching that a server may run OUTSIDE the sandbox without a card for
+    // every call, and any value we did not understand must not read as yes.
+    mcp_servers: cfg
+      .get<Partial<McpServerSettings>[]>("mcpServers", [])
+      .filter((s) => typeof s?.name === "string" && typeof s?.command === "string")
+      .map((s) => ({
+        name: s.name as string,
+        command: s.command as string,
+        args: Array.isArray(s.args) ? s.args.map(String) : [],
+        env: Array.isArray(s.env) ? s.env.map(String) : [],
+        trusted: s.trusted === true,
+      })),
   };
 }
 
