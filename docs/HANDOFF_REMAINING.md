@@ -84,7 +84,7 @@ Non-negotiable, and every one of them exists because it was violated once:
 | # | Item | Size | Risk | Why here |
 |---|---|---|---|---|
 | ~~**R1**~~ | ~~`realmodel` tests never run in CI~~ | S | — | **DONE.** Invisible set 5 → 3; falsifier run in the CI config |
-| **M1** | Wire MCP into the agent | M | low | The whole point of building it |
+| ~~**M1**~~ | ~~Wire MCP into the agent~~ | M | — | **DONE.** Verified against the official reference servers |
 | **C1** | Declared contract is not checked against the mission | M | **high** | Solved 5, completed 2 — the gap is here |
 | **V1** | Mutation harness is absent; its number is unreproducible | M | medium | A measurement with no instrument |
 | ~~**V2**~~ | ~~`pins.json` stores only aggregates~~ | S | — | **DONE.** Attribution lands on the next deliberate re-pin |
@@ -166,7 +166,45 @@ green the split did not cover the case that actually rotted.
 
 ---
 
-## M1 — Wire MCP into the agent
+## M1 — Wire MCP into the agent — **DONE 2026-08-02**
+
+> **Landed** in `95bc956`. `src/tools/mcp_host.{hpp,cpp}` connects each configured server
+> at run start and registers its tools into the same `Registry` the native tools live in,
+> namespaced `mcp__<server>__<tool>`, with the `inputSchema` converted to a
+> `parsephony::ToolSpec` so `ToolCallGuard` constrains remote calls exactly as it does
+> native ones. Settings ride in `RunSettings.mcp_servers`; the wire parsing lives in
+> `src/surface/mcp_settings.{hpp,cpp}`.
+>
+> **Sean's decision on containment (asked, per this section's own instruction): untrusted
+> by default, per-server opt-in.** An untrusted server's tools are all `irreversible`, so
+> every call raises a card. The server's own `readOnlyHint`/`destructiveHint` annotations
+> deliberately do not participate — the MCP spec says they must not drive a security
+> decision, and they are claims made by the thing being contained. `trusted` must be a
+> literal boolean `true`; it is tested against `"true"`, `1`, `null`, `"yes"`, `0` and
+> absent (S7.5).
+>
+> **The generator gained an array type.** `RunSettings.allowed_commands` documents the old
+> workaround — newline-separated, which works only because a shell command cannot carry a
+> raw newline. A list of objects has no such separator, so `repeated` is now a schema field
+> and both sides generate from it.
+>
+> **Verified against software we did not write**, which is the part that matters:
+> `mcp_host_probe` drove the official `server-filesystem` (14 tools) and
+> `server-everything` (13), none rejected. The filesystem server has its own `read_file`,
+> which registered as `mcp__probe__read_file` and did **not** shadow the native one — the
+> exact collision the naming exists for, against a real server that has it. See
+> `bakeoff/mcp/interop/README.md`.
+>
+> **ASan found a real bug in it** once the tests reached `gate-asan`: the handlers captured
+> a raw `mcp::Client*` the host owned, so `close()` was a use-after-free on the next call.
+> Connections are `shared_ptr` now, correct by construction rather than by destruction
+> order.
+>
+> **Still open here.** Exposing OUR tools to other MCP clients (the `Server` half, and
+> `InProcessTransport`) is deliberately not built — Sean chose client-first. That is the
+> obvious next MCP item, ahead of M2.
+
+## M1 — the original plan
 
 **What is wrong.** `src/mcp` is complete, interop-verified in both directions, and
 **nothing calls it.** `src/loop` has no MCP client; `src/tools/registry.cpp` has no MCP
