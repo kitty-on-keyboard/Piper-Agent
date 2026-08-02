@@ -37,3 +37,7 @@ __pycache__/
 
 # System
 .DS_Store
+
+# Sidecar event log: written into the CWD of whoever launched it (S6), so it
+# appears at the repo root or in extension/ depending on how it was started.
+lmp_events.jsonl

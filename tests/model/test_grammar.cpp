@@ -1,6 +1,7 @@
 // TurnGrammar over a synthetic tokenizer-free path is impossible -- the grammar reads
 // token bytes -- so these tests run against the REAL tokenizer.json when present and
-// are labelled realmodel. The structural machine (think/text phases, one-call rule) is
+// are labelled realmodel. The structural machine (think/text phases, the per-turn call
+// cap) is
 // what they pin; ToolCallGuard's own 1000/1000 corpus lives in its source repo.
 
 #include <cstdlib>
@@ -92,7 +93,12 @@ TEST(a_valid_tool_call_is_parsed_by_the_automaton) {
 
     CHECK(feed_text(g, "<function=read_file>\n<parameter=path>\nsrc/main.cpp\n"
                        "</parameter>\n</function>\n") == Advance::Ok);
-    CHECK(g.advance(tok().specials().tool_call_close) == Advance::Accepted);
+    // Ok and back to Text, not Accepted and Done: since batching landed, a closed call
+    // returns the turn to text so another may follow. The turn ends on <|im_end|>.
+    CHECK(g.advance(tok().specials().tool_call_close) == Advance::Ok);
+    CHECK(g.phase() == TurnPhase::Text);
+    CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
+    CHECK(g.phase() == TurnPhase::Done);
     REQUIRE(g.has_tool_call());
     // Extraction IS the automaton -- no second pass over decoded text (S5.6).
     CHECK_EQ(g.tool_name(), std::string("read_file"));
@@ -123,16 +129,37 @@ TEST(closing_with_a_required_parameter_missing_is_unrepresentable) {
     CHECK(feed_text(g, "</function>\n") == Advance::Rejected);
 }
 
-TEST(a_second_tool_call_in_one_turn_is_rejected) {
+TEST(a_turn_batches_up_to_the_call_cap_and_no_further) {
+    // This replaces `a_second_tool_call_in_one_turn_is_rejected`, which asserted the
+    // pre-batching contract. Batching (commit 4300a3c) made a second call legal and
+    // bounded it instead: kMaxCallsPerTurn, then the open is rejected. The old test kept
+    // asserting the old rule for two days because it carries the `realmodel` label and
+    // the gate never runs it.
     REQUIRE(tok().loaded());
     const auto tools = one_tool();
     TurnGrammar g(tok(), tools);
     (void)g.advance(tok().specials().think_close);
-    (void)g.advance(tok().specials().tool_call_open);
-    (void)feed_text(g, "<function=read_file>\n<parameter=path>\nx\n</parameter>\n</function>\n");
-    REQUIRE(g.advance(tok().specials().tool_call_close) == Advance::Accepted);
-    // One turn, one outcome (S9.1): the turn is Done; nothing more is consumable.
+
+    const auto one_call = [&] {
+        const Advance opened = g.advance(tok().specials().tool_call_open);
+        if (opened != Advance::Ok) {
+            return opened;
+        }
+        (void)feed_text(g,
+                        "<function=read_file>\n<parameter=path>\nx\n</parameter>\n</function>\n");
+        return g.advance(tok().specials().tool_call_close);
+    };
+
+    for (std::size_t i = 0; i < TurnGrammar::kMaxCallsPerTurn; ++i) {
+        CHECK(one_call() == Advance::Ok);
+        CHECK(g.phase() == TurnPhase::Text);
+    }
+    CHECK_EQ(g.tool_calls().size(), TurnGrammar::kMaxCallsPerTurn);
+
+    // At the cap the open is rejected rather than silently narrated, and the mask must
+    // say the same thing the walk does.
     CHECK(g.advance(tok().specials().tool_call_open) == Advance::Rejected);
+    CHECK(!g.permitted(tok().specials().tool_call_open));
 }
 
 TEST(with_no_registry_a_tool_call_cannot_start) {
@@ -170,6 +197,10 @@ TEST(the_mask_and_the_walk_agree) {
         ++lmp::test::reg().checks;
         REQUIRE(g.advance(id) != Advance::Rejected);
     }
+    // The walk ends at </tool_call>, which since batching returns the turn to Text so a
+    // second call may follow. Done is reached on <|im_end|>, not on the close.
+    CHECK(g.phase() == TurnPhase::Text);
+    CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
     CHECK(g.phase() == TurnPhase::Done);
 }
 
@@ -223,5 +254,8 @@ TEST(the_bulk_mask_and_the_predicate_agree_over_the_whole_vocabulary) {
                                   std::to_string(disagreements) +
                                       " mask/predicate disagreements; first: " + first);
     }
+    // As above: </tool_call> returns the turn to Text since batching landed.
+    CHECK(g.phase() == TurnPhase::Text);
+    CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
     CHECK(g.phase() == TurnPhase::Done);
 }
