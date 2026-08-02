@@ -585,8 +585,16 @@ UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_decompose_custom(
       if (custom_func != NULL) {
         uc = custom_func(uc, custom_data);   /* user-specified custom mapping */
       }
+      /* LOCAL MODIFICATION (LM_Pipe). Same class of bug as the guard on `dst` inside
+         seqindex_write_char_decomposed above, and the same fix: the documented two-pass
+         idiom calls this with buffer==NULL, bufsize==0 to measure the required length, so
+         `buffer + wpos` forms pointer arithmetic on a null base -- UB even at wpos==0 --
+         whenever a caller uses that idiom directly against utf8proc_decompose(_custom)
+         rather than through seqindex_write_char_decomposed. Guarding is behaviour-
+         preserving: decomp_result below only ever writes through the pointer when
+         bufsize > wpos, which is false whenever buffer is NULL. Re-apply on any upgrade. */
       decomp_result = utf8proc_decompose_char(
-        uc, buffer + wpos, (bufsize > wpos) ? (bufsize - wpos) : 0, options,
+        uc, buffer ? buffer + wpos : NULL, (bufsize > wpos) ? (bufsize - wpos) : 0, options,
         &boundclass
       );
       if (decomp_result < 0) return decomp_result;
