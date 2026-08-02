@@ -82,6 +82,22 @@ struct EventLogOptions {
     std::size_t max_files; // includes the live file; must be >= 1
 };
 
+// Where a process should put its event log, given `$LMP_EVENT_LOG` and `$HOME` (either
+// may be null or empty). PURE, and takes the environment as arguments rather than
+// reading it, so the decision is testable without mutating the process's own env.
+//
+// It exists because the sidecar used to pass the bare relative path "lmp_events.jsonl",
+// which resolves against THE CWD OF WHOEVER SPAWNED IT. From a terminal that is the repo
+// and it looked correct for months; from an editor extension it is whatever the host
+// inherited, and a packaged Antigravity/Cursor build hands its children `/`. The sidecar
+// died on the first line of main() with `open failed: Read-only file system`, and the
+// surface could only report `sidecar exited (code 1)`.
+//
+// Refusing to run without a log is still right (S13) -- it is the UI feed, the debugging
+// trace and the replay input. Refusing because of a directory nobody chose is not. A
+// location the process picks either works everywhere or fails for a stateable reason.
+[[nodiscard]] std::string default_event_log_path(const char* pinned, const char* home);
+
 struct OpenResult {
     bool ok = false;
     std::string error;
