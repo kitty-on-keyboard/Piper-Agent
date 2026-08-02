@@ -25,7 +25,7 @@ memory (`remember`). The miniature tokenizer fixture. Editor-API edits through
 **Where things actually stand, measured 2026-08-02:**
 
 ```
-ctest -L gate            32/32,  ~15 s      (both preset configs, and CI)
+ctest -L gate            34/34,  ~13 s      (both preset configs, and CI)
 ctest -L realmodel -j1    5/5,   ~29 s      (local only -- 3 tests, see R1)
 agent_eval pins          corpus 5/6 solved, 2 completed, 2 verified
                          holdout 2/4 solved, 2 completed, 3 verified
@@ -33,19 +33,27 @@ MCP conformance          12/12; official TS SDK client drives our server 18/18
 extension                installed into Antigravity IDE and Cursor, sidecar verified live
 ```
 
-**Updated 2026-08-02 (later session).** **R1 and V2 are done**, and H1 is done except for
-the `PHASES.md` mutation figure, which belongs to V1. The gate went 29 → 32: `test_grammar`
-and `test_token_stream_gate` (R1) and `test_pin_attribution` (V2). `realmodel` is still
-5 tests but only **3** of them are now CI-invisible — the other two are the same sources
-registered a second time against the real checkpoint.
+**Updated 2026-08-02 (later session).** **R1, M1 and V2 are done**, and H1 is done except
+for the `PHASES.md` mutation figure, which belongs to V1. The gate went 29 → 34:
+`test_grammar` and `test_token_stream_gate` (R1), `test_pin_attribution` (V2),
+`test_mcp_host` and `test_mcp_settings` (M1). `realmodel` is still 5 tests but only **3**
+of them are now CI-invisible — the other two are the same sources registered a second time
+against the real checkpoint.
 
-Two findings from doing it, both recorded in full below:
+A full `agent_eval.py run` after these landed: corpus **5/6**, holdout **2/4**, both
+exactly at their pinned floors, so the vendored tokenizer fix did not move the agent. The
+pins were deliberately NOT rewritten — see V2.
+
+Three findings from doing it, all recorded in full below:
 
 - Putting the tokenizer path under sanitizers for the first time exposed **real undefined
   behaviour in vendored utf8proc**, on the production NFC path, reproduced on the real
   checkpoint and not just the fixture. Fixed in `52df37d`.
 - **`cmake --preset asan` does not work on this machine without `-DLMP_MLX_PYTHON`.** The
   standing rule above said it did. Corrected.
+- ASan then earned its keep a second time on M1, catching a **use-after-free in the new MCP
+  handlers** — they captured a raw `mcp::Client*` the host owned. Both finds came from the
+  same change: putting tests in the gate is what puts them under sanitizers.
 
 ---
 
