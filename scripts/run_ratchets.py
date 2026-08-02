@@ -109,6 +109,13 @@ def gate_layers(root, cfg):
 
     L0 platform is the top of the list and the bottom of the dependency graph:
     src/loop may include src/platform, src/platform may never include src/loop.
+
+    A file under src/ matching NO layer entry is a FAILURE, not a skip. `src/mcp` spent
+    its entire life outside this gate because an unlisted directory read as "nothing to
+    check": ~2500 lines that src/pcc and src/tools both depend on, with its include
+    direction never once enforced. It was found by diffing the map against `ls src/`,
+    which is not a thing anyone does on a schedule -- so absence is now the loud case.
+    Only src/ is required to be layered; tests/ and scripts/ are not a dependency graph.
     """
     layers, findings, subjects = cfg["layers"], [], 0
     for rel, abspath in walk_sources(root, cfg):
@@ -116,6 +123,12 @@ def gate_layers(root, cfg):
             continue
         src_prefix, src_level = layer_of(rel, layers)
         if src_level is None:
+            if rel.startswith("src/") and not is_exempt(rel, cfg["scan_exempt"]):
+                findings.append(Finding(
+                    "layers", rel, 0,
+                    "is under src/ but matches no entry in `layers` -- give it the level "
+                    "its includes justify in scripts/ratchets.json, so its dependency "
+                    "direction is checked like every other layer's"))
             continue
         subjects += 1
         with open(abspath, encoding="utf-8", errors="replace") as fh:

@@ -63,8 +63,23 @@
       "min_subjects": 3
     }
   },
+  "_layers_comment": [
+    "The dependency graph, low to high. A file may include its own level and any",
+    "level below it, never one above. A file under src/ that is absent from this",
+    "map FAILS the layers gate -- it does not skip. src/mcp was unlisted from the",
+    "day it landed and nobody noticed for that exact reason: ~2500 lines that",
+    "src/pcc and src/tools both depend on, with its include direction unchecked,",
+    "found only by diffing this map against `ls src/`.",
+    "",
+    "src/mcp is L0 because it includes nothing else in src/ at all -- it is a",
+    "self-contained protocol implementation, and its consumers (src/pcc at L1,",
+    "src/tools at L2) both sit above it. src/security is deliberately absent: its",
+    "single file is scan_exempt frozen evidence, and the gate skips exempt paths.",
+    "Same level twice is allowed and means 'may include each other'."
+  ],
   "layers": {
     "src/platform": 0,
+    "src/mcp": 0,
     "src/model": 1,
     "src/pcc": 1,
     "src/tools": 2,
