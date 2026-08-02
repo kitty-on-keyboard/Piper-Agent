@@ -11,6 +11,7 @@ import {
   RunSettings,
   StartParams,
   MessageResult,
+  LoadModelResult,
   RunEndNotification,
   TurnNotification,
   TokenNotification,
@@ -19,6 +20,7 @@ import {
   EditNotification,
   VerificationNotification,
   PerfNotification,
+  ModelStatusNotification,
 } from "./protocol.generated";
 
 export interface SidecarEvents {
@@ -29,9 +31,22 @@ export interface SidecarEvents {
   approval_request: ApprovalRequestNotification;
   edit: EditNotification;
   perf: PerfNotification;
+  model_status: ModelStatusNotification;
   run_end: RunEndNotification;
   exit: { code: number | null; stderr: string };
 }
+
+/** What a request settles to: the result, or a STATED failure. Never a rejection.
+ *
+ *  It used to be a rejection, and every call site in sidebar.ts discarded it with `void`.
+ *  So "the sidecar is not running" -- which is the state the extension is in until
+ *  something starts one -- became an unhandled promise nobody saw, while the view had
+ *  already switched itself to "Thinking". Typing into the sidebar of a freshly opened
+ *  window did exactly nothing, visibly and indefinitely, and that is the bug that made
+ *  the whole extension look broken.
+ *
+ *  A failure the caller can ignore by accident is a failure the user finds instead. */
+export type Reply<T> = Partial<T> & { error?: string };
 
 export class SidecarClient extends EventEmitter {
   private proc: ChildProcess | undefined;
@@ -66,6 +81,13 @@ export class SidecarClient extends EventEmitter {
     });
     proc.on("exit", (code) => {
       this.proc = undefined;
+      // Settle everything still outstanding BEFORE announcing the exit. A pending
+      // request whose sidecar has died can never be answered, and an `await` on one
+      // would hang the caller for the lifetime of the window -- including sidebar's
+      // applyEdit, whose whole contract is that every path replies.
+      const why = `sidecar exited (code ${code ?? "signal"})`;
+      for (const [, resolve] of this.pending) resolve({ error: why });
+      this.pending.clear();
       this.emit("exit", { code, stderr: this.stderrTail.join("\n") });
     });
   }
@@ -114,34 +136,58 @@ export class SidecarClient extends EventEmitter {
     this.emit(event, msg.params);
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
-    if (!this.proc?.stdin) return Promise.reject(new Error("sidecar is not running"));
+  private request<T extends object>(method: string, params: unknown): Promise<Reply<T>> {
+    if (!this.proc?.stdin) {
+      return Promise.resolve({
+        error: `cannot send ${method}: the sidecar is not running`,
+      } as Reply<T>);
+    }
     const id = String(this.nextId++);
     const line = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
     return new Promise((resolve) => {
-      this.pending.set(id, resolve);
+      this.pending.set(id, resolve as (result: unknown) => void);
       this.proc?.stdin?.write(line);
     });
   }
 
-  start_run(mission: string, settings: RunSettings): Promise<unknown> {
+  start_run(mission: string, settings: RunSettings): Promise<Reply<{ run_id: string }>> {
     const params: StartParams = { mission, settings };
     return this.request("lmp/start", params);
   }
 
+  /** Loads the weights, as its own act.
+   *
+   *  Separate from start_run because it is the expensive, visible thing: ~19 GB and tens
+   *  of seconds on a 48 GB machine. It used to be a side effect of the first mission, so
+   *  the operator had no way to say WHEN it happened and no way to see that it was --
+   *  the sidebar just read "Thinking" for a minute. Progress arrives as model_status
+   *  notifications; this promise settles only once the load is over. */
+  loadModel(modelDir: string): Promise<Reply<LoadModelResult>> {
+    return this.request("lmp/load_model", { model_dir: modelDir });
+  }
+
+  /** Gives the memory back without killing the process. The conversation goes with it. */
+  unloadModel(): Promise<Reply<{ unloaded: boolean }>> {
+    return this.request("lmp/unload_model", {});
+  }
+
   /** Deliverable while the model is generating: the sidecar's reader thread sets the
    *  cancel token as soon as the message is framed (S4.3). */
-  cancel(runId: string): Promise<unknown> {
+  cancel(runId: string): Promise<Reply<{ accepted: boolean }>> {
     return this.request("lmp/cancel", { run_id: runId });
   }
 
-  approve(requestId: string, approved: boolean): Promise<unknown> {
+  approve(requestId: string, approved: boolean): Promise<Reply<{ accepted: boolean }>> {
     return this.request("lmp/approve", { request_id: requestId, approved });
   }
 
   /** The answer to an lmp/edit. The sidecar BLOCKS on this: `applied:false` carries the
    *  reason and becomes a tool error the model can act on, rather than a silent no-op. */
-  editApplied(requestId: string, applied: boolean, error: string): Promise<unknown> {
+  editApplied(
+    requestId: string,
+    applied: boolean,
+    error: string
+  ): Promise<Reply<{ accepted: boolean }>> {
     return this.request("lmp/edit_applied", { request_id: requestId, applied, error });
   }
 
@@ -151,11 +197,11 @@ export class SidecarClient extends EventEmitter {
    *  in flight the text is steering and lands at the next turn boundary; with nothing
    *  running it is a follow-up and starts a run over the same conversation. `started_run`
    *  in the reply says which happened. */
-  message(runId: string, text: string): Promise<MessageResult> {
-    return this.request("lmp/message", { run_id: runId, text }) as Promise<MessageResult>;
+  message(runId: string, text: string): Promise<Reply<MessageResult>> {
+    return this.request("lmp/message", { run_id: runId, text });
   }
 
-  shutdown(): Promise<unknown> {
+  shutdown(): Promise<Reply<{ ok: boolean }>> {
     return this.request("lmp/shutdown", {});
   }
 

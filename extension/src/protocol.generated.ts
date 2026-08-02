@@ -8,6 +8,7 @@ export const PROTOCOL_VERSION = "1.0.0";
 export type Mode = "plan" | "debug" | "agent";
 export type TurnOutcome = "tool_call_executed" | "tool_call_refused" | "text_only" | "length_capped" | "cancelled" | "backend_error";
 export type ToolStatus = "ok" | "tool_error" | "denied" | "timeout" | "refused" | "cancelled";
+export type ModelState = "unloaded" | "loading" | "ready" | "failed";
 
 export interface SamplingSettings {
   temperature: number;
@@ -107,10 +108,32 @@ export interface MessageResult {
   started_run: boolean;
 }
 
+export interface LoadModelParams {
+  model_dir: string;
+}
+export interface LoadModelResult {
+  loaded: boolean;
+  model_dir: string;
+  error: string;
+}
+
+export interface UnloadModelParams {
+}
+export interface UnloadModelResult {
+  unloaded: boolean;
+}
+
 export interface ShutdownParams {
 }
 export interface ShutdownResult {
   ok: boolean;
+}
+
+export interface ModelStatusNotification {
+  state: ModelState;
+  model_dir: string;
+  detail: string;
+  elapsed_ms: number;
 }
 
 export interface TokenNotification {
@@ -180,7 +203,10 @@ export const METHODS = [
   "lmp/edit_applied",
   "lmp/approve",
   "lmp/message",
+  "lmp/load_model",
+  "lmp/unload_model",
   "lmp/shutdown",
+  "lmp/model_status",
   "lmp/token",
   "lmp/turn",
   "lmp/checklist",

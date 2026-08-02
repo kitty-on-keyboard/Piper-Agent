@@ -1,0 +1,113 @@
+#pragma once
+//
+// What survives between missions, and the two acts that create and destroy it.
+//
+// v1 of the sidecar built the tokenizer, the weights, the registry and the context store
+// inside one function and dropped all four on the way out, so every mission was a fresh
+// one-shot: no history to follow up on, and a ~19 GB reload to ask a second question.
+// The agent could be launched and could be aborted, and that was the entire vocabulary.
+//
+// The context store is the part that makes a conversation; keeping the weights loaded
+// alongside it is what makes a follow-up cost a prefill instead of a minute.
+//
+// WHY THIS IS ITS OWN UNIT. Loading became something the operator asks for by name
+// rather than a side effect of starting a mission, so "the model is loaded" turned into
+// a state with transitions, a duration and a failure mode -- all of which the surface
+// renders. That is a thing worth being able to point at. sidecar.cpp keeps the protocol
+// dispatch and the run loop; the lifecycle of the 19 GB lives here.
+//
+#include <memory>
+#include <string>
+
+#include "src/context/context.hpp"
+#include "src/loop/agent.hpp"
+#include "src/model/mlx_backend.hpp"
+#include "src/model/qwen_tokenizer.hpp"
+#include "src/platform/clock.hpp"
+#include "src/platform/event_log.hpp"
+#include "src/surface/context_journal.hpp"
+#include "src/tools/mcp_host.hpp"
+#include "src/tools/registry.hpp"
+
+namespace lmp::surface {
+
+struct Session {
+    std::string model_dir;
+    std::string workspace;
+    std::unique_ptr<model::QwenTokenizer> tok;
+    std::unique_ptr<model::MlxBackend> backend;
+    std::unique_ptr<tools::Registry> registry;
+    // The handlers this installs into the registry share ownership of their clients
+    // (McpHost::Connection), so neither destruction order here is a use-after-free --
+    // that WAS true of an earlier raw-pointer version and ASan caught it. Kept adjacent
+    // to the registry because they are one unit: the registry holds the tools, this holds
+    // the processes behind them.
+    std::unique_ptr<tools::McpHost> mcp;
+    // What the current registry's remote tools were built from. The Registry has no
+    // "unregister", so a changed server list means a new Registry, not a patched one.
+    std::string mcp_signature;
+    std::unique_ptr<ContextJournal> journal; // BEFORE ctx: its sink points here
+    std::unique_ptr<context::ContextStore> ctx;
+    loop::AgentConfig config;
+    // Whether this client can answer lmp/edit. Advertised at lmp/start rather than
+    // assumed: the extension can, agent_eval.py cannot, and guessing wrong either wedges
+    // an unattended run on a reply that never comes or writes behind the editor's back.
+    bool client_applies_edits = false;
+
+    // Both halves, because either alone is a session that cannot generate. They are only
+    // ever assigned together (see load_model), so this can never be half true -- the
+    // predicate says so anyway, since the invariant is the point.
+    [[nodiscard]] bool model_ready() const noexcept {
+        return tok != nullptr && backend != nullptr;
+    }
+
+    // Whether a load of `dir` would be a no-op. The caller needs this BEFORE calling
+    // load_model, because loading blocks for tens of seconds and the surface has to be
+    // told that is about to happen -- afterwards is too late to say "working on it".
+    [[nodiscard]] bool holds(const std::string& dir) const noexcept {
+        return model_ready() && model_dir == dir;
+    }
+};
+
+struct ModelLoad {
+    bool ok = false;
+    // Verbatim from the tokenizer or the backend. A load failure is nearly always a
+    // fixable statement about what is on disk -- a missing safetensors, an MLX-less
+    // build -- and paraphrasing it into "load failed" throws away the only part the
+    // operator can act on.
+    std::string error;
+    double elapsed_ms = 0.0;
+};
+
+// Loads the tokenizer and the weights, replacing whatever was loaded before.
+//
+// BLOCKS for as long as the checkpoint takes. Emits nothing: the caller owns the wire
+// and brackets this with the model_status notifications, because a progress message
+// that could only be sent after the work finished would not be progress.
+[[nodiscard]] ModelLoad load_model(Session& session, const std::string& model_dir,
+                                   const platform::Clock& clock);
+
+// Gives the memory back. The conversation goes with it -- a ContextStore whose weights
+// are gone cannot be resumed -- so this is a full reset of everything downstream of the
+// model, not just a free().
+void unload_model(Session& session);
+
+// Builds the tool registry for this run, and connects the configured MCP servers into it.
+//
+// Rebuilt rather than patched when the server list changes: the Registry has no
+// unregister, so the alternative is remote tools from a previous run outliving the
+// settings that authorised them.
+void ensure_registry(Session& session, const std::string& workspace,
+                     const std::string& message, platform::EventLogWriter& log,
+                     const platform::Clock& clock);
+
+// The repo's own conventions, in the order the surrounding ecosystem settled on. First
+// file found wins; they are alternatives, not layers, and concatenating them would let a
+// stale `.cursorrules` contradict a current AGENTS.md with no way to tell which won.
+[[nodiscard]] std::string load_project_instructions(const std::string& workspace);
+
+// What the agent told itself, last time it was here. The counterpart to the above: same
+// stable-prompt slot, same once-per-session cost, opposite provenance.
+[[nodiscard]] std::string load_project_memory(const std::string& workspace);
+
+} // namespace lmp::surface
