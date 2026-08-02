@@ -10,8 +10,16 @@ add_dependencies(test_agent_step lmp_mini_vocab)
 target_compile_definitions(test_agent_step PRIVATE
   LMP_MINI_VOCAB_JSON="${CMAKE_BINARY_DIR}/tests/model/mini_qwen/tokenizer.json")
 
-# Needs the real vocab (944 byte-fragment tokens are the whole point), so realmodel, not
-# gate -- same rule as tests/model.
+# Registered twice off one source, same rule as tests/model/test_grammar.cpp (R1). This
+# needs a vocabulary and never the weights -- it drives ScriptedBackend -- so the gate
+# variant runs on the miniature vocabulary and reaches CI. The fixture's merges are
+# ASCII-only, which makes every token of a multi-byte string a fragment: the streaming
+# hazard is exercised harder there than on the real checkpoint's 944 fragment tokens.
+lmp_add_test(test_token_stream_gate SOURCES test_token_stream.cpp LABELS gate LINK lmp_loop TIMEOUT 300)
+add_dependencies(test_token_stream_gate lmp_mini_vocab)
+target_compile_definitions(test_token_stream_gate PRIVATE
+  LMP_MINI_VOCAB_JSON="${CMAKE_BINARY_DIR}/tests/model/mini_qwen/tokenizer.json")
+
 lmp_add_test(test_token_stream SOURCES test_token_stream.cpp LABELS realmodel LINK lmp_loop TIMEOUT 300)
 
 # Pure timing + ordering over the dispatch primitive: no tokenizer, no model, so gate.
