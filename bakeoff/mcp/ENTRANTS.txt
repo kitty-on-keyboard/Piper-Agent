@@ -1,0 +1,20 @@
+# Frozen 2026-08-02 from cat-collector-king. Label -> branch.
+# Judged in docs/BAKEOFF_MCP.md. Sources are EVIDENCE: do not reformat, do not "fix".
+
+repo cat-collector-king/mcp-client-cpp
+C1  entrant-5-mad-scientist-16793250294786043025      PR #4
+C2  entrant3-mcp-client-3078158255173061417           PR #7
+C3  feat/mcp-client-7938028739714872854               PR #5
+C4  feature/mcp-client-17367384797552510946           PR #3
+C5  feature/mcp-client-cpp-8007708411161507511        PR #2
+C6  mcp-client-impl-13947788594751121204              PR #6
+C7  mcp-cpp-client-10737277313008653286               PR #1
+
+repo cat-collector-king/mcp-server-cpp
+S1  entrant-6-3980409347263660845                     PR #3
+S2  feat/mcp-server-cpp-11692793761031594037          PR #5
+S3  feature/mcp-cpp-server-10984712483875596528       PR #4
+S4  feature/mcp-server-cpp-637851683308847282         PR #6
+S5  mcp-cpp-server-18049066605983270617               PR #7
+S6  mcp-server-cpp-2595983727630922091                PR #2
+S7  mcp-server-cpp20-2637395726912799421              PR #1

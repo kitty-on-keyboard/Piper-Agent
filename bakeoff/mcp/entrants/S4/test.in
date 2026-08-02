@@ -1,0 +1,4 @@
+{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "hello"}}}
+{"jsonrpc": "2.0", "id": 4, "method": "ping", "params": {}}

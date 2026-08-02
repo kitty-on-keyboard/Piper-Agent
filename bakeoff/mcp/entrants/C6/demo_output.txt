@@ -1,0 +1,56 @@
+Starting MCP Client...
+Sending initialize...
+Initialized: {
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "capabilities": {
+      "tools": null
+    },
+    "protocolVersion": "2024-11-05",
+    "serverInfo": {
+      "name": "test-server",
+      "version": "1.0.0"
+    }
+  }
+}
+Sending notifications/initialized...
+Requesting tool list...
+Tools: {
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "tools": [
+      {
+        "description": "Echoes the message back",
+        "inputSchema": {
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "name": "echo"
+      }
+    ]
+  }
+}
+Calling tool 'echo'...
+Tool Call Result: {
+  "id": 3,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Echo: Hello from C++20 MCP Client!",
+        "type": "text"
+      }
+    ],
+    "isError": false
+  }
+}
+Shutting down gracefully.
