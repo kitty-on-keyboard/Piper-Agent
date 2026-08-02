@@ -388,7 +388,15 @@ static utf8proc_ssize_t seqindex_write_char_decomposed(utf8proc_uint16_t seqinde
   for (; len >= 0; entry++, len--) {
     utf8proc_int32_t entry_cp = seqindex_decode_entry(&entry);
 
-    written += utf8proc_decompose_char(entry_cp, dst+written,
+    /* LOCAL MODIFICATION (LM_Pipe). Upstream computes `dst+written` unconditionally.
+       utf8proc's own documented two-pass idiom calls with dst==NULL and bufsize==0 to
+       measure the required length -- frankentok/src/normalizer.cpp:37 does exactly that
+       -- so this forms NULL+4, which is undefined behaviour even though bufsize is 0 and
+       nothing is ever written through it. Benign on every real ABI, but the build sets
+       -fno-sanitize-recover=undefined, so it ABORTS the NFC path under UBSan. Guarding
+       the offset is behaviour-preserving: when dst is NULL, bufsize is 0 and
+       utf8proc_decompose_char only counts. Re-apply on any utf8proc upgrade. */
+    written += utf8proc_decompose_char(entry_cp, dst ? dst+written : NULL,
       (bufsize > written) ? (bufsize - written) : 0, options,
     last_boundclass);
     if (written < 0) return UTF8PROC_ERROR_OVERFLOW;
