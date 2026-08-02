@@ -9,7 +9,7 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 26
+count 29
 
 test_agent_step
 test_arena
@@ -26,6 +26,9 @@ test_fs
 test_gate_manifest
 test_kv_reuse
 test_log_triage_engine
+test_mcp_framing
+test_mcp_session
+test_mcp_stdio
 test_mini_vocab
 test_loop
 test_parallel_calls
