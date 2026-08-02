@@ -33,6 +33,7 @@ tools::Registry make_registry(const std::string& root) {
     tools::WorkspaceContext ctx;
     ctx.root = root;
     ctx.max_read_bytes = 1U << 20;
+    ctx.max_model_read_bytes = 16384;
     ctx.max_result_bytes = 4096;
     ctx.spool_dir = root;
     ctx.shell_wall_clock_seconds = 20;

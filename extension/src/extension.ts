@@ -46,6 +46,12 @@ function settingsFromConfig(): RunSettings {
     // newline is the one character a shell command cannot carry unescaped.
     allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
+    // We can apply edits ourselves, so the sidecar routes writes back through
+    // lmp/edit and VS Code's WorkspaceEdit API applies them -- undo, dirty buffers
+    // and diff review all work (S12.4). A headless client leaves this false and the
+    // sidecar writes directly; it must never be assumed, or an unattended run blocks
+    // forever on a reply nobody will send.
+    applies_edits: true,
   };
 }
 

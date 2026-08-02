@@ -28,6 +28,14 @@ namespace mx = mlx::core;
 
 struct MlxBackend::Impl {
     mlxl::Qwen35MoeModel model;
+    // The turn checkpoint: the caches as they stood at the end of the last prompt's
+    // STABLE prefix. Held here rather than in the header because CacheCheckpoint is
+    // MLX-shaped and mlx headers stay out of mlx_backend.hpp.
+    struct TurnCheckpoint {
+        mlxl::Qwen35MoeModel::CacheCheckpoint cp{};
+        std::size_t len = 0;
+        bool valid = false;
+    } ckpt;
 };
 
 // Tokens per prefill eval. Each chunk ends in a full synchronous barrier
@@ -100,6 +108,7 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
 void MlxBackend::reset_cache() {
     if (impl_) {
         impl_->model.reset_cache();
+        impl_->ckpt = {};
     }
     ledger_.clear();
 }
@@ -306,13 +315,32 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     }
 
     // --- verified prefix reuse (S5.10) -------------------------------------
-    const ReuseDecision reuse = ledger_.plan_reuse(task.prompt);
-    if (reuse.divergent) {
-        // Stale context is never decoded past. One honest full re-prefill.
-        impl_->model.reset_cache();
-        ledger_.clear();
+    //
+    // Three outcomes, decided by a pure function so the algebra is gate-testable with no
+    // GPU. Restore is the one that is new: between turns the prompt always diverges
+    // mid-ledger (a new turn record is inserted before the live-state block), and the old
+    // code answered that with a full reset -- so every turn re-prefilled the whole
+    // context and the most-stable-first prompt layout bought nothing.
+    const TurnReuse plan =
+        plan_turn_reuse(ledger_, task.prompt, impl_->ckpt.len, impl_->ckpt.valid);
+    switch (plan.mode) {
+        case ReuseMode::Extend:
+            break;
+        case ReuseMode::Restore:
+            impl_->model.restore(impl_->ckpt.cp);
+            // Exactly the position the caches went back to. A ledger that disagreed with
+            // the caches is the silent-stale-context failure S5.10 exists to prevent.
+            ledger_.truncate_to(impl_->ckpt.len);
+            break;
+        case ReuseMode::Reset:
+            // Stale context is never decoded past. One honest full re-prefill.
+            impl_->model.reset_cache();
+            ledger_.clear();
+            impl_->ckpt = {};
+            break;
     }
-    const std::size_t start = reuse.divergent ? 0 : reuse.reusable;
+    const std::size_t start = plan.prefill_from;
+    r.prefill_reused_tokens = start;
 
     const auto t0 = clock_.mono();
 
@@ -320,24 +348,43 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     const std::size_t kPrefillChunk = prefill_chunk();
     std::vector<float> logits_host;
     const std::size_t prompt_n = task.prompt.size();
+    // The stable boundary is made a CHUNK EDGE so the snapshot lands exactly on it. One
+    // extra edge per turn, against a full GPU barrier every 512 tokens anyway.
+    const std::size_t boundary =
+        task.checkpoint_at > start && task.checkpoint_at <= prompt_n ? task.checkpoint_at
+                                                                     : 0;
     // Everything before the last token is pure prefill; the last token's forward pass
     // produces the first sampling distribution.
-    for (std::size_t at = start; at < prompt_n; at += kPrefillChunk) {
+    // A while loop, not `at += kPrefillChunk`: the boundary shortens a chunk, so the step
+    // is whatever was actually consumed.
+    std::size_t at = start;
+    while (at < prompt_n) {
         if (cancel.cancelled()) {
             r.status = GenStatus::Cancelled;
             return r;
         }
-        const std::size_t end = std::min(at + kPrefillChunk, prompt_n);
-        mx::array ids = mx::array(task.prompt.data() + at,
+        std::size_t end = std::min(at + kPrefillChunk, prompt_n);
+        if (boundary > at && boundary < end) {
+            end = boundary;
+        }
+        mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
                                   {1, static_cast<int>(end - at)}, mx::int32);
         mx::array logits = impl_->model.forward_logits(ids);
         impl_->model.eval_caches();
         for (std::size_t i = at; i < end; ++i) {
             ledger_.append(task.prompt[i]);
         }
+        if (end == boundary) {
+            // Exactly one checkpoint is held, and it is overwritten each turn -- which is
+            // what bounds the memory the 30 gated-delta snapshots cost.
+            impl_->ckpt.cp = impl_->model.checkpoint();
+            impl_->ckpt.len = ledger_.size();
+            impl_->ckpt.valid = true;
+        }
         if (end == prompt_n) {
             logits_to_host(logits, logits_host);
         }
+        at = end;
     }
     const auto t_prefill = clock_.mono();
     const double prefill_ms = ms_between(t0, t_prefill);

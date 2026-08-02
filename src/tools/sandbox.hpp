@@ -15,8 +15,9 @@
 //   T1  macOS Seatbelt (sandbox-exec)      default attended: fs-jail to workspace,
 //                                          deny egress, in the PROFILE, not by
 //                                          inspecting commands
-//   T2  container                          REQUIRED for unattended (S7.2). Not yet
-//                                          wired; requesting it refuses loudly.
+//   T2  container                          REQUIRED for unattended (S7.2). Wired: the
+//                                          runtime is probed once, and a missing or
+//                                          unusable one REFUSES -- never downgrades.
 //   T3  the host, unsandboxed              OPERATOR OPT-IN ONLY (see below).
 //
 // T3 IS NOT A RANK. The numbers are identities, and 3 is the LEAST contained of them,
@@ -93,7 +94,7 @@ struct ExecOutcome {
 };
 
 // Runs `command` via /bin/sh -c inside the granted tier. T0 refuses (that is its
-// meaning); T2 refuses until the container runtime is wired -- refusal, not silent
+// meaning); T2 refuses when no container runtime is usable -- refusal, not silent
 // downgrade to T1, because a silent downgrade is exactly the unsafe_host default v1
 // shipped (S13).
 [[nodiscard]] ExecOutcome run_sandboxed(const ExecutionGrant& grant,
@@ -104,5 +105,43 @@ struct ExecOutcome {
 // The Seatbelt profile source for a given root -- exposed for the tests that prove the
 // jail holds by attempting to break it (S17 phase 5 exit criterion).
 [[nodiscard]] std::string seatbelt_profile(const std::string& workspace_root);
+
+// --- T2 --------------------------------------------------------------------
+//
+// Which container runtime this host can actually use. Probed ONCE per process and
+// recorded, because the answer is a property of the machine and re-probing per command
+// would put a fork in the hot path of every unattended call.
+//
+// `available == false` is the only thing that matters for safety: T2 refuses on it, and
+// there is deliberately no branch anywhere that turns a failed probe into a T1 run.
+struct ContainerRuntime {
+    bool available = false;
+    std::string binary; // "container" (macOS 26) or "docker"
+    std::string image;  // pinned by digest, never by tag
+    std::string detail; // why, when unavailable -- reported verbatim in the refusal
+};
+
+[[nodiscard]] const ContainerRuntime& detect_container_runtime();
+
+// The image T2 runs. Pinned by DIGEST: a tag is a moving target, and "the build passed"
+// is a claim about a specific toolchain or it is not a claim at all.
+//
+// SCOPE, STATED PLAINLY. This image carries python3 and a C++ toolchain -- the two
+// languages evals/agent actually exercises. T2 for an arbitrary user workspace, whose
+// toolchain must match the host's for a green build to mean anything, is NOT solved. A
+// tier that works for the languages we can test beats one that claims to work for all of
+// them, and the refusal above names the gap rather than hiding it.
+[[nodiscard]] std::string container_image();
+
+// `command`, rewritten as a container invocation. Returns a shell command line, which
+// run_sandboxed then spawns down the SAME path as every other tier -- so the rlimits, the
+// process group, the wall-clock killer and the output cap still apply. Exposed so the
+// break-out suite can assert the flags (network none, memory, pids, mounts) without
+// needing a runtime installed.
+[[nodiscard]] std::string container_command(const ContainerRuntime& rt,
+                                            const std::string& command,
+                                            const std::string& workspace_root,
+                                            const std::string& cwd,
+                                            const ExecLimits& limits);
 
 } // namespace lmp::tools

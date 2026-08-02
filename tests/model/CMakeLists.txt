@@ -1,12 +1,38 @@
+# --- the miniature vocabulary (G0) ------------------------------------------
+#
+# Generated rather than committed: QwenTokenizer::load enforces the Qwen3 size band, so an
+# honest fixture is ~140k entries and a few MB of JSON. Generating it keeps the property
+# that matters -- the fixture goes through the SAME family verification production does --
+# without committing a blob nobody will read. See tests/fixtures/make_mini_vocab.py.
+set(LMP_MINI_VOCAB "${CMAKE_CURRENT_BINARY_DIR}/mini_qwen/tokenizer.json")
+add_custom_command(
+  OUTPUT "${LMP_MINI_VOCAB}"
+  COMMAND "${CMAKE_COMMAND}" -E env python3
+          "${PROJECT_SOURCE_DIR}/tests/fixtures/make_mini_vocab.py" "${LMP_MINI_VOCAB}"
+  DEPENDS "${PROJECT_SOURCE_DIR}/tests/fixtures/make_mini_vocab.py"
+  COMMENT "Generating the miniature Qwen-shaped vocabulary"
+  VERBATIM)
+add_custom_target(lmp_mini_vocab DEPENDS "${LMP_MINI_VOCAB}")
+
 lmp_add_test(test_backend_seam SOURCES test_backend_seam.cpp LABELS gate LINK lmp_model)
 # The speculative block algebra runs in the GATE: SpecForward is an interface precisely so
 # that "which positions were committed, what does the cache hold" is testable with no GPU.
 lmp_add_test(test_speculative SOURCES test_speculative.cpp LABELS gate LINK lmp_model)
+# The cross-turn cache decision, for the same reason: an off-by-one there decodes fluent
+# wrong text rather than crashing, so the algebra is pure and asserted with no GPU.
+lmp_add_test(test_kv_reuse SOURCES test_kv_reuse.cpp LABELS gate LINK lmp_model)
+lmp_add_test(test_mini_vocab SOURCES test_mini_vocab.cpp LABELS gate LINK lmp_model)
+add_dependencies(test_mini_vocab lmp_mini_vocab)
+target_compile_definitions(test_mini_vocab PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
 
 # Real-model tests (S11.6): excluded from the gate, and `ctest --preset realmodel`
 # pins jobs=1 -- concurrent large model loads exhaust unified memory.
 lmp_add_test(test_grammar_realmodel SOURCES test_grammar.cpp LABELS realmodel LINK lmp_model TIMEOUT 300)
 lmp_add_test(test_realmodel SOURCES test_realmodel.cpp LABELS realmodel LINK lmp_model TIMEOUT 1200)
+# G3's falsifier: reuse must fire, and must be INVISIBLE in the output. A stale-cache bug
+# decodes fluent wrong text rather than crashing, so byte-identity is the only assertion
+# that catches it.
+lmp_add_test(test_kv_reuse_realmodel SOURCES test_kv_reuse_realmodel.cpp LABELS realmodel LINK lmp_model TIMEOUT 1200)
 lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK lmp_model simdjson TIMEOUT 900)
 # Same relaxation mlx_backend.cpp and the diag driver carry: this TU includes the vendored
 # MLX numerics directly, to drive Qwen35MoeModel's cache API below the backend seam.

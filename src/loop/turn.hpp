@@ -166,11 +166,16 @@ struct Budget {
 
 // Ranks the applicable correctives and returns the single highest. At most one per
 // turn (S9.2).
+// `have_verify_contract` gates SynthesizeVerification. With no contract declared there is
+// nothing to synthesize, and the corrective used to run a hardcoded `cmake --build build`
+// regardless -- which on the eight Python fixtures in evals/agent is a command that cannot
+// work. Passed as a bool rather than the store so this stays a pure function (S11.2).
 [[nodiscard]] Corrective choose_corrective(const TurnResult& turn,
                                            const RepeatDetector& repeats,
                                            const RefusalLedger& refusals,
                                            int iterations_used, const Budget& budget,
-                                           bool wall_clock_exhausted);
+                                           bool wall_clock_exhausted,
+                                           bool have_verify_contract);
 
 // --- classification ---------------------------------------------------------
 
@@ -193,6 +198,19 @@ struct CompletionVerdict {
     bool complete = false;
     std::string reason;
     std::size_t open_items = 0;
+    // WHO CHOSE THE PROOF. A complete verdict against a model-chosen contract means "the
+    // model's own criterion is satisfied", which is a strictly weaker claim than "the
+    // operator's criterion is satisfied" -- and until this field existed the two were
+    // reported with the same word. See ContextStore::ContractSource.
+    context::ContextStore::ContractSource contract_source =
+        context::ContextStore::ContractSource::Model;
+    // True when the verdict rests on a contract nobody but the model has vouched for.
+    // Reported, never enforced: refusing to complete without an operator contract would
+    // break every run that does not have one, which is most of them.
+    [[nodiscard]] bool self_declared() const noexcept {
+        return complete &&
+               contract_source == context::ContextStore::ContractSource::Model;
+    }
 };
 
 [[nodiscard]] CompletionVerdict evaluate_completion(const context::ContextStore& ctx);

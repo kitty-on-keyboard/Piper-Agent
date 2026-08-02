@@ -36,6 +36,20 @@ std::uint64_t hash_ids(const std::vector<TokenId>& ids) noexcept {
     return h;
 }
 
+namespace {
+
+// The fingerprint the ledger WOULD hold for the first `n` ids of `v`. Folded the same way
+// hashes_ is, so the two are comparable by construction rather than by remembering to.
+std::uint64_t hash_prefix(const std::vector<TokenId>& v, std::size_t n) noexcept {
+    std::uint64_t h = kSeed;
+    for (std::size_t i = 0; i < n && i < v.size(); ++i) {
+        h = fold(h, v[i]);
+    }
+    return h;
+}
+
+} // namespace
+
 KvCacheLedger::KvCacheLedger() { hashes_.push_back(kSeed); }
 
 void KvCacheLedger::append(TokenId id) {
@@ -92,6 +106,34 @@ void KvCacheLedger::clear() noexcept {
 
 std::uint64_t KvCacheLedger::fingerprint_at(std::size_t k) const noexcept {
     return hashes_[std::min(k, ids_.size())];
+}
+
+TurnReuse plan_turn_reuse(const KvCacheLedger& ledger, const std::vector<TokenId>& prompt,
+                          std::size_t checkpoint_len, bool checkpoint_valid) {
+    const ReuseDecision d = ledger.plan_reuse(prompt);
+    if (!d.divergent) {
+        // The cache is a verified prefix of the prompt: prefill only the tail. Unchanged
+        // from before this function existed, and still the fast path within a turn.
+        return {ReuseMode::Extend, d.reusable};
+    }
+    if (!checkpoint_valid || checkpoint_len == 0 || checkpoint_len > prompt.size() ||
+        checkpoint_len > ledger.size()) {
+        return {ReuseMode::Reset, 0};
+    }
+    // VERIFIED, NEVER ASSUMED (S5.10). fingerprint_at() is O(1) and is the right fast
+    // reject, but the hash keys the lookup and equality is the proof -- a few thousand
+    // int32 compares against a 19 GB model is not a cost worth reasoning about, and the
+    // failure this guards is silent.
+    if (ledger.fingerprint_at(checkpoint_len) != hash_prefix(prompt, checkpoint_len)) {
+        return {ReuseMode::Reset, 0};
+    }
+    const std::vector<TokenId>& cached = ledger.ids();
+    for (std::size_t i = 0; i < checkpoint_len; ++i) {
+        if (cached[i] != prompt[i]) {
+            return {ReuseMode::Reset, 0};
+        }
+    }
+    return {ReuseMode::Restore, checkpoint_len};
 }
 
 } // namespace lmp::model

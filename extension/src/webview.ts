@@ -1364,7 +1364,17 @@ window.addEventListener('message', (e) => {
     if (payload.completed && payload.unfinished_items > 0) {
       t += ' · evidence says done, ' + payload.unfinished_items + ' item(s) left unticked';
     }
-    d.innerHTML = '<b>' + (payload.completed ? 'Complete' : 'Stopped') + '</b> — ';
+    // WHOSE criterion was met. "Complete" against a contract the model chose for itself
+    // is a weaker claim than "Complete" against one you set, and both used to print the
+    // same word -- a run once reported completed=yes on a mission it had not finished,
+    // because the check it picked passed.
+    if (payload.completed && payload.self_declared) {
+      t += ' · against a check the model chose for itself';
+    }
+    const label = payload.completed
+      ? (payload.self_declared ? 'Complete (self-checked)' : 'Complete')
+      : 'Stopped';
+    d.innerHTML = '<b>' + label + '</b> — ';
     d.append(document.createTextNode(t));
     feed.append(d);
     feed.scrollTop = feed.scrollHeight;

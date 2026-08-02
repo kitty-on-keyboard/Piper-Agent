@@ -87,6 +87,7 @@ struct RunSettings {
     bool auto_approve_exec = false;
     bool auto_approve_writes = false;
     bool require_approval = false;
+    bool applies_edits = false;
     std::string system_prompt;
     std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
@@ -122,6 +123,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"require_approval\":";
     append_value(out, v.require_approval);
+    out += ",";
+    out += "\"applies_edits\":";
+    append_value(out, v.applies_edits);
     out += ",";
     out += "\"system_prompt\":";
     append_value(out, v.system_prompt);
@@ -220,6 +224,16 @@ struct CancelParams {
     std::string run_id;
 };
 struct CancelResult {
+    bool accepted = false;
+};
+
+// request "lmp/edit_applied"
+struct EditAppliedParams {
+    std::string request_id;
+    bool applied = false;
+    std::string error;
+};
+struct EditAppliedResult {
     bool accepted = false;
 };
 
@@ -397,6 +411,7 @@ struct ApprovalRequestNotification {
 
 // notification "lmp/edit"
 struct EditNotification {
+    std::string request_id;
     std::string run_id;
     std::string path;
     std::string new_content;
@@ -404,6 +419,9 @@ struct EditNotification {
 };
 [[nodiscard]] inline std::string to_json(const EditNotification& n) {
     std::string out = "{";
+    out += "\"request_id\":";
+    append_value(out, n.request_id);
+    out += ",";
     out += "\"run_id\":";
     append_value(out, n.run_id);
     out += ",";
@@ -440,6 +458,7 @@ struct RunEndNotification {
     std::int64_t iterations = 0;
     bool completed = false;
     std::int64_t unfinished_items = 0;
+    bool self_declared = false;
     static constexpr const char* kMethod = "lmp/run_end";
 };
 [[nodiscard]] inline std::string to_json(const RunEndNotification& n) {
@@ -458,6 +477,9 @@ struct RunEndNotification {
     out += ",";
     out += "\"unfinished_items\":";
     append_value(out, n.unfinished_items);
+    out += ",";
+    out += "\"self_declared\":";
+    append_value(out, n.self_declared);
     out += "}";
     return out;
 }

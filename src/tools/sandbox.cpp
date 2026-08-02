@@ -181,20 +181,41 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         out.output = "T0: this mode does not execute commands";
         return out;
     }
+    // T2 rewrites the command into a container invocation and then takes the SAME spawn
+    // path as everything else: the pipe, the rlimits, the process group and its
+    // wall-clock killer, the output cap. A runtime that ignores a limit must never be the
+    // only thing enforcing it.
+    std::string effective_command = command;
+    bool containerised = false;
     if (grant.tier() == SandboxTier::T2_Container) {
-        // Refusal, not downgrade (S7.2): unattended MUST be containerised, and running
-        // it in T1 instead would be the silent unsafe_host default all over again.
-        out.status = Status::Refused;
-        out.output = "T2 (container) is not wired yet. Unattended runs require it; run "
-                     "attended (T1) or wire the container runtime.";
-        return out;
+        const ContainerRuntime& rt = detect_container_runtime();
+        if (!rt.available) {
+            // Refusal, not downgrade (S7.2): unattended MUST be containerised, and running
+            // it in T1 instead would be the silent unsafe_host default all over again.
+            // This stays a refusal when the runtime is MISSING, when it is present but
+            // unusable, and when the probe itself fails -- there is no path from here to
+            // execution that does not go through a container.
+            out.status = Status::Refused;
+            out.output = "T2 (container) requested but no container runtime is usable: " +
+                         rt.detail +
+                         ". Unattended runs require T2; this is a refusal, not a "
+                         "downgrade to T1.";
+            return out;
+        }
+        effective_command = container_command(rt, command, workspace_root, cwd, limits);
+        containerised = true;
     }
 
     // T3 keeps every OTHER containment the harness has -- rlimits, the process group and
     // its wall-clock killer, the output cap, the workspace cwd. Only the Seatbelt profile
     // is dropped. "Unsandboxed" here means "no filesystem jail and no egress denial", not
     // "no limits at all", and a runaway build is still killed on the same schedule.
-    const bool jailed = grant.tier() != SandboxTier::T3_HostUnsandboxed;
+    //
+    // T2 is unjailed here for a different reason: the container IS the jail, and wrapping
+    // the runtime's own client in a Seatbelt profile would deny it the sockets it needs.
+    const bool jailed =
+        grant.tier() != SandboxTier::T3_HostUnsandboxed && !containerised;
+    const std::string& command_to_run = effective_command;
     const std::string profile = jailed ? seatbelt_profile(workspace_root) : std::string();
 
     Pipe pipe;
@@ -234,9 +255,10 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
             // in the headers, load-bearing across macOS tooling, and the ONLY per-process
             // profile API without an entitlement; the T2 container is the successor path.
             ::execlp("/usr/bin/sandbox-exec", "sandbox-exec", "-p", profile.c_str(),
-                     "/bin/sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+                     "/bin/sh", "-c", command_to_run.c_str(), static_cast<char*>(nullptr));
         } else {
-            ::execlp("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+            ::execlp("/bin/sh", "sh", "-c", command_to_run.c_str(),
+                     static_cast<char*>(nullptr));
         }
         ::_exit(127);
     }
