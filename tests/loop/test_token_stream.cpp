@@ -1,4 +1,11 @@
-// TokenStreamer (S5.7): labelled realmodel because it needs the real vocab.
+// TokenStreamer (S5.7): needs a vocabulary, never the weights.
+//
+// REGISTERED TWICE (R1), like tests/model/test_grammar.cpp. The `gate` variant runs on
+// the generated miniature vocabulary and so runs on CI; the `realmodel` variant runs on
+// the real checkpoint. The fixture is if anything the harsher of the two here: its merges
+// are ASCII-only, so EVERY token of a multi-byte string is a byte fragment, where the real
+// checkpoint merely has 944 such tokens. naive_invalid_chunks() below asserts the input
+// actually exercises the hazard, so this is checked rather than assumed on both.
 //
 // Two properties, and the first one is not the obvious one. Concatenating raw per-token
 // bytes DOES eventually reassemble the text -- byte-level BPE splits a multi-byte
@@ -41,21 +48,27 @@ using lmp::model::TokenId;
 
 namespace {
 
-std::string qwen_dir() {
+std::string tokenizer_path() {
+#ifdef LMP_MINI_VOCAB_JSON
+    return LMP_MINI_VOCAB_JSON;
+#else
     const char* v = std::getenv("LMP_QWEN_DIR");
-    return v != nullptr
-               ? std::string(v)
-               : std::string(
-                     "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit");
+    return (v != nullptr
+                ? std::string(v)
+                : std::string("/Users/dev/.lmstudio/models/lmstudio-community/"
+                              "Qwen3.6-35B-A3B-MLX-4bit")) +
+           "/tokenizer.json";
+#endif
 }
 
 const QwenTokenizer& loaded_tokenizer() {
     static QwenTokenizer tok;
-    static LoadStatus st = tok.load(qwen_dir() + "/tokenizer.json", Family::Qwen3);
+    static LoadStatus st = tok.load(tokenizer_path(), Family::Qwen3);
     if (!st.ok) {
         static bool reported = false;
         if (!reported) {
-            lmp::test::record_failure(__FILE__, __LINE__, "tokenizer load: " + st.error);
+            lmp::test::record_failure(__FILE__, __LINE__,
+                                      "tokenizer load (" + tokenizer_path() + "): " + st.error);
             reported = true;
         }
     }

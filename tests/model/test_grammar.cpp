@@ -1,8 +1,14 @@
 // TurnGrammar over a synthetic tokenizer-free path is impossible -- the grammar reads
-// token bytes -- so these tests run against the REAL tokenizer.json when present and
-// are labelled realmodel. The structural machine (think/text phases, the per-turn call
-// cap) is
-// what they pin; ToolCallGuard's own 1000/1000 corpus lives in its source repo.
+// token bytes -- so these tests need a vocabulary. The structural machine (think/text
+// phases, the per-turn call cap) is what they pin; ToolCallGuard's own 1000/1000 corpus
+// lives in its source repo.
+//
+// THIS SOURCE IS REGISTERED TWICE (R1). The `gate` variant compiles with
+// LMP_MINI_VOCAB_JSON and runs on the generated miniature vocabulary -- no GPU, no 19 GB
+// -- so it runs on CI. The `realmodel` variant runs on the real checkpoint, which keeps
+// the actual merges under test. Only the second one used to exist, and that is exactly
+// how commit 4300a3c changed what closing a tool call means and left this file asserting
+// the old contract, red, for two days: the label hid it from every automated run.
 
 #include <cstdlib>
 #include <string>
@@ -16,16 +22,31 @@ using namespace lmp::model;
 
 namespace {
 
+std::string tokenizer_path() {
+#ifdef LMP_MINI_VOCAB_JSON
+    return LMP_MINI_VOCAB_JSON;
+#else
+    const char* v = std::getenv("LMP_QWEN_DIR");
+    return std::string(v != nullptr ? v
+                                    : "/Users/dev/.lmstudio/models/lmstudio-community/"
+                                      "Qwen3.6-35B-A3B-MLX-4bit") +
+           "/tokenizer.json";
+#endif
+}
+
 const QwenTokenizer& tok() {
     static QwenTokenizer t;
-    static LoadStatus st = t.load(
-        std::string(std::getenv("LMP_QWEN_DIR") != nullptr
-                        ? std::getenv("LMP_QWEN_DIR")
-                        : "/Users/dev/.lmstudio/models/lmstudio-community/"
-                          "Qwen3.6-35B-A3B-MLX-4bit") +
-            "/tokenizer.json",
-        Family::Qwen3);
-    (void)st;
+    static LoadStatus st = t.load(tokenizer_path(), Family::Qwen3);
+    // Reported rather than discarded: REQUIRE(loaded()) below would fail either way, but
+    // a bad fixture path and a bad vocabulary are very different problems.
+    if (!st.ok) {
+        static bool reported = false;
+        if (!reported) {
+            lmp::test::record_failure(__FILE__, __LINE__,
+                                      "tokenizer load (" + tokenizer_path() + "): " + st.error);
+            reported = true;
+        }
+    }
     return t;
 }
 
