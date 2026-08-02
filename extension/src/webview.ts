@@ -27,6 +27,8 @@
 //    reaching off the machine. Nothing here ever sets innerHTML from model output: every
 //    byte the model produced reaches the DOM as a text node.
 
+import { orbStyles, orbMarkup, orbScript } from "./orb";
+
 /** Font stack: the platform's own UI face first, so it reads native on macOS and does
  *  not fall back to something heavier elsewhere. */
 const FONT_STACK =
@@ -81,27 +83,13 @@ body {
   min-height: 16px;
 }
 
-/* --- the thinking indicator --------------------------------------------- */
-/* A conic ring that rotates while the model is generating, with a soft bloom behind
-   it. Present only while there is genuinely something happening -- an idle spinner
-   teaches people to ignore it. */
-#orb {
-  width: 14px; height: 14px; border-radius: 50%; flex: none;
-  background: conic-gradient(from 0deg, transparent 0deg, var(--accent) 120deg,
-              color-mix(in srgb, var(--accent) 40%, transparent) 240deg, transparent 360deg);
-  -webkit-mask: radial-gradient(circle, transparent 54%, #000 56%);
-  mask: radial-gradient(circle, transparent 54%, #000 56%);
-  animation: spin 1.1s linear infinite;
-  opacity: 0; transition: opacity .25s var(--ease);
-}
-#orb::after {
-  content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%;
-  background: var(--accent); filter: blur(7px); opacity: .35;
-  animation: breathe 2.2s ease-in-out infinite;
-}
-body.busy #orb { opacity: 1; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes breathe { 0%,100% { opacity:.18; transform:scale(.85);} 50% { opacity:.4; transform:scale(1.15);} }
+/* --- the activity orb ---------------------------------------------------- */
+/* A raymarched glass bead, in orb.ts. It replaced a 14px conic spinner: a spinner can
+   only say "something is happening", and the orb says WHICH thing -- hue is the state,
+   and the motion is sprung rather than looped, so a tool call reads differently from a
+   pause. Unlike the spinner it is present at rest too, dimmed; an object that is always
+   there and changes colour is not the same as an idle spinner nobody reads. */
+${orbStyles()}
 
 /* The label shimmers while busy -- the Gemini/Siri trick: a bright band swept across
    the text by animating a clipped gradient. */
@@ -115,8 +103,7 @@ body.busy #statusText {
 @keyframes sweep { 0% { background-position: 120% 0; } 100% { background-position: -20% 0; } }
 
 @media (prefers-reduced-motion: reduce) {
-  #orb, #orb::after, body.busy #statusText { animation: none; }
-  body.busy #statusText { -webkit-text-fill-color: var(--fg); }
+  body.busy #statusText { animation: none; -webkit-text-fill-color: var(--fg); }
 }
 
 /* --- checklist ----------------------------------------------------------- */
@@ -403,8 +390,13 @@ function markup(): string {
   return `
 <div id="head">
   <button id="gear" title="Settings">⚙</button>
-  <div id="mission"></div>
-  <div id="status"><span id="orb"></span><span id="statusText">Idle</span></div>
+  <div id="headRow">
+    ${orbMarkup()}
+    <div id="headText">
+      <div id="mission"></div>
+      <div id="status"><span id="statusText">Idle</span></div>
+    </div>
+  </div>
   <div id="drawer">
     <div class="set">
       <label>Mode</label>
@@ -842,6 +834,7 @@ class MarkdownStream {
 function script(): string {
   return `
 ${markdownStreamSource()}
+${orbScript()}
 
 const api = acquireVsCodeApi();
 const $ = (id) => document.getElementById(id);
@@ -989,13 +982,33 @@ function renderMd(ctx, events) {
 }
 
 // --- state ----------------------------------------------------------------
-function busy(on, label) {
+// The status line and the orb are set from the SAME call, so the word and the colour can
+// never disagree about what the run is doing. Everything the orb knows arrives here.
+function busy(on, label, state) {
   inFlight = on;
   document.body.classList.toggle('busy', on);
   $('statusText').textContent = label;
+  if (state && window.__orb) window.__orb.state(state);
   $('hint').textContent = on
     ? 'Your message reaches the run at the next turn boundary'
     : 'Your message continues the conversation';
+}
+
+// sidebar.ts posts 'idle' in the same tick as 'run_end'. Left alone, that overwrites the
+// terminal colour in the frame it started, and a run would end on the same grey it began
+// on -- so the ending is held on screen before the orb is allowed to go back to rest.
+let terminalUntil = 0;
+let idleTimer = 0;
+
+function finish(label, state) {
+  terminalUntil = Date.now() + 2400;
+  busy(false, label, state);
+}
+
+function goIdle() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => busy(false, 'Idle', 'IDLE'),
+                         Math.max(0, terminalUntil - Date.now()));
 }
 
 function add(el, cls) {
@@ -1082,7 +1095,7 @@ box.addEventListener('input', () => {
 box.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
 });
-busy(false, 'Idle');
+busy(false, 'Idle', 'IDLE');
 
 // --- settings drawer ------------------------------------------------------
 // Every control writes back to the editor's own configuration, so this drawer and the
@@ -1186,7 +1199,7 @@ window.addEventListener('message', (e) => {
     $('mission').textContent = payload.mission;
     feed.textContent = ''; $('plan').textContent = ''; $('perf').textContent = '';
     closeBubble();
-    busy(true, 'Thinking');
+    busy(true, 'Thinking', 'THINKING');
   }
 
   if (kind === 'said') {
@@ -1199,20 +1212,22 @@ window.addEventListener('message', (e) => {
     body.textContent = payload.text;
     d.append(who, body);
     add(d, 'user');
-    busy(true, payload.steering ? 'Steering at the next turn' : 'Thinking');
+    busy(true, payload.steering ? 'Steering at the next turn' : 'Thinking', 'THINKING');
   }
 
   if (kind === 'token') {
     if (payload.channel === 'thinking') {
       typeInto(openThought(), payload.text);
-      busy(true, 'Thinking');
+      busy(true, 'Thinking', 'THINKING');
+      if (window.__orb) window.__orb.impulse('token');
     } else {
       // Reasoning always precedes the answer within a turn, so the first answer token is
       // the signal that the thought is finished.
       closeThought();
       currentBubble();
       renderMd(mdCtx, mdCtx.stream.feed(payload.text));
-      busy(true, 'Writing');
+      busy(true, 'Writing', 'WRITING');
+      if (window.__orb) window.__orb.impulse('token');
     }
   }
 
@@ -1232,7 +1247,11 @@ window.addEventListener('message', (e) => {
     const pre = document.createElement('pre'); pre.textContent = payload.summary || '';
     d.append(s, pre);
     add(d, '');
-    busy(true, 'Thinking');
+    // The tool ROW is history; the orb is the live view of it. A call that failed or was
+    // refused is not the same event as one that worked, and the colour says which.
+    busy(true, 'Thinking',
+         payload.tool_status === 'ok' || !payload.tool_status ? 'TOOL' : 'FAILED');
+    if (window.__orb) window.__orb.impulse('tool');
   }
 
   if (kind === 'checklist') {
@@ -1278,6 +1297,10 @@ window.addEventListener('message', (e) => {
       d.append(u);
     }
     add(d, '');
+    // A pass that has never been shown capable of failing is not evidence, and the orb does
+    // not celebrate one: UNPROVEN gets the same amber the tool call got, not the green.
+    busy(true, payload.passed ? 'Verified' : 'Verification failed',
+         payload.passed ? (payload.falsifiable ? 'DONE' : 'TOOL') : 'FAILED');
   }
 
   if (kind === 'approval') {
@@ -1342,7 +1365,7 @@ window.addEventListener('message', (e) => {
       card.append(note);
     }
     add(card, '');
-    busy(true, 'Waiting for you');
+    busy(true, 'Waiting for you', 'WAITING');
   }
 
   if (kind === 'perf') {
@@ -1378,9 +1401,12 @@ window.addEventListener('message', (e) => {
     d.append(document.createTextNode(t));
     feed.append(d);
     feed.scrollTop = feed.scrollHeight;
+    // Green only for an ending that is actually complete. "Stopped" covers the wall clock,
+    // the iteration cap and a cancel, and none of those are a success (S14).
+    finish(label, payload.completed ? 'DONE' : 'FAILED');
   }
 
-  if (kind === 'idle') busy(false, 'Idle');
+  if (kind === 'idle') goIdle();
 });
 `;
 }
