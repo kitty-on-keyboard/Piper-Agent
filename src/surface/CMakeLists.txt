@@ -7,3 +7,15 @@ target_link_libraries(lmp_surface PRIVATE lmp_warnings lmp_assertions
 add_executable(lmp_sidecar sidecar.cpp)
 target_link_libraries(lmp_sidecar PRIVATE lmp_warnings lmp_assertions
   lmp_surface lmp_loop lmp_tools lmp_context lmp_model lmp_platform)
+
+# `cmake --build build --target vsix` produces extension/lm-pipe.vsix with THIS binary
+# inside it, verified by hash. Not part of `all`: packaging is a deliberate act, and a
+# packaging step nobody asked for is a slow build for everyone who is not shipping.
+add_custom_target(vsix
+  DEPENDS lmp_sidecar
+  COMMAND npm --prefix "${PROJECT_SOURCE_DIR}/extension" run compile
+  COMMAND npm --prefix "${PROJECT_SOURCE_DIR}/extension" run stage-sidecar
+  COMMAND npm --prefix "${PROJECT_SOURCE_DIR}/extension" run package
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/extension"
+  COMMENT "Packaging lm-pipe.vsix (sidecar staged and hash-verified)"
+  VERBATIM)

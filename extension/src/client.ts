@@ -16,6 +16,7 @@ import {
   TokenNotification,
   ChecklistNotification,
   ApprovalRequestNotification,
+  EditNotification,
   VerificationNotification,
   PerfNotification,
 } from "./protocol.generated";
@@ -26,6 +27,7 @@ export interface SidecarEvents {
   checklist: ChecklistNotification;
   verification: VerificationNotification;
   approval_request: ApprovalRequestNotification;
+  edit: EditNotification;
   perf: PerfNotification;
   run_end: RunEndNotification;
   exit: { code: number | null; stderr: string };
@@ -135,6 +137,12 @@ export class SidecarClient extends EventEmitter {
 
   approve(requestId: string, approved: boolean): Promise<unknown> {
     return this.request("lmp/approve", { request_id: requestId, approved });
+  }
+
+  /** The answer to an lmp/edit. The sidecar BLOCKS on this: `applied:false` carries the
+   *  reason and becomes a tool error the model can act on, rather than a silent no-op. */
+  editApplied(requestId: string, applied: boolean, error: string): Promise<unknown> {
+    return this.request("lmp/edit_applied", { request_id: requestId, applied, error });
   }
 
   /** Say something to the agent.

@@ -29,6 +29,7 @@ export interface RunSettings {
   auto_approve_exec: boolean;
   auto_approve_writes: boolean;
   require_approval: boolean;
+  applies_edits: boolean;
   system_prompt: string;
   allowed_commands: string;
   context_budget_tokens: number;
@@ -67,6 +68,15 @@ export interface CancelParams {
   run_id: string;
 }
 export interface CancelResult {
+  accepted: boolean;
+}
+
+export interface EditAppliedParams {
+  request_id: string;
+  applied: boolean;
+  error: string;
+}
+export interface EditAppliedResult {
   accepted: boolean;
 }
 
@@ -135,6 +145,7 @@ export interface ApprovalRequestNotification {
 }
 
 export interface EditNotification {
+  request_id: string;
   run_id: string;
   path: string;
   new_content: string;
@@ -151,11 +162,13 @@ export interface RunEndNotification {
   iterations: number;
   completed: boolean;
   unfinished_items: number;
+  self_declared: boolean;
 }
 
 export const METHODS = [
   "lmp/start",
   "lmp/cancel",
+  "lmp/edit_applied",
   "lmp/approve",
   "lmp/message",
   "lmp/shutdown",

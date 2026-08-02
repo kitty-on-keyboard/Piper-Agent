@@ -43,6 +43,7 @@
       { "_comment": "false makes EVERY command execution raise a card, whatever its risk score. true keeps the risk-routed behaviour, where only the 0.35-0.85 band escalates. Named for what the operator turns on -- 'run commands without asking me' -- rather than for the harness's internal routing.", "name": "auto_approve_exec", "type": "bool" },
       { "_comment": "false makes every workspace-mutating call raise a card. Writes had no HITL path at all before: mode policy decided whether they were allowed and nothing asked about any individual one.", "name": "auto_approve_writes", "type": "bool" },
       { "name": "require_approval", "type": "bool" },
+      { "_comment": "The client can apply workspace edits itself, via lmp/edit + lmp/edit_applied (S12.4). The extension sets it so writes go through VS Code's WorkspaceEdit API and undo works; agent_eval.py and any other headless client leave it false and the sidecar writes directly. Advertised rather than assumed -- guessing wrong either wedges an unattended run on a reply nobody will send, or writes behind the editor's back.", "name": "applies_edits", "type": "bool" },
       { "_comment": "Overrides the built-in persona. The editor keeps one per mode, so 'plan' can be told to think out loud and 'agent' to be terse. Empty means the built-in, which is the only reason this can be a plain string rather than a presence flag.", "name": "system_prompt", "type": "string" },
       { "_comment": "Commands the operator has already said yes to, newline-separated (the generator has no array type, and a newline is the one character a shell command cannot contain unescaped). An entry matches a command that equals it, or that starts with it followed by a space. A command containing shell chaining -- ; && || | ` $( > < & -- NEVER matches, because `pytest` on the allowlist must not authorise `pytest; rm -rf ~`. The irreversible-capability gate sits ABOVE this: nothing on this list can auto-approve a call that destroys data, writes outside the workspace, escalates privileges or rewrites history.", "name": "allowed_commands", "type": "string" },
       { "name": "context_budget_tokens", "type": "int" }
@@ -80,6 +81,17 @@
       "_comment": "MUST be deliverable while the model is generating (S4.3). The reader thread parses the method field of a COMPLETE message and sets the cancel token; no substring matching on transport bytes, ever.",
       "params": [{ "name": "run_id", "type": "string" }],
       "result": [{ "name": "accepted", "type": "bool" }]
+    },
+    "lmp/edit_applied": {
+      "_comment": "The editor's answer to lmp/edit. Applied through VS Code's WorkspaceEdit API so undo, dirty buffers and diff review all work (S12.4); `applied:false` carries the reason and becomes a tool error, so a refusal in the editor is a fact the model can act on rather than a silent no-op.",
+      "params": [
+        { "name": "request_id", "type": "string" },
+        { "name": "applied", "type": "bool" },
+        { "name": "error", "type": "string" }
+      ],
+      "result": [
+        { "name": "accepted", "type": "bool" }
+      ]
     },
     "lmp/approve": {
       "params": [
@@ -157,6 +169,7 @@
       { "name": "capabilities", "type": "CapabilityChips" }
     ],
     "lmp/edit": [
+      { "_comment": "Matched by the lmp/edit_applied reply, the same shape a card uses. The sidecar BLOCKS on it: the tool result has to say whether the bytes landed, and an unanswered edit that reported success would leave the model editing a file nothing wrote.", "name": "request_id", "type": "string" },
       { "name": "run_id", "type": "string" },
       { "name": "path", "type": "string" },
       { "name": "new_content", "type": "string" }
@@ -170,7 +183,8 @@
       { "name": "termination_reason", "type": "string" },
       { "name": "iterations", "type": "int" },
       { "name": "completed", "type": "bool" },
-      { "_comment": "Checklist items still open when the run ended. `completed` is an EVIDENTIAL verdict -- a recorded deliverable plus a falsifiable passing verification of the declared contract -- so it no longer waits on the model agreeing that it is done. This field reports the disagreement instead of hiding it: completed=true with unfinished_items>0 means the evidence says the mission is met and the model's own list says otherwise, and a human should look.", "name": "unfinished_items", "type": "int" }
+      { "_comment": "Checklist items still open when the run ended. `completed` is an EVIDENTIAL verdict -- a recorded deliverable plus a falsifiable passing verification of the declared contract -- so it no longer waits on the model agreeing that it is done. This field reports the disagreement instead of hiding it: completed=true with unfinished_items>0 means the evidence says the mission is met and the model's own list says otherwise, and a human should look.", "name": "unfinished_items", "type": "int" },
+      { "_comment": "True when `completed` rests on a contract the MODEL chose rather than one the operator set. Both were previously reported with the same word, and rename_across_files ended completed=yes verified=yes against a mission it had not met. Not a failure -- most runs have no operator contract -- but the UI must not present the two as the same claim.", "name": "self_declared", "type": "bool" }
     ]
   }
 }
