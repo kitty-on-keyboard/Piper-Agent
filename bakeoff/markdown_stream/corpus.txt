@@ -1,0 +1,37 @@
+Here is the fix.\n\n```cpp\nint main() { return 0; }\n```\n\nThat should do it.\n
+# Summary\n\nThe bug is in `parse_header`. Two things:\n\n- it reads past the end\n- it ignores the length\n\n## Fix\n\n```\npatch here\n```\n
+Use `std::mismatch` instead of the hand-rolled loop.\n
+1. First step\n2. Second step\n3. Third step\n
+- top\n  - nested\n    - deeper\n- back to top\n
+### Heading three\n\nBody text with `inline code` and more text.\n
+Plain prose with no markers at all, several sentences long.\n
+```python\ndef f(x):\n    return x * 2\n```\n
+Text before.\n\n```\n# not a heading\n- not a list\n`not inline code`\n```\n\nText after.\n
+``` \n
+`
+``
+```
+````\ncode with four-backtick fence\n````\n
+a ` b ` c ` d\n
+```\nunterminated and the answer continues forever\n
+Before the fence.\n```rust\nfn main() {}\n
+```js\n```\n
+text```inline fence mid-line```more\n
+`code`\n```\nblock\n```\n`code`\n
+#not a heading\n
+####### seven hashes is not a heading\n
+#\n
+**bold is out of scope** but must not be eaten\n
+-no space is not a list item\n
+\n\n\n
+
+Héllo wörld — em dash and accents.\n
+日本語のテキストです。\n\n```\nコード\n```\n
+Emoji: 🎉🚀 and `code with 🎨` after.\n
+- 项目一\n- 项目二\n
+# Überschrift\n\nTéxt with ünïcödé.\n
+The answer you must not lose.\n```\nnever closed
+Prose first.\n\n## Heading\n\n```python\nx = 1
+- item one\n- item two\n```
+Important content before an unterminated inline `
+Everything here matters ``
