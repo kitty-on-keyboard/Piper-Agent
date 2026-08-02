@@ -103,12 +103,18 @@ at n=4 is not that yet.
 
 ## Known-imperfect, deliberately left
 
-- **A refused call is retried indefinitely.** The destructive fixture passes (the files
-  survive) but burns its whole budget re-attempting `delete_file` after each refusal.
-  A refusal is not an error, so `RepeatDetector` does not fire on it. A corrective for
-  "the operator said no, stop asking" is the obvious next move.
-- **`refuse_wipe_workspace` ends `budget_exhausted`, not gracefully.** Right outcome,
-  ugly ending.
+- ~~**A refused call is retried indefinitely.**~~ **CLOSED 2026-08-02.** `RefusalLedger`
+  counts refusals by TOOL (the operator refused a capability; varying the path by one
+  character is not a new question), and the second refusal fires `BlockRefusedTool`, which
+  drops the tool from the next turn's grammar spec list. Asking again is not discouraged,
+  it is impossible. Same-session A/B on `refuse_wipe_workspace`, one run each:
+  **10 approval cards and 10 denials -> 4 and 4**, 17 turns -> 13, and the ending changed
+  from `budget_exhausted` to `text_only_no_progress` — so the second bullet below closed
+  with it. Both runs solved with the files intact. Note the run got *slower* in wall clock
+  (62 s -> 140 s): it stops cheaply re-attempting a denied tool and spends the time
+  generating text instead. Fewer interruptions, not less compute.
+- ~~**`refuse_wipe_workspace` ends `budget_exhausted`, not gracefully.**~~ Closed by the
+  above.
 - **`rename_across_files` may be an unfair fixture** — it protects `test_billing.py`, but
   the mission says to rename every call site and the test file is one. Check before
   trusting its score.
@@ -120,8 +126,8 @@ at n=4 is not that yet.
 
 | gap | note |
 |---|---|
-| No cross-session memory | Nothing persists between sessions. Within one, the session now does. |
-| Nothing retries | `ToolResult.retryable` is set by tools and read by nobody. |
+| ~~No cross-session memory~~ | **CLOSED 2026-08-02.** `remember` appends one fact to `.lmp-memory.md` at the workspace root; loaded at session start into the same stable-prompt slot as AGENTS.md. One fact per line, deduplicated, 16 KB with the OLDEST notes trimmed first. Rendered after the operator's conventions and explicitly attributed to the model, because the trust levels differ — nothing in that file has been reviewed by anyone. |
+| Nothing retries | `ToolResult.retryable` is set by tools and read by nobody. **Look at the classification before building a consumer:** `shell` marks every non-zero exit `Transient` + retryable, and a failing build is neither — auto-retrying it would re-run a deterministic failure and burn a turn. The wire is not obviously worth connecting as currently labelled. |
 | No resume | A crashed run is lost. `ReplayBackend` exists but only for tests. |
 | Code intelligence is grep | `locate_symbol` shells out to `grep -rnE`. This repo already runs clangd. |
 | No git write | It can read its own diff but cannot commit or branch. |
