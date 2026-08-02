@@ -18,6 +18,14 @@ export interface SamplingSettings {
   seed: number;
 }
 
+export interface McpServerSettings {
+  name: string;
+  command: string;
+  args: string[];
+  env: string[];
+  trusted: boolean;
+}
+
 export interface RunSettings {
   model_dir: string;
   workspace_root: string;
@@ -33,6 +41,7 @@ export interface RunSettings {
   system_prompt: string;
   allowed_commands: string;
   context_budget_tokens: number;
+  mcp_servers: McpServerSettings[];
 }
 
 export interface CapabilityChips {

@@ -128,9 +128,20 @@ class Registry {
                                      const std::vector<ToolParamValue>& params,
                                      int approved_tier);
 
-  private:
     using Handler =
         std::function<ToolResult(const std::vector<ToolParamValue>&, int approved_tier)>;
+
+    // Registers a tool whose implementation lives OUTSIDE this process -- today, an MCP
+    // server (src/tools/mcp_host.hpp). Public where declare() is private, and the
+    // asymmetry is the point: a native tool's behaviour is in this binary and reviewable,
+    // while this one's is a promise made by another process that Seatbelt does not cover.
+    // Callers are expected to have decided `decl.irreversible` accordingly.
+    //
+    // Refuses a name that is already registered, so a remote tool can never displace a
+    // native one even if the namespacing above it were wrong. Returns false if it did.
+    [[nodiscard]] bool declare_remote(ToolDecl decl, Handler handler);
+
+  private:
 
     void declare(ToolDecl decl, Handler handler);
 

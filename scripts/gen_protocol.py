@@ -29,22 +29,37 @@ def method_ident(method):
     return method.split("/", 1)[1]
 
 
+def cpp_base(t, structs):
+    if t in CPP_TYPES:
+        return CPP_TYPES[t]
+    if t in structs:
+        return t
+    return "std::string"  # enums cross the wire as strings
+
+
 def cpp_field(field, structs):
     t = field["type"]
+    # `repeated` exists because the alternative was worse. RunSettings.allowed_commands is
+    # newline-separated with a comment explaining that the generator has no array type --
+    # tolerable for shell commands, which cannot carry a raw newline. A LIST OF OBJECTS
+    # has no such separator, and encoding one as a hand-built JSON string would put a
+    # format on the wire that the schema does not describe, which is the exact drift this
+    # generator exists to prevent.
+    if field.get("repeated"):
+        return f"    std::vector<{cpp_base(t, structs)}> {field['name']};"
     if t in CPP_TYPES:
         return f"    {CPP_TYPES[t]} {field['name']}{CPP_DEFAULT[t]};"
     if t in structs:
         return f"    {t} {field['name']};"
-    return f"    std::string {field['name']};"  # enums cross the wire as strings
+    return f"    std::string {field['name']};"
 
 
 def ts_field(field, structs, enums):
     t = field["type"]
-    if t in TS_TYPES:
-        return f"  {field['name']}: {TS_TYPES[t]};"
-    if t in enums:
-        return f"  {field['name']}: {t};"
-    return f"  {field['name']}: {t};"
+    base = TS_TYPES.get(t, t)
+    if field.get("repeated"):
+        return f"  {field['name']}: {base}[];"
+    return f"  {field['name']}: {base};"
 
 
 def gen_cpp(schema):
@@ -58,6 +73,22 @@ void append_value(std::string& out, const std::string& v);
 inline void append_value(std::string& out, std::int64_t v) { out += std::to_string(v); }
 inline void append_value(std::string& out, double v) { out += std::to_string(v); }
 inline void append_value(std::string& out, bool v) { out += v ? "true" : "false"; }
+
+// Repeated fields. The element overload is found by ADL at instantiation, so this may
+// sit above the struct definitions it serializes.
+template <typename T>
+inline void append_value(std::string& out, const std::vector<T>& v) {
+    out += "[";
+    bool first = true;
+    for (const T& item : v) {
+        if (!first) {
+            out += ",";
+        }
+        first = false;
+        append_value(out, item);
+    }
+    out += "]";
+}
 """)
 
     for name, values in enums.items():

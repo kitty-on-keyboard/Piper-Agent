@@ -224,6 +224,49 @@
           },
           "default": [],
           "description": "Commands you have already approved. The 'Always allow' button on an approval card adds to this. An entry matches a command that equals it or starts with it followed by a space; a command containing shell chaining (; && || | ` $( > <) never matches, so allowing 'pytest' cannot authorise 'pytest; rm -rf ~'. Irreversible operations (destroying data, writing outside the workspace, escalating privileges, rewriting history) always ask, whatever is on this list."
+        },
+        "lmPipe.mcpServers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Namespace for this server's tools. They appear to the model as mcp__<name>__<tool>, so a remote 'read_file' cannot shadow the built-in one."
+              },
+              "command": {
+                "type": "string",
+                "description": "Executable to spawn, resolved via PATH. The server speaks MCP over stdio."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "Arguments, excluding the program name."
+              },
+              "env": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "Extra environment for the server process, as KEY=VALUE entries. Added to the ones this process already has."
+              },
+              "trusted": {
+                "type": "boolean",
+                "default": false,
+                "description": "You vouch for this server. An MCP tool runs inside the SERVER's process, which the sandbox does not cover -- so by default every call to one raises an approval card. Turn this on only for a server whose code you would run yourself. The server's own tool annotations never decide this: they are claims made by the thing being contained."
+              }
+            }
+          },
+          "default": [],
+          "description": "MCP servers to connect at the start of each run. Their tools are registered alongside the built-in ones and constrained by the same grammar. A server that fails to start, refuses the handshake or hangs leaves its tools absent and the run continues."
         }
       }
     }

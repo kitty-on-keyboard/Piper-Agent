@@ -16,8 +16,10 @@
 #include "src/model/mlx_backend.hpp"
 #include "src/platform/event_log.hpp"
 #include "src/platform/fs.hpp"
+#include "src/surface/mcp_settings.hpp"
 #include "src/surface/protocol_generated.hpp"
 #include "src/surface/transport.hpp"
+#include "src/tools/mcp_host.hpp"
 
 namespace {
 
@@ -521,6 +523,15 @@ struct Session {
     std::unique_ptr<model::QwenTokenizer> tok;
     std::unique_ptr<model::MlxBackend> backend;
     std::unique_ptr<tools::Registry> registry;
+    // The handlers this installs into the registry share ownership of their clients
+    // (McpHost::Connection), so neither destruction order here is a use-after-free --
+    // that WAS true of an earlier raw-pointer version and ASan caught it. Kept adjacent
+    // to the registry because they are one unit: the registry holds the tools, this holds
+    // the processes behind them.
+    std::unique_ptr<tools::McpHost> mcp;
+    // What the current registry's remote tools were built from. The Registry has no
+    // "unregister", so a changed server list means a new Registry, not a patched one.
+    std::string mcp_signature;
     std::unique_ptr<context::ContextStore> ctx;
     loop::AgentConfig config;
     // Whether this client can answer lmp/edit. Advertised at lmp/start rather than
@@ -590,6 +601,40 @@ bool run_loop(const std::string& run_id, Session& session,
     return run_inbox.shutdown_requested();
 }
 
+// Builds the tool registry for this run, and connects the configured MCP servers into it.
+//
+// Rebuilt rather than patched when the server list changes: the Registry has no
+// unregister, so the alternative is remote tools from a previous run outliving the
+// settings that authorised them.
+void ensure_registry(Session& session, const std::string& workspace,
+                     const std::string& message, platform::EventLogWriter& log,
+                     const platform::Clock& clock) {
+    std::string mcp_signature;
+    const std::vector<tools::McpServerConfig> servers =
+        surface::parse_mcp_servers(message, mcp_signature);
+    if (session.registry != nullptr && session.workspace == workspace &&
+        session.mcp_signature == mcp_signature) {
+        return;
+    }
+
+    tools::WorkspaceContext wctx;
+    wctx.root = workspace;
+    wctx.max_read_bytes = 4U << 20;
+    wctx.max_model_read_bytes = 24U << 10;
+    wctx.max_result_bytes = 8192;
+    wctx.spool_dir = workspace + "/.lmp_spool";
+    wctx.shell_wall_clock_seconds = 300;
+    // Registry first, then host: the old registry's handlers are what keep the old
+    // clients alive, so releasing it first lets those connections go at the same time
+    // rather than one reconfiguration later.
+    session.registry = std::make_unique<tools::Registry>(std::move(wctx));
+    session.mcp = std::make_unique<tools::McpHost>();
+    session.workspace = workspace;
+
+    surface::connect_mcp_servers(*session.mcp, servers, *session.registry, log, clock);
+    session.mcp_signature = mcp_signature;
+}
+
 // A fresh mission. Reuses the loaded weights when the model has not changed -- the
 // tokenizer and the checkpoint are the expensive part and neither depends on the mission
 // -- but the context store is rebuilt, because `lmp/start` MEANS start over. Continuing a
@@ -634,17 +679,7 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
         session.model_dir = model_dir;
     }
 
-    if (session.registry == nullptr || session.workspace != workspace) {
-        tools::WorkspaceContext wctx;
-        wctx.root = workspace;
-        wctx.max_read_bytes = 4U << 20;
-        wctx.max_model_read_bytes = 24U << 10;
-        wctx.max_result_bytes = 8192;
-        wctx.spool_dir = workspace + "/.lmp_spool";
-        wctx.shell_wall_clock_seconds = 300;
-        session.registry = std::make_unique<tools::Registry>(std::move(wctx));
-        session.workspace = workspace;
-    }
+    ensure_registry(session, workspace, message, log, clock);
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
     // A little above the widest single result the tool layer can produce, so the door

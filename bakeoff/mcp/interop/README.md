@@ -24,3 +24,18 @@ resources, prompts, completion, ping, logging, error codes.
 Last run 2026-08-02 against sdk 1.30.0, server-everything 2026.7.4,
 server-filesystem 0.2.0, server-memory 0.6.3: 18/18 and clean both ways.
 See docs/MCP.md.
+
+**Our HOST -> official servers.** M1: the same servers seen as agent tools, through the
+Registry rather than the raw client, so the namespacing, the schema conversion and the
+approval routing are all in the path.
+
+    cmake --build build --target mcp_host_probe
+    ./build/src/tools/mcp_host_probe -- node node_modules/@modelcontextprotocol/server-filesystem/dist/index.js /tmp
+    ./build/src/tools/mcp_host_probe -- node node_modules/@modelcontextprotocol/server-everything/dist/index.js
+
+Run 2026-08-02: server-filesystem registered 14 tools and server-everything 13, none
+rejected, every schema converted. server-filesystem has its own `read_file`, which
+registered as `mcp__probe__read_file` and did NOT shadow the native one -- the collision
+this naming exists for, against a real server that actually has it. A trusted call
+round-tripped (`read_text_file` -> file contents) and a server-side policy denial came
+back as a typed ToolError rather than a refusal or a hang.
