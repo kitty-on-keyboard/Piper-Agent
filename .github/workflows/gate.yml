@@ -32,6 +32,19 @@ jobs:
           echo "logs=$logs holdout=$holdout bytes=$bytes"
           test "$logs" = "25" && test "$holdout" = "7" && test "$bytes" = "971544"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Extension dependencies
+        # test_extension_typecheck registers only when extension/node_modules exists
+        # (tests/gate/CMakeLists.txt), so WITHOUT this the gate CI runs is a different set
+        # from the one the manifest pins -- 25 selected against 26 recorded -- and the TS
+        # half of a protocol change goes unchecked. That check exists precisely so "a
+        # protocol change that breaks the TS side must fail here, not in someone's editor
+        # three days later", and it had never once run on CI.
+        run: npm ci --prefix extension
+
       - name: Configure
         run: cmake --preset dev
 
@@ -51,6 +64,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Same reason as the gate job: without node_modules the pinned manifest and the
+      # selected set disagree, and test_gate_manifest fails by design.
+      - run: npm ci --prefix extension
+
       - run: cmake --preset asan
       - run: cmake --build --preset asan -j3
       - run: ctest --preset gate-asan
