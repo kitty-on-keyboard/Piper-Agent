@@ -9,3 +9,9 @@ lmp_add_test(test_mcp_settings SOURCES test_mcp_settings.cpp LABELS gate LINK lm
 # has a state, a refusal and an unload -- and the half-loaded session is the shape worth
 # a test, because it fails by generating fluent nonsense rather than by stopping.
 lmp_add_test(test_session SOURCES test_session.cpp LABELS gate LINK lmp_surface)
+
+# The context/pcc adapter, and specifically the run where it cannot open a database. The
+# failure is invisible at the time and only matters twenty turns later, when a detail the
+# trim dropped is wanted back -- so the reason it failed has to survive the moment.
+lmp_add_test(test_context_journal SOURCES test_context_journal.cpp LABELS gate
+             LINK lmp_surface)

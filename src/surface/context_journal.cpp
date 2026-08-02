@@ -1,6 +1,5 @@
 #include "src/surface/context_journal.hpp"
 
-#include <cstdio>
 #include <utility>
 #include <vector>
 
@@ -33,25 +32,24 @@ std::string turn_body(const context::TurnRecord& turn) {
 
 } // namespace
 
-std::unique_ptr<ContextJournal> ContextJournal::open(const std::string& workspace_root,
-                                                     const std::string& session_id,
-                                                     context::ContextStore& ctx) {
-    std::unique_ptr<ContextJournal> journal;
+ContextJournal::Result ContextJournal::open(const std::string& workspace_root,
+                                            const std::string& session_id,
+                                            context::ContextStore& ctx) {
+    Result out;
     try {
         // Not make_unique: the constructor is private, deliberately, so the only way to
         // get one is through the path that also attaches the sink.
-        journal.reset(new ContextJournal(workspace_root + "/" + kContextDbName, session_id));
+        out.journal.reset(
+            new ContextJournal(workspace_root + "/" + kContextDbName, session_id));
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "lmp: context journal unavailable (%s); this run's "
-                             "compacted turns will not be recoverable\n",
-                     e.what());
-        return nullptr;
+        out.error = e.what();
+        return out;
     }
 
     // Captures the raw store, not the unique_ptr: the journal owns the store and outlives
     // the ContextStore it is attached to, because the session destroys the context first.
-    pcc::Store* store = &journal->store_;
-    const std::string session = journal->session_;
+    pcc::Store* store = &out.journal->store_;
+    const std::string session = out.journal->session_;
     ctx.set_compaction_sink(
         [store, session](const std::vector<context::TurnRecord>& dropped, std::size_t) {
             for (const context::TurnRecord& turn : dropped) {
@@ -72,7 +70,7 @@ std::unique_ptr<ContextJournal> ContextJournal::open(const std::string& workspac
                 }
             }
         });
-    return journal;
+    return out;
 }
 
 } // namespace lmp::surface
