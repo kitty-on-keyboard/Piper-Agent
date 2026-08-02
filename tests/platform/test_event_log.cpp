@@ -253,3 +253,44 @@ TEST(appending_to_a_closed_writer_is_a_no_op_not_a_crash) {
     CHECK_EQ(w.events_written(), std::uint64_t{0});
     CHECK(!w.is_open());
 }
+
+// --- where the log goes -----------------------------------------------------
+//
+// The sidecar used to pass the bare relative path "lmp_events.jsonl", which resolves
+// against the CWD of whoever spawned it. From a terminal that is the repo, which is why
+// it looked correct for months. From an editor extension it is whatever the host process
+// inherited, and a packaged Antigravity build hands its children `/` -- so the sidecar
+// died on the first line of main() with `open failed: Read-only file system`, and the
+// only thing the surface could say was `sidecar exited (code 1)`.
+//
+// Nothing tested it because the old value was a literal, and a literal has no behaviour
+// to test. These pin the behaviour it has now.
+
+TEST(the_log_path_does_not_depend_on_the_working_directory) {
+    // The property the bug violated: with a normal environment, the answer is absolute.
+    // A relative path here means the launcher's CWD decides whether the sidecar lives.
+    const std::string p = default_event_log_path(nullptr, "/Users/someone");
+    CHECK(!p.empty());
+    CHECK(p.front() == '/');
+    CHECK(p == "/Users/someone/Library/Logs/LM_Pipe/events.jsonl");
+}
+
+TEST(an_explicit_log_path_wins_over_the_default) {
+    // How a harness pins one run's trace to a file it chose.
+    CHECK_EQ(default_event_log_path("/tmp/pinned.jsonl", "/Users/someone"),
+             std::string("/tmp/pinned.jsonl"));
+}
+
+TEST(an_empty_env_var_is_not_an_explicit_path) {
+    // getenv returns "" for `LMP_EVENT_LOG=` in the environment. Treating that as a
+    // request to log to the empty string would refuse to start for an unstateable reason.
+    CHECK_EQ(default_event_log_path("", "/Users/someone"),
+             std::string("/Users/someone/Library/Logs/LM_Pipe/events.jsonl"));
+}
+
+TEST(no_home_falls_back_rather_than_refusing_to_start) {
+    // A broken environment, not a supported one -- but dying here would trade a bad
+    // default for no sidecar at all, so it lands where it always used to.
+    CHECK_EQ(default_event_log_path(nullptr, nullptr), std::string("lmp_events.jsonl"));
+    CHECK_EQ(default_event_log_path(nullptr, ""), std::string("lmp_events.jsonl"));
+}
