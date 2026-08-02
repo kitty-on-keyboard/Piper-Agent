@@ -6,6 +6,9 @@
 
 add_subdirectory(platform)
 add_subdirectory(model)
+# mcp is off to the side of the six layers on purpose: it links nothing from LM_Pipe, so
+# it has no layer to violate and stays liftable into its own repo.
+add_subdirectory(mcp)
 add_subdirectory(tools)
 add_subdirectory(context)
 add_subdirectory(loop)
