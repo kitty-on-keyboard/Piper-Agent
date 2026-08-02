@@ -34,16 +34,28 @@ Real-model tests carry the `realmodel` label, are excluded from the gate, and **
 run in parallel** — concurrent large model loads exhaust unified memory and take the
 machine down. `ctest --preset realmodel` pins `jobs: 1` for that reason.
 
-## Ratchets
+## Gates
 
 ```bash
 ./scripts/run_ratchets.py --root .              # the gates
 ./scripts/run_ratchets.py --root . --self-test  # prove each one can go red
 ```
 
-Six gates, configured in [scripts/ratchets.json](scripts/ratchets.json): file/function/
-nesting size, layer include direction, dead code, and three that are **dormant** until the
-phase that gives them subjects (protocol §4.4, tool honesty §6.3, prose correctives §9.2).
+Five gates, configured in [scripts/ratchets.json](scripts/ratchets.json): layer include
+direction, dead code, protocol drift (§4.4), tool honesty (§6.3), prose correctives (§9.2).
+
+Every one checks a **property** — the dependency graph points one way, a declared symbol
+is used, both sides of the protocol come from one schema, a tool description names tools
+that exist, a corrective changes state rather than composing a sentence. A gate here has
+to be a thing that is true or false of the code, whose false case a reviewer would call a
+defect on its own.
+
+There was a sixth that counted lines — 800 per file, 80 per function, nesting 3. It was
+removed on 2026-08-02 and **is not coming back in any form**. What it produced was code
+shaped to satisfy it: an API that swallowed its own error message to buy back a line,
+files split on length instead of responsibility, and a sidecar sitting at exactly 800/800.
+Good design is enforced by review; a budget only moves the mess around. If a file is
+badly organised, say so about its organisation.
 
 A dormant gate does not report green. It reports `DORMANT`, and it **fails** the moment it
 finds subjects — so the day a tool registry lands, the tool-honesty gate stops being

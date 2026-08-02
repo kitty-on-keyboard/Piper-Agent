@@ -1,5 +1,5 @@
-// MoE subcommands of the attribution driver (S19.3). Split from diag_main.cpp for the
-// per-file line ratchet.
+// MoE subcommands of the attribution driver (S19.3). Separate from diag_main.cpp because
+// these two carry the warning below and nothing else in the driver does.
 //
 // A standing warning about the first two. `blocks` and `moe` are ISOLATION benchmarks:
 // they call one block repeatedly on a fixed input. That is not what a decode step does,

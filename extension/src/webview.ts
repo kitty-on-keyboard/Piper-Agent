@@ -106,6 +106,34 @@ body.busy #statusText {
   body.busy #statusText { animation: none; -webkit-text-fill-color: var(--fg); }
 }
 
+/* --- the model bar -------------------------------------------------------- */
+/* WHY THIS IS ALWAYS VISIBLE. The sidecar holds ~19 GB of weights or it holds nothing,
+   and until this existed there was no way to tell which from the outside -- so "no model
+   is loaded" and "the model is thinking" looked identical: a status line, and no output.
+   Loading is now an act with a button, a state and a duration, and all three are here. */
+#modelBar {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--dim); min-width: 0;
+}
+#modelName {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--vscode-editor-font-family); font-size: 11px;
+  direction: rtl; text-align: left; /* a long path elides at the FRONT: the checkpoint
+                                       name is the end of it, and the end is the part
+                                       that tells you which model this is */
+}
+#modelBar button {
+  flex: none; padding: 3px 9px; font-size: 11px; font-weight: 500;
+  background: var(--surface-hi); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 999px;
+}
+#modelBar button:disabled { opacity: .45; cursor: default; }
+#modelBar .dot.loading { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+#modelBar .dot.unloaded { background: var(--faint); }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { #modelBar .dot.loading { animation: none; } }
+
 /* --- checklist ----------------------------------------------------------- */
 #plan { padding: 0 var(--pad); }
 #plan:empty { display: none; }
@@ -290,6 +318,23 @@ button.ghost {
   border: 1px solid var(--line); flex: 1;
 }
 
+/* --- things that went wrong on THIS side ---------------------------------- */
+/* A sidecar that will not start, a checkpoint that will not load, a request that could
+   not be sent. All of these used to be discarded promises: the view simply stayed on
+   "Thinking", which is indistinguishable from working and is the reason the extension
+   looked dead rather than misconfigured. They belong in the feed, in sequence with
+   everything else, because WHEN a failure happened is most of what it means. */
+.msg.error {
+  border: 1px solid color-mix(in srgb, var(--fail) 45%, var(--line));
+  background: color-mix(in srgb, var(--fail) 8%, transparent);
+  border-radius: var(--r); padding: 9px 11px; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.msg.error .who {
+  font-size: 10px; font-weight: 590; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--fail); margin-bottom: 3px;
+}
+
 .ended {
   text-align: center; font-size: 11px; color: var(--dim); padding: 10px 0 2px;
   border-top: 1px solid var(--line); margin-top: 14px;
@@ -396,6 +441,12 @@ function markup(): string {
       <div id="mission"></div>
       <div id="status"><span id="statusText">Idle</span></div>
     </div>
+  </div>
+  <div id="modelBar">
+    <span id="modelDot" class="dot unloaded"></span>
+    <span id="modelName">No model</span>
+    <button id="modelAction">Load</button>
+    <button id="modelPick" title="Choose a different model directory">Change</button>
   </div>
   <div id="drawer">
     <div class="set">
@@ -1011,8 +1062,17 @@ function goIdle() {
                          Math.max(0, terminalUntil - Date.now()));
 }
 
+// ADDS classes; it used to assign them.
+//
+// Assigning el.className overwrote whatever the caller had already set, and four
+// callers set one before calling: the reasoning disclosure (.thought), tool rows (.tool),
+// verification rows (.verify) and approval cards (.card). Every one of them reached the
+// feed as a bare .msg, so none of that CSS had ever applied to anything -- the thought
+// disclosure had no marker and no body panel, and a tool row had no border. The styles
+// were written, reviewed and shipped, and were dead on arrival at this line.
 function add(el, cls) {
-  el.className = 'msg ' + (cls || '');
+  el.classList.add('msg');
+  if (cls) el.classList.add(cls);
   feed.append(el);
   feed.scrollTop = feed.scrollHeight;
   return el;
@@ -1056,11 +1116,29 @@ function currentBubble() {
 // Reasoning gets ONE disclosure per turn, appended to, for the same reason.
 let thought = null;         // the <details> body currently being streamed into
 let thoughtSummary = null;
+let thoughtDetails = null;
+let thoughtStarted = 0;
 
+// OPEN WHILE IT IS HAPPENING, collapsed once it is history.
+//
+// Reasoning that only ever appeared behind a shut disclosure was, from the outside, no
+// different from a model that had produced nothing -- the user had to already believe it
+// was working to go and check. Watching the tokens arrive is the evidence. Afterwards it
+// is a transcript of a decision already made, which is worth keeping and not worth the
+// vertical space, so it folds itself away and says how long it took.
 function closeThought() {
-  if (thoughtSummary) thoughtSummary.textContent = 'Thought for a moment';
+  if (thoughtSummary) {
+    const secs = (Date.now() - thoughtStarted) / 1000;
+    thoughtSummary.textContent =
+      'Thought for ' + (secs < 1 ? 'a moment' : secs.toFixed(secs < 10 ? 1 : 0) + 's');
+  }
+  // The user's own click wins. Someone who opened a finished thought to read it does not
+  // want the next answer token to shut it in their face, and someone who collapsed a live
+  // one has said they are not interested.
+  if (thoughtDetails && !thoughtDetails.dataset.touched) thoughtDetails.open = false;
   thought = null;
   thoughtSummary = null;
+  thoughtDetails = null;
 }
 
 function openThought() {
@@ -1068,13 +1146,21 @@ function openThought() {
   closeBubble();  // before the fields below are set: closeBubble() clears them
   const d = document.createElement('details');
   d.className = 'thought';
+  d.open = true;
   thoughtSummary = document.createElement('summary');
+  // The CLICK, not the toggle event. <details> fires toggle asynchronously, so the one
+  // queued by setting open above lands after any listener attached here and marked
+  // every disclosure as touched the instant it was created -- which meant none of them
+  // ever auto-collapsed. A click on the summary is the only way a human changes this.
+  thoughtSummary.addEventListener('click', () => { d.dataset.touched = '1'; });
   thoughtSummary.textContent = 'Thinking…';
   const b = document.createElement('div');
   b.className = 'body';
   d.append(thoughtSummary, b);
   add(d, '');
   thought = b;
+  thoughtDetails = d;
+  thoughtStarted = Date.now();
   return b;
 }
 
@@ -1088,6 +1174,38 @@ const submit = () => {
   box.style.height = 'auto';
 };
 $('send').onclick = submit;
+
+// --- the model bar --------------------------------------------------------
+// Four states, one button, and the button says what pressing it does rather than what
+// the state is -- the dot and the name already say that.
+const MODEL_ACTION = {
+  unloaded: 'Load', loading: 'Loading…', ready: 'Unload', failed: 'Retry',
+};
+let modelState = 'unloaded';
+/** Whether the status line currently belongs to a load, and must be handed back. */
+let loadingModel = false;
+
+function paintModel(m) {
+  modelState = m.state;
+  $('modelDot').className = 'dot ' + (
+    m.state === 'ready' ? 'ok' : m.state === 'failed' ? 'failed' : m.state);
+  const name = m.model_dir ? m.model_dir.split('/').filter(Boolean).pop() : '';
+  $('modelName').textContent =
+    m.state === 'ready' ? name + (m.elapsed_ms > 0 ? ' · loaded in ' + (m.elapsed_ms / 1000).toFixed(1) + 's' : '')
+    : m.state === 'loading' ? 'Loading ' + name + '…'
+    : m.state === 'failed' ? 'Failed: ' + name
+    : 'No model loaded';
+  $('modelName').title = m.model_dir || '';
+  const act = $('modelAction');
+  act.textContent = MODEL_ACTION[m.state] || 'Load';
+  act.disabled = m.state === 'loading';
+}
+
+$('modelAction').onclick = () => {
+  if (modelState === 'loading') return;
+  api.postMessage({ kind: modelState === 'ready' ? 'unload_model' : 'load_model' });
+};
+$('modelPick').onclick = () => api.postMessage({ kind: 'pick_model' });
 box.addEventListener('input', () => {
   box.style.height = 'auto';
   box.style.height = Math.min(box.scrollHeight, 140) + 'px';
@@ -1195,9 +1313,43 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'settings') { settings = payload; paint(); }
 
+  if (kind === 'model') {
+    paintModel(payload);
+    // A load owns the sidecar's only thread, so nothing else can be happening while one
+    // runs -- which is both why "Loading the model" is safe to put in the status line and
+    // why a run can never be in flight underneath it. Saying it is the difference between
+    // a wait with a reason and the 'Thinking' that used to sit there over a process
+    // holding no weights at all.
+    //
+    // loadingModel is what hands the line back. Without it the status kept whichever
+    // word the LOAD had put there once the load was over -- "Loading the model", with
+    // the model long since loaded. Exactly the stale-status bug this whole change is
+    // about, reintroduced one layer up.
+    if (payload.state === 'loading') { loadingModel = true; busy(true, 'Loading the model', 'THINKING'); }
+    else if (payload.state === 'failed') { loadingModel = false; finish('Model failed to load', 'FAILED'); }
+    else if (loadingModel) { loadingModel = false; busy(false, 'Idle', 'IDLE'); }
+  }
+
+  if (kind === 'error') {
+    closeBubble();
+    const d = document.createElement('div');
+    const who = document.createElement('div');
+    who.className = 'who';
+    who.textContent = 'LM_Pipe';
+    const body = document.createElement('div');
+    body.textContent = payload.text;
+    d.append(who, body);
+    add(d, 'error');
+  }
+
   if (kind === 'run_start') {
     $('mission').textContent = payload.mission;
-    feed.textContent = ''; $('plan').textContent = ''; $('perf').textContent = '';
+    // Only a DELIBERATE start over clears the feed. When the mission came from the
+    // composer the user's message is already on screen, and wiping it to announce the
+    // run it started would delete the thing they just typed.
+    if (payload.reset) {
+      feed.textContent = ''; $('plan').textContent = ''; $('perf').textContent = '';
+    }
     closeBubble();
     busy(true, 'Thinking', 'THINKING');
   }

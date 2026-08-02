@@ -24,7 +24,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
+#include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/model/chat_template.hpp"
@@ -231,6 +233,22 @@ class ContextStore {
     // --- T3 compacted -------------------------------------------------------
     [[nodiscard]] std::size_t compaction_count() const noexcept { return compactions_; }
 
+    // Called with the turns compact_oldest() is about to erase, BEFORE it erases them.
+    //
+    // Compaction has always been lossy: the span keeps one anchor line per turn and the
+    // rest is gone. The summary even prints the event range it was made from -- a
+    // provenance pointer with nothing on the other end. This is the other end. The
+    // sidecar wires it to src/pcc, and the trim stops being destructive: the prompt keeps
+    // the summary, the full text stays one query away.
+    //
+    // A SINK rather than a store reference, for two reasons. render() stays pure and
+    // diffable, which is the property the whole prompt-purity argument rests on; and this
+    // layer keeps knowing nothing about databases, so a ContextStore in a unit test needs
+    // no fixture. Unset, behaviour is exactly what it was.
+    using CompactionSink =
+        std::function<void(const std::vector<TurnRecord>& dropped, std::size_t span_index)>;
+    void set_compaction_sink(CompactionSink sink) { compaction_sink_ = std::move(sink); }
+
     // Moves the oldest `keep_recent`-excess turns into a summarized span. Returns the
     // number of turns compacted. The summary keeps every observation's ANCHOR (tool
     // name + whether it errored + the first line of what it observed), because the
@@ -274,6 +292,7 @@ class ContextStore {
     std::vector<std::string> deliverables_;
     std::vector<TurnRecord> recent_;
     std::vector<std::string> spans_;
+    CompactionSink compaction_sink_;
     std::size_t compactions_ = 0;
     // Monotonic position in the conversation. Never reset -- compaction moves turns into
     // spans but must not renumber the timeline, or evidence would appear to move.

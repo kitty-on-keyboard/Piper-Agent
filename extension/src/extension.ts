@@ -1,14 +1,15 @@
 // Extension lifecycle (spec S12.1, S12.3, S12.4).
 //
-// Deliberately small. v1's extension.ts was 2,526 lines and 60% unreviewed machine
-// output; the size ratchet caps every file here at 800, and the modules are split by
-// responsibility: this one owns lifecycle and commands, client.ts owns the protocol,
-// sidebar.ts owns the view.
+// Split by responsibility, which is the only reason worth splitting on: this owns
+// lifecycle and commands, client.ts owns the protocol, sidebar.ts owns the view, and
+// webview.ts owns what the view looks like. v1's extension.ts was 2,526 lines and 60%
+// unreviewed machine output -- the problem there was the unreviewed part, and four
+// files of 600 unreviewed lines would have been the same product.
 
 import * as vscode from "vscode";
 import * as path from "path";
 import { SidecarClient } from "./client";
-import { SidebarProvider } from "./sidebar";
+import { ExtensionHost, SidebarProvider } from "./sidebar";
 import { McpServerSettings, RunSettings } from "./protocol.generated";
 
 let client: SidecarClient | undefined;
@@ -90,11 +91,55 @@ function validate(settings: RunSettings): string[] {
   return errors;
 }
 
+/** The once-per-window unsandboxed confirmation.
+ *
+ *  T3 drops the filesystem jail and the egress denial. It is a legitimate choice on your
+ *  own machine and it is not the default, so it is confirmed once per session rather than
+ *  nagged about or quietly honoured. Declining downgrades the run to the sandbox rather
+ *  than refusing it; dismissing the dialog cancels. */
+async function confirmContainment(settings: RunSettings): Promise<boolean> {
+  if (settings.sandbox_tier !== 3 || unsandboxedAcknowledged) return true;
+  const choice = await vscode.window.showWarningMessage(
+    "LM_Pipe is set to run commands UNSANDBOXED (tier 3). The agent's shell will " +
+      "have your permissions: no filesystem jail, no egress denial. Wall-clock, " +
+      "memory and output limits still apply.",
+    { modal: true },
+    "Run unsandboxed",
+    "Use the sandbox instead"
+  );
+  if (choice === undefined) return false;
+  if (choice === "Use the sandbox instead") {
+    settings.sandbox_tier = 1;
+  } else {
+    unsandboxedAcknowledged = true;
+  }
+  return true;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("LM_Pipe");
   client = new SidecarClient();
 
-  const sidebar = new SidebarProvider(context.extensionUri, client);
+  // The PROCESS, not the model. Spawning is cheap and holds nothing, so it happens
+  // whenever the view needs it; the ~19 GB is a separate act the operator asks for.
+  const ensureSidecar = (): string => {
+    if (client?.running) return "";
+    try {
+      client?.start(context.asAbsolutePath(path.join("bin", "lmp_sidecar")));
+      return "";
+    } catch (err) {
+      return `Cannot start the LM_Pipe sidecar: ${String(err)}`;
+    }
+  };
+
+  const host: ExtensionHost = {
+    ensureSidecar,
+    settings: settingsFromConfig,
+    problems: validate,
+    confirmContainment,
+  };
+
+  const sidebar = new SidebarProvider(context.extensionUri, client, host);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar),
     sidebar
@@ -117,50 +162,17 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   context.subscriptions.push(
+    // A deliberate start over: a new mission and a clean transcript. The sidebar's
+    // composer reaches the same code by a shorter road -- the first thing you type IS
+    // the mission -- so this exists for the palette and for a fresh feed, not because
+    // starting a run requires a dialog.
     vscode.commands.registerCommand("lmPipe.start", async () => {
-      const settings = settingsFromConfig();
-      const errors = validate(settings);
-      if (errors.length > 0) {
-        void vscode.window.showErrorMessage(`LM_Pipe settings are invalid:\n${errors.join("\n")}`);
-        return;
-      }
-      // T3 drops the filesystem jail and the egress denial. It is a legitimate choice on
-      // your own machine and it is not the default, so it is confirmed once per session
-      // rather than nagged about or quietly honoured.
-      if (settings.sandbox_tier === 3 && !unsandboxedAcknowledged) {
-        const choice = await vscode.window.showWarningMessage(
-          "LM_Pipe is set to run commands UNSANDBOXED (tier 3). The agent's shell will " +
-            "have your permissions: no filesystem jail, no egress denial. Wall-clock, " +
-            "memory and output limits still apply.",
-          { modal: true },
-          "Run unsandboxed",
-          "Use the sandbox instead"
-        );
-        if (choice === undefined) return;
-        if (choice === "Use the sandbox instead") {
-          settings.sandbox_tier = 1;
-        } else {
-          unsandboxedAcknowledged = true;
-        }
-      }
-
       const mission = await vscode.window.showInputBox({
         prompt: "Mission — the one place the deliverable is named",
         placeHolder: "e.g. Fix the failing parser test and prove it passes",
       });
       if (!mission) return;
-
-      if (!client?.running) {
-        const binary = context.asAbsolutePath(path.join("bin", "lmp_sidecar"));
-        try {
-          client?.start(binary);
-        } catch (err) {
-          void vscode.window.showErrorMessage(`Cannot start sidecar: ${String(err)}`);
-          return;
-        }
-      }
-      sidebar.beginRun(mission);
-      await client?.start_run(mission, settings);
+      await sidebar.startRun(mission);
     })
   );
 
@@ -168,6 +180,28 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("lmPipe.cancel", async () => {
       const runId = sidebar.currentRunId;
       if (runId) await client?.cancel(runId);
+    }),
+    vscode.commands.registerCommand("lmPipe.loadModel", () => sidebar.loadModel()),
+    vscode.commands.registerCommand("lmPipe.unloadModel", () => sidebar.unloadModel()),
+    // Picks the checkpoint and remembers it. A folder picker rather than a text box
+    // because lmPipe.modelDir is an absolute path to a directory of safetensors, and the
+    // failure mode of typing one is a load error several steps later.
+    vscode.commands.registerCommand("lmPipe.selectModel", async () => {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        openLabel: "Use this model",
+        title: "Qwen3 MLX model directory (contains tokenizer.json and safetensors)",
+      });
+      const dir = picked?.[0]?.fsPath;
+      if (!dir) return;
+      await vscode.workspace
+        .getConfiguration("lmPipe")
+        .update("modelDir", dir, vscode.ConfigurationTarget.Global);
+      // Chosen is not loaded. Asking again here would be a second click for a decision
+      // the operator has already made, so the pick carries straight through to the load.
+      await sidebar.loadModel(dir);
     })
   );
 
