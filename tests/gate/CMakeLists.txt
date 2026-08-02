@@ -16,6 +16,14 @@ lmp_add_script_test(test_ratchets_falsifiable
   COMMAND "${PROJECT_SOURCE_DIR}/scripts/run_ratchets.py" --root "${PROJECT_SOURCE_DIR}" --self-test
   LABELS gate)
 
+# The agent-eval pin ATTRIBUTION (V2). Not the eval itself -- that loads a 19 GB model
+# and takes half an hour -- but the logic that turns a drop into a task name. Its
+# falsifier is "change one task's outcome by hand and confirm the diff names it", which
+# by hand means once and never again; here it is every build.
+lmp_add_script_test(test_pin_attribution
+  COMMAND "${PROJECT_SOURCE_DIR}/scripts/agent_eval.py" self-test
+  LABELS gate)
+
 # The bake-off pins, including the assertion that the holdout stays harder (S11.3).
 lmp_add_script_test(test_bakeoff_pins
   COMMAND "${CMAKE_COMMAND}" -E env "LMP_BUILD_DIR=${CMAKE_BINARY_DIR}"
