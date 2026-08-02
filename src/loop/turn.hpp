@@ -93,6 +93,10 @@ enum class Corrective : std::uint8_t {
     // Mechanism: synthesize the verification tool call the model keeps describing but
     // not making.
     SynthesizeVerification,
+    // Mechanism: make a tool the operator has refused twice UNSAMPLABLE for the rest of
+    // the run, by dropping it from the grammar's spec list. Asking again is then not
+    // discouraged, it is impossible.
+    BlockRefusedTool,
     // Mechanism: end the run. Not a request -- a control-flow change.
     HaltOnBudget,
 };
@@ -114,6 +118,47 @@ class RepeatDetector {
     std::vector<std::pair<std::string, std::size_t>> seen_;
 };
 
+// Refusals, counted by TOOL rather than by (tool, params).
+//
+// RepeatDetector deliberately ignores refusals -- S9.1 says a refused tool NEVER RAN, so
+// it is not an execution and repeating it is not a repeat. That is right for the ledgers,
+// and it left re-asking free: the destructive fixture kept its files but burned its
+// entire budget re-attempting `delete_file` after each refusal, because a refusal is not
+// an error either and so nothing fired.
+//
+// Counted by tool, not by exact call, on purpose. The operator refused a CAPABILITY; a
+// model that varies the path by one character has not been told something different, and
+// a per-(tool, params) counter would never reach two.
+class RefusalLedger {
+  public:
+    void record(const std::string& tool);
+    [[nodiscard]] std::size_t refused_count(const std::string& tool) const;
+
+    // Set by the BlockRefusedTool corrective; read when the next turn's grammar is built.
+    void block(std::string tool);
+    [[nodiscard]] bool is_blocked(const std::string& tool) const;
+    [[nodiscard]] const std::vector<std::string>& blocked() const noexcept {
+        return blocked_;
+    }
+
+  private:
+    std::vector<std::pair<std::string, std::size_t>> refusals_;
+    std::vector<std::string> blocked_;
+};
+
+// Drops every tool BlockRefusedTool has blocked from a turn's samplable spec list.
+//
+// Applied to the grammar rather than to the registry, so the block is scoped to
+// SAMPLING: a corrective or a verification may still drive the tool directly, and only
+// the model is stopped from choosing it again.
+//
+// Never returns an empty list. With nothing samplable a turn can emit no call at all,
+// which is exactly the deadlock the deleted `must_reconcile` restriction caused; `plan`
+// is always a legal move and always clears its own precondition, so it is the floor.
+[[nodiscard]] std::vector<parsephony::ToolSpec> without_blocked(
+    const std::vector<parsephony::ToolSpec>& specs, const RefusalLedger& refusals,
+    const std::vector<parsephony::ToolSpec>& all_specs);
+
 struct Budget {
     int max_iterations = 40;
     int wall_clock_seconds = 900;
@@ -123,6 +168,7 @@ struct Budget {
 // turn (S9.2).
 [[nodiscard]] Corrective choose_corrective(const TurnResult& turn,
                                            const RepeatDetector& repeats,
+                                           const RefusalLedger& refusals,
                                            int iterations_used, const Budget& budget,
                                            bool wall_clock_exhausted);
 
