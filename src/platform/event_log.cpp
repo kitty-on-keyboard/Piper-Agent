@@ -291,6 +291,24 @@ void append_field(std::string& out, std::string_view key, std::string_view value
 
 } // namespace
 
+std::string default_event_log_path(const char* pinned, const char* home) {
+    // An explicit path wins outright, so a harness can pin one run's trace to a known
+    // file without caring where this function would otherwise have put it.
+    if (pinned != nullptr && *pinned != '\0') {
+        return pinned;
+    }
+    if (home == nullptr || *home == '\0') {
+        // No HOME is a broken environment rather than a supported one. Returning the old
+        // relative path keeps the process alive where it used to be alive, instead of
+        // trading a bad default for no sidecar at all.
+        return "lmp_events.jsonl";
+    }
+    // ~/Library/Logs is where a macOS user looks for an application's diagnostics and
+    // where they can delete them without breaking anything. This file is write-only
+    // today -- nothing in the tree reads it back -- so it is diagnostics, not state.
+    return std::string(home) + "/Library/Logs/LM_Pipe/events.jsonl";
+}
+
 std::string serialize_event(const Event& ev) {
     std::string out;
     out.reserve(128);

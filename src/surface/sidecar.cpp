@@ -8,6 +8,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -713,12 +715,21 @@ bool dispatch_one(const std::string& message, surface::Session& session,
 int main() {
     platform::SystemClock clock;
     platform::EventLogWriter log;
-    const platform::OpenResult opened =
-        log.open({"lmp_events.jsonl", 32U * 1024 * 1024, 4});
+    // Chosen, not inherited from the launcher's CWD -- see default_event_log_path.
+    const std::string log_path =
+        platform::default_event_log_path(std::getenv("LMP_EVENT_LOG"), std::getenv("HOME"));
+
+    // The directory is ours to create; the log rotates within it (4 files, 32 MiB each).
+    // Errors are swallowed deliberately -- open() below is the real check, and it reports
+    // the actual errno against the actual path rather than a guess made one call earlier.
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(log_path).parent_path(), ec);
+
+    const platform::OpenResult opened = log.open({log_path, 32U * 1024 * 1024, 4});
     if (!opened.ok) {
-        // Refused loudly (S13). No silent fallback to "run without a trace" -- the log
-        // IS the UI feed, the debugging trace and the replay input.
-        std::fprintf(stderr, "lmp: cannot open event log: %s\n", opened.error.c_str());
+        // Refused loudly (S13). No silent fallback to "run without a trace".
+        std::fprintf(stderr, "lmp: cannot open event log at %s: %s\n", log_path.c_str(),
+                     opened.error.c_str());
         return 1;
     }
 
