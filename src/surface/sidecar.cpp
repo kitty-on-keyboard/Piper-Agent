@@ -441,6 +441,17 @@ std::string load_project_instructions(const std::string& workspace) {
     return {};
 }
 
+// What the agent told itself, last time it was here.
+//
+// The counterpart to load_project_instructions above: same stable-prompt slot, same
+// once-per-session cost, opposite provenance. Bounded by the same constant the writer
+// enforces, so a hand-edited file cannot grow the prompt past what `remember` allows.
+std::string load_project_memory(const std::string& workspace) {
+    const platform::FileContents f = platform::read_file_whole(
+        workspace + "/" + tools::kMemoryFileName, tools::kMemoryMaxBytes);
+    return f.status == platform::FsStatus::Ok ? f.bytes : std::string();
+}
+
 // What survives between missions.
 //
 // v1 of this file built the tokenizer, the weights, the registry and the context store
@@ -559,6 +570,7 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
     session.ctx->set_project_instructions(load_project_instructions(workspace));
+    session.ctx->set_project_memory(load_project_memory(workspace));
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
 

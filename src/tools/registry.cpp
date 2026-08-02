@@ -86,6 +86,57 @@ std::string resolve_contained(const std::string& root, const std::string& rel) {
     return fsx::is_within(root, abs) ? abs : std::string();
 }
 
+ToolResult Registry::remember_fact(const std::string& raw) {
+    // Folded to ONE LINE, not refused. Dedupe and trimming both work line-wise, so a
+    // multi-line note would silently defeat both; folding keeps every character the
+    // model wrote and keeps the file's one invariant.
+    std::string fact;
+    fact.reserve(raw.size());
+    for (const char c : raw) {
+        fact += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+    }
+    const std::size_t first = fact.find_first_not_of(' ');
+    const std::size_t last = fact.find_last_not_of(' ');
+    if (first == std::string::npos) {
+        return ToolResult::error(ErrorClass::Malformed, false,
+                                 "a note cannot be blank");
+    }
+    fact = fact.substr(first, last - first + 1);
+
+    const std::string path = ctx_.root + "/" + kMemoryFileName;
+    const std::string line = "- " + fact + "\n";
+
+    // Read wider than the cap so a file that is already oversized can be trimmed back
+    // rather than refused -- otherwise one oversized write would wedge the tool forever.
+    const fsx::FileContents cur = fsx::read_file_whole(path, kMemoryMaxBytes * 4);
+    std::string body = cur.ok() ? cur.bytes : std::string();
+
+    // Exact repeats are the common case: a model that re-reads its own notes re-derives
+    // the same conclusion. An unbounded pile of duplicates is how this section stops
+    // being worth the tokens it costs.
+    if (body.find(line) != std::string::npos) {
+        return ToolResult::okay("already noted: " + fact);
+    }
+    body += line;
+
+    // Trimmed from the FRONT, so a full file drops its OLDEST notes. Truncating the tail
+    // instead would freeze the memory at whatever the project learned first and silently
+    // discard everything it learned since.
+    while (body.size() > kMemoryMaxBytes) {
+        const std::size_t nl = body.find('\n');
+        if (nl == std::string::npos) {
+            break;
+        }
+        body.erase(0, nl + 1);
+    }
+
+    const fsx::WriteResult w = fsx::write_file_atomic(path, body);
+    if (!w.ok()) {
+        return ToolResult::error(ErrorClass::Transient, true, w.error);
+    }
+    return ToolResult::okay("noted for later sessions: " + fact);
+}
+
 const ToolDecl* Registry::find(const std::string& name) const {
     for (const ToolDecl& d : decls_) {
         if (d.name == name) {
@@ -658,6 +709,26 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
     // (Agent::step) -- the checklist lives in the context store, which the registry has
     // no business reaching into. The handler is never called; it exists so that the
     // declaration and the execution path cannot drift apart silently.
+    {
+        ToolDecl d;
+        d.name = "remember";
+        d.description =
+            "Save one durable fact about this project so a later session starts already "
+            "knowing it: how it builds, where a subsystem lives, a constraint you had to "
+            "discover the hard way. For things that stay true after this mission ends -- "
+            "not the current task's progress, which the checklist already carries.";
+        d.spec.name = d.name;
+        d.spec.params = {param("fact", ParamType::Text, true)};
+        // It writes a file inside the workspace, so it is a mutation: it raises a card
+        // when the operator has asked to approve writes, and it stays off the parallel
+        // read-only dispatch path. Not irreversible -- the note is additive and the file
+        // is the agent's own.
+        d.mutates_workspace = true;
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            return remember_fact(*get(p, "fact"));
+        });
+    }
+    // --- plan ---------------------------------------------------------------
     {
         ToolDecl d;
         d.name = "plan";

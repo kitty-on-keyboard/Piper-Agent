@@ -61,6 +61,15 @@ struct WorkspaceContext {
     int shell_wall_clock_seconds;
 };
 
+// Where cross-session memory lives, and how much of it there is.
+//
+// A single dotfile at the workspace root, so nothing has to create a directory, and
+// hyphenated so the tool_honesty ratchet does not read the name as a tool reference.
+// The cap is a PROMPT budget, not a disk one: this text is prepended to the stable part
+// of every prompt for the whole of the next session.
+inline constexpr const char* kMemoryFileName = ".lmp-memory.md";
+inline constexpr std::size_t kMemoryMaxBytes = 16U * 1024;
+
 class Registry {
   public:
     explicit Registry(WorkspaceContext ctx);
@@ -86,6 +95,9 @@ class Registry {
         std::function<ToolResult(const std::vector<ToolParamValue>&, int approved_tier)>;
 
     void declare(ToolDecl decl, Handler handler);
+
+    // Appends one fact to the workspace's memory file, deduplicated and bounded.
+    [[nodiscard]] ToolResult remember_fact(const std::string& raw);
 
     // Runs `git <args>` in the workspace under the same sandbox as any other command.
     // `args` is composed by the registry, never supplied by the model.

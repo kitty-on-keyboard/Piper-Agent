@@ -146,6 +146,14 @@ class ContextStore {
     //
     // It sits at the very front of the STABLE block, so changing it between runs costs a
     // full re-prefill and changing it within one is impossible by construction.
+    // Notes the agent wrote in EARLIER sessions, loaded once at session start. Kept
+    // separate from project_instructions_ because their trust levels differ: conventions
+    // are the operator's, these are the model's own recollection.
+    void set_project_memory(std::string text) { project_memory_ = std::move(text); }
+    [[nodiscard]] const std::string& project_memory() const noexcept {
+        return project_memory_;
+    }
+
     void set_persona(std::string text) { persona_ = std::move(text); }
 
     // --- T2 recent ----------------------------------------------------------
@@ -208,6 +216,7 @@ class ContextStore {
     std::vector<std::string> user_turns_;
     std::string persona_;
     std::string project_instructions_;
+    std::string project_memory_;
     std::string verify_contract_;
     std::vector<ChecklistItem> checklist_;
     std::vector<VerificationRecord> verifications_;

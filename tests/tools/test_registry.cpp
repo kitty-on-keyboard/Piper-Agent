@@ -54,15 +54,66 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // 11 -> 15: git_status, git_diff and git_log (an agent that cannot read its own diff
     // has no review surface), plus `plan`, which is declared here but executed by the
     // loop because the checklist lives in the context store.
-    CHECK_EQ(reg.decls().size(), std::size_t{15});
+    //
+    // 15 -> 16: `remember`, the only tool whose effect outlives the run. Reviewed as
+    // surface area on the same terms as the rest: it takes no path, writing to one fixed
+    // file, so it adds a durable prompt input without adding a way to reach the disk.
+    CHECK_EQ(reg.decls().size(), std::size_t{16});
     CHECK(reg.find("git_diff") != nullptr);
     CHECK(reg.find("plan") != nullptr);
     CHECK(reg.find("read_file") != nullptr);
     CHECK(reg.find("shell") != nullptr);
+    CHECK(reg.find("remember") != nullptr);
     CHECK(reg.find("no_such_tool") == nullptr);
     // The guard specs mirror the declarations one-to-one -- the grammar constrains
     // exactly the advertised set (S6.4).
     CHECK_EQ(reg.guard_specs().size(), reg.decls().size());
+}
+
+// `remember` is the only tool whose effect outlives the run, so its file invariants are
+// the thing to test: one fact per line, no duplicates, and a hard byte cap. Break any of
+// them and the damage lands in the STABLE part of every future prompt.
+TEST(remember_folds_dedupes_and_stays_under_its_cap) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const std::string path = root + "/" + std::string(kMemoryFileName);
+
+    ToolResult a = reg.execute("remember", args({{"fact", "builds with cmake --preset dev"}}), 1);
+    REQUIRE(a.ok());
+    CHECK(lmp::platform::read_file_whole(path, 1U << 20).bytes ==
+          std::string("- builds with cmake --preset dev\n"));
+
+    // A repeat is the common case, not an edge case: a model that re-reads its own notes
+    // re-derives the same conclusion. It must not accumulate.
+    ToolResult again =
+        reg.execute("remember", args({{"fact", "builds with cmake --preset dev"}}), 1);
+    CHECK(again.ok());
+    CHECK_EQ(lmp::platform::read_file_whole(path, 1U << 20).bytes,
+             std::string("- builds with cmake --preset dev\n"));
+
+    // Multi-line input is FOLDED, not refused -- one fact per line is the invariant that
+    // dedupe and trimming both rest on, and folding keeps every character.
+    ToolResult multi = reg.execute("remember", args({{"fact", "a\nb\tc"}}), 1);
+    CHECK(multi.ok());
+    const std::string folded = lmp::platform::read_file_whole(path, 1U << 20).bytes;
+    CHECK(folded.find("- a b c\n") != std::string::npos);
+    CHECK_EQ(folded.find("- a\nb"), std::string::npos);
+
+    // Blank is a malformed note, not a silent no-op that reports success.
+    CHECK(!reg.execute("remember", args({{"fact", "   "}}), 1).ok());
+
+    // The cap holds, and it drops the OLDEST notes: a memory frozen at whatever the
+    // project learned first would be worse than none.
+    for (int i = 0; i < 400; ++i) {
+        (void)reg.execute("remember",
+                          args({{"fact", "filler note number " + std::to_string(i) +
+                                             " padded out to take up real room"}}),
+                          1);
+    }
+    const std::string full = lmp::platform::read_file_whole(path, 1U << 20).bytes;
+    CHECK(full.size() <= kMemoryMaxBytes);
+    CHECK(full.find("filler note number 399") != std::string::npos);
+    CHECK_EQ(full.find("builds with cmake --preset dev"), std::string::npos);
 }
 
 TEST(paths_outside_the_root_are_refused_not_errored) {
