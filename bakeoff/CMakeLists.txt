@@ -90,3 +90,12 @@ if(LMP_BUILD_SCOREBOARDS)
     endif()
   endforeach()
 endif()
+
+# --- mcp -------------------------------------------------------------------
+#
+# The MCP cook-off's artefacts are Python (bakeoff/mcp/conform.py plus its falsifiers),
+# so there is no per-entrant scoreboard binary here. What does build is the transport
+# benchmark, because the "replace stdio with a ring buffer" question is settled by
+# numbers and a benchmark that stops compiling is a number you have lost.
+add_executable(bench_mcp_transport "${CMAKE_CURRENT_SOURCE_DIR}/mcp/bench_transport.cpp")
+target_link_libraries(bench_mcp_transport PRIVATE lmp_mcp lmp_warnings lmp_assertions)
