@@ -8,7 +8,9 @@
 // point of the seam (S2.1.1).
 //
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "src/context/context.hpp"
@@ -22,6 +24,7 @@
 #include "src/platform/event_log.hpp"
 #include "src/tools/registry.hpp"
 #include "src/tools/sandbox.hpp"
+#include "src/tools/syntax_check.hpp"
 
 namespace lmp::loop {
 
@@ -63,6 +66,11 @@ struct HitlThresholds {
 // be perfectly ordinary, it just cannot be waved through on a prefix.
 [[nodiscard]] bool is_allowlisted(const std::string& command,
                                   const std::vector<std::string>& allowed);
+
+// One line naming the call and its arguments, each argument truncated for display. Shared
+// with the approval gate in approval.cpp, which puts it on the card.
+[[nodiscard]] std::string preview_of(const std::string& tool,
+                                     const std::vector<tools::ToolParamValue>& params);
 
 // Returns true to allow. Injected so tests script it; the UI supplies the real one.
 //
@@ -123,6 +131,18 @@ struct AgentConfig {
     // entirely -- which is how a harness ends up with nothing between the model and
     // `rm -rf` again.
     std::vector<std::string> allowed_commands;
+
+    // Run the language's syntax check after every successful workspace write and hand the
+    // diagnostic back as part of that call's observation. Default on: this only ever
+    // tightens, and S13's rule is that defaults tighten while explicit requests loosen.
+    bool auto_syntax_check = true;
+
+    // THE OPERATOR'S completion criterion. When set it becomes the contract, `plan` may
+    // not replace it, and a complete verdict is a claim about the mission rather than
+    // about what the model decided to check. Empty leaves the model to declare one, which
+    // is what every run did before this existed -- and is why `rename_across_files` could
+    // report completed=yes verified=yes while the mission was unmet.
+    std::string operator_verify_contract;
 };
 
 // The UI feed. The Agent emits structured facts; the sidecar serializes them with the
@@ -151,6 +171,11 @@ struct RunReport {
     std::size_t unfinished_items = 0;
     // Instructions that arrived mid-run and were taken up at a turn boundary.
     std::size_t steers_received = 0;
+    // True when `completed` rests on a contract the MODEL chose rather than one the
+    // operator set. Not a failure and not enforced -- most runs have no operator contract
+    // -- but it is the difference between "the mission is met" and "the criterion the
+    // model picked for itself is met", and those were previously the same word.
+    bool self_declared = false;
 };
 
 class Agent {
@@ -179,6 +204,16 @@ class Agent {
     static constexpr int kMaxConsecutiveNoProgress = 3;
 
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
+    // The HITL gate: mode policy, then writes, then commands. Returns the refusal when a
+    // call must not run, and nothing when it may. Defined in approval.cpp with the pure
+    // routing functions it drives -- the loop file stays about the loop.
+    [[nodiscard]] std::optional<tools::ToolResult> gate_call(
+        const tools::ToolDecl* decl, const std::string& name,
+        const std::vector<tools::ToolParamValue>& params);
+    // Appends the post-edit syntax verdict to `result`'s summary. Empty when there is no
+    // contract for the path, when the check could not run, or when it came back clean --
+    // silence is the default, because a per-turn "no checker for .md" is prompt noise.
+    void annotate_with_syntax_check(const std::string& path, tools::ToolResult& result);
     void compact_to_budget();
     // Drains the steer source into the context. Returns how many instructions landed.
     [[nodiscard]] std::size_t take_steering();
@@ -209,6 +244,11 @@ class Agent {
     Observer observer_;
     SteerSource steer_;
     Verifier verifier_;
+    std::unique_ptr<tools::SyntaxChecker> syntax_;
+    // Whether each path's syntax check was already failing BEFORE this run first edited
+    // it. A red that was already red is not evidence about the edit -- the same
+    // FAIL_TO_PASS reasoning verification.cpp applies to the declared contract.
+    std::map<std::string, bool> pre_edit_clean_;
     std::string tools_guidance_;
     int consecutive_no_progress_ = 0;
     bool halted_ = false;

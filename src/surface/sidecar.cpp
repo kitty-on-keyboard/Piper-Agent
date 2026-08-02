@@ -249,11 +249,64 @@ class RunInbox {
         }
     }
 
+    // The workspace edit round trip (S12.4). Structurally identical to ask(): send a
+    // request, block on the run thread for the matching reply, treat a dead parent as a
+    // refusal rather than waiting forever.
+    //
+    // It BLOCKS for the same reason a card does. The tool result has to say whether the
+    // bytes landed -- an edit reported as applied while the editor never wrote it would
+    // leave the model reasoning about a file that does not exist, which is the silent
+    // failure this whole path is meant to remove.
+    tools::EditOutcome apply_edit(const std::string& path, const std::string& content) {
+        const std::string request_id = run_id_ + "/edit/" + std::to_string(++seq_);
+        protocol::EditNotification req;
+        req.request_id = request_id;
+        req.run_id = run_id_;
+        req.path = path;
+        req.new_content = content;
+        notify(req);
+
+        std::string msg;
+        while (true) {
+            if (inbox_.drained()) {
+                return {false, "the editor is gone"};
+            }
+            if (!inbox_.try_pop(msg)) {
+                std::this_thread::yield();
+                continue;
+            }
+            if (handle_edit_reply(msg, request_id)) {
+                return edit_answer_;
+            }
+        }
+    }
+
     // True when a shutdown arrived mid-run: acknowledged there, but only actionable once
     // the run has unwound.
     [[nodiscard]] bool shutdown_requested() const noexcept { return shutdown_; }
 
   private:
+    // Services one message while an edit is outstanding. Returns true only when it
+    // ANSWERED that edit; everything else falls through to the ordinary routing, so
+    // steering typed while a write was in flight is queued rather than lost.
+    bool handle_edit_reply(const std::string& msg, const std::string& awaiting) {
+        if (surface::method_of(msg) == "lmp/edit_applied") {
+            const std::string id = surface::string_field(msg, "id");
+            if (surface::string_field(msg, "request_id") == awaiting) {
+                reply_result(id, R"({"accepted":true})");
+                edit_answer_.applied = surface::bool_field(msg, "applied");
+                edit_answer_.error = surface::string_field(msg, "error");
+                return true;
+            }
+            // An answer to an edit this run has already moved past. Say so rather than
+            // letting it decide the CURRENT write.
+            reply_result(id, R"({"accepted":false})");
+            return false;
+        }
+        (void)handle(msg, nullptr, nullptr);
+        return false;
+    }
+
     // Services one message. Returns true only when it ANSWERED the approval named by
     // `awaiting` -- so the same routing serves the blocking and non-blocking paths, and a
     // message cannot mean one thing at a turn boundary and another under a card.
@@ -317,6 +370,7 @@ class RunInbox {
     std::string run_id_;
     std::vector<std::string> steering_;
     std::uint64_t seq_ = 0;
+    tools::EditOutcome edit_answer_;
     bool shutdown_ = false;
 };
 
@@ -469,6 +523,10 @@ struct Session {
     std::unique_ptr<tools::Registry> registry;
     std::unique_ptr<context::ContextStore> ctx;
     loop::AgentConfig config;
+    // Whether this client can answer lmp/edit. Advertised at lmp/start rather than
+    // assumed: the extension can, agent_eval.py cannot, and guessing wrong either wedges
+    // an unattended run on a reply that never comes or writes behind the editor's back.
+    bool client_applies_edits = false;
 };
 
 // Turns the loop once over an EXISTING session. Returns true when the run should be the
@@ -488,6 +546,24 @@ bool run_loop(const std::string& run_id, Session& session,
         return run_inbox.ask(tool, command, preview, hint);
     });
     agent.set_steer_source([&run_inbox]() { return run_inbox.take_messages(); });
+
+    // Workspace writes go through the EDITOR (S12.4), so undo, dirty buffers and diff
+    // review work. Attached only when an editor is actually there to route through:
+    // `lmp/edit_applied` is a capability the client advertises at lmp/start, and a client
+    // that does not is left on the direct-write path.
+    //
+    // Deliberately the opposite polarity to the approver's deny-by-default. An absent
+    // approver means "nobody is there to ask", so the safe answer is no. An absent edit
+    // sink means "there is no editor to route through" -- an eval run, a script -- and
+    // refusing there would break every unattended run for no safety gain at all.
+    if (session.client_applies_edits) {
+        session.registry->set_edit_sink(
+            [&run_inbox](const std::string& path, const std::string& content) {
+                return run_inbox.apply_edit(path, content);
+            });
+    } else {
+        session.registry->set_edit_sink(nullptr);
+    }
 
     cancel.reset();
     const loop::RunReport report = agent.run(cancel);
@@ -509,6 +585,7 @@ bool run_loop(const std::string& run_id, Session& session,
     end.iterations = report.iterations;
     end.completed = report.completed;
     end.unfinished_items = static_cast<std::int64_t>(report.unfinished_items);
+    end.self_declared = report.self_declared;
     notify(end);
     return run_inbox.shutdown_requested();
 }
@@ -561,6 +638,7 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
         tools::WorkspaceContext wctx;
         wctx.root = workspace;
         wctx.max_read_bytes = 4U << 20;
+        wctx.max_model_read_bytes = 24U << 10;
         wctx.max_result_bytes = 8192;
         wctx.spool_dir = workspace + "/.lmp_spool";
         wctx.shell_wall_clock_seconds = 300;
@@ -569,10 +647,14 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
     }
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
+    // A little above the widest single result the tool layer can produce, so the door
+    // catches a tool that forgot to bound itself without firing on a legitimate one.
+    session.ctx->set_observation_budget(32U << 10);
     session.ctx->set_project_instructions(load_project_instructions(workspace));
     session.ctx->set_project_memory(load_project_memory(workspace));
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
+    session.client_applies_edits = surface::bool_field(message, "applies_edits");
 
     return run_loop(id, session, inbox, cancel, log, clock);
 }

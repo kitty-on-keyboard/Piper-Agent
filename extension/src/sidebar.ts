@@ -18,6 +18,7 @@ import {
   ChecklistNotification,
   VerificationNotification,
   ApprovalRequestNotification,
+  EditNotification,
   PerfNotification,
   RunEndNotification,
 } from "./protocol.generated";
@@ -48,6 +49,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.client.on("approval_request", (n: ApprovalRequestNotification) =>
       this.observe(n.run_id, "approval", n)
     );
+    this.client.on("edit", (n: EditNotification) => void this.applyEdit(n));
     this.client.on("run_end", (n: RunEndNotification) => {
       // termination_reason is the one unambiguous signal for WHICH ENDING a run took
       // (S14). It is shown, not summarized away.
@@ -55,6 +57,53 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.runInFlight = false;
       this.post("idle", {});
     });
+  }
+
+  /** Applies a workspace edit through VS Code, then answers the sidecar.
+   *
+   *  Through WorkspaceEdit rather than fs.writeFile so undo, dirty buffers and the diff
+   *  UI all work -- that is the whole point of routing writes back here (S12.4).
+   *
+   *  EVERY path replies, including the failures. The sidecar blocks the run thread on
+   *  this answer, so a throw that skipped the reply would wedge the run until its wall
+   *  clock -- holding 19 GB of weights -- and the user would see a hang with no cause.
+   */
+  private async applyEdit(n: EditNotification): Promise<void> {
+    try {
+      const uri = vscode.Uri.file(n.path);
+      const edit = new vscode.WorkspaceEdit();
+      let existing: vscode.TextDocument | undefined;
+      try {
+        existing = await vscode.workspace.openTextDocument(uri);
+      } catch {
+        existing = undefined; // a new file; createFile below
+      }
+      if (existing === undefined) {
+        edit.createFile(uri, { overwrite: false, ignoreIfExists: true });
+        edit.insert(uri, new vscode.Position(0, 0), n.new_content);
+      } else {
+        const whole = new vscode.Range(
+          existing.positionAt(0),
+          existing.positionAt(existing.getText().length)
+        );
+        edit.replace(uri, whole, n.new_content);
+      }
+      const ok = await vscode.workspace.applyEdit(edit);
+      // Saved explicitly: an applied-but-unsaved buffer means the next `shell` call --
+      // a test run, a build -- reads the OLD bytes off disk, and the model would be told
+      // its edit did not take.
+      if (ok) {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        await doc.save();
+      }
+      await this.client.editApplied(
+        n.request_id,
+        ok,
+        ok ? "" : "VS Code declined to apply the edit"
+      );
+    } catch (err) {
+      await this.client.editApplied(n.request_id, false, String(err));
+    }
   }
 
   /** Every notification carries the run it belongs to, so the run id is READ off the

@@ -108,10 +108,10 @@ TEST(at_most_one_corrective_and_budget_outranks_everything) {
     Budget budget;
     budget.max_iterations = 40;
     // Repeat alone -> BreakRepeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::BreakRepeat);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BreakRepeat);
     // Budget exhausted outranks it; only ONE is returned.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, rl, 1, budget, true) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 1, budget, true, true) == Corrective::HaltOnBudget);
 }
 
 TEST(a_claimed_verification_synthesizes_a_real_one) {
@@ -122,10 +122,16 @@ TEST(a_claimed_verification_synthesizes_a_real_one) {
     t.assistant_text = "I fixed the include. The build should pass now.";
     const Budget budget;
     // Mechanism, not prose: the loop MAKES the call the model only described.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::SynthesizeVerification);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::SynthesizeVerification);
 
     t.assistant_text = "Here is a summary of the file.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+
+    // With no contract declared there is nothing to synthesize. Before this gate the
+    // corrective fired anyway and ran a hardcoded `cmake --build build` -- on a Python
+    // workspace, a guaranteed failure filed against a contract nobody declared.
+    t.assistant_text = "I fixed the include. The build should pass now.";
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false) == Corrective::None);
 }
 
 // A refusal is neither an execution nor an error, so before RefusalLedger existed the
@@ -143,27 +149,27 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     // First refusal: the model could not have known. Taking the tool away over one "no"
     // would be the wrong trade.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
 
     // Second: fire.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::BlockRefusedTool);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BlockRefusedTool);
 
     // Counted by TOOL, not by (tool, params) -- varying the path is not a new question.
     t.tool_params = {{"path", "b"}};
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::BlockRefusedTool);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BlockRefusedTool);
 
     // Once blocked it must not re-fire: the mechanism already ran, and a corrective that
     // keeps selecting itself would crowd out every other one for the rest of the run.
     rl.block("delete_file");
     CHECK(rl.is_blocked("delete_file"));
-    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
 
     // Budget still outranks it (S9.2).
     rl.record("shell");
     rl.record("shell");
     t.tool_name = "shell";
-    CHECK(choose_corrective(t, d, rl, 40, budget, false) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true) == Corrective::HaltOnBudget);
 }
 
 // --- completion gate (S10.4) -------------------------------------------------
@@ -484,4 +490,109 @@ TEST(risk_routing_is_a_pure_function) {
     unseeable.caps.network_access = true;
     unseeable.caps.destroys_data = true;
     CHECK(route_approval(unseeable, t) == Approval::Escalate);
+}
+
+// An unrecoverable failure repeated verbatim is a repeat, not a retry.
+//
+// MEASURED, not anticipated: failing_test_median sent a byte-identical replace_in_file
+// five times, each returning "old_text matches more than one site", and nothing fired --
+// BreakRepeat required ok(). Ambiguity, NotFound and Malformed are pure functions of the
+// bytes sent, so re-sending them buys the same failure.
+TEST(a_repeated_unrecoverable_failure_breaks_the_repeat) {
+    RepeatDetector d;
+    RefusalLedger rl;
+    const Budget budget;
+
+    TurnResult t;
+    t.outcome = Outcome::ToolCallExecuted;
+    t.tool_name = "replace_in_file";
+    t.tool_params = {{"path", "stats.py"}, {"old_text", "return x"}};
+    t.tool_result = tools::ToolResult::error(tools::ErrorClass::Conflict, false,
+                                             "old_text matches more than one site");
+    d.record(t.tool_name, t.tool_params);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+
+    d.record(t.tool_name, t.tool_params);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BreakRepeat);
+}
+
+// A TRANSIENT failure is still legitimate retry -- a flaky build or a timeout deserves a
+// second attempt, and taking that away would be worse than the loop this closes.
+TEST(a_repeated_transient_failure_is_still_a_retry) {
+    RepeatDetector d;
+    RefusalLedger rl;
+    const Budget budget;
+
+    TurnResult t;
+    t.outcome = Outcome::ToolCallExecuted;
+    t.tool_name = "shell";
+    t.tool_params = {{"command", "pytest"}};
+    t.tool_result = tools::ToolResult::error(tools::ErrorClass::Transient, true, "[exit 1]");
+    d.record(t.tool_name, t.tool_params);
+    d.record(t.tool_name, t.tool_params);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+}
+
+// --- whose criterion was met (S10.4) -----------------------------------------
+//
+// The checklist stopped gating completion because a tick is a self-report. `verify_with`
+// is the same class of thing one level down and went unnoticed: the model picks the
+// command that counts as proof, and the harness then rigorously verifies whatever it
+// picked. rename_across_files ended completed=yes verified=yes solved=NO by declaring
+// `pytest -q`, passing it, and stopping -- while the mission also required no residual
+// `calc_total`. Every gate worked. The contract was weaker than the mission.
+TEST(an_operator_contract_outranks_the_models_and_cannot_be_replaced) {
+    context::ContextStore ctx("rename calc_total everywhere");
+    using Source = context::ContextStore::ContractSource;
+
+    ctx.set_verify_contract("pytest -q", Source::Model);
+    CHECK_EQ(ctx.verify_contract(), std::string("pytest -q"));
+    CHECK(ctx.verify_contract_source() == Source::Model);
+
+    // The operator's wins.
+    ctx.set_verify_contract("pytest -q && ! grep -rq calc_total .", Source::Operator);
+    CHECK(ctx.verify_contract_source() == Source::Operator);
+
+    // And cannot be talked out of by restating the plan -- which is the one move this
+    // whole gate exists to stop.
+    ctx.set_verify_contract("true", Source::Model);
+    CHECK_EQ(ctx.verify_contract(), std::string("pytest -q && ! grep -rq calc_total ."));
+    CHECK(ctx.verify_contract_source() == Source::Operator);
+
+    // An operator may still change their own mind.
+    ctx.set_verify_contract("make check", Source::Operator);
+    CHECK_EQ(ctx.verify_contract(), std::string("make check"));
+}
+
+TEST(completion_reports_whether_the_model_chose_its_own_criterion) {
+    using Source = context::ContextStore::ContractSource;
+    const auto complete_run = [](Source source) {
+        context::ContextStore ctx("fix the median");
+        ctx.set_verify_contract("pytest -q", source);
+        ctx.set_checklist({{"fix it", true}});
+        ctx.record_deliverable("stats.py");
+        ctx.record_verification(observed("pytest -q", true, true));
+        return evaluate_completion(ctx);
+    };
+
+    const CompletionVerdict model = complete_run(Source::Model);
+    REQUIRE(model.complete);
+    CHECK(model.self_declared());
+    // The word that was missing: "the declared contract passes" reads identically whether
+    // the operator set the criterion or the model picked one it could satisfy.
+    CHECK(model.reason.find("MODEL chose") != std::string::npos);
+
+    const CompletionVerdict op = complete_run(Source::Operator);
+    REQUIRE(op.complete);
+    CHECK(!op.self_declared());
+    CHECK(op.reason.find("operator's contract") != std::string::npos);
+}
+
+// self_declared is about a COMPLETE verdict. An incomplete one makes no claim about whose
+// contract it was, and reporting it as self-declared would be noise on every failed run.
+TEST(an_incomplete_verdict_is_never_self_declared) {
+    context::ContextStore ctx("do a thing");
+    const CompletionVerdict v = evaluate_completion(ctx);
+    CHECK(!v.complete);
+    CHECK(!v.self_declared());
 }

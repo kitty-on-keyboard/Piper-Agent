@@ -127,12 +127,12 @@
       "reason": "See StartParams."
     },
     {
-      "symbol": "EditNotification",
-      "reason": "S12.4: workspace edits are applied via the extension's edit API so undo, dirty buffers and the diff UI work. The sidecar writes files directly today; this is the type that carries the handover. Remove this entry when the edit path moves through the extension."
+      "symbol": "EditAppliedParams",
+      "reason": "See StartParams. Request payload types are the WIRE CONTRACT, consumed by the TypeScript client and regenerated + diffed by the protocol gate; the sidecar reads request fields by name off the framed message, so the C++ mirror is unreferenced by construction."
     },
     {
-      "symbol": "ApprovalRequestNotification",
-      "reason": "Emitted when the HITL router escalates AND a UI approver is attached. The sidecar currently passes a null approver (deny-by-default when nobody is there to ask), so it is unreferenced until the extension wires the approver back."
+      "symbol": "EditAppliedResult",
+      "reason": "See StartParams. Request payload types are the WIRE CONTRACT, consumed by the TypeScript client and regenerated + diffed by the protocol gate; the sidecar reads request fields by name off the framed message, so the C++ mirror is unreferenced by construction."
     }
   ]
 }

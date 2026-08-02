@@ -8,23 +8,6 @@
 #include "src/loop/token_stream.hpp"
 
 namespace lmp::loop {
-namespace {
-
-std::string preview_of(const std::string& tool,
-                       const std::vector<tools::ToolParamValue>& params) {
-    std::string s = tool + "(";
-    bool first = true;
-    for (const tools::ToolParamValue& p : params) {
-        if (!first) {
-            s += ", ";
-        }
-        first = false;
-        s += p.name + "=" + (p.value.size() > 120 ? p.value.substr(0, 120) + "..." : p.value);
-    }
-    return s + ")";
-}
-
-} // namespace
 
 Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
              tools::Registry& registry, context::ContextStore& ctx,
@@ -39,6 +22,15 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     // that matters: it pins T0, so "no execution" cannot be undone by a settings field.
     if (config_.sandbox_tier_override >= 0 && config_.mode != Mode::Plan) {
         policy_.sandbox_tier = config_.sandbox_tier_override;
+    }
+    if (!config_.operator_verify_contract.empty()) {
+        ctx_.set_verify_contract(config_.operator_verify_contract,
+                                 context::ContextStore::ContractSource::Operator);
+        emit("operator_contract", {{"contract", config_.operator_verify_contract}});
+    }
+    if (config_.auto_syntax_check) {
+        syntax_ = std::make_unique<tools::SyntaxChecker>(registry_.workspace().root,
+                                                         2048);
     }
     emit("policy", {{"mode", std::to_string(static_cast<int>(config_.mode))},
                     {"sandbox_tier", std::to_string(policy_.sandbox_tier)},
@@ -61,7 +53,11 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
             // Pinned in the store, not held here: a follow-up run builds a fresh Agent
             // over the SAME context, and a contract that lived in the Agent would be
             // silently lost between the two.
-            ctx_.set_verify_contract(p.value);
+            //
+            // Declared MODEL-sourced. When the operator supplied one, the store ignores
+            // this -- otherwise a run could talk its way out of the criterion it was given
+            // by restating its plan, which is the one move this whole gate exists to stop.
+            ctx_.set_verify_contract(p.value, context::ContextStore::ContractSource::Model);
         }
     }
     if (raw == nullptr) {
@@ -146,6 +142,37 @@ std::string Agent::baseline_check() {
                     "pass is now provable evidence rather than an unproven green.";
 }
 
+// Non-model feedback on an edit, on the same observation the edit produced.
+//
+// Deliberately NOT routed through the Verifier: a syntax check is not the contract the run
+// declared, and a green from it must never help a run complete (S10.1). The test for this
+// asserts the verification ledger is unchanged across a checked edit, because the tidy
+// implementation -- reuse run_and_record, it already exists -- would quietly make S10.4
+// completion cheaper and nothing else would notice.
+void Agent::annotate_with_syntax_check(const std::string& path, tools::ToolResult& result) {
+    if (!config_.auto_syntax_check || !syntax_) {
+        return;
+    }
+    const tools::SyntaxVerdict v = syntax_->check(path, policy_.sandbox_tier);
+    if (!v.ran) {
+        return; // no contract, or it could not be run: say nothing at all
+    }
+    const auto before = pre_edit_clean_.find(path);
+    const bool was_clean = before == pre_edit_clean_.end() || before->second;
+    emit("syntax_check",
+         {{"path", path}, {"language", v.language}, {"clean", v.clean ? "1" : "0"}});
+    if (v.clean) {
+        return;
+    }
+    result.summary += "\n[syntax] " + v.language;
+    // A red that was already red is a different fact and a different next move. Without
+    // this the model gets told its edit broke a file that arrived broken.
+    result.summary += was_clean ? ": FAILED\n" : ": still failing (it was already failing "
+                                                 "before this edit)\n";
+    result.summary += v.diagnostics;
+    result.error_class = tools::ErrorClass::Malformed;
+}
+
 void Agent::emit(const std::string& kind, std::vector<platform::EventField> fields) {
     platform::Event ev;
     ev.kind = kind;
@@ -160,7 +187,16 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     const model::ChatTemplate tmpl(tok_);
     const std::vector<model::Message> messages = ctx_.render("");
     model::InferenceTask task;
-    task.prompt = tmpl.render(messages, tools_guidance_);
+    // render_with_offsets, NOT a second render of a message sub-list: render() appends the
+    // generation prompt, so the first k messages rendered alone are not a token prefix of
+    // the whole. Asking for offsets is the only correct way to locate the boundary, and
+    // getting it wrong reuses a cache against the wrong prefix without crashing (S5.10).
+    std::vector<std::size_t> offsets;
+    task.prompt = tmpl.render_with_offsets(messages, tools_guidance_, offsets);
+    // Everything except the live-state block, which changes every turn. The backend
+    // snapshots here so the next turn rolls back instead of re-prefilling the context.
+    const std::size_t stable = ctx_.stable_message_count("");
+    task.checkpoint_at = stable < offsets.size() ? offsets[stable] : 0;
     task.max_new_tokens = config_.max_new_tokens;
     task.sampling = config_.sampling;
     // config_.seed stays authoritative over the sampling block's own field: it is the
@@ -378,93 +414,27 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     }
 
     const tools::ToolDecl* decl = registry_.find(name);
-    if (decl != nullptr && decl->mutates_workspace && !policy_.allow_workspace_writes) {
-        emit("tool_refused", {{"tool", name}, {"why", "mode policy"}});
-        return tools::ToolResult::refused("this mode does not permit workspace writes");
+    // Mode policy, then the write gate, then the command gate -- in approval.cpp, with
+    // the pure routing functions they drive (S9.3: policy is applied in ONE place).
+    if (std::optional<tools::ToolResult> refusal = gate_call(decl, name, params)) {
+        return std::move(*refusal);
     }
 
-    // --- HITL: writes -------------------------------------------------------
-    //
-    // Separate from the command gate below because the question is different. A command
-    // is asked about because of what it MIGHT do, inferred from a string; a write is
-    // asked about because of what it definitely does, to a named path. There is no risk
-    // score here and there should not be one -- the operator asked to see writes, so
-    // every write is shown.
-    // A tool DECLARED irreversible always asks, exactly as an irreversible command does,
-    // and for the same reason -- but it has to be asked here, because a tool call has no
-    // command string for the blast-radius classifier to read. `delete_file` destroys data
-    // with no command in sight, so the entire risk-and-approval apparatus was watching
-    // `shell` while a run wiped a workspace through a tool it never scored.
-    const bool irreversible_tool = decl != nullptr && decl->irreversible;
-    if (decl != nullptr && decl->mutates_workspace &&
-        (!config_.auto_approve_writes || irreversible_tool)) {
-        tools::RiskHint hint;
-        // Declared, not inferred, and reported to the card as the fact it is.
-        hint.caps.destroys_data = irreversible_tool;
-        hint.status = blast_radius::ParseStatus::Parsed;
-        const bool allowed =
-            approver_ && approver_(name, "", preview_of(name, params), hint);
-        if (!allowed) {
-            emit("tool_denied", {{"tool", name},
-                                 {"why", irreversible_tool ? "irreversible, not approved"
-                                                           : "write not approved"}});
-            return tools::ToolResult::refused(
-                approver_ ? "denied by the operator"
-                          : "this call needs a human decision and no approver is attached");
+    // First touch of a path: record whether its syntax check was ALREADY failing, using
+    // what is on disk right now -- which is the pre-image, so nothing has to be
+    // snapshotted. Costs one extra sandboxed run per file per run, and it is the
+    // difference between "your edit broke this" and "this arrived broken".
+    if (syntax_ && config_.auto_syntax_check && decl != nullptr &&
+        decl->mutates_workspace) {
+        const std::string path = param_value(params, "path");
+        if (!path.empty() && pre_edit_clean_.find(path) == pre_edit_clean_.end()) {
+            const tools::SyntaxVerdict pre = syntax_->check(path, policy_.sandbox_tier);
+            if (pre.ran) {
+                pre_edit_clean_.emplace(path, pre.clean);
+            }
         }
     }
 
-    // --- HITL: commands -----------------------------------------------------
-    if (decl != nullptr && decl->executes_commands) {
-        const std::string cmd = param_value(params, "command");
-        const tools::RiskHint hint =
-            !cmd.empty() ? tools::classify_command(cmd, "", "") : tools::RiskHint{};
-        Approval route = route_approval(hint, config_.hitl);
-
-        // Three checks, and the ORDER is the design.
-        //
-        //   1. The allowlist can only ever loosen, and only for ordinary commands.
-        //   2. auto_approve_exec off can only ever tighten.
-        //   3. Irreversibility overrides both, in the tightening direction, always.
-        //
-        // Written as three separate steps rather than one condition because each is a
-        // different kind of claim -- "the operator said yes to this before", "the
-        // operator wants to see everything", "this cannot be undone" -- and collapsing
-        // them into one boolean is how the last one got lost.
-        const bool allowlisted = is_allowlisted(cmd, config_.allowed_commands);
-        if (allowlisted && route == Approval::Escalate) {
-            route = Approval::AutoApprove;
-        }
-        if (!config_.auto_approve_exec && route == Approval::AutoApprove && !allowlisted) {
-            route = Approval::Escalate;
-        }
-        if (is_irreversible(hint) && route == Approval::AutoApprove) {
-            emit("irreversible", {{"tool", name},
-                                  {"risk", std::to_string(risk_score(hint))},
-                                  {"allowlisted", allowlisted ? "1" : "0"}});
-            route = Approval::Escalate;
-        }
-
-        // An escalation with nobody to escalate TO is a denial, not a pass. This is the
-        // unattended path: an eval, a script, a dead editor. Deny-by-default (S7.2).
-        if (route == Approval::Escalate && !approver_) {
-            emit("tool_denied", {{"tool", name}, {"why", "escalation with no approver"}});
-            return tools::ToolResult::refused(
-                "this call needs a human decision and no approver is attached");
-        }
-
-        bool allowed = route == Approval::AutoApprove;
-        if (route == Approval::Escalate && approver_) {
-            allowed = approver_(name, cmd, preview_of(name, params), hint);
-        }
-        if (!allowed) {
-            emit("tool_denied",
-                 {{"tool", name}, {"risk", std::to_string(risk_score(hint))}});
-            return tools::ToolResult::refused(
-                route == Approval::Reject ? "rejected: risk score above the reject threshold"
-                                          : "denied by the operator");
-        }
-    }
 
     // A shell call whose command IS the declared verification contract goes through the
     // Verifier, the only thing that may write the ledger (S10.1). Without this the agent
@@ -507,6 +477,10 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         const std::string path = param_value(params, "path");
         if (!path.empty()) {
             ctx_.record_deliverable(path);
+            // The post-edit check goes on the SAME observation rather than becoming a
+            // turn of its own: it is a consequence of this edit, not a separate action,
+            // and a turn would violate one-turn-one-outcome (S9.1) and burn an iteration.
+            annotate_with_syntax_check(path, result);
         }
     }
 
@@ -575,17 +549,37 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
             emit("corrective", {{"kind", "break_repeat"}, {"tool", turn.tool_name}});
             context::TurnRecord marker;
             marker.tool_name = turn.tool_name;
+            // A repeated FAILURE needs a different sentence from a repeated success: the
+            // model is not seeing duplicate progress, it is re-sending bytes that cannot
+            // work. Naming the arguments as the thing to change is the mechanism's whole
+            // point -- suppressing the observation alone would leave it re-deriving the
+            // same call from the same context.
             marker.observation =
-                "(repeat suppressed: this exact call already returned this result)";
-            marker.observation_is_error = false;
+                turn.tool_result.ok()
+                    ? "(repeat suppressed: this exact call already returned this result)"
+                    : "(this exact call has already failed the same way; the arguments "
+                      "are what must change, not the tool)";
+            marker.observation_is_error = !turn.tool_result.ok();
             ctx_.add_turn(std::move(marker));
             return;
         }
         case Corrective::SynthesizeVerification: {
             // Mechanism: make the call the model described but did not make.
-            emit("corrective", {{"kind", "synthesize_verification"}});
-            Verifier verifier(registry_, ctx_);
-            (void)verifier.run_and_record("cmake --build build", policy_.sandbox_tier);
+            //
+            // The command is the contract the run DECLARED through `plan`, not a hardcoded
+            // one. It used to be `cmake --build build` unconditionally, which on a Python
+            // workspace runs a command that cannot work -- so the mechanism that exists to
+            // break a stall filed a guaranteed failure instead.
+            //
+            // Through verifier_, not a fresh Verifier: proven_ is the falsifiability cache
+            // and a new instance starts with an empty one. And filed under the canonical
+            // contract, so every spelling of the check accumulates history on ONE identity
+            // (S10.1) rather than minting a historyless second.
+            const std::string& contract = ctx_.verify_contract();
+            emit("corrective",
+                 {{"kind", "synthesize_verification"}, {"contract", contract}});
+            (void)verifier_.run_and_record_as(contract, policy_.sandbox_tier,
+                                              canonicalize_check(contract));
             return;
         }
         case Corrective::BlockRefusedTool: {
@@ -722,7 +716,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
 
         // At most ONE corrective per turn, chosen by rank (S9.2).
         apply_corrective(choose_corrective(turn, repeats_, refusals_, report.iterations,
-                                           config_.budget, out_of_time),
+                                           config_.budget, out_of_time,
+                                           !ctx_.verify_contract().empty()),
                          turn);
 
         // Any verification a corrective produced flows to the UI from the ledger --
@@ -736,9 +731,14 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         const CompletionVerdict verdict = evaluate_completion(ctx_);
         if (verdict.complete) {
             report.completed = true;
+            report.self_declared = verdict.self_declared();
+            // "completed" against a model-chosen contract is a weaker claim than
+            // "completed" against the operator's, and until this field existed both were
+            // reported with the same word.
             report.termination_reason = "completed";
             emit("completion", {{"reason", verdict.reason},
-                                {"open_items", std::to_string(verdict.open_items)}});
+                                {"open_items", std::to_string(verdict.open_items)},
+                                {"self_declared", verdict.self_declared() ? "1" : "0"}});
             break;
         }
         // A run that has stopped calling tools has stopped working. Two ways to see it:

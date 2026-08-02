@@ -1,5 +1,8 @@
 #include "src/tools/registry.hpp"
 
+#include "src/tools/symbol_index.hpp"
+#include "src/tools/text_view.hpp"
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -84,57 +87,6 @@ void append_json_escaped(std::string& out, std::string_view in) {
 std::string resolve_contained(const std::string& root, const std::string& rel) {
     const std::string abs = fsx::resolve_against(root, rel);
     return fsx::is_within(root, abs) ? abs : std::string();
-}
-
-ToolResult Registry::remember_fact(const std::string& raw) {
-    // Folded to ONE LINE, not refused. Dedupe and trimming both work line-wise, so a
-    // multi-line note would silently defeat both; folding keeps every character the
-    // model wrote and keeps the file's one invariant.
-    std::string fact;
-    fact.reserve(raw.size());
-    for (const char c : raw) {
-        fact += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
-    }
-    const std::size_t first = fact.find_first_not_of(' ');
-    const std::size_t last = fact.find_last_not_of(' ');
-    if (first == std::string::npos) {
-        return ToolResult::error(ErrorClass::Malformed, false,
-                                 "a note cannot be blank");
-    }
-    fact = fact.substr(first, last - first + 1);
-
-    const std::string path = ctx_.root + "/" + kMemoryFileName;
-    const std::string line = "- " + fact + "\n";
-
-    // Read wider than the cap so a file that is already oversized can be trimmed back
-    // rather than refused -- otherwise one oversized write would wedge the tool forever.
-    const fsx::FileContents cur = fsx::read_file_whole(path, kMemoryMaxBytes * 4);
-    std::string body = cur.ok() ? cur.bytes : std::string();
-
-    // Exact repeats are the common case: a model that re-reads its own notes re-derives
-    // the same conclusion. An unbounded pile of duplicates is how this section stops
-    // being worth the tokens it costs.
-    if (body.find(line) != std::string::npos) {
-        return ToolResult::okay("already noted: " + fact);
-    }
-    body += line;
-
-    // Trimmed from the FRONT, so a full file drops its OLDEST notes. Truncating the tail
-    // instead would freeze the memory at whatever the project learned first and silently
-    // discard everything it learned since.
-    while (body.size() > kMemoryMaxBytes) {
-        const std::size_t nl = body.find('\n');
-        if (nl == std::string::npos) {
-            break;
-        }
-        body.erase(0, nl + 1);
-    }
-
-    const fsx::WriteResult w = fsx::write_file_atomic(path, body);
-    if (!w.ok()) {
-        return ToolResult::error(ErrorClass::Transient, true, w.error);
-    }
-    return ToolResult::okay("noted for later sessions: " + fact);
 }
 
 const ToolDecl* Registry::find(const std::string& name) const {
@@ -230,8 +182,10 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
     {
         ToolDecl d;
         d.name = "read_file";
-        d.description = "Read a file, whole. Fails honestly with the real size if it "
-                        "exceeds the limit; use read_slice for a line range instead.";
+        d.description = "Read a file, whole, with 1-based line numbers prefixed for "
+                        "reference. Fails honestly with the real size if it exceeds the "
+                        "prompt budget; use read_slice for a line range instead. The line "
+                        "numbers are display only -- never include them in old_text.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true)};
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
@@ -247,7 +201,20 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                           : ErrorClass::Malformed;
                 return ToolResult::error(ec, false, f.error);
             }
-            return ToolResult::okay(std::move(f.bytes));
+            // The PROMPT budget, not the read budget. These two used to be one number at
+            // 4 MiB, so a single read could hand the context store more bytes than the
+            // whole 96k-token window holds -- while this description already claimed it
+            // "fails honestly with the real size". It does now.
+            if (f.bytes.size() > ctx_.max_model_read_bytes) {
+                return ToolResult::error(
+                    ErrorClass::Malformed, false,
+                    *path + " is " + std::to_string(f.bytes.size()) + " bytes over " +
+                        std::to_string(count_lines(f.bytes)) +
+                        " lines, above the " + std::to_string(ctx_.max_model_read_bytes) +
+                        "-byte prompt budget. Use read_slice(path, start_line, end_line) "
+                        "to read a range.");
+            }
+            return ToolResult::okay(number_lines(f.bytes, 1));
         });
     }
     // --- read_slice --------------------------------------------------------
@@ -255,8 +222,9 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         ToolDecl d;
         d.name = "read_slice";
         d.description = "Read lines [start_line, end_line] of a file (1-based, "
-                        "inclusive). The slice is exact: whole lines, never a partial "
-                        "byte range.";
+                        "inclusive), each prefixed with its own line number. The slice is "
+                        "exact: whole lines, never a partial byte range. The line numbers "
+                        "are display only -- never include them in old_text.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
                          param("start_line", ParamType::Number, true),
@@ -282,11 +250,21 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             std::string outp;
             long line = 1;
             std::size_t at = 0;
+            // The line the budget stopped at, so the model is told where to resume rather
+            // than left to guess. A 5,000-line slice costs the context as much as a whole
+            // file, so the bound applies here too.
+            long stopped_at = 0;
             while (at <= f.bytes.size() && line <= end) {
                 const std::size_t nl = f.bytes.find('\n', at);
                 const std::size_t stop =
                     nl == std::string::npos ? f.bytes.size() : nl + 1;
                 if (line >= start) {
+                    if (outp.size() >= ctx_.max_model_read_bytes) {
+                        stopped_at = line;
+                        break;
+                    }
+                    outp += std::to_string(line);
+                    outp += '\t';
                     outp.append(f.bytes, at, stop - at);
                 }
                 if (nl == std::string::npos) {
@@ -300,6 +278,14 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                          "file has only " + std::to_string(line) +
                                              " line(s); start_line was " +
                                              std::to_string(start));
+            }
+            if (stopped_at != 0) {
+                if (!outp.empty() && outp.back() != '\n') {
+                    outp += '\n';
+                }
+                outp += "[budget reached at line " + std::to_string(stopped_at) +
+                        "; continue with read_slice(path, " +
+                        std::to_string(stopped_at) + ", ...)]\n";
             }
             return ToolResult::okay(std::move(outp));
         });
@@ -402,7 +388,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             const std::string cmd =
                 "grep -rnE --binary-files=without-match "
                 "'(class|struct|enum|def|fn|func|function|const|let|var|void|int|bool|auto"
-                "|std::string)[^;]*\\b" + sym + "\\b' -- '" + ctx_.root + "' | head -60";
+                "|std::string)[^;]*\\b" + sym + "\\b' -- '" + ctx_.root + "' | head -400";
             const ExecutionGrant grant = grant_execution(
                 approved_tier == 0 ? SandboxTier::T0_NoExec : SandboxTier::T1_Seatbelt);
             const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
@@ -414,7 +400,22 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                 return ToolResult::okay("(no definition-shaped lines found for '" + sym +
                                         "'; try search)");
             }
-            return ToolResult::okay(std::move(o.output));
+            // Ranked here, not in the pipeline. `head -60` used to hand back whichever
+            // lines the filesystem walk reached first, so a symbol with fifty call sites
+            // buried its own definition. The grep now casts a wider net and the ordering
+            // is decided where it can be asserted.
+            std::size_t suppressed = 0;
+            const std::vector<SymbolHit> hits =
+                rank_symbol_hits(o.output, sym, 40, suppressed);
+            std::string out;
+            for (const SymbolHit& h : hits) {
+                out += h.path + ":" + std::to_string(h.line) + ":" + h.text + "\n";
+            }
+            if (suppressed > 0) {
+                out += "[" + std::to_string(suppressed) +
+                       " lower-ranked match(es) not shown]\n";
+            }
+            return ToolResult::okay(std::move(out));
         });
     }
     // --- write_file ---------------------------------------------------------
@@ -433,7 +434,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             if (abs.empty()) {
                 return refused_path(*get(p, "path"));
             }
-            const fsx::WriteResult w = fsx::write_file_atomic(abs, *get(p, "content"));
+            const fsx::WriteResult w = commit_write(abs, *get(p, "content"));
             if (!w.ok()) {
                 return ToolResult::error(ErrorClass::Transient, true, w.error);
             }
@@ -467,8 +468,21 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                              : ErrorClass::Malformed,
                                          false, f.error);
             }
-            const graft::Result g =
-                graft::apply(f.bytes, *get(p, "old_text"), *get(p, "new_text"));
+            // Accept what read_file and read_slice displayed. See strip_line_numbers.
+            //
+            // ASYMMETRIC ON PURPOSE. Stripping old_text is safe in the worst case: a
+            // wrong strip means NoMatch and the file is left untouched, which is graft's
+            // contract. Stripping new_text is NOT -- a TSV whose first column is a row
+            // number is exactly the shape this matches, and a wrong strip there silently
+            // writes corrupted content. So new_text is only stripped when old_text ALSO
+            // carried numbers, i.e. when the model is demonstrably echoing back a view it
+            // was shown rather than authoring numbered data.
+            const std::string& raw_old = *get(p, "old_text");
+            const std::string old_text = strip_line_numbers(raw_old);
+            const bool echoing_a_view = old_text != raw_old;
+            const std::string new_text = echoing_a_view ? strip_line_numbers(*get(p, "new_text"))
+                                                        : *get(p, "new_text");
+            const graft::Result g = graft::apply(f.bytes, old_text, new_text);
             if (g.status == graft::Status::NoMatch) {
                 return ToolResult::error(ErrorClass::NotFound, false,
                                          "old_text not found in " + *get(p, "path") +
@@ -483,7 +497,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                          "old_text matches more than one site (lines " +
                                              sites + "); include more context");
             }
-            const fsx::WriteResult w = fsx::write_file_atomic(abs, g.result);
+            const fsx::WriteResult w = commit_write(abs, g.result);
             if (!w.ok()) {
                 return ToolResult::error(ErrorClass::Transient, true, w.error);
             }
@@ -510,7 +524,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             if (!f.ok() && f.status != fsx::FsStatus::NotFound) {
                 return ToolResult::error(ErrorClass::Malformed, false, f.error);
             }
-            const fsx::WriteResult w = fsx::write_file_atomic(abs, content);
+            const fsx::WriteResult w = commit_write(abs, content);
             if (!w.ok()) {
                 return ToolResult::error(ErrorClass::Transient, true, w.error);
             }

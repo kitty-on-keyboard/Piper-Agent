@@ -94,19 +94,32 @@ void ChatTemplate::append_generation_prompt(std::vector<TokenId>& out) const {
     append(out, tok_.encode_template("\n"));
 }
 
-std::vector<TokenId> ChatTemplate::render(const std::vector<Message>& messages,
-                                          std::string_view tools_json) const {
+std::vector<TokenId> ChatTemplate::render_with_offsets(
+    const std::vector<Message>& messages, std::string_view tools_json,
+    std::vector<std::size_t>& offsets) const {
     std::vector<TokenId> out;
+    offsets.clear();
+    offsets.reserve(messages.size() + 1);
     bool first = true;
     for (const Message& m : messages) {
+        offsets.push_back(out.size());
         // The tools block rides on the first message iff it is the system message;
         // it is part of the KV prefix and therefore run-constant (S6.4).
         const bool with_tools = first && m.role == Role::System;
         append_message(m, with_tools ? tools_json : std::string_view{}, out);
         first = false;
     }
+    offsets.push_back(out.size()); // where the generation prompt starts
     append_generation_prompt(out);
     return out;
+}
+
+// One line, so the two cannot drift: a second copy of the loop is how the offsets would
+// eventually stop describing the ids.
+std::vector<TokenId> ChatTemplate::render(const std::vector<Message>& messages,
+                                          std::string_view tools_json) const {
+    std::vector<std::size_t> ignored;
+    return render_with_offsets(messages, tools_json, ignored);
 }
 
 } // namespace lmp::model

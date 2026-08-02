@@ -58,6 +58,30 @@ struct ReuseDecision {
     bool divergent = false;
 };
 
+// What a turn should do with the cache it inherited from the previous one.
+//
+// WHY THIS IS NEEDED AT ALL. plan_reuse() answers "is the cache a prefix of this prompt",
+// which between turns is always NO: after turn N the ledger holds [prompt_N][generated_N],
+// and turn N+1's prompt inserts a new turn record BEFORE the live-state block, so the two
+// diverge mid-ledger. The backend's response was a full reset, so every turn re-prefilled
+// the entire context -- which made context.cpp's most-stable-first layout, and the
+// measurement that motivated it, buy nothing.
+//
+// The way out is a checkpoint taken in advance at the end of the stable prefix.
+// qwen35_moe_model.hpp says why it must be a checkpoint rather than a rollback_to(n): 30
+// of this model's 40 layers are gated-delta, a recurrence with no per-token history, so
+// only positions snapshotted ahead of time are reachable at all.
+enum class ReuseMode : std::uint8_t {
+    Extend,   // the cache is a verified prefix of the prompt; prefill the tail
+    Restore,  // roll back to the saved checkpoint, then prefill from there
+    Reset,    // nothing usable; one honest full re-prefill
+};
+
+struct TurnReuse {
+    ReuseMode mode = ReuseMode::Reset;
+    std::size_t prefill_from = 0;
+};
+
 class KvCacheLedger {
   public:
     KvCacheLedger();
@@ -96,5 +120,18 @@ class KvCacheLedger {
     // truncated to" holds by construction rather than by arithmetic.
     std::vector<std::uint64_t> hashes_;
 };
+
+// Pure, so the whole decision is testable in the gate with no GPU and no 19 GB
+// checkpoint -- the same argument speculative.hpp makes for keeping the block algebra
+// model-free, and for the same reason: an off-by-one here does not crash, it reuses a
+// cache against the wrong prefix and the text stays fluent.
+//
+// Invalidation is NOT enumerated. Compaction, a steering message, a persona change and a
+// tools-block change all rewrite the stable prefix; none of them is special-cased,
+// because rule 2's id-by-id comparison fails and the answer falls through to Reset. An
+// enumeration is a list someone forgets to extend.
+[[nodiscard]] TurnReuse plan_turn_reuse(const KvCacheLedger& ledger,
+                                        const std::vector<TokenId>& prompt,
+                                        std::size_t checkpoint_len, bool checkpoint_valid);
 
 } // namespace lmp::model

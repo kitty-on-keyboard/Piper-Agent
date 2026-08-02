@@ -130,8 +130,15 @@ def run_one(meta, model_dir, verbose):
         elif method == "lmp/turn":
             state["turns"] += 1
             if verbose:
+                detail = ""
+                if params.get("tool_status") not in (None, "Ok"):
+                    # The SUMMARY, not just the status. A run of identical ToolErrors is
+                    # unattributable without it -- which is exactly how five consecutive
+                    # replace_in_file failures looked like a line-numbering problem they
+                    # turned out not to be.
+                    detail = "  " + (params.get("summary") or "").split("\n")[0][:150]
                 print(f"      turn {state['turns']:2d}  {params.get('tool_name') or '(text)':<16}"
-                      f" {params.get('tool_status')}", flush=True)
+                      f" {params.get('tool_status')}{detail}", flush=True)
         elif method == "lmp/approval_request":
             state["approvals"] += 1
             # A task can insist the card be denied -- that is how the destructive task is

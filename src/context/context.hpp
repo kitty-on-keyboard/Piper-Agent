@@ -20,6 +20,7 @@
 // prompt. No inferred workspace description, no guessed deliverable names. This was v1's
 // root bug class, and add_observation() is the only door.
 //
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <algorithm>
@@ -94,12 +95,36 @@ class ContextStore {
             checklist_.begin(), checklist_.end(), [](const ChecklistItem& c) { return !c.done; }));
     }
 
-    // The command the run declared, via `plan`, as the proof that the mission is done.
-    // Pinned here rather than held by the Agent so a follow-up run picks up the contract
-    // its predecessor declared instead of silently losing it.
-    void set_verify_contract(std::string c) { verify_contract_ = std::move(c); }
+    // WHO CHOSE THE PROOF (S10.4).
+    //
+    // The checklist stopped gating completion because a tick is a self-report. The verify
+    // contract is the same class of thing one level down, and it was never noticed: the
+    // model picks the command that counts as proof, and the harness then rigorously
+    // verifies whatever the model picked. `rename_across_files` ended
+    // completed=yes verified=yes solved=NO by declaring `pytest -q`, making it pass, and
+    // stopping -- while the mission also required no residual `calc_total`. Every gate
+    // worked. The contract was weaker than the mission and nothing said so.
+    //
+    // This cannot be fixed by inspecting the contract: whether a command covers a mission
+    // is not decidable from either string. What CAN be fixed is the pretence that the two
+    // kinds of contract are the same. An operator contract is evidence about the mission;
+    // a model contract is evidence about what the model decided to check.
+    enum class ContractSource : std::uint8_t { Model, Operator };
+
+    // Operator contracts WIN and are permanent: `plan` may not replace one. Otherwise a
+    // run could talk its way out of the criterion it was given by restating the plan.
+    void set_verify_contract(std::string c, ContractSource source = ContractSource::Model) {
+        if (contract_source_ == ContractSource::Operator && source != ContractSource::Operator) {
+            return;
+        }
+        verify_contract_ = std::move(c);
+        contract_source_ = source;
+    }
     [[nodiscard]] const std::string& verify_contract() const noexcept {
         return verify_contract_;
+    }
+    [[nodiscard]] ContractSource verify_contract_source() const noexcept {
+        return contract_source_;
     }
 
     // True when an instruction has landed that the current checklist predates. Cleared
@@ -157,9 +182,24 @@ class ContextStore {
     void set_persona(std::string text) { persona_ = std::move(text); }
 
     // --- T2 recent ----------------------------------------------------------
+    // The most an observation may carry into the prompt. The tool layer is supposed to
+    // bound every result before it gets here -- tool_result.hpp says so -- but only the
+    // shell path actually did, and read_file handed over whole files. This is the door
+    // that makes the next tool which forgets fail loudly instead of silently.
+    void set_observation_budget(std::size_t n) noexcept { observation_budget_ = n; }
+
     // The ONLY door for run facts. Everything it stores was observed through a tool
     // result in this run.
     void add_turn(TurnRecord t) {
+        // Assert in tests (assertions are on in EVERY configuration here), clamp in a
+        // real run: a run that has already produced an over-budget observation is better
+        // served by a truncated one than by an abort.
+        assert(t.observation.size() <= observation_budget_ &&
+               "observation exceeds the prompt budget; the tool layer must bound it");
+        if (t.observation.size() > observation_budget_) {
+            t.observation.resize(observation_budget_);
+            t.observation += "\n[truncated at the observation budget]\n";
+        }
         ++seq_;
         recent_.push_back(std::move(t));
     }
@@ -202,6 +242,16 @@ class ContextStore {
     // is diffable and a purity violation is a unit test, not a run-time surprise.
     [[nodiscard]] std::vector<Message> render(std::string_view tool_guidance) const;
 
+    // How many of render()'s messages form the STABLE prefix -- everything except the
+    // live-state block, which is the one part that changes every turn. This is the
+    // boundary the KV checkpoint is taken at (S5.10): turn N's stable prefix is a pure
+    // prefix of turn N+1's, so a cache rolled back to here needs only the new turn record
+    // and the new live state prefilled, instead of the whole context.
+    [[nodiscard]] std::size_t stable_message_count(std::string_view tool_guidance) const {
+        const std::size_t n = render(tool_guidance).size();
+        return render_live_state().empty() ? n : n - 1;
+    }
+
     [[nodiscard]] const std::string& mission() const noexcept { return user_turns_.front(); }
     [[nodiscard]] const std::vector<std::string>& compacted_spans() const noexcept {
         return spans_;
@@ -218,6 +268,7 @@ class ContextStore {
     std::string project_instructions_;
     std::string project_memory_;
     std::string verify_contract_;
+    ContractSource contract_source_ = ContractSource::Model;
     std::vector<ChecklistItem> checklist_;
     std::vector<VerificationRecord> verifications_;
     std::vector<std::string> deliverables_;
@@ -228,6 +279,9 @@ class ContextStore {
     // spans but must not renumber the timeline, or evidence would appear to move.
     std::size_t seq_ = 0;
     std::size_t last_directive_seq_ = 0;
+    // Generous by default so a caller that never sets it keeps today's behaviour; the
+    // sidecar sets the real one from the workspace's budgets.
+    std::size_t observation_budget_ = 1U << 20;
     bool plan_stale_ = false;
 };
 
