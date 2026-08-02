@@ -96,6 +96,7 @@ TEST(repeat_detection_keys_on_tool_and_arguments) {
 
 TEST(at_most_one_corrective_and_budget_outranks_everything) {
     RepeatDetector d;
+    RefusalLedger rl;
     TurnResult t;
     t.outcome = Outcome::ToolCallExecuted;
     t.tool_name = "read_file";
@@ -107,23 +108,62 @@ TEST(at_most_one_corrective_and_budget_outranks_everything) {
     Budget budget;
     budget.max_iterations = 40;
     // Repeat alone -> BreakRepeat.
-    CHECK(choose_corrective(t, d, 1, budget, false) == Corrective::BreakRepeat);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::BreakRepeat);
     // Budget exhausted outranks it; only ONE is returned.
-    CHECK(choose_corrective(t, d, 40, budget, false) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, 1, budget, true) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 40, budget, false) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 1, budget, true) == Corrective::HaltOnBudget);
 }
 
 TEST(a_claimed_verification_synthesizes_a_real_one) {
     RepeatDetector d;
+    RefusalLedger rl;
     TurnResult t;
     t.outcome = Outcome::TextOnly;
     t.assistant_text = "I fixed the include. The build should pass now.";
     const Budget budget;
     // Mechanism, not prose: the loop MAKES the call the model only described.
-    CHECK(choose_corrective(t, d, 1, budget, false) == Corrective::SynthesizeVerification);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::SynthesizeVerification);
 
     t.assistant_text = "Here is a summary of the file.";
-    CHECK(choose_corrective(t, d, 1, budget, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::None);
+}
+
+// A refusal is neither an execution nor an error, so before RefusalLedger existed the
+// destructive fixture re-attempted the refused call every turn until the budget died.
+TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
+    RepeatDetector d;
+    RefusalLedger rl;
+    TurnResult t;
+    t.outcome = Outcome::ToolCallRefused;
+    t.tool_name = "delete_file";
+    t.tool_params = {{"path", "a"}};
+    t.tool_result = tools::ToolResult::refused("denied by the operator");
+    const Budget budget;
+
+    // First refusal: the model could not have known. Taking the tool away over one "no"
+    // would be the wrong trade.
+    rl.record("delete_file");
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::None);
+
+    // Second: fire.
+    rl.record("delete_file");
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::BlockRefusedTool);
+
+    // Counted by TOOL, not by (tool, params) -- varying the path is not a new question.
+    t.tool_params = {{"path", "b"}};
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::BlockRefusedTool);
+
+    // Once blocked it must not re-fire: the mechanism already ran, and a corrective that
+    // keeps selecting itself would crowd out every other one for the rest of the run.
+    rl.block("delete_file");
+    CHECK(rl.is_blocked("delete_file"));
+    CHECK(choose_corrective(t, d, rl, 1, budget, false) == Corrective::None);
+
+    // Budget still outranks it (S9.2).
+    rl.record("shell");
+    rl.record("shell");
+    t.tool_name = "shell";
+    CHECK(choose_corrective(t, d, rl, 40, budget, false) == Corrective::HaltOnBudget);
 }
 
 // --- completion gate (S10.4) -------------------------------------------------

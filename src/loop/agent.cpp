@@ -217,6 +217,7 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     } else {
         specs = registry_.guard_specs();
     }
+    specs = without_blocked(specs, refusals_, registry_.guard_specs());
     model::TurnGrammar grammar(tok_, specs);
     task.mask = &grammar;
 
@@ -587,6 +588,22 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
             (void)verifier.run_and_record("cmake --build build", policy_.sandbox_tier);
             return;
         }
+        case Corrective::BlockRefusedTool: {
+            // Mechanism: take the tool off the grammar for the rest of the run, so the
+            // next turn cannot sample it at all. Recording the reason matters as much as
+            // the block -- a call that silently stops being available is indistinguishable
+            // from a model that forgot the tool exists.
+            emit("corrective", {{"kind", "block_refused_tool"}, {"tool", turn.tool_name}});
+            refusals_.block(turn.tool_name);
+            context::TurnRecord marker;
+            marker.tool_name = turn.tool_name;
+            marker.observation = "(the operator refused `" + turn.tool_name +
+                                 "` twice; it is no longer available this run -- take "
+                                 "another route or stop and say why you cannot)";
+            marker.observation_is_error = true;
+            ctx_.add_turn(std::move(marker));
+            return;
+        }
         case Corrective::HaltOnBudget:
             // Mechanism: end the run.
             emit("corrective", {{"kind", "halt_on_budget"}});
@@ -662,6 +679,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         if (turn.outcome == Outcome::ToolCallExecuted) {
             repeats_.record(turn.tool_name, turn.tool_params);
         }
+        // A refusal is not an execution and not an error, so neither ledger above sees
+        // it. Counted here so re-asking has somewhere to register (S9.2).
+        if (turn.outcome == Outcome::ToolCallRefused) {
+            refusals_.record(turn.tool_name);
+        }
 
         // Calls batched behind the first each get their own record and their own UI row.
         for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
@@ -699,7 +721,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         compact_to_budget();
 
         // At most ONE corrective per turn, chosen by rank (S9.2).
-        apply_corrective(choose_corrective(turn, repeats_, report.iterations,
+        apply_corrective(choose_corrective(turn, repeats_, refusals_, report.iterations,
                                            config_.budget, out_of_time),
                          turn);
 

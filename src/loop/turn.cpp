@@ -96,12 +96,76 @@ void RepeatDetector::record(const std::string& tool,
     seen_.emplace_back(k, 1);
 }
 
+void RefusalLedger::record(const std::string& tool) {
+    for (auto& [name, count] : refusals_) {
+        if (name == tool) {
+            ++count;
+            return;
+        }
+    }
+    refusals_.emplace_back(tool, 1);
+}
+
+std::size_t RefusalLedger::refused_count(const std::string& tool) const {
+    for (const auto& [name, count] : refusals_) {
+        if (name == tool) {
+            return count;
+        }
+    }
+    return 0;
+}
+
+void RefusalLedger::block(std::string tool) {
+    if (!is_blocked(tool)) {
+        blocked_.push_back(std::move(tool));
+    }
+}
+
+bool RefusalLedger::is_blocked(const std::string& tool) const {
+    for (const std::string& name : blocked_) {
+        if (name == tool) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<parsephony::ToolSpec> without_blocked(
+    const std::vector<parsephony::ToolSpec>& specs, const RefusalLedger& refusals,
+    const std::vector<parsephony::ToolSpec>& all_specs) {
+    if (refusals.blocked().empty()) {
+        return specs;
+    }
+    std::vector<parsephony::ToolSpec> allowed;
+    for (const parsephony::ToolSpec& s : specs) {
+        if (!refusals.is_blocked(s.name)) {
+            allowed.push_back(s);
+        }
+    }
+    if (allowed.empty()) {
+        for (const parsephony::ToolSpec& s : all_specs) {
+            if (s.name == "plan") {
+                allowed.push_back(s);
+            }
+        }
+    }
+    return allowed;
+}
+
 Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repeats,
-                             int iterations_used, const Budget& budget,
-                             bool wall_clock_exhausted) {
+                             const RefusalLedger& refusals, int iterations_used,
+                             const Budget& budget, bool wall_clock_exhausted) {
     // Ranked; the highest applicable one wins, and only one is returned (S9.2).
     if (wall_clock_exhausted || iterations_used >= budget.max_iterations) {
         return Corrective::HaltOnBudget;
+    }
+    // Above BreakRepeat: this one is the difference between a run that ends and a run
+    // that spends its whole budget asking a question already answered. The second
+    // refusal is the trigger -- the first is legitimate (the model could not have known),
+    // and blocking on it would take the tool away over a single "no".
+    if (turn.outcome == Outcome::ToolCallRefused &&
+        refusals.refused_count(turn.tool_name) >= 2 && !refusals.is_blocked(turn.tool_name)) {
+        return Corrective::BlockRefusedTool;
     }
     if (turn.outcome == Outcome::ToolCallExecuted && turn.tool_result.ok() &&
         repeats.seen_count(turn.tool_name, turn.tool_params) > 1) {

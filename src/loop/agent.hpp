@@ -204,6 +204,7 @@ class Agent {
     AgentConfig config_;
     ModePolicy policy_;
     RepeatDetector repeats_;
+    RefusalLedger refusals_;
     Approver approver_;
     Observer observer_;
     SteerSource steer_;
