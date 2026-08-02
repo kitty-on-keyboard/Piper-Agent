@@ -484,6 +484,11 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     (void)task;
     (void)sink;
     (void)cancel;
+    // Not decoration. Without MLX nothing in this translation unit reads clock_, and
+    // -Wunused-private-field is an error here -- so the no-MLX build did not compile at
+    // all. Suppressed HERE rather than with [[maybe_unused]] on the member, so the
+    // warning stays live for the MLX path, where an unread clock would be a real finding.
+    (void)clock_;
     GenResult r;
     r.status = GenStatus::BackendError;
     r.error = "MlxBackend: MLX not compiled in";
