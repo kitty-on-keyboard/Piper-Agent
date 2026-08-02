@@ -19,6 +19,22 @@ inline void append_value(std::string& out, std::int64_t v) { out += std::to_stri
 inline void append_value(std::string& out, double v) { out += std::to_string(v); }
 inline void append_value(std::string& out, bool v) { out += v ? "true" : "false"; }
 
+// Repeated fields. The element overload is found by ADL at instantiation, so this may
+// sit above the struct definitions it serializes.
+template <typename T>
+inline void append_value(std::string& out, const std::vector<T>& v) {
+    out += "[";
+    bool first = true;
+    for (const T& item : v) {
+        if (!first) {
+            out += ",";
+        }
+        first = false;
+        append_value(out, item);
+    }
+    out += "]";
+}
+
 // Mode: crosses the wire as one of these literals.
 namespace mode_values {
 inline constexpr const char* kPlan = "plan";
@@ -76,6 +92,32 @@ inline void append_value(std::string& out, const SamplingSettings& v) {
     out += "}";
 }
 
+struct McpServerSettings {
+    std::string name;
+    std::string command;
+    std::vector<std::string> args;
+    std::vector<std::string> env;
+    bool trusted = false;
+};
+inline void append_value(std::string& out, const McpServerSettings& v) {
+    out += "{";
+    out += "\"name\":";
+    append_value(out, v.name);
+    out += ",";
+    out += "\"command\":";
+    append_value(out, v.command);
+    out += ",";
+    out += "\"args\":";
+    append_value(out, v.args);
+    out += ",";
+    out += "\"env\":";
+    append_value(out, v.env);
+    out += ",";
+    out += "\"trusted\":";
+    append_value(out, v.trusted);
+    out += "}";
+}
+
 struct RunSettings {
     std::string model_dir;
     std::string workspace_root;
@@ -91,6 +133,7 @@ struct RunSettings {
     std::string system_prompt;
     std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
+    std::vector<McpServerSettings> mcp_servers;
 };
 inline void append_value(std::string& out, const RunSettings& v) {
     out += "{";
@@ -135,6 +178,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"context_budget_tokens\":";
     append_value(out, v.context_budget_tokens);
+    out += ",";
+    out += "\"mcp_servers\":";
+    append_value(out, v.mcp_servers);
     out += "}";
 }
 

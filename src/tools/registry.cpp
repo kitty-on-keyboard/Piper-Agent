@@ -135,6 +135,17 @@ void Registry::declare(ToolDecl decl, Handler handler) {
     decls_.push_back(std::move(decl));
 }
 
+bool Registry::declare_remote(ToolDecl decl, Handler handler) {
+    // The namespacing in mcp_host.cpp should already make this impossible. Checked here
+    // anyway, because "a remote tool shadowed read_file" is the kind of thing that must
+    // fail closed at the door rather than depend on a caller getting a prefix right.
+    if (handlers_.find(decl.name) != handlers_.end()) {
+        return false;
+    }
+    declare(std::move(decl), std::move(handler));
+    return true;
+}
+
 ToolResult Registry::execute(const std::string& name,
                              const std::vector<ToolParamValue>& params, int approved_tier) {
     const auto it = handlers_.find(name);
