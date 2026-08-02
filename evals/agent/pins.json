@@ -1,18 +1,18 @@
 {
   "corpus": {
     "total": 6,
-    "solved": 3,
-    "completed": 1,
-    "verified": 1,
-    "turns": 130
+    "solved": 5,
+    "completed": 2,
+    "verified": 2,
+    "turns": 119
   },
   "holdout": {
     "total": 4,
-    "solved": 1,
+    "solved": 2,
     "completed": 2,
-    "verified": 2,
-    "turns": 58
+    "verified": 3,
+    "turns": 66
   },
-  "_measured": "2026-07-31",
+  "_measured": "2026-08-02",
   "_note": "Floors, not equalities: this drives a 35B MoE at temperature 0.6, where a fixed seed is only approximately reproducible. A drop fails; an improvement asks to be re-pinned."
 }

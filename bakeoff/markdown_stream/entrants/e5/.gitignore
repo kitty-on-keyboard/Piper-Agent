@@ -1,0 +1,12 @@
+build/
+poc*
+*~
+tests/poc*
+src/poc*
+include/poc*
+_deps/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.a

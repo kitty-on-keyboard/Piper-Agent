@@ -223,6 +223,7 @@ TEST(the_agent_streams_a_turn_token_by_token) {
     lmp::tools::WorkspaceContext ws;
     ws.root = "/tmp";
     ws.max_read_bytes = 1 << 20;
+    ws.max_model_read_bytes = 16384;
     ws.max_result_bytes = 1 << 16;
     ws.spool_dir = "/tmp";
     ws.shell_wall_clock_seconds = 5;

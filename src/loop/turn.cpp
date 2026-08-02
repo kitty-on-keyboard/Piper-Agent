@@ -96,20 +96,106 @@ void RepeatDetector::record(const std::string& tool,
     seen_.emplace_back(k, 1);
 }
 
+void RefusalLedger::record(const std::string& tool) {
+    for (auto& [name, count] : refusals_) {
+        if (name == tool) {
+            ++count;
+            return;
+        }
+    }
+    refusals_.emplace_back(tool, 1);
+}
+
+std::size_t RefusalLedger::refused_count(const std::string& tool) const {
+    for (const auto& [name, count] : refusals_) {
+        if (name == tool) {
+            return count;
+        }
+    }
+    return 0;
+}
+
+void RefusalLedger::block(std::string tool) {
+    if (!is_blocked(tool)) {
+        blocked_.push_back(std::move(tool));
+    }
+}
+
+bool RefusalLedger::is_blocked(const std::string& tool) const {
+    for (const std::string& name : blocked_) {
+        if (name == tool) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<parsephony::ToolSpec> without_blocked(
+    const std::vector<parsephony::ToolSpec>& specs, const RefusalLedger& refusals,
+    const std::vector<parsephony::ToolSpec>& all_specs) {
+    if (refusals.blocked().empty()) {
+        return specs;
+    }
+    std::vector<parsephony::ToolSpec> allowed;
+    for (const parsephony::ToolSpec& s : specs) {
+        if (!refusals.is_blocked(s.name)) {
+            allowed.push_back(s);
+        }
+    }
+    if (allowed.empty()) {
+        for (const parsephony::ToolSpec& s : all_specs) {
+            if (s.name == "plan") {
+                allowed.push_back(s);
+            }
+        }
+    }
+    return allowed;
+}
+
 Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repeats,
-                             int iterations_used, const Budget& budget,
-                             bool wall_clock_exhausted) {
+                             const RefusalLedger& refusals, int iterations_used,
+                             const Budget& budget, bool wall_clock_exhausted,
+                             bool have_verify_contract) {
     // Ranked; the highest applicable one wins, and only one is returned (S9.2).
     if (wall_clock_exhausted || iterations_used >= budget.max_iterations) {
         return Corrective::HaltOnBudget;
     }
-    if (turn.outcome == Outcome::ToolCallExecuted && turn.tool_result.ok() &&
+    // Above BreakRepeat: this one is the difference between a run that ends and a run
+    // that spends its whole budget asking a question already answered. The second
+    // refusal is the trigger -- the first is legitimate (the model could not have known),
+    // and blocking on it would take the tool away over a single "no".
+    if (turn.outcome == Outcome::ToolCallRefused &&
+        refusals.refused_count(turn.tool_name) >= 2 && !refusals.is_blocked(turn.tool_name)) {
+        return Corrective::BlockRefusedTool;
+    }
+    // A repeat is a repeat whether it SUCCEEDED or failed unrecoverably.
+    //
+    // This used to require ok(), on the reasoning that "repeating after an error is
+    // legitimate retry". That is true of a TRANSIENT error and false of anything else: an
+    // ambiguous edit, a path that does not exist, a malformed argument. Those are pure
+    // functions of the bytes sent, so re-sending the same bytes gets the same answer, and
+    // the run just buys the same failure again.
+    //
+    // MEASURED. failing_test_median sent a byte-identical replace_in_file five times --
+    // "old_text matches more than one site (lines 7, 8)" each time -- and nothing fired,
+    // because a ToolError is not ok(). It is the same hole RefusalLedger was added to
+    // close, one class over: refusals were not errors, and unretryable errors were not
+    // repeats.
+    const bool unrecoverable_repeat =
+        !turn.tool_result.ok() && !turn.tool_result.retryable;
+    if (turn.outcome == Outcome::ToolCallExecuted &&
+        (turn.tool_result.ok() || unrecoverable_repeat) &&
         repeats.seen_count(turn.tool_name, turn.tool_params) > 1) {
         return Corrective::BreakRepeat;
     }
     // The model described a verification but did not make one. Synthesizing the call is
     // a mechanism; asking it to please run the build would be prose.
-    if (turn.outcome == Outcome::TextOnly && !turn.assistant_text.empty()) {
+    //
+    // Only when a contract exists to synthesize. Without one the corrective has nothing to
+    // run, and running something else -- as the hardcoded `cmake --build build` did -- files
+    // a guaranteed failure against a contract nobody declared.
+    if (have_verify_contract && turn.outcome == Outcome::TextOnly &&
+        !turn.assistant_text.empty()) {
         const std::string& t = turn.assistant_text;
         const bool claims_verification =
             t.find("should pass") != std::string::npos ||
@@ -216,12 +302,19 @@ CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
                     "since",
                 open};
     }
-    return {true,
-            open == 0 ? "deliverables recorded and the declared contract passes provably"
-                      : "deliverables recorded and the declared contract passes provably, "
-                        "though " + std::to_string(open) + " checklist item(s) are "
-                        "still unticked",
-            open};
+    const auto source = ctx.verify_contract_source();
+    std::string why = "deliverables recorded and the ";
+    // The word that was missing. "The declared contract passes" reads identically whether
+    // the operator set the criterion or the model picked one it could satisfy, and those
+    // are not the same claim.
+    why += source == context::ContextStore::ContractSource::Operator
+               ? "operator's contract passes provably"
+               : "contract the MODEL chose passes provably (nobody else vouched for it "
+                 "as the mission's criterion)";
+    if (open != 0) {
+        why += ", though " + std::to_string(open) + " checklist item(s) are still unticked";
+    }
+    return {true, why, open, source};
 }
 
 } // namespace lmp::loop

@@ -55,6 +55,11 @@ struct InferenceTask {
     // and ReplayBackend ignore it: their tokens are the script's business, and the loop's
     // sink still classifies them.
     const MaskSource* mask = nullptr;
+    // Token index at which the STABLE part of this prompt ends -- everything except the
+    // live-state block, which changes every turn. The backend snapshots its caches there
+    // so the next turn can roll back to it instead of re-prefilling the whole context
+    // (S5.10). 0 disables it. Ignored by backends without a KV cache.
+    std::size_t checkpoint_at = 0;
 };
 
 // Receives each sampled id as it is produced. Returns false to stop generation -- this is
@@ -93,6 +98,11 @@ struct GenResult {
     double forward_ms = 0.0;
     double logits_copy_ms = 0.0;
     double sample_ms = 0.0;
+    // Prompt tokens that did NOT have to be prefilled because the cache already held
+    // them, verified id by id. The number this whole checkpoint mechanism exists for: if
+    // it stays 0 across a multi-turn run, the mechanism is not firing and the complexity
+    // is not paying for itself.
+    std::size_t prefill_reused_tokens = 0;
 };
 
 class InferenceBackend {

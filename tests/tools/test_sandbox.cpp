@@ -90,8 +90,21 @@ TEST(a_command_that_spins_forever_is_stopped) {
     const ExecOutcome o =
         run_sandboxed(grant, "while true; do :; done", root, root, limits(1));
     CHECK(o.status != Status::Ok);
-    CHECK(o.signalled);
-    CHECK_EQ(o.signal, SIGXCPU);
+
+    // EITHER stopper satisfies the requirement, and this test used to pin SIGXCPU --
+    // contradicting the comment directly above it. limits(1) sets cpu_seconds AND
+    // wall_clock_seconds to 1, so which one lands first is a race; on a fast idle machine
+    // the busy loop burns its CPU second first and dies of SIGXCPU, and under ASan on a
+    // shared CI runner the wall-clock killer (polled every 200 ms) gets there first and
+    // the child is SIGKILLed instead, with signalled left false.
+    //
+    // That is not a defect in the sandbox -- the runaway was stopped both times, which is
+    // the entire requirement. It was a defect in the assertion, and it went unnoticed
+    // because the sanitizers job had never built far enough to run this suite.
+    CHECK(o.wall_clock_killed || o.signalled);
+    if (o.signalled) {
+        CHECK_EQ(o.signal, SIGXCPU);
+    }
 }
 
 TEST(a_command_that_must_fork_still_runs) {
@@ -141,12 +154,50 @@ TEST(t0_refuses_and_t2_refuses_rather_than_downgrades) {
                                          "echo hi", root, root, limits(5));
     CHECK(t0.status == Status::Refused);
 
-    // T2 is not wired: it must REFUSE, not silently run in T1 -- a silent downgrade is
-    // v1's unsafe_host default wearing a new name (S7.2, S13).
+    // With no usable runtime, T2 must REFUSE rather than silently run in T1 -- a silent
+    // downgrade is v1's unsafe_host default wearing a new name (S7.2, S13). The env
+    // switch makes "no runtime" reachable on a host that HAS one, so this assertion is
+    // about the code path rather than about this machine's software.
+    ::setenv("LMP_DISABLE_CONTAINER", "1", 1);
     const ExecOutcome t2 = run_sandboxed(grant_execution(SandboxTier::T2_Container),
                                          "echo hi", root, root, limits(5));
     CHECK(t2.status == Status::Refused);
     CHECK(t2.output.find("container") != std::string::npos);
+    // The refusal names WHY, so an operator can act on it instead of guessing.
+    CHECK(t2.output.find("refusal, not a") != std::string::npos);
+    // And nothing ran: a refused command produces no output of its own.
+    CHECK(t2.output.find("hi\n") == std::string::npos);
+}
+
+// The container invocation itself, asserted without needing a runtime installed: the
+// flags ARE the containment, so they are worth pinning.
+TEST(the_container_invocation_carries_its_containment) {
+    ContainerRuntime rt;
+    rt.available = true;
+    rt.binary = "docker";
+    rt.image = "img@sha256:deadbeef";
+    const std::string cmd =
+        container_command(rt, "pytest -q", "/work/space", "/work/space", limits(5));
+    CHECK(cmd.find("--network none") != std::string::npos);       // egress denied
+    CHECK(cmd.find("--pids-limit") != std::string::npos);         // fork bombs
+    CHECK(cmd.find("--memory") != std::string::npos);
+    // Mounted at the SAME path it has on the host: every diagnostic the model has already
+    // seen names the host path, and remapping would describe a filesystem nothing else in
+    // the run knows about.
+    CHECK(cmd.find("--volume /work/space:/work/space") != std::string::npos);
+    CHECK(cmd.find("img@sha256:deadbeef") != std::string::npos);  // pinned by digest
+    CHECK(cmd.find("'pytest -q'") != std::string::npos);          // quoted, not injected
+}
+
+// A command carrying a quote must not break out of the -c argument.
+TEST(the_container_invocation_quotes_the_command) {
+    ContainerRuntime rt;
+    rt.available = true;
+    rt.binary = "docker";
+    rt.image = "i";
+    const std::string cmd =
+        container_command(rt, "echo 'a'; rm -rf /", "/w", "/w", limits(5));
+    CHECK(cmd.find("'echo '\\''a'\\''; rm -rf /'") != std::string::npos);
 }
 
 TEST(output_is_capped_not_unbounded) {

@@ -4,20 +4,28 @@
 // user actually looks at, and mixing a stylesheet into the class that dispatches
 // notifications made both harder to read.
 //
-// THREE THINGS THIS FILE IS CAREFUL ABOUT
+// FOUR THINGS THIS FILE IS CAREFUL ABOUT
 //
-// 1. The model does not stream. `Observer::on_token` fires ONCE per turn with the whole
-//    reasoning block and once with the whole answer, so text arrives in slabs after a
-//    silence as long as the turn took. The typewriter is therefore not decoration over a
-//    stream -- it IS the stream, reconstructed at the view layer, and the thinking
-//    animation covers the gap where genuinely nothing is arriving.
+// 1. The sidecar streams. `Observer::on_token` now fires per token -- ~51 notifications a
+//    turn -- so the typewriter is no longer reconstructing a stream from a slab, it is
+//    smoothing arrival jitter over a real one. (It DID fire once per turn before `7cb3139`;
+//    every "reconstructed at the view layer" assumption from that era is gone.) The drain
+//    rate scales with how far behind the queue is, so a burst after a stall catches up.
 //
-// 2. Everything is themed from VS Code variables, so it follows the editor into light,
+// 2. Markdown is parsed incrementally, never re-parsed. A fenced block whose closing fence
+//    has not arrived must not swallow the rest of the answer, and a chunk boundary must not
+//    change the output -- which is what makes this a state machine and not a regex over the
+//    accumulated text. The parser is `markdownStreamSource()`; the renderer is the only
+//    part that touches the DOM. Keeping them apart is what lets the parser be diffed
+//    against the C++ it was ported from -- see `scripts/verify-markdown-stream.js`.
+//
+// 3. Everything is themed from VS Code variables, so it follows the editor into light,
 //    dark and high contrast rather than looking correct in whichever one it was built in.
 //
-// 3. The CSP allows inline styles and exactly one nonced script. No network, no CDN
+// 4. The CSP allows inline styles and exactly one nonced script. No network, no CDN
 //    fonts, no remote anything -- the sidecar is local and the view has no business
-//    reaching off the machine.
+//    reaching off the machine. Nothing here ever sets innerHTML from model output: every
+//    byte the model produced reaches the DOM as a text node.
 
 /** Font stack: the platform's own UI face first, so it reads native on macOS and does
  *  not fall back to something heavier elsewhere. */
@@ -153,6 +161,37 @@ body.busy #statusText {
   letter-spacing: .04em; color: var(--dim); margin-bottom: 3px;
 }
 .msg.assistant { white-space: pre-wrap; word-break: break-word; }
+
+/* Rendered markdown. The state machine in markdownStreamSource() decides what the events
+   are; these decide what they look like. Everything is themed from the same variables as
+   the rest of the view, so code blocks follow the editor rather than shipping their own
+   palette. */
+.md-h { margin: 10px 0 2px; font-weight: 650; line-height: 1.3; }
+h1.md-h { font-size: 1.3em; }
+h2.md-h { font-size: 1.17em; }
+h3.md-h { font-size: 1.06em; }
+h4.md-h, h5.md-h, h6.md-h { font-size: 1em; color: var(--dim); }
+.md-code {
+  margin: 8px 0; padding: 8px 10px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-sm); overflow-x: auto;
+  white-space: pre; word-break: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  line-height: 1.45;
+}
+.md-lang {
+  display: block; font-family: ${FONT_STACK};
+  font-size: 10px; font-weight: 590; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--faint); margin-bottom: 5px;
+}
+.md-inline {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em;
+  background: var(--surface-hi); border-radius: 3px; padding: 1px 4px;
+  word-break: break-all;
+}
+.md-list { margin: 3px 0; padding-left: 20px; }
+.md-list li { margin: 1px 0; }
+.md-list .md-list { margin: 1px 0; }
 .caret {
   display: inline-block; width: 6px; height: 1.05em; margin-left: 1px;
   vertical-align: text-bottom; background: var(--accent); border-radius: 1px;
@@ -405,9 +444,405 @@ function markup(): string {
 </div>`;
 }
 
+/** The incremental markdown state machine, as view-script source.
+ *
+ *  Ported from the winner of the MarkdownStream cook-off (Brief E, entrant e4 plus the
+ *  nested-list fix) -- see `bakeoff/markdown_stream/README.md` for the scoreboard that
+ *  chose it. Bytes in, render events out, no DOM: the renderer below is the only part
+ *  that touches the document, so the parser stays checkable against the C++ original.
+ *
+ *  Exported so `scripts/verify-markdown-stream.js` can eval THIS text and diff it against
+ *  the C++ amalgam on the cook-off corpus. Verifying a copy would verify the copy.
+ *
+ *  Two deliberate deviations from the C++, both because JS strings are UTF-16 and the
+ *  original counted bytes:
+ *    - `one()` never splits a surrogate pair when the holdback bound forces a flush.
+ *    - a literal backtick never appears in this source; it is `TICK`, so the whole machine
+ *      survives being carried inside a TypeScript template literal.
+ */
+export function markdownStreamSource(): string {
+  return `
+const TICK = String.fromCharCode(96);
+const MAX_HOLDBACK = 64;
+
+class MarkdownStream {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.hold = '';
+    this.state = 'normal';
+    this.atLineStart = true;
+    this.listIndents = [];
+    this.fencedTicks = 0;
+    this.fencedInfo = '';
+    this.inlineTicks = 0;
+    this.headingLevel = 0;
+    this.events = [];
+  }
+
+  pending() { return this.hold.length > 0; }
+
+  // One unit of input to flush when the holdback bound is hit -- two if that would
+  // otherwise tear a surrogate pair in half.
+  one() {
+    const c = this.hold.charCodeAt(0);
+    return (c >= 0xD800 && c <= 0xDBFF && this.hold.length > 1) ? 2 : 1;
+  }
+
+  emitText(t) {
+    if (!t) return;
+    const last = this.events[this.events.length - 1];
+    if (last && last.kind === 'text') last.text += t;
+    else this.events.push({ kind: 'text', text: t });
+  }
+
+  emitCode(t) {
+    if (!t) return;
+    const last = this.events[this.events.length - 1];
+    if (last && last.kind === 'codeText') last.text += t;
+    else this.events.push({ kind: 'codeText', text: t });
+  }
+
+  closeLists(target) {
+    while (this.listIndents.length && this.listIndents[this.listIndents.length - 1] >= target) {
+      this.events.push({ kind: 'listClose', level: this.listIndents.length - 1 });
+      this.listIndents.pop();
+    }
+  }
+
+  closeAllLists() { this.closeLists(0); }
+
+  feed(chunk) {
+    this.hold += chunk;
+    this.events = [];
+    this.process(false);
+    return this.events;
+  }
+
+  finish() {
+    this.events = [];
+    this.process(true);
+    if (this.state === 'heading') this.events.push({ kind: 'headingClose', level: this.headingLevel });
+    else if (this.state === 'fenceInfo' || this.state === 'fenceBody') this.events.push({ kind: 'codeClose' });
+    else if (this.state === 'inline') this.events.push({ kind: 'inlineClose' });
+    this.closeAllLists();
+    const out = this.events;
+    this.reset();
+    return out;
+  }
+
+  process(isFinish) {
+    while (this.hold.length) {
+      if (this.state === 'normal') {
+        if (this.atLineStart) {
+          let spaces = 0;
+          while (spaces < this.hold.length && this.hold[spaces] === ' ' && spaces < 32) spaces++;
+
+          if (spaces === this.hold.length) {
+            if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+            else if (this.hold.length >= MAX_HOLDBACK) {
+              const n = this.one(); this.emitText(this.hold.slice(0, n)); this.hold = this.hold.slice(n);
+            }
+            return;
+          }
+
+          const c = this.hold[spaces];
+
+          if (c === '\\n') {
+            this.closeAllLists();
+            this.events.push({ kind: 'paraBreak' });
+            this.hold = this.hold.slice(spaces + 1);
+            this.atLineStart = true;
+            continue;
+          }
+
+          if (c === '#') {
+            let hashes = 0, i = spaces;
+            while (i < this.hold.length && this.hold[i] === '#' && hashes < 6) { hashes++; i++; }
+            if (i === this.hold.length) {
+              if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+              else if (this.hold.length >= MAX_HOLDBACK) {
+                const n = this.one(); this.emitText(this.hold.slice(0, n));
+                this.hold = this.hold.slice(n); this.atLineStart = false;
+              }
+              return;
+            }
+            if (this.hold[i] === ' ') {
+              this.closeAllLists();
+              this.headingLevel = hashes;
+              this.events.push({ kind: 'headingOpen', level: hashes });
+              this.state = 'heading';
+              this.hold = this.hold.slice(i + 1);
+              this.atLineStart = false;
+              continue;
+            } else if (this.hold[i] === '\\n') {
+              this.closeAllLists();
+              this.events.push({ kind: 'headingOpen', level: hashes });
+              this.events.push({ kind: 'headingClose', level: hashes });
+              this.hold = this.hold.slice(i + 1);
+              this.atLineStart = true;
+              continue;
+            }
+          }
+
+          if (c === TICK) {
+            let ticks = 0, i = spaces;
+            while (i < this.hold.length && this.hold[i] === TICK) { ticks++; i++; }
+            if (i === this.hold.length) {
+              if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+              else if (this.hold.length >= MAX_HOLDBACK) {
+                const n = this.one(); this.emitText(this.hold.slice(0, n));
+                this.hold = this.hold.slice(n); this.atLineStart = false;
+              }
+              return;
+            }
+            if (ticks >= 3) {
+              this.closeAllLists();
+              this.fencedTicks = ticks;
+              this.fencedInfo = '';
+              // CodeBlockOpen is NOT pushed until the newline arrives: the info tag is not
+              // known to be complete before it, and emitting early breaks split invariance.
+              this.state = 'fenceInfo';
+              this.hold = this.hold.slice(i);
+              this.atLineStart = false;
+              continue;
+            }
+          }
+
+          if (c === '-' || c === '*') {
+            if (spaces + 1 === this.hold.length) {
+              if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+              return;
+            }
+            const nx = this.hold[spaces + 1];
+            if (nx === ' ' || nx === '\\n') {
+              this.closeLists(spaces + 2);
+              this.events.push({ kind: 'listOpen', level: this.listIndents.length, ordered: false });
+              this.listIndents.push(spaces + 2);
+              this.hold = this.hold.slice(spaces + (nx === ' ' ? 2 : 1));
+              this.atLineStart = (nx === '\\n');
+              continue;
+            }
+          }
+
+          if (c >= '0' && c <= '9') {
+            let i = spaces;
+            while (i < this.hold.length && this.hold[i] >= '0' && this.hold[i] <= '9') i++;
+            if (i === this.hold.length) {
+              if (i - spaces < 9 && !isFinish) {
+                if (this.hold.length >= MAX_HOLDBACK) {
+                  const n = this.one(); this.emitText(this.hold.slice(0, n));
+                  this.hold = this.hold.slice(n); this.atLineStart = false;
+                } else return;
+              } else { this.emitText(this.hold); this.hold = ''; }
+              return;
+            } else if (this.hold[i] === '.') {
+              if (i + 1 === this.hold.length) {
+                if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+                return;
+              }
+              const nx = this.hold[i + 1];
+              if (nx === ' ' || nx === '\\n') {
+                this.closeLists(i + 2);
+                this.events.push({
+                  kind: 'listOpen', level: this.listIndents.length,
+                  ordered: true, start: parseInt(this.hold.slice(spaces, i), 10),
+                });
+                this.listIndents.push(i + 2);
+                this.hold = this.hold.slice(i + (nx === ' ' ? 2 : 1));
+                this.atLineStart = (nx === '\\n');
+                continue;
+              }
+            }
+          }
+        }
+
+        let i = 0;
+        while (i < this.hold.length && this.hold[i] !== TICK && this.hold[i] !== '\\n') i++;
+        if (i > 0) {
+          this.emitText(this.hold.slice(0, i));
+          this.hold = this.hold.slice(i);
+          this.atLineStart = false;
+          continue;
+        }
+        if (!this.hold.length) return;
+
+        if (this.hold[0] === '\\n') {
+          this.emitText('\\n');
+          this.hold = this.hold.slice(1);
+          this.atLineStart = true;
+          continue;
+        }
+
+        if (this.hold[0] === TICK) {
+          let ticks = 0, j = 0;
+          while (j < this.hold.length && this.hold[j] === TICK) { ticks++; j++; }
+          if (j === this.hold.length) {
+            if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+            else if (this.hold.length >= MAX_HOLDBACK) { this.emitText(TICK); this.hold = this.hold.slice(1); }
+            return;
+          }
+          this.inlineTicks = ticks;
+          this.events.push({ kind: 'inlineOpen' });
+          this.state = 'inline';
+          this.hold = this.hold.slice(j);
+          this.atLineStart = false;
+          continue;
+        }
+      } else if (this.state === 'heading') {
+        const nl = this.hold.indexOf('\\n');
+        if (nl < 0) {
+          if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+          else if (this.hold.length >= MAX_HOLDBACK) {
+            const n = this.one(); this.emitText(this.hold.slice(0, n)); this.hold = this.hold.slice(n);
+          }
+          return;
+        }
+        this.emitText(this.hold.slice(0, nl));
+        this.events.push({ kind: 'headingClose', level: this.headingLevel });
+        this.hold = this.hold.slice(nl + 1);
+        this.state = 'normal';
+        this.atLineStart = true;
+        continue;
+      } else if (this.state === 'fenceInfo') {
+        const nl = this.hold.indexOf('\\n');
+        if (nl < 0) {
+          if (isFinish) {
+            this.fencedInfo += this.hold;
+            this.events.push({ kind: 'codeOpen', info: this.fencedInfo });
+            this.hold = '';
+            this.state = 'fenceBody';
+            this.atLineStart = true;
+          } else if (this.fencedInfo.length + this.hold.length >= MAX_HOLDBACK) {
+            // An info tag that never ends is not an info tag. Give up on it as a language
+            // hint, open the block, and let the bytes through as code rather than sitting
+            // on the stream -- the C++ original drains one byte per feed here, which is a
+            // stall the webview would show as a frozen bubble.
+            this.events.push({ kind: 'codeOpen', info: this.fencedInfo });
+            this.state = 'fenceBody';
+            this.atLineStart = true;
+            continue;
+          }
+          return;
+        }
+        this.fencedInfo += this.hold.slice(0, nl);
+        this.events.push({ kind: 'codeOpen', info: this.fencedInfo });
+        this.hold = this.hold.slice(nl + 1);
+        this.state = 'fenceBody';
+        this.atLineStart = true;
+        continue;
+      } else if (this.state === 'fenceBody') {
+        if (this.atLineStart) {
+          let spaces = 0;
+          while (spaces < this.hold.length && this.hold[spaces] === ' ' && spaces < 32) spaces++;
+
+          if (spaces === this.hold.length) {
+            if (isFinish) { this.emitCode(this.hold); this.hold = ''; }
+            else if (this.hold.length >= MAX_HOLDBACK) {
+              const n = this.one(); this.emitCode(this.hold.slice(0, n));
+              this.hold = this.hold.slice(n); this.atLineStart = false;
+            }
+            return;
+          }
+
+          if (this.hold[spaces] === TICK) {
+            let ticks = 0, i = spaces;
+            while (i < this.hold.length && this.hold[i] === TICK) { ticks++; i++; }
+            if (i === this.hold.length) {
+              if (isFinish) {
+                if (ticks >= this.fencedTicks) {
+                  this.events.push({ kind: 'codeClose' });
+                  this.hold = ''; this.state = 'normal'; this.atLineStart = true;
+                } else { this.emitCode(this.hold); this.hold = ''; }
+              } else if (this.hold.length >= MAX_HOLDBACK) {
+                const n = this.one(); this.emitCode(this.hold.slice(0, n));
+                this.hold = this.hold.slice(n); this.atLineStart = false;
+              }
+              return;
+            }
+            if (ticks >= this.fencedTicks) {
+              let j = i;
+              while (j < this.hold.length && (this.hold[j] === ' ' || this.hold[j] === '\\t')) j++;
+              if (j === this.hold.length) {
+                if (isFinish) {
+                  this.events.push({ kind: 'codeClose' });
+                  this.hold = ''; this.state = 'normal'; this.atLineStart = true;
+                } else if (this.hold.length >= MAX_HOLDBACK) {
+                  const n = this.one(); this.emitCode(this.hold.slice(0, n));
+                  this.hold = this.hold.slice(n); this.atLineStart = false;
+                }
+                return;
+              }
+              if (this.hold[j] === '\\n') {
+                this.events.push({ kind: 'codeClose' });
+                this.hold = this.hold.slice(j + 1);
+                this.state = 'normal';
+                this.atLineStart = true;
+                continue;
+              }
+            }
+          }
+
+          if (this.hold[0] === '\\n') {
+            this.emitCode('\\n');
+            this.hold = this.hold.slice(1);
+            this.atLineStart = true;
+          } else {
+            const n = this.one();
+            this.emitCode(this.hold.slice(0, n));
+            this.hold = this.hold.slice(n);
+            this.atLineStart = false;
+          }
+          continue;
+        } else {
+          const nl = this.hold.indexOf('\\n');
+          if (nl < 0) {
+            if (isFinish) { this.emitCode(this.hold); this.hold = ''; }
+            else if (this.hold.length >= MAX_HOLDBACK) {
+              const n = this.one(); this.emitCode(this.hold.slice(0, n)); this.hold = this.hold.slice(n);
+            }
+            return;
+          }
+          this.emitCode(this.hold.slice(0, nl + 1));
+          this.hold = this.hold.slice(nl + 1);
+          this.atLineStart = true;
+          continue;
+        }
+      } else if (this.state === 'inline') {
+        let ticks = 0, j = 0;
+        while (j < this.hold.length && this.hold[j] === TICK) { ticks++; j++; }
+        if (j === this.hold.length) {
+          if (isFinish) { this.emitText(this.hold); this.hold = ''; }
+          else if (this.hold.length >= MAX_HOLDBACK) { this.emitText(TICK); this.hold = this.hold.slice(1); }
+          return;
+        }
+        if (ticks === this.inlineTicks) {
+          this.events.push({ kind: 'inlineClose' });
+          this.state = 'normal';
+          this.hold = this.hold.slice(ticks);
+          continue;
+        } else if (ticks > 0) {
+          this.emitText(this.hold.slice(0, ticks));
+          this.hold = this.hold.slice(ticks);
+          continue;
+        }
+        let i = 0;
+        while (i < this.hold.length && this.hold[i] !== TICK) i++;
+        this.emitText(this.hold.slice(0, i));
+        this.hold = this.hold.slice(i);
+        continue;
+      }
+    }
+  }
+}
+`;
+}
+
 /** The view script. Owns the typewriter queue, the busy state and the DOM. */
 function script(): string {
   return `
+${markdownStreamSource()}
+
 const api = acquireVsCodeApi();
 const $ = (id) => document.getElementById(id);
 const feed = $('feed');
@@ -415,6 +850,7 @@ const feed = $('feed');
 let inFlight = false;
 let bubble = null;          // the assistant bubble currently being typed into
 let caret = null;
+let mdCtx = null;           // the markdown parser + DOM cursor for that bubble
 
 // --- typewriter -----------------------------------------------------------
 // The sidecar now streams token by token, so this is no longer turning a slab into
@@ -424,23 +860,132 @@ let caret = null;
 const queue = [];
 let typing = false;
 
-function typeInto(node, text) {
-  queue.push({ node, text, at: 0 });
-  if (!typing) { typing = true; requestAnimationFrame(step); }
-}
+function pump() { if (!typing) { typing = true; requestAnimationFrame(step); } }
+
+function typeInto(node, text) { queue.push({ node, text, at: 0 }); pump(); }
+
+// A structural job -- create a code block, open a list item. It runs from the SAME queue
+// as the text rather than being applied on arrival, because the element a later Text event
+// belongs in may not exist yet when that event is queued. Applying structure eagerly and
+// text lazily puts the code block above the paragraph that introduced it.
+function queueOp(fn) { queue.push({ op: fn }); pump(); }
+
+// Markdown text resolves its destination at DRAIN time via ctx.target(), for the same
+// reason: the container is whatever the structural jobs ahead of it have built.
+function typeMd(ctx, text, trimLead) { queue.push({ ctx, text, at: 0, trimLead }); pump(); }
 
 function step() {
   const job = queue[0];
   if (!job) { typing = false; return; }
+
+  if (job.op) { job.op(); queue.shift(); requestAnimationFrame(step); return; }
+
+  // One newline is dropped where prose resumes after a block element, so a code block or
+  // heading does not leave a blank line behind it in the pre-wrap flow.
+  if (job.ctx && job.at === 0 && job.trimLead && job.ctx.afterBlock) {
+    job.ctx.afterBlock = false;
+    if (job.text[0] === '\\n') job.text = job.text.slice(1);
+    if (!job.text.length) { queue.shift(); requestAnimationFrame(step); return; }
+  }
+
+  const target = job.ctx ? job.ctx.target() : job.node;
   const left = job.text.length - job.at;
   const rate = Math.max(2, Math.ceil(left / 28));
   const chunk = job.text.slice(job.at, job.at + rate);
   job.at += rate;
-  job.node.insertBefore(document.createTextNode(chunk), job.node.querySelector('.caret'));
+  if (caret && caret.parentNode === target) {
+    target.insertBefore(document.createTextNode(chunk), caret);
+  } else {
+    target.appendChild(document.createTextNode(chunk));
+  }
   const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   if (pinned) feed.scrollTop = feed.scrollHeight;
   if (job.at >= job.text.length) queue.shift();
   requestAnimationFrame(step);
+}
+
+// --- markdown rendering ---------------------------------------------------
+// One MarkdownStream per assistant bubble. The parser says WHAT the events are; this says
+// where in the DOM they land, and nothing else. Keeping the two apart is what lets the
+// parser stay diffable against the C++ it was ported from.
+function newMdCtx(bubbleEl) {
+  const ctx = {
+    bubble: bubbleEl,
+    stream: new MarkdownStream(),
+    lists: [],          // one entry per open nesting level: { ul, li }
+    headEl: null, codeEl: null, inlineEl: null,
+    afterBlock: false,
+  };
+  ctx.innerLi = () => (ctx.lists.length ? ctx.lists[ctx.lists.length - 1].li : null);
+  ctx.blockParent = () => ctx.innerLi() || ctx.bubble;
+  ctx.target = () => ctx.inlineEl || ctx.codeEl || ctx.headEl || ctx.blockParent();
+  return ctx;
+}
+
+function applyMd(ctx, e) {
+  if (e.kind === 'headingOpen') {
+    ctx.lists.length = 0;
+    const h = document.createElement('h' + Math.min(6, Math.max(1, e.level)));
+    h.className = 'md-h';
+    ctx.bubble.appendChild(h);
+    ctx.headEl = h;
+  } else if (e.kind === 'headingClose') {
+    ctx.headEl = null; ctx.afterBlock = true;
+  } else if (e.kind === 'codeOpen') {
+    ctx.lists.length = 0;
+    const pre = document.createElement('pre');
+    pre.className = 'md-code';
+    const lang = (e.info || '').trim().split(/\\s+/)[0];
+    if (lang) {
+      const tag = document.createElement('span');
+      tag.className = 'md-lang';
+      tag.textContent = lang;
+      pre.appendChild(tag);
+    }
+    const code = document.createElement('code');
+    pre.appendChild(code);
+    ctx.bubble.appendChild(pre);
+    ctx.codeEl = code;
+  } else if (e.kind === 'codeClose') {
+    ctx.codeEl = null; ctx.afterBlock = true;
+  } else if (e.kind === 'inlineOpen') {
+    const c = document.createElement('code');
+    c.className = 'md-inline';
+    ctx.target().appendChild(c);
+    ctx.inlineEl = c;
+  } else if (e.kind === 'inlineClose') {
+    ctx.inlineEl = null;
+  } else if (e.kind === 'listOpen') {
+    // Depth is driven entirely by listOpen. listClose is ignored: the parser emits one
+    // before every sibling item, so honouring it would start a fresh <ul> per bullet.
+    if (e.level < ctx.lists.length) {
+      const cur = ctx.lists[e.level];
+      const li = document.createElement('li');
+      cur.ul.appendChild(li);
+      cur.li = li;
+      ctx.lists.length = e.level + 1;
+    } else {
+      const ul = document.createElement(e.ordered ? 'ol' : 'ul');
+      ul.className = 'md-list';
+      if (e.ordered && e.start > 1) ul.setAttribute('start', String(e.start));
+      ctx.blockParent().appendChild(ul);
+      const li = document.createElement('li');
+      ul.appendChild(li);
+      ctx.lists.push({ ul, li });
+    }
+  } else if (e.kind === 'paraBreak') {
+    ctx.lists.length = 0;
+    if (ctx.afterBlock) ctx.afterBlock = false;
+    else ctx.bubble.appendChild(document.createTextNode('\\n'));
+  }
+  if (caret) ctx.target().appendChild(caret);
+}
+
+function renderMd(ctx, events) {
+  for (const e of events) {
+    if (e.kind === 'text' || e.kind === 'codeText') typeMd(ctx, e.text, e.kind === 'text');
+    else queueOp(((ev) => () => applyMd(ctx, ev))(e));
+  }
 }
 
 // --- state ----------------------------------------------------------------
@@ -465,7 +1010,14 @@ function add(el, cls) {
 // means a new section can never land inside a still-open disclosure -- rather than six
 // call sites each having to remember a second call.
 function closeBubble() {
-  if (caret) { caret.remove(); caret = null; }
+  // finish() flushes whatever the parser was still withholding and closes anything left
+  // open, so an unterminated fence cannot swallow the answer. It is QUEUED, not applied
+  // here, or it would land ahead of text still being typed.
+  if (mdCtx) { renderMd(mdCtx, mdCtx.stream.finish()); mdCtx = null; }
+  if (caret) {
+    const c = caret;
+    queueOp(() => { c.remove(); if (caret === c) caret = null; });
+  }
   bubble = null;
   closeThought();
 }
@@ -476,6 +1028,7 @@ function openBubble() {
   caret = document.createElement('span');
   caret.className = 'caret';
   bubble.append(caret);
+  mdCtx = newMdCtx(bubble);
   return bubble;
 }
 
@@ -657,7 +1210,8 @@ window.addEventListener('message', (e) => {
       // Reasoning always precedes the answer within a turn, so the first answer token is
       // the signal that the thought is finished.
       closeThought();
-      typeInto(currentBubble(), payload.text);
+      currentBubble();
+      renderMd(mdCtx, mdCtx.stream.feed(payload.text));
       busy(true, 'Writing');
     }
   }
@@ -810,7 +1364,17 @@ window.addEventListener('message', (e) => {
     if (payload.completed && payload.unfinished_items > 0) {
       t += ' · evidence says done, ' + payload.unfinished_items + ' item(s) left unticked';
     }
-    d.innerHTML = '<b>' + (payload.completed ? 'Complete' : 'Stopped') + '</b> — ';
+    // WHOSE criterion was met. "Complete" against a contract the model chose for itself
+    // is a weaker claim than "Complete" against one you set, and both used to print the
+    // same word -- a run once reported completed=yes on a mission it had not finished,
+    // because the check it picked passed.
+    if (payload.completed && payload.self_declared) {
+      t += ' · against a check the model chose for itself';
+    }
+    const label = payload.completed
+      ? (payload.self_declared ? 'Complete (self-checked)' : 'Complete')
+      : 'Stopped';
+    d.innerHTML = '<b>' + label + '</b> — ';
     d.append(document.createTextNode(t));
     feed.append(d);
     feed.scrollTop = feed.scrollHeight;

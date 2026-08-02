@@ -42,6 +42,19 @@ class ChatTemplate {
     [[nodiscard]] std::vector<TokenId> render(const std::vector<Message>& messages,
                                               std::string_view tools_json) const;
 
+    // render(), plus where each message begins. `offsets` comes back with
+    // messages.size() + 1 entries; the last is where the generation prompt starts.
+    //
+    // This exists because render() APPENDS THE GENERATION PROMPT, so rendering the first k
+    // messages does NOT produce a token prefix of rendering all of them -- it ends in
+    // "<|im_start|>assistant\n<think>\n". Anything that needs "how many tokens do the
+    // first k messages occupy" (the KV checkpoint boundary, S5.10) must ask here rather
+    // than re-render a sub-list. Getting that wrong does not crash; it reuses a cache
+    // against the wrong prefix and the text stays fluent.
+    [[nodiscard]] std::vector<TokenId> render_with_offsets(
+        const std::vector<Message>& messages, std::string_view tools_json,
+        std::vector<std::size_t>& offsets) const;
+
     void append_message(const Message& m, std::string_view tools_json,
                         std::vector<TokenId>& out) const;
 

@@ -181,6 +181,18 @@ The single highest-value next task is a committed miniature Qwen-shaped `tokeniz
 fixture; it unblocks gate-level testing of the grammar and the whole loop, and would
 close three of the four remaining survivors.
 
+**Update 2026-08-02.** The fixture exists (`tests/fixtures/make_mini_vocab.py`, generated
+at build time so an honest 140k-entry vocabulary is not a committed blob), and
+`tests/loop/test_agent_step.cpp` now drives `Agent::step` end to end in the gate on it --
+the shared blocker the two `agent.cpp` survivors were waiting on. Providing the fixture
+without writing the test it was for would have cleared the blocker on paper only.
+
+**The 3/8 figure above cannot currently be re-measured: the mutation harness is not in
+this repo.** It is described here and nowhere else in the tree, so the number is a report
+of a run nobody can reproduce -- which is the precise thing `ctest -E realmodel` was
+condemned for on the previous page. Either the harness gets committed or the figure gets
+struck; it should not stay as a measurement with no instrument.
+
 **The sandbox tests found two real holes** when first run: `/tmp` is a symlink so
 Seatbelt subpaths need `realpath`, and a blanket `/private/var/folders` allowance
 covered the user's entire temp tree. Both fixed; sandboxed processes now get scratch
@@ -188,16 +200,56 @@ space via `TMPDIR` pointed inside the jail.
 
 ## Not done, stated plainly
 
-- **T2 containers.** `SandboxTier::T2_Container` **refuses** rather than downgrading to
-  T1. §7.2 requires T2 for unattended runs, so unattended runs are not available.
-- **Speculative decoding.** The config seam (`draft_model_dir`) exists; the
-  implementation does not.
-- **`lmp/edit` through the extension.** §12.4 wants workspace edits applied via VS
-  Code's edit API for undo and diff review. The sidecar writes files directly today; the
-  notification type exists and is exempted in `ratchets.json` with that reason.
-- **Approval round-trip.** The HITL router, risk scoring and approval cards are built,
-  but the sidecar passes a null approver, so escalation currently denies. Deny-by-default
-  is the honest behaviour with nobody to ask; wiring the UI approver back is a small job.
-- **The `.vsix` is not packaged**, and `bin/lmp_sidecar` is not copied into the
-  extension. `cmake --build --preset dev` produces the binary at
-  `build/src/surface/lmp_sidecar`.
+*Revised 2026-08-02 after the gap-closure pass; see [PLAN_GAP_CLOSURE.md](PLAN_GAP_CLOSURE.md).*
+
+- **`lmp/edit` through the extension — half done.** The tools-layer seam is built and
+  tested: `Registry::set_edit_sink` makes `commit_write` the one door every mutating tool
+  goes through, an attached sink receives the bytes instead of the disk, a refusing sink
+  surfaces as a tool error, and no sink writes directly (an eval run has no extension and
+  must still be able to edit — deliberately the opposite of the approver's
+  deny-by-default). **The sidecar does not attach one yet**: the round trip needs an
+  `lmp/edit_applied` reply method the schema does not have, plus the extension handler.
+  `EditNotification` stays exempted in `ratchets.json` until it does.
+- **T2's image is scoped, not universal.** The runtime is probed and wired, and a missing
+  or unusable one refuses rather than downgrading. What is **not** solved is matching an
+  arbitrary user workspace's toolchain — without which a green build inside the container
+  is a claim about a different machine. The refusal text says so rather than hiding it.
+- **The container path is unexercised on this host.** No runtime is installed, so the T2
+  tests assert the refusal and the composed invocation (network none, pids, memory, mount,
+  quoting) rather than a real containerised run.
+
+## Closed since (2026-08-02)
+
+- **Speculative decoding.** Wired, off by default; measured +4.5–11% on turns where it
+  fires. See [HANDOFF_SPECULATIVE.md](HANDOFF_SPECULATIVE.md).
+- **Approval round-trip.** `sidecar.cpp` attaches a real approver. The
+  `ApprovalRequestNotification` dead-code exemption was stale and has been deleted — the
+  gate stayed green without it, which is the proof the notification is referenced.
+- **T2 containers.** Probed once per process, refusing on absence. Unattended runs are
+  reachable where a runtime exists.
+- **The `.vsix`.** `cmake --build build --target vsix` compiles, stages and packages, and
+  `verify-vsix.js` **fails the build** unless the sidecar inside the package hashes equal
+  to the one just built. A packaging step that can ship a stale binary is how a fixed bug
+  reappears in the user's editor with a version number saying it was fixed.
+- **Post-edit syntax checking.** `src/tools/syntax_check.*`, run after every successful
+  write, appended to that call's observation, and deliberately with no access to the
+  `Verifier` — a syntax green must never help a run complete.
+- **Cross-turn KV reuse.** `plan_turn_reuse` plus a checkpoint at the stable prompt
+  boundary. Before this, every turn re-prefilled the whole context, which made the
+  most-stable-first layout in `context.cpp` buy nothing at the backend.
+  **Measured on the real model** (`test_kv_reuse_realmodel`, realmodel label): turn two of
+  a 2,800-token conversation reuses **2,758 prompt tokens**, and TTFT falls
+  **1960 ms -> 137 ms**. A restored cache is bit-identical to a re-prefilled one when
+  prefill segmentation is held fixed, and an injected off-by-one on the resume point makes
+  that assertion fail, so the green has been shown capable of red.
+
+- **A property of this checkpoint, now on record.** Prefill SEGMENTATION changes the
+  sampled tokens: the same prompt with `LMP_PREFILL_CHUNK=512` and `=2048` produces
+  different first tokens, with no cache reuse involved. So "reuse must be byte-identical
+  to a plain run" is not an achievable assertion and never was; the achievable one holds
+  segmentation fixed. `HANDOFF_SPECULATIVE.md` records the same property from the
+  speculative side ("~4% TV from sequential decode").
+- **The miniature vocabulary.** `tests/fixtures/make_mini_vocab.py` generates a
+  140,009-entry Qwen-shaped `tokenizer.json` that passes the **real** family verification,
+  so the grammar and the template are testable in the gate. Re-run the mutation harness:
+  three of the four named survivors were blocked on exactly this.

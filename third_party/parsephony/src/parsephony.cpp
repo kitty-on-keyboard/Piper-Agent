@@ -1,8 +1,14 @@
 #include "parsephony/parsephony.hpp"
 #include "parsephony/swar.hpp"
 
+#include <xlocale.h>
+
+#include <cerrno>
 #include <charconv>
+#include <clocale>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 namespace parsephony {
 
@@ -406,14 +412,45 @@ size_t Value::size() const noexcept {
     return n.len;
 }
 
+// PORTABILITY, patched in LM_Pipe_2 (2026-08-02). Vendored otherwise unmodified.
+//
+// This was std::from_chars(const char*, const char*, double&). The INTEGER overloads are
+// everywhere; the floating-point ones are not -- libc++ only implemented them in LLVM 20,
+// and the libc++ shipped with Xcode 16.4 `= delete`s the overload that a double argument
+// resolves to. So this built on a machine with a newer Xcode and failed on the macos-15
+// CI runner, which is exactly the class of break that hides until somebody else builds it.
+//
+// strtod_l with an explicit C locale rather than plain strtod: strtod's decimal separator
+// follows LC_NUMERIC, so under a comma locale "1.5" would parse as 1. A JSON number is
+// defined with a '.' regardless of who is running the process, and a parser that disagrees
+// depending on the host's locale is a worse bug than the one being fixed.
+//
+// The saturate-on-overflow behaviour is preserved exactly: strtod sets ERANGE and returns
+// +/-HUGE_VAL, which is what the from_chars branch below returned by hand. The bytes are a
+// number token the PDA already validated, so the wider syntax strtod accepts (leading '+',
+// "inf", hex) is unreachable here, and the NUL-terminated copy bounds it to n.len anyway.
 double Value::get_double() const noexcept {
     if (!doc_) return 0.0;
     const Node& n = doc_->node(idx_);
     if (n.type != Type::Number) return 0.0;
     const char* s = doc_->source().data() + n.off;
-    double v = 0.0;
-    auto r = std::from_chars(s, s + n.len, v);
-    if (r.ec == std::errc::result_out_of_range) {
+
+    // Long enough for any double's shortest round-trip form many times over; a token
+    // longer than this cannot carry more precision, and truncating its tail changes only
+    // digits the format cannot represent.
+    char buf[512];
+    const size_t len = n.len < sizeof(buf) - 1 ? n.len : sizeof(buf) - 1;
+    std::memcpy(buf, s, len);
+    buf[len] = '\0';
+
+    static locale_t c_locale = ::newlocale(LC_NUMERIC_MASK, "C", nullptr);
+    const int saved = errno;
+    errno = 0;
+    const double v = c_locale != nullptr ? ::strtod_l(buf, nullptr, c_locale)
+                                         : std::strtod(buf, nullptr);
+    const bool overflowed = errno == ERANGE;
+    errno = saved;
+    if (overflowed) {
         // Matches nlohmann: overflow saturates to infinity rather than failing.
         return (*s == '-') ? -HUGE_VAL : HUGE_VAL;
     }
