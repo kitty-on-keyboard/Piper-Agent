@@ -57,6 +57,18 @@ files split on length instead of responsibility, and a sidecar sitting at exactl
 Good design is enforced by review; a budget only moves the mess around. If a file is
 badly organised, say so about its organisation.
 
+Two of its three limits also **never ran**. The function scanner only began a body at
+brace depth 0, and `namespace lmp::x {` puts every file in `src/` at depth 1 from its
+first line — so it saw zero functions in 107 of 149 files, and its self-test went green
+against a probe with no namespace, a shape nothing in the repo has. Only the file cap was
+ever live. Worth stating because it inverts the obvious defence of a size limit: nothing
+ever tripped the function cap because the function cap was not looking.
+
+Exemptions are the other half of a gate's honesty. `dead_code_exempt` is **empty** — the
+sixteen protocol mirrors it used to list are one `generated` rule now, and the two that
+remained had both outlived their own stated expiry conditions without anyone noticing.
+A by-symbol exemption list is written when a gate is inconvenient and never read again.
+
 A dormant gate does not report green. It reports `DORMANT`, and it **fails** the moment it
 finds subjects — so the day a tool registry lands, the tool-honesty gate stops being
 dormant by breaking the build, and someone has to implement it deliberately.

@@ -10,10 +10,11 @@
 //   business of a context tier or a database.
 //
 // DEGRADES RATHER THAN FAILS
-//   open() returns null if the database cannot be opened, and the run proceeds exactly as
-//   it did before this component existed: the prompt still gets its summary, the full text
-//   just is not kept. Journalling makes a run better, and a run that cannot journal is
-//   still a run -- wedging the agent because a disk is full would be a worse trade.
+//   open() yields a null journal if the database cannot be opened, and the run proceeds
+//   exactly as it did before this component existed: the prompt still gets its summary,
+//   the full text just is not kept. Journalling makes a run better, and a run that cannot
+//   journal is still a run -- wedging the agent because a disk is full would be a worse
+//   trade. It degrades QUIETLY, not SILENTLY: the reason comes back with the null.
 //
 #include <memory>
 #include <string>
@@ -25,18 +26,23 @@ namespace lmp::surface {
 
 class ContextJournal {
   public:
+    struct Result {
+        // Null when the store could not be opened.
+        std::unique_ptr<ContextJournal> journal;
+        // Verbatim from SQLite; empty if and only if `journal` is non-null. RETURNED
+        // rather than printed. The previous version wrote it to stderr and dropped it,
+        // which put the one actionable sentence about a broken journal in the only
+        // channel nothing collects: stdout is the framed protocol stream, and the
+        // sidecar's stderr is a subprocess pipe no client reads. The caller has an
+        // event log, which is the record that outlives the run (S6).
+        std::string error;
+    };
+
     // Opens (or creates) the store under `workspace_root` and attaches it to `ctx` as the
-    // compaction sink. Null on failure, having written the reason to stderr -- stdout is
-    // the framed protocol channel and a diagnostic there would desync the client.
-    //
-    // TODO: return the reason. It is dropped today, and the justification written here
-    // was that no caller could use it and that sidecar.cpp had no line to spare. Both
-    // halves are now false -- the sidebar has an error channel into the transcript, and
-    // the size limit that made a spare line a currency is gone -- so a run whose
-    // compacted turns are silently unrecoverable should say so.
-    [[nodiscard]] static std::unique_ptr<ContextJournal> open(const std::string& workspace_root,
-                                                              const std::string& session_id,
-                                                              context::ContextStore& ctx);
+    // compaction sink.
+    [[nodiscard]] static Result open(const std::string& workspace_root,
+                                     const std::string& session_id,
+                                     context::ContextStore& ctx);
 
     [[nodiscard]] pcc::Store& store() noexcept { return store_; }
 
