@@ -578,7 +578,21 @@ bool start_mission(const std::string& id, const std::string& message,
     session.ctx->set_project_memory(surface::load_project_memory(workspace));
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
-    session.journal = surface::ContextJournal::open(workspace, id, *session.ctx);
+    // Logged the way a failed MCP server is (see connect_mcp_servers): a degradation the
+    // run survives, recorded where a postmortem will find it rather than announced. A
+    // null journal means this run's compacted turns are gone for good once they are
+    // trimmed, which is invisible at the time and matters later -- exactly the shape of
+    // thing the event log exists for.
+    surface::ContextJournal::Result journal =
+        surface::ContextJournal::open(workspace, id, *session.ctx);
+    if (!journal.error.empty()) {
+        platform::Event ev;
+        ev.kind = "context_journal";
+        ev.fields.push_back({"opened", "0"});
+        ev.fields.push_back({"error", journal.error});
+        log.append(ev, clock);
+    }
+    session.journal = std::move(journal.journal);
     session.client_applies_edits = surface::bool_field(message, "applies_edits");
 
     return run_loop(id, session, inbox, cancel, log, clock);

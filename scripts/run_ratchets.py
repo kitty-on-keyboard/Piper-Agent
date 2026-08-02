@@ -18,16 +18,32 @@ WHAT BELONGS HERE, AND WHAT DOES NOT
   There used to be a sixth gate here, and it counted lines: 800 per file, 80 per
   function, nesting depth 3. It is gone, and it is not coming back. A line count
   is not a property -- it is a proxy for one, and the proxy was optimized against
-  instead of the thing. The damage was not hypothetical and it is still legible
-  in the history: `ContextJournal::open()` dropped an out-parameter and swallowed
-  its own failure reason to buy back one line; `mcp_settings` and two `tests/model`
-  files were split on line count rather than on responsibility; `sidecar.cpp` sat
-  at exactly 800/800, which is not where a well-factored file naturally lands.
-  Every one of those is worse code that passed a green check.
+  instead of the thing. `ContextJournal::open()` dropped an out-parameter and
+  swallowed its own failure reason to buy back one line; `mcp_settings` and two
+  `tests/model` files were split on line count rather than on responsibility;
+  `sidecar.cpp` sat at exactly 800/800, which is not where a well-factored file
+  naturally lands. Every one of those is worse code that passed a green check.
+
+  AND TWO OF THE THREE LIMITS NEVER RAN. Measured on 2026-08-02, after the fact.
+  The function scanner only started a body at brace depth 0, and `namespace
+  lmp::x {` puts a file at depth 1 from its first line and never returns -- so it
+  saw zero function bodies in 107 of 149 source files, and the only four it would
+  ever have flagged were all inside `blast_radius.hpp`, which is scan-exempt. The
+  function-length and nesting limits fired on nothing, ever. Only the 800-line
+  file cap was real, and it is the one that did the damage above.
+
+  Its self-test passed the whole time, because the planted probe was a bare
+  `inline void probe_fn() {` at depth 0 -- a shape no file in src/ has. That is
+  the same defect as v1's `ctest -E realmodel`: a check that matched nothing while
+  printing a number that looked fine, this time inside the falsifier itself. A
+  probe has to have the shape of the code it stands for, or it proves only that
+  the gate can fail on input the repo never produces.
 
   So: no gate here may enforce a number that stands in for a judgement. If a file
   is badly organised, that is a review comment about its organisation, and the
-  argument has to be made about the code rather than about its length.
+  argument has to be made about the code rather than about its length. And nobody
+  gets to argue the function cap was harmless because nothing ever tripped it --
+  nothing ever tripped it because it was not looking.
 """
 
 import argparse
@@ -127,9 +143,20 @@ FUNC_DECL_RE = re.compile(
 
 
 def collect_declarations(root, cfg):
+    """Every hand-written .hpp declaration, as gate subjects.
+
+    GENERATED files declare nothing a human chose, so their symbols are not subjects.
+    They stay in the CORPUS -- references from them still count -- but a generator that
+    emits one struct per request is not writing dead code when a request has no C++
+    reader, and answering it symbol-by-symbol produced a 16-entry exemption list that
+    grew by two every time the protocol did. Drift in these files is the protocol gate's
+    job, and it diffs the whole file against protocol/schema.json.
+    """
     decls = {}
     for rel, abspath in walk_sources(root, cfg):
         if not rel.endswith(".hpp") or is_exempt(rel, cfg["scan_exempt"]):
+            continue
+        if is_exempt(rel, cfg["generated"]):
             continue
         with open(abspath, encoding="utf-8", errors="replace") as fh:
             for lineno, line in enumerate(fh, start=1):

@@ -57,8 +57,14 @@ bool append_json_string(std::string& out, std::string_view in);
 
 [[nodiscard]] std::string base64_encode(std::string_view in);
 // Returns false on any character outside the base64 alphabet or a bad length, leaving
-// `out` unspecified. Used by the replayer, and by the round-trip test that keeps
-// base64_encode honest.
+// `out` unspecified.
+//
+// Its only caller today is the round-trip test that keeps base64_encode honest -- said
+// plainly rather than as "used by the replayer", which was written ahead of a replayer
+// that reads traces back and still does not exist. Kept anyway, and this is the whole
+// argument: append_field base64-encodes any field value that is not valid UTF-8, so a
+// trace containing one is not readable without this. An encoder shipped without a
+// decoder is how a trace quietly stops being replayable (S2.1.4).
 bool base64_decode(std::string_view in, std::string& out);
 
 // One JSONL line, newline-terminated. Deterministic: field order is exactly as given.
