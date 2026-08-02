@@ -1,0 +1,9 @@
+_deps/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+mcp_server_demo
+libmcp_server.a
+json*
+build/

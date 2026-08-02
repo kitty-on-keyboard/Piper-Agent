@@ -1,0 +1,11 @@
+build/
+_deps/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.o
+*.a
+*.so
+mcp_client
+mcp_demo
