@@ -157,7 +157,7 @@ construction.
 
 | Idea | Source | Note |
 |---|---|---|
-| Cache the opposite index in the SPSC hot path | agent-cook-off E3, the only one | We reload a contended atomic on every `try_push`/`try_pop` (`spsc_channel.hpp:44`) |
+| ~~Cache the opposite index in the SPSC hot path~~ | agent-cook-off E3, the only one | **DONE.** `spsc_channel.hpp` carries `head_cached_`/`tail_cached_`, with the stale-lower-bound argument written out at :48 and :66. Verified 2026-08-02 |
 | De-duplicate the repetition-penalty history | E6, E9 | See below -- correctness, and it moves the baseline |
 | Hold back a streamed tail only when it is short enough to still be a tag prefix | E7 | `len - last_open < 12`. Relevant once Workstream 1 streams text |
 | Cursor plus one `substr` instead of substr-per-iteration | E8 | Same |
@@ -167,8 +167,10 @@ construction.
 penalty **per occurrence**, so a token appearing three times in the 64-token window gets
 `l/p/p/p`. HuggingFace's reference gathers and scatters by index, applying it once per
 unique id. E6 and E9 both de-duplicate; we do not. This is a genuine divergence from the
-reference — **but it changes generated tokens and would move the pinned baseline (corpus
-3/6, holdout 1/4).** Do not fold it in silently. Land it deliberately, with a re-pin.
+reference — **but it changes generated tokens and would move the pinned baseline.** Do not
+fold it in silently. Land it deliberately, with a re-pin. (The baseline this section
+originally cited, corpus 3/6 and holdout 1/4, is long superseded; read
+`evals/agent/pins.json` rather than any number written here.) Still true 2026-08-02.
 
 ---
 
@@ -188,6 +190,18 @@ Why it fits us specifically:
 - Memory is fine and this is **not** the two-process hazard: a 0.6B draft at bf16 is ~1.2 GB
   in-process against a 19 GB resident checkpoint on a 48 GB host. The standing rule is never
   to run two MLX *processes*; one process holding a small draft is a different thing.
+
+> **CLOSED — this landed later the same day, in `a6eb981`.** Speculative decoding is
+> wired, gate-tested with no GPU, and measured on the real agent loop: **+4.5% to +11%
+> decode on turns where it fires, ~+3.8% overall, 84% acceptance**, OFF by default
+> (`LMP_SPECULATIVE=1`, or `MlxBackendConfig::speculative`). The binding constraint turned
+> out to be the TRIGGER rate, not the acceptance rate. See
+> [HANDOFF_SPECULATIVE.md](HANDOFF_SPECULATIVE.md) — including two measurements that
+> change the design, on `draft_probs` and on the ~4% TV between batched verification and
+> sequential decode.
+>
+> Everything below this line is the assessment as it stood on 2026-08-01, kept because how
+> the four blockers were cleared is the useful part. It is history, not a to-do list.
 
 **NOT DONE — blocked, and deliberately not half-built.** Assessed 2026-08-01. Four
 blockers, three of them structural:

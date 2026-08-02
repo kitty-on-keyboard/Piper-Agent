@@ -25,18 +25,27 @@ memory (`remember`). The miniature tokenizer fixture. Editor-API edits through
 **Where things actually stand, measured 2026-08-02:**
 
 ```
-ctest -L gate            29/29,  ~15 s      (both preset configs, and CI)
-ctest -L realmodel -j1    5/5,   ~26 s      (local only -- see R1, this is the problem)
+ctest -L gate            32/32,  ~15 s      (both preset configs, and CI)
+ctest -L realmodel -j1    5/5,   ~29 s      (local only -- 3 tests, see R1)
 agent_eval pins          corpus 5/6 solved, 2 completed, 2 verified
                          holdout 2/4 solved, 2 completed, 3 verified
 MCP conformance          12/12; official TS SDK client drives our server 18/18
 extension                installed into Antigravity IDE and Cursor, sidecar verified live
 ```
 
-**Stale documents — trust this file over them.** `HANDOFF_AGENT.md`'s ranked table still
-lists the tokenizer fixture and editor-API edits as gaps; both are done.
-`PLAN_PARALLELISM.md`'s Workstream 4 says speculative decoding is "NOT DONE — blocked";
-it was landed later the same day. Fixing those two documents is item **H1** below.
+**Updated 2026-08-02 (later session).** **R1 and V2 are done**, and H1 is done except for
+the `PHASES.md` mutation figure, which belongs to V1. The gate went 29 → 32: `test_grammar`
+and `test_token_stream_gate` (R1) and `test_pin_attribution` (V2). `realmodel` is still
+5 tests but only **3** of them are now CI-invisible — the other two are the same sources
+registered a second time against the real checkpoint.
+
+Two findings from doing it, both recorded in full below:
+
+- Putting the tokenizer path under sanitizers for the first time exposed **real undefined
+  behaviour in vendored utf8proc**, on the production NFC path, reproduced on the real
+  checkpoint and not just the fixture. Fixed in `52df37d`.
+- **`cmake --preset asan` does not work on this machine without `-DLMP_MLX_PYTHON`.** The
+  standing rule above said it did. Corrected.
 
 ---
 
@@ -44,10 +53,20 @@ it was landed later the same day. Fixing those two documents is item **H1** belo
 
 Non-negotiable, and every one of them exists because it was violated once:
 
-- `ctest -L gate` green, **under a preset**. A bare `cmake -S . -B dir` probes the wrong
-  MLX and fails in `src/model/mlx_backend.cpp` with `no member named 'device_info'`. That
-  is a configuration artifact, not a broken tree — I misread it as a pre-existing break on
-  `main` on 2026-08-02 and said so. Use `cmake --preset dev` or `--preset asan`.
+- `ctest -L gate` green, **under a preset, and with `LMP_MLX_PYTHON` pointed at the venv**.
+  The default probe uses `python3`, which on this machine is 3.9 — MLX stopped shipping
+  cp39 wheels after 0.29.3, so the build silently pins to an MLX two minor versions behind
+  and fails in `src/model/mlx_backend.cpp` with `no member named 'device_info'`. That is a
+  configuration artifact, not a broken tree.
+  **The presets do not set it, and a preset alone is not enough** — this file used to say
+  "use `cmake --preset dev` or `--preset asan`", and `--preset asan` on a fresh build dir
+  fails exactly this way. `build/` only works because an earlier session's
+  `-DLMP_MLX_PYTHON` is still in its cache. Corrected 2026-08-02, after it cost a build
+  cycle. Configure with:
+
+  ```
+  cmake --preset asan -DLMP_MLX_PYTHON=$HOME/.venvs/lmp-mlx/bin/python
+  ```
 - `./scripts/run_ratchets.py` 6/6, with `--self-test` still able to redden each one.
 - A new test bumps **both** the count and the names in `tests/gate/gate_manifest.txt`, in
   the same commit. Two edits, deliberately.
@@ -64,11 +83,11 @@ Non-negotiable, and every one of them exists because it was violated once:
 
 | # | Item | Size | Risk | Why here |
 |---|---|---|---|---|
-| **R1** | `realmodel` tests never run in CI | S | **high** | A contract rotted for two days undetected |
+| ~~**R1**~~ | ~~`realmodel` tests never run in CI~~ | S | — | **DONE.** Invisible set 5 → 3; falsifier run in the CI config |
 | **M1** | Wire MCP into the agent | M | low | The whole point of building it |
 | **C1** | Declared contract is not checked against the mission | M | **high** | Solved 5, completed 2 — the gap is here |
 | **V1** | Mutation harness is absent; its number is unreproducible | M | medium | A measurement with no instrument |
-| **V2** | `pins.json` stores only aggregates | S | medium | Regressions cannot be attributed |
+| ~~**V2**~~ | ~~`pins.json` stores only aggregates~~ | S | — | **DONE.** Attribution lands on the next deliberate re-pin |
 | **M2** | MCP: streamable HTTP + authorization | L | low | The one real spec gap |
 | **D1** | No git write | M | low | It can read its diff and not commit it |
 | **C2** | No resume | L | medium | A crashed run is lost |
@@ -82,9 +101,35 @@ Non-negotiable, and every one of them exists because it was violated once:
 
 ---
 
-## R1 — `realmodel` tests never run in CI
+## R1 — `realmodel` tests never run in CI — **DONE 2026-08-02**
 
-**What is wrong.** `.github/workflows/gate.yml` runs `ctest --preset gate` and
+> **Landed** in `e8818e0`, taking option 2 below. Each of the two tokenizer-only sources is
+> now registered **twice** off one file: a `gate` variant compiled with
+> `LMP_MINI_VOCAB_JSON` that runs on the generated miniature vocabulary and therefore runs
+> on CI, and the original `realmodel` variant against the real checkpoint. Duplicating
+> rather than moving costs one extra binary and keeps the real-vocab coverage that
+> motivated the label in the first place. Gate 29 → 31 here (32 after V2).
+>
+> **Falsifier, run in the configuration CI actually builds** (`-DLMP_MLX_PYTHON=/usr/bin/false`,
+> no MLX at all): re-applying `4300a3c`'s semantics reddens `-L gate`, 1 failed of 31.
+> The same mutation left the gate green before. Also confirmed under `dev` and `asan`.
+>
+> **What it caught on the way in.** `gate-asan` selects `gate`, so sanitizers had never
+> once run over the tokenizer path. The first run aborted on real undefined behaviour in
+> vendored utf8proc — `utf8proc.c:391` forms `NULL+4` on the documented two-pass measuring
+> call that `frankentok/src/normalizer.cpp:37` makes on every NFC normalization. Benign on
+> any real ABI, fatal under `-fno-sanitize-recover=undefined`. **Reproduced on the real
+> checkpoint before fixing**, so it is a production path and not a fixture artifact. Fixed
+> in `52df37d`, marked as a local modification to re-apply on upgrade.
+>
+> **Residual, deliberately left.** Three tests still never run on CI —
+> `test_realmodel`, `test_kv_reuse_realmodel`, `test_spec_cache` — because they genuinely
+> need weights on a GPU. The invisible set is smaller, not empty, and `realmodel_count` in
+> the manifest still pins it at 5. Note the corollary the utf8proc find makes concrete:
+> **nothing in that set has ever run under a sanitizer.** If any of the three is ever
+> reduced to something a vocabulary can drive, it should move the same way.
+
+**What was wrong.** `.github/workflows/gate.yml` runs `ctest --preset gate` and
 `gate-asan`. Neither selects the `realmodel` label, and nothing else does. Five tests —
 `test_grammar_realmodel`, `test_realmodel`, `test_kv_reuse_realmodel`, `test_spec_cache`,
 `test_token_stream` — run only when a human remembers.
@@ -221,9 +266,27 @@ the same run.
 
 ---
 
-## V2 — `pins.json` stores only aggregates
+## V2 — `pins.json` stores only aggregates — **DONE 2026-08-02**
 
-**What is wrong.** `evals/agent/pins.json` records `solved: 5` and not *which* five.
+> **Landed** in `a22dd1f`. `summarize()` carries a per-task map beside the counts and
+> `compare()` names what changed; the aggregate stays the gate, so this adds attribution
+> and not strictness. It also closes a case aggregate-only pins could never show: one task
+> regressing while another starts passing leaves `solved` identical and the suite quietly
+> different — reported, deliberately not gated.
+>
+> **`evals/agent/pins.json` was deliberately NOT rewritten.** `--pin` overwrites the floors
+> with whatever a single temperature-0.6 run produced, so re-pinning is an act someone
+> takes on purpose, not a side effect of landing the harness. Until then the pin carries no
+> per-task record and `compare()` says so rather than reporting a diff it cannot compute.
+> **The next deliberate `--pin` is what makes drops attributable.**
+>
+> **The falsifier is now automated.** "Change one task's outcome by hand and confirm the
+> diff names it" is a one-off, and a full run costs ~30 minutes and a 19 GB load, so by
+> hand means once and never again. It is `agent_eval.py self-test` — four scenarios, no
+> model, no sidecar — and runs in the gate as `test_pin_attribution`. Shown red by stubbing
+> out the regression detection (4 failures), green when restored.
+
+**What was wrong.** `evals/agent/pins.json` records `solved: 5` and not *which* five.
 `PLAN_GAP_CLOSURE.md` finding 2 hit this directly: "Whether this was a regression could not
 be established: `pins.json` stores only aggregates, so there is no record of which 3 of 6
 corpus tasks passed on 2026-07-31."
@@ -364,18 +427,25 @@ security posture.
 
 ---
 
-## H1 — Stale documents
+## H1 — Stale documents — **DONE except the mutation figure**
 
-Cheap, and they actively mislead:
+Cheap, and they actively mislead. Each claim was checked against the tree before editing,
+not taken from this list:
 
-- `HANDOFF_AGENT.md`'s ranked table lists the tokenizer fixture and editor-API edits as
-  open; both are closed. Its `max_new_tokens` and `rename_across_files` notes are still
-  live and should stay.
-- `PLAN_PARALLELISM.md` Workstream 4 says speculative decoding is "NOT DONE — blocked,
-  and deliberately not half-built". It was landed later that day (`a6eb981`). Its four
-  blockers make good history; mark the section closed and point at
-  `HANDOFF_SPECULATIVE.md`.
-- `PHASES.md`'s mutation figure — see V1. Strike it or restore the instrument.
+- ~~`HANDOFF_AGENT.md`'s ranked table lists the tokenizer fixture and editor-API edits as
+  open; both are closed.~~ **Done.** Both rows struck. Two more were stale and are
+  corrected: `ToolResult.retryable` is no longer "read by nobody" (`src/loop/turn.cpp:185`
+  gates `BreakRepeat` on it, and nothing retries — which is C4, not this), and "20 tests in
+  ~7 s" is now 32 in ~15 s. Its `max_new_tokens` and `rename_across_files` notes are still
+  live and were left alone.
+- ~~`PLAN_PARALLELISM.md` Workstream 4 says speculative decoding is "NOT DONE — blocked".~~
+  **Done.** Marked closed with the measured result, pointing at `HANDOFF_SPECULATIVE.md`;
+  the four blockers are kept below the line and labelled history. Workstream 3's first row
+  was stale the same way — the SPSC opposite-index cache is **already implemented**
+  (`spsc_channel.hpp:48`, `:66`) — and its repetition-penalty note cited a baseline of
+  corpus 3/6, holdout 1/4, which is two re-pins out of date. Both fixed.
+- `PHASES.md`'s mutation figure — **still open**, and it belongs to V1: the honest fix is
+  to restore the instrument, not to strike the number. Left for whoever does V1.
 
 ---
 
@@ -383,10 +453,17 @@ Cheap, and they actively mislead:
 
 ```bash
 cmake --preset dev -B build && cmake --build build -j8
-ctest --test-dir build -L gate                    # 29/29
+ctest --test-dir build -L gate                    # 32/32
 ctest --test-dir build -L realmodel -j1           # 5/5, ONE at a time
 ./scripts/run_ratchets.py                         # 6/6
+python3 scripts/agent_eval.py self-test           # 4 scenarios, no model
 python3 scripts/agent_eval.py run                 # ~30 min, loads the model
+```
+
+The sanitizer build needs the interpreter passed explicitly — see Standing rules:
+
+```bash
+cmake --preset asan -DLMP_MLX_PYTHON=$HOME/.venvs/lmp-mlx/bin/python && cmake --build --preset asan -j8 && ctest --preset gate-asan
 ```
 
 ```bash

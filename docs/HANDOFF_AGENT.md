@@ -127,13 +127,13 @@ at n=4 is not that yet.
 | gap | note |
 |---|---|
 | ~~No cross-session memory~~ | **CLOSED 2026-08-02.** `remember` appends one fact to `.lmp-memory.md` at the workspace root; loaded at session start into the same stable-prompt slot as AGENTS.md. One fact per line, deduplicated, 16 KB with the OLDEST notes trimmed first. Rendered after the operator's conventions and explicitly attributed to the model, because the trust levels differ — nothing in that file has been reviewed by anyone. |
-| Nothing retries | `ToolResult.retryable` is set by tools and read by nobody. **Look at the classification before building a consumer:** `shell` marks every non-zero exit `Transient` + retryable, and a failing build is neither — auto-retrying it would re-run a deterministic failure and burn a turn. The wire is not obviously worth connecting as currently labelled. |
+| Nothing retries | `ToolResult.retryable` now has ONE reader — `src/loop/turn.cpp:185` gates `BreakRepeat` on it — but nothing actually retries. **Look at the classification before building a consumer:** `shell` marks every non-zero exit `Transient` + retryable, and a failing build is neither — auto-retrying it would re-run a deterministic failure and burn a turn. The wire is not obviously worth connecting as currently labelled. |
 | No resume | A crashed run is lost. `ReplayBackend` exists but only for tests. |
 | Code intelligence is grep | `locate_symbol` shells out to `grep -rnE`. This repo already runs clangd. |
 | No git write | It can read its own diff but cannot commit or branch. |
-| No editor-API edits | `lmp/edit` writes files directly: no undo, no diff review. |
+| ~~No editor-API edits~~ | **CLOSED.** `lmp/edit` goes through VS Code's `WorkspaceEdit` (`extension/src/sidebar.ts:74`), so edits get undo, dirty buffers and the diff review. |
 | T2 containers refuse | Unattended runs unavailable (S7.2). Deliberate. **Do not start without asking.** |
-| Miniature `tokenizer.json` fixture | Would unblock gate-level testing of the grammar and close three surviving mutations. |
+| ~~Miniature `tokenizer.json` fixture~~ | **CLOSED.** `tests/fixtures/make_mini_vocab.py` generates it at build time; `test_mini_vocab`, `test_agent_step`, `test_grammar` and `test_token_stream_gate` run on it. It did what it was for: the grammar is now tested in the gate rather than only under `realmodel` (R1). |
 
 ## How to run things
 
@@ -141,7 +141,8 @@ at n=4 is not that yet.
 ctest --preset gate && python3 scripts/run_ratchets.py
 ```
 
-20 tests in ~7 s and six ratchets. `ctest --preset realmodel` loads the real model.
+32 tests in ~15 s and six ratchets. `ctest --preset realmodel` loads the real model, and
+must run `-j1`.
 
 To drive a mission by hand — this is still how the sharpest bugs get found:
 
