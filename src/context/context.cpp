@@ -71,6 +71,17 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
         span += first_line(t.observation, 200) + "\n";
     }
     spans_.push_back(std::move(span));
+
+    // Hand the full turns over BEFORE they are destroyed. Ordering is the whole
+    // contract: after the erase below there is nothing left to journal, and a sink
+    // called afterwards would be handed an empty range and report success.
+    if (compaction_sink_) {
+        const std::vector<TurnRecord> dropped(recent_.begin(),
+                                              recent_.begin() +
+                                                  static_cast<std::ptrdiff_t>(drop));
+        compaction_sink_(dropped, spans_.size() - 1);
+    }
+
     recent_.erase(recent_.begin(), recent_.begin() + static_cast<std::ptrdiff_t>(drop));
     ++compactions_;
     return drop;

@@ -34,6 +34,12 @@
       "timeout",
       "refused",
       "cancelled"
+    ],
+    "ModelState": [
+      "unloaded",
+      "loading",
+      "ready",
+      "failed"
     ]
   },
   "structs": {
@@ -344,6 +350,67 @@
         }
       ]
     },
+    "lmp/load_model": {
+      "_comment": [
+        "Load the weights, as its own act.",
+        "",
+        "The load used to be a side effect of lmp/start: the first mission of a",
+        "session paid ~19 GB of it, after the reply had already been sent, with no",
+        "notification of any kind. From the editor that was a minute of a status",
+        "line reading 'Thinking' about a model that did not exist yet, and a",
+        "checkpoint that could not be opened produced its only symptom at the end",
+        "of a run that never began.",
+        "",
+        "Separating it gives the operator the thing they actually want to control --",
+        "WHEN 19 GB of unified memory is taken, on a machine that has 48 -- and gives",
+        "the surface a state to render. lmp/start still loads on demand if nothing is",
+        "loaded, so no client is required to call this first; it is the explicit door",
+        "into the same room, not a new precondition.",
+        "",
+        "Progress is reported by lmp/model_status notifications, not by this reply:",
+        "the reply cannot arrive until the load has finished, and 'it is working' is",
+        "only useful before then."
+      ],
+      "params": [
+        {
+          "name": "model_dir",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "name": "loaded",
+          "type": "bool"
+        },
+        {
+          "name": "model_dir",
+          "type": "string"
+        },
+        {
+          "_comment": "Empty on success. Carries the tokenizer's or the backend's own refusal text otherwise -- 'MLX is not compiled into this build', a missing safetensors -- because a load failure is nearly always a fixable statement about the checkpoint on disk and paraphrasing it would throw that away.",
+          "name": "error",
+          "type": "string"
+        }
+      ]
+    },
+    "lmp/unload_model": {
+      "_comment": [
+        "Give the memory back, without killing the process.",
+        "",
+        "The pair to lmp/load_model, and not a nicety: one checkpoint is ~19 GB on a",
+        "48 GB host, so 'I need that memory for something else' is a routine request",
+        "and the only answer used to be closing the editor. The conversation dies with",
+        "the weights -- a context store whose model has gone is not resumable -- so",
+        "this is a real reset, and the surface says so before it sends one."
+      ],
+      "params": [],
+      "result": [
+        {
+          "name": "unloaded",
+          "type": "bool"
+        }
+      ]
+    },
     "lmp/shutdown": {
       "params": [],
       "result": [
@@ -355,6 +422,27 @@
     }
   },
   "notifications": {
+    "lmp/model_status": [
+      {
+        "_comment": "The ONLY thing that says whether this process can answer a prompt. It is sent on every transition, and once unsolicited right after lmp/ready, so a surface that attaches at any moment learns the truth without asking -- rather than inferring 'loaded' from the absence of an error, which is how a run came to sit on 'Thinking' for a minute with no model behind it.",
+        "name": "state",
+        "type": "ModelState"
+      },
+      {
+        "name": "model_dir",
+        "type": "string"
+      },
+      {
+        "_comment": "Empty except on `failed`, where it is the loader's verbatim refusal.",
+        "name": "detail",
+        "type": "string"
+      },
+      {
+        "_comment": "How long the load took, on `ready` and `failed`. Measured, so the surface can tell the operator what a reload of THIS checkpoint on THIS machine actually costs instead of guessing at a spinner.",
+        "name": "elapsed_ms",
+        "type": "double"
+      }
+    ],
     "lmp/token": [
       {
         "name": "run_id",

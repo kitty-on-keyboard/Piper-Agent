@@ -62,6 +62,14 @@ inline constexpr const char* kRefused = "refused";
 inline constexpr const char* kCancelled = "cancelled";
 }
 
+// ModelState: crosses the wire as one of these literals.
+namespace modelstate_values {
+inline constexpr const char* kUnloaded = "unloaded";
+inline constexpr const char* kLoading = "loading";
+inline constexpr const char* kReady = "ready";
+inline constexpr const char* kFailed = "failed";
+}
+
 struct SamplingSettings {
     double temperature = 0.0;
     double top_p = 0.0;
@@ -303,12 +311,54 @@ struct MessageResult {
     bool started_run = false;
 };
 
+// request "lmp/load_model"
+struct LoadModelParams {
+    std::string model_dir;
+};
+struct LoadModelResult {
+    bool loaded = false;
+    std::string model_dir;
+    std::string error;
+};
+
+// request "lmp/unload_model"
+struct UnloadModelParams {
+};
+struct UnloadModelResult {
+    bool unloaded = false;
+};
+
 // request "lmp/shutdown"
 struct ShutdownParams {
 };
 struct ShutdownResult {
     bool ok = false;
 };
+
+// notification "lmp/model_status"
+struct ModelStatusNotification {
+    std::string state;
+    std::string model_dir;
+    std::string detail;
+    double elapsed_ms = 0.0;
+    static constexpr const char* kMethod = "lmp/model_status";
+};
+[[nodiscard]] inline std::string to_json(const ModelStatusNotification& n) {
+    std::string out = "{";
+    out += "\"state\":";
+    append_value(out, n.state);
+    out += ",";
+    out += "\"model_dir\":";
+    append_value(out, n.model_dir);
+    out += ",";
+    out += "\"detail\":";
+    append_value(out, n.detail);
+    out += ",";
+    out += "\"elapsed_ms\":";
+    append_value(out, n.elapsed_ms);
+    out += "}";
+    return out;
+}
 
 // notification "lmp/token"
 struct TokenNotification {

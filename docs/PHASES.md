@@ -12,7 +12,7 @@ Met, and verified by intervention rather than by reading the output — see
 | Assertions | `cmake/LmpAssertions.cmake` strips `-DNDEBUG` from **every** configuration, including Release. |
 | L0 platform | `arena.hpp`, `clock.hpp`, `spsc_channel.hpp`, `event_log.{hpp,cpp}`, `fs.{hpp,cpp}` |
 | Gate | 11 tests, **0.6-1.7 s** against a 5-minute budget. Contents pinned by count *and* name. |
-| Ratchets | 6 gates, 3 live and self-falsifying, 3 dormant and failing-on-activation. |
+| Ratchets | 6 gates, 3 live and self-falsifying, 3 dormant and failing-on-activation. (Historical: the size gate was removed 2026-08-02, leaving 5.) |
 | §18 corpora | Ported byte-identical, loading in the gate, scoreboards building. |
 | CI | `.github/workflows/gate.yml` — gate + ASan/UBSan. No write permission, no commit step. |
 

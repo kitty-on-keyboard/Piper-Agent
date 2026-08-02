@@ -3,9 +3,8 @@
 // The MCP half of a run's settings: reading the server list off the wire, and connecting
 // it into the tool registry (M1).
 //
-// Split out of sidecar.cpp because it pushed that file over the 800-line ratchet, which
-// was the right signal -- this is a distinct responsibility with untrusted input, and it
-// wants tests of its own. `trusted` in particular decides whether a tool that runs
+// Split out of sidecar.cpp because it is a distinct responsibility over untrusted input
+// and wants tests of its own. `trusted` in particular decides whether a tool that runs
 // OUTSIDE the sandbox may be called without an approval card, and a settings parser that
 // decides that has no business being untestable inside an anonymous namespace.
 //

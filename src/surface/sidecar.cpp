@@ -9,68 +9,22 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
-#include <mutex>
 #include <string>
 
 #include "src/loop/agent.hpp"
-#include "src/model/mlx_backend.hpp"
 #include "src/platform/event_log.hpp"
-#include "src/platform/fs.hpp"
-#include "src/surface/mcp_settings.hpp"
 #include "src/surface/protocol_generated.hpp"
+#include "src/surface/session.hpp"
 #include "src/surface/transport.hpp"
-#include "src/tools/mcp_host.hpp"
+#include "src/surface/wire.hpp"
 
 namespace {
 
 using namespace lmp;
-
-// Two threads reach this now: the run thread for turn/verification/perf notifications, and
-// the token streamer for per-token text (S5.7 streaming). stdio locks each FILE* call on
-// its own, which is not enough -- the payload and its newline are two calls, so without a
-// lock here another thread's line can land between them and both messages are corrupt.
-// The lock is held across the flush deliberately: a half-written line must never be
-// visible to the extension's line-oriented reader.
-std::mutex& stdout_lock() {
-    static std::mutex m;
-    return m;
-}
-
-void write_line(const std::string& s) {
-    const std::lock_guard<std::mutex> guard(stdout_lock());
-    std::fwrite(s.data(), 1, s.size(), stdout);
-    std::fputc('\n', stdout);
-    std::fflush(stdout);
-}
-
-// Every outbound notification goes through the GENERATED serializer for its type, so
-// a schema change that the sidecar has not caught up with is a compile error rather
-// than a field the extension silently reads as its default (S4.4).
-template <class N>
-void notify(const N& n) {
-    std::string out;
-    out += R"({"jsonrpc":"2.0","method":")";
-    out += N::kMethod;
-    out += R"(","params":)";
-    out += protocol::to_json(n);
-    out += "}";
-    write_line(out);
-}
-
-std::string json_escape(std::string_view in) {
-    std::string out;
-    (void)platform::append_json_string(out, in);
-    return out;
-}
-
-void reply_result(const std::string& id, const std::string& body) {
-    write_line(R"({"jsonrpc":"2.0","id":")" + id + R"(","result":)" + body + "}");
-}
-
-void reply_error(const std::string& id, const std::string& message) {
-    write_line(R"({"jsonrpc":"2.0","id":")" + id + R"(","error":{"code":-32000,)" +
-               R"("message":)" + json_escape(message) + "}}");
-}
+using surface::wire::json_escape;
+using surface::wire::notify;
+using surface::wire::reply_error;
+using surface::wire::reply_result;
 
 // Leaves WITHOUT joining the reader thread.
 //
@@ -479,71 +433,48 @@ class RunInbox {
     return apply_autonomy(id, message, config);
 }
 
-// The repo's own conventions, in the order the surrounding ecosystem settled on. First
-// file found wins; they are alternatives, not layers, and concatenating them would let a
-// stale `.cursorrules` contradict a current AGENTS.md with no way to tell which won.
+// Where the surface learns whether this process can answer a prompt at all.
 //
-// Loaded once into the STABLE part of the prompt: conventions do not change mid-run, so
-// they cost one prefill for the whole run.
-std::string load_project_instructions(const std::string& workspace) {
-    static constexpr const char* kNames[] = {"AGENTS.md", "CLAUDE.md", ".cursorrules"};
-    for (const char* name : kNames) {
-        const platform::FileContents f =
-            platform::read_file_whole(workspace + "/" + name, 64U * 1024);
-        if (f.status == platform::FsStatus::Ok && !f.bytes.empty()) {
-            return "(from " + std::string(name) + ")\n\n" + f.bytes;
-        }
+// Sent on EVERY transition and once unsolicited after lmp/ready, so a client that
+// attaches at any moment is told the truth rather than inferring it. Before this the
+// only evidence a model was loaded was the absence of an error, and the absence of an
+// error is exactly what a 19 GB load in progress looks like.
+void notify_model(const char* state, const std::string& model_dir,
+                  const std::string& detail = {}, double elapsed_ms = 0.0) {
+    protocol::ModelStatusNotification n;
+    n.state = state;
+    n.model_dir = model_dir;
+    n.detail = detail;
+    n.elapsed_ms = elapsed_ms;
+    notify(n);
+}
+
+// Loads the weights, announcing the attempt before it blocks and the outcome after.
+//
+// The announcement is the whole point of the split. `loading` goes out first because the
+// load owns this thread for tens of seconds; a status that could only be sent once the
+// work was over would tell the operator nothing they had not already worked out.
+[[nodiscard]] surface::ModelLoad ensure_model(surface::Session& session,
+                                              const std::string& model_dir,
+                                              const platform::Clock& clock) {
+    if (session.holds(model_dir)) {
+        return {true, {}, 0.0};
     }
-    return {};
+    notify_model(protocol::modelstate_values::kLoading, model_dir);
+    const surface::ModelLoad loaded = surface::load_model(session, model_dir, clock);
+    // `model_dir` names the checkpoint the status is ABOUT, on the failure too: "which
+    // path did that come from" is the first question a load error raises, and a client
+    // that had to remember what it asked for could only ever guess at an unsolicited one.
+    notify_model(loaded.ok ? protocol::modelstate_values::kReady
+                           : protocol::modelstate_values::kFailed,
+                 model_dir, loaded.error, loaded.elapsed_ms);
+    return loaded;
 }
-
-// What the agent told itself, last time it was here.
-//
-// The counterpart to load_project_instructions above: same stable-prompt slot, same
-// once-per-session cost, opposite provenance. Bounded by the same constant the writer
-// enforces, so a hand-edited file cannot grow the prompt past what `remember` allows.
-std::string load_project_memory(const std::string& workspace) {
-    const platform::FileContents f = platform::read_file_whole(
-        workspace + "/" + tools::kMemoryFileName, tools::kMemoryMaxBytes);
-    return f.status == platform::FsStatus::Ok ? f.bytes : std::string();
-}
-
-// What survives between missions.
-//
-// v1 of this file built the tokenizer, the weights, the registry and the context store
-// inside one function and dropped all four on the way out, so every mission was a fresh
-// one-shot: no history to follow up on, and a ~19 GB reload to ask a second question.
-// The agent could be launched and could be aborted, and that was the entire vocabulary.
-//
-// The context store is the part that makes a conversation; keeping the weights loaded
-// alongside it is what makes a follow-up cost a prefill instead of a minute.
-struct Session {
-    std::string model_dir;
-    std::string workspace;
-    std::unique_ptr<model::QwenTokenizer> tok;
-    std::unique_ptr<model::MlxBackend> backend;
-    std::unique_ptr<tools::Registry> registry;
-    // The handlers this installs into the registry share ownership of their clients
-    // (McpHost::Connection), so neither destruction order here is a use-after-free --
-    // that WAS true of an earlier raw-pointer version and ASan caught it. Kept adjacent
-    // to the registry because they are one unit: the registry holds the tools, this holds
-    // the processes behind them.
-    std::unique_ptr<tools::McpHost> mcp;
-    // What the current registry's remote tools were built from. The Registry has no
-    // "unregister", so a changed server list means a new Registry, not a patched one.
-    std::string mcp_signature;
-    std::unique_ptr<context::ContextStore> ctx;
-    loop::AgentConfig config;
-    // Whether this client can answer lmp/edit. Advertised at lmp/start rather than
-    // assumed: the extension can, agent_eval.py cannot, and guessing wrong either wedges
-    // an unattended run on a reply that never comes or writes behind the editor's back.
-    bool client_applies_edits = false;
-};
 
 // Turns the loop once over an EXISTING session. Returns true when the run should be the
 // process's last. The caller has already replied to the request that triggered it, since
 // this blocks for as long as the mission takes.
-bool run_loop(const std::string& run_id, Session& session,
+bool run_loop(const std::string& run_id, surface::Session& session,
               platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
               platform::EventLogWriter& log, const platform::Clock& clock) {
     loop::Agent agent(*session.tok, *session.backend, *session.registry, *session.ctx, log,
@@ -601,47 +532,14 @@ bool run_loop(const std::string& run_id, Session& session,
     return run_inbox.shutdown_requested();
 }
 
-// Builds the tool registry for this run, and connects the configured MCP servers into it.
-//
-// Rebuilt rather than patched when the server list changes: the Registry has no
-// unregister, so the alternative is remote tools from a previous run outliving the
-// settings that authorised them.
-void ensure_registry(Session& session, const std::string& workspace,
-                     const std::string& message, platform::EventLogWriter& log,
-                     const platform::Clock& clock) {
-    std::string mcp_signature;
-    const std::vector<tools::McpServerConfig> servers =
-        surface::parse_mcp_servers(message, mcp_signature);
-    if (session.registry != nullptr && session.workspace == workspace &&
-        session.mcp_signature == mcp_signature) {
-        return;
-    }
-
-    tools::WorkspaceContext wctx;
-    wctx.root = workspace;
-    wctx.max_read_bytes = 4U << 20;
-    wctx.max_model_read_bytes = 24U << 10;
-    wctx.max_result_bytes = 8192;
-    wctx.spool_dir = workspace + "/.lmp_spool";
-    wctx.shell_wall_clock_seconds = 300;
-    // Registry first, then host: the old registry's handlers are what keep the old
-    // clients alive, so releasing it first lets those connections go at the same time
-    // rather than one reconfiguration later.
-    session.registry = std::make_unique<tools::Registry>(std::move(wctx));
-    session.mcp = std::make_unique<tools::McpHost>();
-    session.workspace = workspace;
-
-    surface::connect_mcp_servers(*session.mcp, servers, *session.registry, log, clock);
-    session.mcp_signature = mcp_signature;
-}
-
 // A fresh mission. Reuses the loaded weights when the model has not changed -- the
 // tokenizer and the checkpoint are the expensive part and neither depends on the mission
 // -- but the context store is rebuilt, because `lmp/start` MEANS start over. Continuing a
 // conversation is what lmp/message is for.
-bool start_mission(const std::string& id, const std::string& message, Session& session,
-                   platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
-                   platform::EventLogWriter& log, const platform::Clock& clock) {
+bool start_mission(const std::string& id, const std::string& message,
+                   surface::Session& session, platform::SpscChannel<std::string>& inbox,
+                   model::CancelToken& cancel, platform::EventLogWriter& log,
+                   const platform::Clock& clock) {
     const std::string mission = surface::string_field(message, "mission");
     const std::string model_dir = surface::string_field(message, "model_dir");
     const std::string workspace = surface::string_field(message, "workspace_root");
@@ -658,40 +556,64 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
     }
     session.config = config;
 
-    if (session.tok == nullptr || session.model_dir != model_dir) {
-        auto tok = std::make_unique<model::QwenTokenizer>();
-        const model::LoadStatus tok_status =
-            tok->load(model_dir + "/tokenizer.json", model::Family::Qwen3);
-        if (!tok_status.ok) {
-            end_run(id, "tokenizer_refused: " + tok_status.error);
-            return false;
-        }
-        auto backend = std::make_unique<model::MlxBackend>(clock);
-        const model::LoadStatus backend_status = backend->load({model_dir, ""});
-        if (!backend_status.ok) {
-            end_run(id, "model_load_failed: " + backend_status.error);
-            return false;
-        }
-        // Assigned only once BOTH succeeded, so a failed reload cannot leave the session
-        // holding a tokenizer for one checkpoint and weights for another.
-        session.tok = std::move(tok);
-        session.backend = std::move(backend);
-        session.model_dir = model_dir;
+    // Still loads on demand, so lmp/load_model is a door into this and not a new
+    // precondition -- a headless client that only knows lmp/start keeps working. The
+    // difference is that the wait is now narrated: ensure_model says `loading` before it
+    // blocks, and the run_end below carries the loader's own words when it cannot.
+    const surface::ModelLoad loaded = ensure_model(session, model_dir, clock);
+    if (!loaded.ok) {
+        end_run(id, loaded.error);
+        return false;
     }
 
-    ensure_registry(session, workspace, message, log, clock);
+    surface::ensure_registry(session, workspace, message, log, clock);
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
     // A little above the widest single result the tool layer can produce, so the door
     // catches a tool that forgot to bound itself without firing on a legitimate one.
     session.ctx->set_observation_budget(32U << 10);
-    session.ctx->set_project_instructions(load_project_instructions(workspace));
-    session.ctx->set_project_memory(load_project_memory(workspace));
+    // Loaded once into the STABLE part of the prompt: neither the repo's conventions nor
+    // the agent's own notes change mid-run, so they cost one prefill for the whole run.
+    session.ctx->set_project_instructions(surface::load_project_instructions(workspace));
+    session.ctx->set_project_memory(surface::load_project_memory(workspace));
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
+    session.journal = surface::ContextJournal::open(workspace, id, *session.ctx);
     session.client_applies_edits = surface::bool_field(message, "applies_edits");
 
     return run_loop(id, session, inbox, cancel, log, clock);
+}
+
+// Load the weights, as its own act (S12.2). Answers when the load is over; the surface
+// follows the attempt through the model_status notifications ensure_model emits.
+//
+// The reply carries the loader's verbatim error rather than a JSON-RPC error, because
+// "this checkpoint has no safetensors" is an ordinary answer to a reasonable question --
+// the request was well-formed and was serviced. A protocol error would say the opposite.
+void handle_load_model(const std::string& id, const std::string& message,
+                       surface::Session& session, const platform::Clock& clock) {
+    const std::string model_dir = surface::string_field(message, "model_dir");
+    if (model_dir.empty()) {
+        reply_error(id, "lmp/load_model requires a non-empty 'model_dir'");
+        return;
+    }
+    const surface::ModelLoad loaded = ensure_model(session, model_dir, clock);
+    reply_result(id, R"({"loaded":)" + std::string(loaded.ok ? "true" : "false") +
+                         R"(,"model_dir":)" + json_escape(loaded.ok ? model_dir : "") +
+                         R"(,"error":)" + json_escape(loaded.error) + "}");
+}
+
+// Give the memory back. One checkpoint is ~19 GB on a 48 GB host, so this is a routine
+// request and the only answer used to be closing the editor.
+//
+// Only reachable with no run in flight: while one is turning, the main loop is inside
+// run_loop and RunInbox refuses every method it does not recognise. Freeing the weights
+// out from under a generating model is therefore not a case that has to be defended
+// against here -- the structure already excludes it.
+void handle_unload_model(const std::string& id, surface::Session& session) {
+    surface::unload_model(session);
+    notify_model(protocol::modelstate_values::kUnloaded, "");
+    reply_result(id, R"({"unloaded":true})");
 }
 
 // A follow-up: the same context, one more user turn, another pass of the loop.
@@ -700,7 +622,8 @@ bool start_mission(const std::string& id, const std::string& message, Session& s
 // reaches here -- while a run is turning, the main loop is inside run_loop and is not
 // reading the inbox at all, so a message that arrives HERE is by construction one that
 // arrived with nothing running.
-bool continue_session(const std::string& id, const std::string& message, Session& session,
+bool continue_session(const std::string& id, const std::string& message,
+                      surface::Session& session,
                       platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
                       platform::EventLogWriter& log, const platform::Clock& clock) {
     const std::string text = surface::string_field(message, "text");
@@ -715,6 +638,60 @@ bool continue_session(const std::string& id, const std::string& message, Session
     reply_result(id, R"({"accepted":true,"run_id":")" + id + R"(","started_run":true})");
     session.ctx->add_user_message(text);
     return run_loop(id, session, inbox, cancel, log, clock);
+}
+
+// Routes ONE framed message. Returns true when the process should not survive it.
+//
+// Split from main because main had grown two jobs -- bring the process up, then route
+// forever -- and the second is the one that changes. The exit decision is returned rather
+// than taken here so that "what ends this process" stays readable in one place: a
+// shutdown with nothing running, and a shutdown that arrived mid-run and had to wait for
+// the weights to be freed, are the same fact and now leave by the same door.
+bool dispatch_one(const std::string& message, surface::Session& session,
+                  platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
+                  platform::EventLogWriter& log, const platform::Clock& clock) {
+    const std::string method = surface::method_of(message);
+    const std::string id = surface::string_field(message, "id");
+
+    if (method == "lmp/shutdown") {
+        reply_result(id, R"({"ok":true})");
+        return true;
+    }
+    if (method == "lmp/cancel") {
+        // The reader thread already set the token the moment the message was framed --
+        // this is only the acknowledgement (S4.3).
+        reply_result(id, R"({"accepted":true})");
+        return false;
+    }
+    if (method == "lmp/approve") {
+        // An approval with no run waiting on it. Answering a card after the run that
+        // raised it has ended must not silently look like it landed.
+        reply_result(id, R"({"accepted":false})");
+        return false;
+    }
+    if (method == "lmp/load_model") {
+        handle_load_model(id, message, session, clock);
+        return false;
+    }
+    if (method == "lmp/unload_model") {
+        handle_unload_model(id, session);
+        return false;
+    }
+
+    // --- a run --------------------------------------------------------------
+    //
+    // Both of these BLOCK for the length of a mission. Anything the user says while one
+    // is turning is read by the RunInbox inside it, not here.
+    if (method == "lmp/start") {
+        return start_mission(id, message, session, inbox, cancel, log, clock);
+    }
+    if (method == "lmp/message") {
+        return continue_session(id, message, session, inbox, cancel, log, clock);
+    }
+    reply_error(id, "unknown method '" + method +
+                        "'. This sidecar speaks the private lmp/* namespace; it is not "
+                        "MCP and does not claim to be.");
+    return false;
 }
 
 } // namespace
@@ -736,12 +713,19 @@ int main() {
     surface::StdinReader reader(inbox, cancel);
     reader.start(STDIN_FILENO);
 
-    write_line(std::string(R"({"jsonrpc":"2.0","method":"lmp/ready","params":)") +
-               R"({"protocol_version":")" + protocol::kProtocolVersion + R"("}})");
+    surface::wire::write_line(
+        std::string(R"({"jsonrpc":"2.0","method":"lmp/ready","params":)") +
+        R"({"protocol_version":")" + protocol::kProtocolVersion + R"("}})");
 
     // Outlives every run in this process: the conversation, and the weights it is having
     // that conversation with.
-    Session session;
+    surface::Session session;
+
+    // The starting state, said out loud rather than left to be assumed. A fresh process
+    // holds no weights, and a surface that had to infer that from silence would render
+    // the same blank thing for "no model" as for "still loading" -- which is precisely
+    // how a prompt came to sit on 'Thinking' with nothing behind it.
+    notify_model(protocol::modelstate_values::kUnloaded, "");
 
     std::string message;
     while (!inbox.drained()) {
@@ -749,44 +733,10 @@ int main() {
             std::this_thread::yield();
             continue;
         }
-        const std::string method = surface::method_of(message);
-        const std::string id = surface::string_field(message, "id");
-
-        if (method == "lmp/shutdown") {
-            reply_result(id, R"({"ok":true})");
-            exit_now(log);
-        }
-        if (method == "lmp/cancel") {
-            // The reader thread already set the token the moment the message was
-            // framed -- this is only the acknowledgement (S4.3).
-            reply_result(id, R"({"accepted":true})");
-            continue;
-        }
-        if (method == "lmp/approve") {
-            // An approval with no run waiting on it. Answering a card after the run
-            // that raised it has ended must not silently look like it landed.
-            reply_result(id, R"({"accepted":false})");
-            continue;
-        }
-
-        // --- a run --------------------------------------------------------
-        //
-        // Both of these BLOCK for the length of a mission. Anything the user says while
-        // one is turning is read by the RunInbox inside it, not here.
-        bool last_run = false;
-        if (method == "lmp/start") {
-            last_run = start_mission(id, message, session, inbox, cancel, log, clock);
-        } else if (method == "lmp/message") {
-            last_run = continue_session(id, message, session, inbox, cancel, log, clock);
-        } else {
-            reply_error(id, "unknown method '" + method +
-                                "'. This sidecar speaks the private lmp/* namespace; it "
-                                "is not MCP and does not claim to be.");
-            continue;
-        }
-        if (last_run) {
-            // A shutdown arrived mid-run: acknowledged there, acted on here, now that
-            // the run has unwound and the model is freed.
+        if (dispatch_one(message, session, inbox, cancel, log, clock)) {
+            // A shutdown: either with nothing running, or one that arrived mid-run and
+            // was acknowledged there. Acted on here, now that the run has unwound and
+            // the model is freed.
             exit_now(log);
         }
     }
