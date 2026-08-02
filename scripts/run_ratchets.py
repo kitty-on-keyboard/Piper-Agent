@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
-"""The CI ratchets (spec S15.3 - S15.7).
+"""The CI gates (spec S15.3 - S15.7).
 
-One entry point, six gates. Run with --self-test to prove each gate can go red:
-a gate that has never been observed failing is a gate nobody has falsified, and
+One entry point, five gates. Run with --self-test to prove each can go red: a
+gate that has never been observed failing is a gate nobody has falsified, and
 S2.1.2 does not make an exception for tooling.
 
   ./scripts/run_ratchets.py --root .
   ./scripts/run_ratchets.py --root . --self-test
 
-The C++ scanning here is a brace-depth scanner, not a parser. That is a real
-limitation and it is stated rather than hidden: it can be fooled by a brace inside
-a string literal or a macro that opens a scope. It is not fooled by anything in
-this repo, and the alternative -- a full frontend in the pre-commit path -- costs
-more than the defect class is worth. If it ever misreports, fix the scanner; do
-not raise the limit.
+WHAT BELONGS HERE, AND WHAT DOES NOT
+  Every gate below checks a PROPERTY: the dependency graph points one way, a
+  declared symbol is used, the two sides of the protocol are generated from one
+  schema, a tool description names tools that exist, a corrective arm changes
+  state rather than composing a sentence. Each is a thing that is either true of
+  the code or false, and false is a defect a reviewer would also call a defect.
+
+  There used to be a sixth gate here, and it counted lines: 800 per file, 80 per
+  function, nesting depth 3. It is gone, and it is not coming back. A line count
+  is not a property -- it is a proxy for one, and the proxy was optimized against
+  instead of the thing. The damage was not hypothetical and it is still legible
+  in the history: `ContextJournal::open()` dropped an out-parameter and swallowed
+  its own failure reason to buy back one line; `mcp_settings` and two `tests/model`
+  files were split on line count rather than on responsibility; `sidecar.cpp` sat
+  at exactly 800/800, which is not where a well-factored file naturally lands.
+  Every one of those is worse code that passed a green check.
+
+  So: no gate here may enforce a number that stands in for a judgement. If a file
+  is badly organised, that is a review comment about its organisation, and the
+  argument has to be made about the code rather than about its length.
 """
 
 import argparse
@@ -60,78 +74,6 @@ def walk_sources(root, cfg):
 
 def is_exempt(relpath, exemptions):
     return any(relpath.startswith(e["path"]) for e in exemptions)
-
-
-def strip_comments_and_strings(line):
-    """Blanks out // comments and "..." literals so braces inside them do not count."""
-    out, i, in_str = [], 0, False
-    while i < len(line):
-        ch = line[i]
-        if in_str:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                in_str = False
-            i += 1
-            continue
-        if ch == '"':
-            in_str = True
-            i += 1
-            continue
-        if ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
-            break
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-# --- gate: size ------------------------------------------------------------
-
-FUNC_RE = re.compile(r"^[A-Za-z_~].*\)\s*(const\s*)?(noexcept\s*)?(override\s*)?\{\s*$")
-
-
-def scan_function_shapes(lines):
-    """Yields (start_line, length, max_nesting) for each brace-balanced body."""
-    depth, start, peak = 0, None, 0
-    for idx, raw in enumerate(lines, start=1):
-        line = strip_comments_and_strings(raw)
-        opens, closes = line.count("{"), line.count("}")
-        if depth == 0 and opens > 0 and FUNC_RE.match(raw.strip()):
-            start, peak = idx, 0
-        if start is not None:
-            depth += opens - closes
-            peak = max(peak, depth - 1)
-            if depth <= 0:
-                yield start, idx - start + 1, peak
-                depth, start, peak = 0, None, 0
-        else:
-            depth = max(0, depth + opens - closes)
-
-
-def gate_size(root, cfg):
-    limits, findings, subjects = cfg["limits"], [], 0
-    for rel, abspath in walk_sources(root, cfg):
-        if is_exempt(rel, cfg["size_exempt"]):
-            continue
-        subjects += 1
-        with open(abspath, encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
-        if len(lines) > limits["max_file_lines"]:
-            findings.append(Finding("size", rel, len(lines),
-                                    f"{len(lines)} lines exceeds {limits['max_file_lines']}"))
-        if not rel.endswith(CPP_EXT):
-            continue
-        for start, length, nesting in scan_function_shapes(lines):
-            if length > limits["max_function_lines"]:
-                findings.append(Finding("size", rel, start,
-                                        f"function body is {length} lines, limit is "
-                                        f"{limits['max_function_lines']}"))
-            if nesting > limits["max_nesting_depth"]:
-                findings.append(Finding("size", rel, start,
-                                        f"nesting depth {nesting} exceeds "
-                                        f"{limits['max_nesting_depth']}"))
-    return subjects, findings
 
 
 # --- gate: layers ----------------------------------------------------------
@@ -187,7 +129,7 @@ FUNC_DECL_RE = re.compile(
 def collect_declarations(root, cfg):
     decls = {}
     for rel, abspath in walk_sources(root, cfg):
-        if not rel.endswith(".hpp") or is_exempt(rel, cfg["size_exempt"]):
+        if not rel.endswith(".hpp") or is_exempt(rel, cfg["scan_exempt"]):
             continue
         with open(abspath, encoding="utf-8", errors="replace") as fh:
             for lineno, line in enumerate(fh, start=1):
@@ -209,7 +151,7 @@ def gate_dead_code(root, cfg):
     decls = collect_declarations(root, cfg)
     corpus = []
     for rel, abspath in walk_sources(root, cfg):
-        if is_exempt(rel, cfg["size_exempt"]):
+        if is_exempt(rel, cfg["scan_exempt"]):
             continue
         with open(abspath, encoding="utf-8", errors="replace") as fh:
             corpus.append((rel, fh.read()))
@@ -350,7 +292,6 @@ def gate_prose_correctives(root, cfg):
 
 
 GATES = {
-    "size": gate_size,
     "layers": gate_layers,
     "dead_code": gate_dead_code,
     "protocol": gate_protocol,
@@ -397,7 +338,18 @@ PROBE = "src/platform/_probe.hpp"
 
 
 def violations():
-    """The planted defects, one per live gate.
+    """The planted defects, for the gates a NEW FILE can violate.
+
+    That is the honest scope, and it is narrower than it reads. `layers` and
+    `dead_code` scan every source file, so dropping one probe file in is a real
+    violation. The other three read one specific file each -- protocol/schema.json,
+    src/tools/registry.cpp, src/loop/agent.cpp -- and a probe beside them proves
+    nothing, so falsifying those needs a mutation mechanism rather than a new file.
+    scripts/mutation_test.py is the tool for it.
+
+    Until then this prints exactly which gates it proved and which it did not, rather
+    than "all". It formerly claimed all six with three of them unprobed, which is the
+    same unfalsified green S2.1.2 exists to forbid -- in the falsifier itself.
 
     The dead-code probe's symbol name is generated, not written as a literal. It was
     a literal at first, and the self-test reported MISS: `scripts/` is one of the
@@ -409,14 +361,6 @@ def violations():
     """
     dead_symbol = "Probe" + uuid.uuid4().hex[:12]
     return {
-        "size:file": (PROBE, "// probe\n" + "int x_probe_pad;\n" * 900),
-        "size:function": (PROBE,
-                          "inline void probe_fn() {\n" + "    int a = 1;\n" * 120 + "}\n"),
-        "size:nesting": (PROBE,
-                         "inline void probe_fn() {\n    if (a) {\n        if (b) {\n"
-                         "            if (c) {\n                if (d) {\n"
-                         "                    x();\n                }\n            }\n"
-                         "        }\n    }\n}\n"),
         "layers": (PROBE, '#include "src/loop/turn_machine.hpp"\n'),
         "dead_code": (PROBE, "class " + dead_symbol + " {};\n"),
     }
@@ -470,11 +414,18 @@ def self_test(root, cfg):
             print(f"{'RED  ' if hit else 'MISS '} {label}: "
                   f"{len(findings)} finding(s) over {subjects} subject(s)")
             ok = ok and hit
+    probed = {label.split(":")[0] for label in violations()}
+    unprobed = sorted(set(GATES) - probed)
     if ok:
-        print("\nAll live ratchets proven capable of failing.")
+        print("\nProven capable of failing: " + ", ".join(sorted(probed)) + ".")
     else:
-        print("\nFAIL: a ratchet did not fire on a violation planted for it. "
+        print("\nFAIL: a gate did not fire on a violation planted for it. "
               "Until it does, its greens mean nothing.")
+    if unprobed:
+        # Named rather than counted, because "3 unprobed" is the kind of summary a
+        # reader skims past and a list of names is one they act on.
+        print("NOT proven here (each reads one specific file, so a probe file cannot "
+              "violate them; use scripts/mutation_test.py): " + ", ".join(unprobed) + ".")
     return not ok
 
 

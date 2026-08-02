@@ -1,6 +1,5 @@
-// Shared scaffolding for the attribution driver (S19.3). Split out only because
-// diag_main.cpp reached the per-file line ratchet; the MoE subcommands live in
-// diag_moe.cpp and everything else stays in diag_main.cpp.
+// Shared scaffolding for the attribution driver (S19.3), used by both translation units:
+// the MoE subcommands live in diag_moe.cpp and everything else in diag_main.cpp.
 #ifndef LMP_TESTS_MODEL_DIAG_COMMON_HPP
 #define LMP_TESTS_MODEL_DIAG_COMMON_HPP
 

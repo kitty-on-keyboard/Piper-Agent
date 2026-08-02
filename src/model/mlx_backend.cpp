@@ -206,8 +206,10 @@ class MlxSpecForward final : public SpecForward {
     std::size_t ledger_mark_ = 0;
 };
 
-// The speculative decode loop. Separate from generate() so the plain path keeps the shape
-// it was tuned in, and so this stays under the function-size ratchet.
+// The speculative decode loop. Separate from generate() so the plain path keeps the exact
+// shape it was tuned and measured in: the two share a prefill and diverge completely
+// after it, and interleaving them would put a branch in the hot decode step for the
+// benefit of whichever mode is off.
 GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
                              const InferenceTask& task, TokenSink& sink,
                              const CancelToken& cancel, const platform::Clock& clock,

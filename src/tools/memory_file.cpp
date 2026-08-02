@@ -3,9 +3,9 @@
 #include "src/platform/fs.hpp"
 
 // The cross-session memory file (spec S8). Split out of registry.cpp because it is the one
-// tool whose state outlives the run, and because registry.cpp is at the file-size ratchet
-// -- a limit that exists so a file stays readable, which is worth more than keeping every
-// handler in one place.
+// tool whose state outlives the run: every other handler there acts on the workspace
+// within a single mission, and this one writes a file the NEXT session reads. That is a
+// different lifetime and a different failure mode, and it wants its own tests.
 
 namespace lmp::tools {
 

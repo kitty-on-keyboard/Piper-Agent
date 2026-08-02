@@ -15,7 +15,10 @@
   "activationEvents": [
     "onView:lmPipe.sidebar",
     "onCommand:lmPipe.start",
-    "onCommand:lmPipe.cancel"
+    "onCommand:lmPipe.cancel",
+    "onCommand:lmPipe.loadModel",
+    "onCommand:lmPipe.unloadModel",
+    "onCommand:lmPipe.selectModel"
   ],
   "contributes": {
     "commands": [
@@ -26,6 +29,18 @@
       {
         "command": "lmPipe.cancel",
         "title": "LM_Pipe: Cancel the current run"
+      },
+      {
+        "command": "lmPipe.selectModel",
+        "title": "LM_Pipe: Choose the model directory"
+      },
+      {
+        "command": "lmPipe.loadModel",
+        "title": "LM_Pipe: Load the model"
+      },
+      {
+        "command": "lmPipe.unloadModel",
+        "title": "LM_Pipe: Unload the model (frees the memory, ends the conversation)"
       }
     ],
     "viewsContainers": {

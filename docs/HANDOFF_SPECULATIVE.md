@@ -148,9 +148,9 @@ distribution. A naive implementation passes everything else and fails only that.
   Assert per-message validity.
 - **A traced run's throughput is meaningless.** `LMP_MOE_TRACE` forces a mid-graph sync;
   52 tok/s traced against 85 untraced. Routing is unaffected. Never quote a traced tok/s.
-- **The ratchets will catch you.** Adding a test requires editing `gate_manifest.txt` twice
-  (count AND name) by design. `agent.cpp` is near the 800-line size ratchet; new loop code
-  should go in its own file.
+- **The gates will catch you.** Adding a test requires editing `gate_manifest.txt` twice
+  (count AND name) by design. (The 800-line size gate this used to also warn about was
+  removed on 2026-08-02 — put new loop code wherever it belongs, not wherever it fits.)
 - **Never two MLX processes.** One model is 19 GB on a 48 GB host. `ctest --preset
   realmodel` pins jobs=1; `scripts/drive.py` must run alone.
 
