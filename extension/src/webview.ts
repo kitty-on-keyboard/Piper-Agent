@@ -222,12 +222,28 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 1em; color: var(--dim); }
   display: inline-flex; align-items: center; gap: 5px;
 }
 .thought summary::-webkit-details-marker { display: none; }
-.thought summary::before { content: "✦"; color: var(--accent); font-size: 10px; }
+/* Rendered as ordinary chat, not as a monospace dump. Reasoning is prose with the same
+   lists, code fences and emphasis the answer has, and showing it raw made the one part of
+   the transcript people open out of curiosity the ugliest thing on screen. Same markdown
+   pipeline, one notch dimmer so it still reads as an aside. */
 .thought .body {
-  margin-top: 6px; padding: 8px 10px; font-size: 12px; color: var(--dim);
+  margin-top: 6px; padding: 9px 11px; font-size: 12.5px; color: var(--dim);
   background: var(--surface); border-radius: var(--r-sm);
-  white-space: pre-wrap; word-break: break-word;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  word-break: break-word;
 }
+.thought .body > :first-child { margin-top: 0; }
+.thought .body > :last-child { margin-bottom: 0; }
+/* The caret is the marker, and it turns. A disclosure that is shut by default has to look
+   like one you can open. */
+.thought summary::before {
+  content: ""; width: 0; height: 0; flex: none;
+  border-left: 4px solid var(--accent);
+  border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent;
+  transition: transform .18s var(--ease);
+}
+.thought[open] summary::before { transform: rotate(90deg); }
+.thought summary:hover { color: var(--fg); }
 
 /* --- tool rows ----------------------------------------------------------- */
 .tool {
@@ -346,12 +362,15 @@ button.ghost {
 /* Live controls for the things worth changing between runs. They write straight back
    to the editor's own settings, so the drawer and the Settings UI are the same state
    rather than two copies that drift. */
-#gear {
-  position: absolute; top: 10px; right: 10px;
+#gear, #histBtn {
+  position: absolute; top: 10px;
   width: 24px; height: 24px; padding: 0; border-radius: 6px;
   background: transparent; color: var(--dim); font-size: 13px;
 }
-#gear:hover { background: var(--surface-hi); color: var(--fg); }
+#gear { right: 10px; }
+#histBtn { right: 38px; font-size: 14px; }
+#gear:hover, #histBtn:hover { background: var(--surface-hi); color: var(--fg); }
+#gear.on, #histBtn.on { background: var(--surface-hi); color: var(--fg); }
 #head { position: sticky; }
 #drawer {
   display: none; padding: 10px 0 2px; border-top: 1px solid var(--line); margin-top: 10px;
@@ -394,6 +413,73 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 }
 #promptBox:focus { border-color: var(--accent); }
 
+/* --- mode, on the main page ---------------------------------------------- */
+/* Mode is not a preference, it is what the agent is ALLOWED to do this run: Plan cannot
+   execute, Debug cannot write, Agent can do both. Burying that two clicks deep in a
+   drawer put the single most consequential choice in the same place as the temperature
+   slider. It lives on the surface now, and the drawer keeps the things you set once. */
+#modeBar { margin-top: 9px; }
+#modeBar .seg button { padding: 5px 6px; font-size: 11px; }
+
+/* --- context meter -------------------------------------------------------- */
+/* WHY THIS IS ON SCREEN. The context filling up is the single best predictor that answers
+   are about to get worse, and compaction is the moment the run starts THROWING AWAY its
+   own history. Both were invisible: "ctx 21378/100096" sat in a 10px monospace line among
+   four other numbers, and compaction was not on the wire at all.
+   The bar fills, warms through amber, and goes red near the top. */
+#ctx {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 7px; font-size: 10px; color: var(--faint);
+}
+#ctxTrack {
+  flex: 1; height: 3px; border-radius: 999px; min-width: 0;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  overflow: hidden;
+}
+#ctxFill {
+  height: 100%; width: 0%; border-radius: 999px;
+  background: var(--accent);
+  transition: width .5s var(--ease), background-color .5s var(--ease);
+}
+#ctx.warm #ctxFill { background: var(--warn); }
+#ctx.hot  #ctxFill { background: var(--fail); }
+#ctxLabel { flex: none; font-variant-numeric: tabular-nums; }
+#ctx.warm #ctxLabel { color: var(--warn); }
+#ctx.hot  #ctxLabel { color: var(--fail); }
+/* Compaction is an EVENT, not a level, so it gets a chip that appears when it happens
+   and a pulse the first time each one lands. */
+#ctxCompact {
+  flex: none; display: none; align-items: center; gap: 4px;
+  padding: 1px 7px; border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  color: var(--warn); font-size: 10px; font-weight: 590;
+}
+#ctxCompact.on { display: inline-flex; }
+#ctxCompact.bump { animation: chipPop .5s var(--ease); }
+@keyframes chipPop { 0% { transform: scale(.8); opacity: 0; } 60% { transform: scale(1.06); } }
+#ctx:empty, #ctx.idle { opacity: 0; }
+#ctx { transition: opacity .3s var(--ease); }
+
+/* --- run history ---------------------------------------------------------- */
+#history { display: none; padding: 10px 0 2px; border-top: 1px solid var(--line); margin-top: 10px; }
+#history.open { display: block; animation: rise .22s var(--ease) both; }
+#history .empty { font-size: 11px; color: var(--faint); padding: 4px 0; }
+.run {
+  display: flex; align-items: baseline; gap: 8px; padding: 7px 8px;
+  border-radius: var(--r-sm); font-size: 11px;
+}
+.run + .run { margin-top: 2px; }
+.run:hover { background: var(--surface-hi); }
+.run .rdot { width: 6px; height: 6px; border-radius: 50%; flex: none; align-self: center; }
+.run .rdot.ok { background: var(--ok); }
+.run .rdot.no { background: var(--faint); }
+.run .rmission {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg);
+}
+.run .rmeta { flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
+
 #foot {
   padding: 8px var(--pad) 10px;
   background: var(--vscode-sideBar-background);
@@ -407,8 +493,14 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 #composer {
   display: flex; align-items: flex-end; gap: 6px;
   background: var(--vscode-input-background);
-  border: 1px solid var(--line); border-radius: 20px; padding: 4px 4px 4px 12px;
+  border: 1px solid var(--line); border-radius: 20px; padding: 4px 4px 4px 8px;
   transition: border-color .18s var(--ease), box-shadow .18s var(--ease);
+}
+/* The orb sits at the head of the composer, where every other assistant puts its activity
+   indicator: next to the thing you are typing into, not in a header you scroll past. */
+#composer #orb {
+  --orb-size: 22px;
+  align-self: center; margin-bottom: 1px;
 }
 #composer:focus-within {
   border-color: var(--accent);
@@ -427,6 +519,22 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
   display: flex; align-items: center; justify-content: center;
 }
 #send:disabled { opacity: .3; cursor: default; }
+/* Stop REPLACES send while a run is turning, the way every other assistant does it.
+   Two buttons side by side would mean the primary action changes meaning without moving,
+   and the one you want mid-run is always the same one. */
+#stop {
+  flex: none; width: 28px; height: 28px; padding: 0; border-radius: 50%;
+  background: var(--surface-hi); color: var(--fg); border: 1px solid var(--line);
+  display: none; align-items: center; justify-content: center;
+}
+#stop::before {
+  content: ""; width: 9px; height: 9px; border-radius: 2px; background: var(--fg);
+}
+#stop:hover { background: color-mix(in srgb, var(--fail) 18%, transparent);
+              border-color: color-mix(in srgb, var(--fail) 45%, transparent); }
+#stop:hover::before { background: var(--fail); }
+body.busy #stop { display: flex; }
+body.busy #send { display: none; }
 #hint { font-size: 10px; color: var(--faint); padding: 5px 4px 0; text-align: center; }
 `;
 }
@@ -435,11 +543,18 @@ function markup(): string {
   return `
 <div id="head">
   <button id="gear" title="Settings">⚙</button>
+  <button id="histBtn" title="Run history">◷</button>
   <div id="headRow">
-    ${orbMarkup()}
     <div id="headText">
       <div id="mission"></div>
       <div id="status"><span id="statusText">Idle</span></div>
+    </div>
+  </div>
+  <div id="modeBar">
+    <div class="seg" id="segMode">
+      <button data-v="plan">Plan</button>
+      <button data-v="debug">Debug</button>
+      <button data-v="agent">Agent</button>
     </div>
   </div>
   <div id="modelBar">
@@ -448,15 +563,8 @@ function markup(): string {
     <button id="modelAction">Load</button>
     <button id="modelPick" title="Choose a different model directory">Change</button>
   </div>
+  <div id="history"></div>
   <div id="drawer">
-    <div class="set">
-      <label>Mode</label>
-      <div class="seg" id="segMode">
-        <button data-v="plan">Plan</button>
-        <button data-v="debug">Debug</button>
-        <button data-v="agent">Agent</button>
-      </div>
-    </div>
     <div class="set">
       <label>Containment</label>
       <div class="seg" id="segTier">
@@ -478,9 +586,16 @@ function markup(): string {
 <div id="plan"></div>
 <div id="feed"></div>
 <div id="foot">
+  <div id="ctx" class="idle">
+    <div id="ctxTrack"><div id="ctxFill"></div></div>
+    <span id="ctxLabel"></span>
+    <span id="ctxCompact"></span>
+  </div>
   <div id="perf"></div>
   <div id="composer">
+    ${orbMarkup()}
     <textarea id="say" rows="1" placeholder="Message the agent…"></textarea>
+    <button id="stop" title="Stop this run"></button>
     <button id="send" title="Send">↑</button>
   </div>
   <div id="hint"></div>
@@ -1118,24 +1233,24 @@ let thought = null;         // the <details> body currently being streamed into
 let thoughtSummary = null;
 let thoughtDetails = null;
 let thoughtStarted = 0;
+let thoughtMd = null;       // its markdown context -- same pipeline as the answer
 
-// OPEN WHILE IT IS HAPPENING, collapsed once it is history.
+// SHUT BY DEFAULT.
 //
-// Reasoning that only ever appeared behind a shut disclosure was, from the outside, no
-// different from a model that had produced nothing -- the user had to already believe it
-// was working to go and check. Watching the tokens arrive is the evidence. Afterwards it
-// is a transcript of a decision already made, which is worth keeping and not worth the
-// vertical space, so it folds itself away and says how long it took.
+// It used to open itself while the tokens arrived, on the reasoning that watching them is
+// the evidence the model is working. The orb and the shimmering status line do that job
+// now, and they do it without moving the transcript: a disclosure that opens, fills with
+// several hundred tokens and then collapses pushes the answer down the screen and yanks it
+// back, on every single turn. Reasoning is an aside you open when you want it.
 function closeThought() {
+  // The parser holds bytes back mid-construct; finishing it is what flushes the tail and
+  // closes an unterminated fence, exactly as the answer bubble does.
+  if (thoughtMd) { renderMd(thoughtMd, thoughtMd.stream.finish()); thoughtMd = null; }
   if (thoughtSummary) {
     const secs = (Date.now() - thoughtStarted) / 1000;
     thoughtSummary.textContent =
       'Thought for ' + (secs < 1 ? 'a moment' : secs.toFixed(secs < 10 ? 1 : 0) + 's');
   }
-  // The user's own click wins. Someone who opened a finished thought to read it does not
-  // want the next answer token to shut it in their face, and someone who collapsed a live
-  // one has said they are not interested.
-  if (thoughtDetails && !thoughtDetails.dataset.touched) thoughtDetails.open = false;
   thought = null;
   thoughtSummary = null;
   thoughtDetails = null;
@@ -1146,13 +1261,8 @@ function openThought() {
   closeBubble();  // before the fields below are set: closeBubble() clears them
   const d = document.createElement('details');
   d.className = 'thought';
-  d.open = true;
+  d.open = false;
   thoughtSummary = document.createElement('summary');
-  // The CLICK, not the toggle event. <details> fires toggle asynchronously, so the one
-  // queued by setting open above lands after any listener attached here and marked
-  // every disclosure as touched the instant it was created -- which meant none of them
-  // ever auto-collapsed. A click on the summary is the only way a human changes this.
-  thoughtSummary.addEventListener('click', () => { d.dataset.touched = '1'; });
   thoughtSummary.textContent = 'Thinking…';
   const b = document.createElement('div');
   b.className = 'body';
@@ -1161,6 +1271,10 @@ function openThought() {
   thought = b;
   thoughtDetails = d;
   thoughtStarted = Date.now();
+  // The SAME renderer the answer uses, so opening a thought shows prose, lists and code
+  // fences rather than a wall of preformatted text. newMdCtx takes the element it writes
+  // into, so this costs one line and no second pipeline to keep in step.
+  thoughtMd = newMdCtx(b);
   return b;
 }
 
@@ -1174,6 +1288,101 @@ const submit = () => {
   box.style.height = 'auto';
 };
 $('send').onclick = submit;
+
+// Stop. The sidecar's cancel is the violent interrupt -- it sets the token mid-stream
+// rather than waiting for a turn boundary, which is the whole point of a stop button.
+// Disabled the instant it is pressed so a second click cannot queue a second cancel.
+$('stop').onclick = () => {
+  $('stop').disabled = true;
+  busy(true, 'Stopping…', 'WAITING');
+  api.postMessage({ kind: 'cancel' });
+};
+
+// --- context meter --------------------------------------------------------
+// Bands, not a gradient: the number only matters near the top, and a bar that is already
+// amber at 40% trains you to ignore it.
+let lastCompactions = 0;
+function paintContext(used, max, compactions) {
+  const ctx = $('ctx');
+  if (!max) { ctx.classList.add('idle'); return; }
+  ctx.classList.remove('idle');
+  const pct = Math.max(0, Math.min(100, (used / max) * 100));
+  $('ctxFill').style.width = pct.toFixed(1) + '%';
+  ctx.classList.toggle('warm', pct >= 70 && pct < 88);
+  ctx.classList.toggle('hot', pct >= 88);
+  $('ctxLabel').textContent = Math.round(pct) + '% of context';
+
+  const chip = $('ctxCompact');
+  if (compactions > 0) {
+    chip.classList.add('on');
+    chip.textContent = 'compacted ' + compactions + '×';
+    // Pulse only on a NEW one. Re-running the animation every turn would make a steady
+    // state look like a recurring event.
+    if (compactions > lastCompactions) {
+      chip.classList.remove('bump');
+      void chip.offsetWidth;
+      chip.classList.add('bump');
+    }
+  } else {
+    chip.classList.remove('on');
+  }
+  lastCompactions = compactions;
+}
+
+// --- run history ----------------------------------------------------------
+function paintHistory(runs) {
+  const el = $('history');
+  el.textContent = '';
+  if (!runs || runs.length === 0) {
+    const p = document.createElement('div');
+    p.className = 'empty';
+    p.textContent = 'No runs yet in this workspace.';
+    el.append(p);
+    return;
+  }
+  for (const r of runs) {
+    const row = document.createElement('div');
+    row.className = 'run';
+    const dot = document.createElement('span');
+    dot.className = 'rdot ' + (r.completed ? 'ok' : 'no');
+    const m = document.createElement('span');
+    m.className = 'rmission';
+    m.textContent = r.mission;
+    // \\n, not \\\\n: this source is a TEMPLATE LITERAL, so an escape written once is
+    // resolved by TypeScript and reaches the browser as a REAL newline -- which splits the
+    // string literal across two lines and kills the entire view script at parse time.
+    // tsc cannot see it: to the compiler this whole function is one string.
+    m.title = r.mission + '\\n' + r.reason;
+    const meta = document.createElement('span');
+    meta.className = 'rmeta';
+    meta.textContent = r.iterations + ' turns · ' + when(r.at);
+    row.append(dot, m, meta);
+    el.append(row);
+  }
+}
+
+// Relative, because "3 minutes ago" is what you want from a history list and an ISO
+// timestamp is what you want from a log.
+function when(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 90) return 'just now';
+  const m = s / 60;
+  if (m < 60) return Math.round(m) + 'm ago';
+  const h = m / 60;
+  if (h < 24) return Math.round(h) + 'h ago';
+  return Math.round(h / 24) + 'd ago';
+}
+
+$('histBtn').onclick = () => {
+  const el = $('history');
+  const open = el.classList.toggle('open');
+  $('histBtn').classList.toggle('on', open);
+  if (open) {
+    $('drawer').classList.remove('open');
+    $('gear').classList.remove('on');
+    api.postMessage({ kind: 'history' });
+  }
+};
 
 // --- the model bar --------------------------------------------------------
 // Four states, one button, and the button says what pressing it does rather than what
@@ -1233,7 +1442,15 @@ const put = (key, value) => {
   api.postMessage({ kind: 'setting', key, value });
 };
 
-$('gear').onclick = () => $('drawer').classList.toggle('open');
+// One panel at a time: two stacked disclosures push the composer off a narrow sidebar.
+$('gear').onclick = () => {
+  const open = $('drawer').classList.toggle('open');
+  $('gear').classList.toggle('on', open);
+  if (open) {
+    $('history').classList.remove('open');
+    $('histBtn').classList.remove('on');
+  }
+};
 
 function seg(id, key, cast) {
   $(id).querySelectorAll('button').forEach((b) => {
@@ -1369,7 +1586,8 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'token') {
     if (payload.channel === 'thinking') {
-      typeInto(openThought(), payload.text);
+      openThought();
+      renderMd(thoughtMd, thoughtMd.stream.feed(payload.text));
       busy(true, 'Thinking', 'THINKING');
       if (window.__orb) window.__orb.impulse('token');
     } else {
@@ -1522,11 +1740,16 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'perf') {
     const s = payload.sample;
+    // The context figure moved OUT of this line and into the meter above it. Leaving a
+    // second copy here would be two readings of the same number that can disagree by a
+    // frame, and the throughput line is about speed.
     $('perf').textContent =
       'ttft ' + Math.round(s.ttft_ms) + 'ms · prefill ' + s.prefill_tok_per_s.toFixed(0) +
-      ' tok/s · decode ' + s.decode_tok_per_s.toFixed(1) + ' tok/s · ctx ' +
-      s.context_used + '/' + s.context_max;
+      ' tok/s · decode ' + s.decode_tok_per_s.toFixed(1) + ' tok/s';
+    paintContext(s.context_used, s.context_max, s.compactions);
   }
+
+  if (kind === 'history') paintHistory(payload.runs);
 
   if (kind === 'run_end') {
     closeBubble();
@@ -1556,6 +1779,12 @@ window.addEventListener('message', (e) => {
     // Green only for an ending that is actually complete. "Stopped" covers the wall clock,
     // the iteration cap and a cancel, and none of those are a success (S14).
     finish(label, payload.completed ? 'DONE' : 'FAILED');
+    // The button is hidden by the busy class again, but a disabled control that comes
+    // back disabled is how the next run ends up unstoppable.
+    $('stop').disabled = false;
+    // The history panel is stale the moment a run ends, and it is the moment someone is
+    // most likely to look at it.
+    if ($('history').classList.contains('open')) api.postMessage({ kind: 'history' });
   }
 
   if (kind === 'idle') goIdle();
