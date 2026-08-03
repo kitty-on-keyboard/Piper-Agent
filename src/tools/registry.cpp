@@ -25,6 +25,34 @@ namespace fsx = lmp::platform;
 using parsephony::ParamSpec;
 using parsephony::ParamType;
 
+// A failed write, classified by WHY -- because `retryable` is what decides whether the
+// loop's BreakRepeat corrective may fire (see choose_corrective: an unrecoverable repeat
+// is `!ok() && !retryable`).
+//
+// Every write failure used to be reported as Transient AND retryable, which told the loop
+// that re-sending the identical bytes was worth a turn. It is not, for any of these
+// causes: they are pure functions of the path and the process's permissions. A real run
+// re-sent the same 8 KB write six times against the same error and nothing fired, because
+// a retryable error is never an unrecoverable repeat.
+//
+// Only a genuine I/O error keeps the retry, which is the one case where trying again can
+// legitimately come out differently.
+ToolResult write_failure(const fsx::WriteResult& w) {
+    switch (w.status) {
+        case fsx::FsStatus::NotFound:
+            return ToolResult::error(ErrorClass::NotFound, false, w.error);
+        case fsx::FsStatus::PermissionDenied:
+            return ToolResult::error(ErrorClass::Policy, false, w.error);
+        case fsx::FsStatus::IsDirectory:
+        case fsx::FsStatus::TooLarge:
+            return ToolResult::error(ErrorClass::Malformed, false, w.error);
+        case fsx::FsStatus::Ok:
+        case fsx::FsStatus::IoError:
+            break;
+    }
+    return ToolResult::error(ErrorClass::Transient, true, w.error);
+}
+
 ParamSpec param(const char* name, ParamType type, bool required) {
     ParamSpec p;
     p.name = name;
@@ -154,7 +182,26 @@ ToolResult Registry::execute(const std::string& name,
         return ToolResult::error(ErrorClass::NotFound, false,
                                  "tool '" + name + "' is not registered");
     }
-    return it->second(params, approved_tier);
+    ToolResult r = it->second(params, approved_tier);
+    // NO TOOL MAY RETURN A SILENT RESULT. An empty summary is dropped from the rendered
+    // prompt (context.cpp only appends a tool_response when the observation is non-empty),
+    // so a call that produced no text leaves the next turn's prompt byte-identical to this
+    // one's -- and at a fixed seed a byte-identical prompt produces a byte-identical
+    // continuation. That is a deterministic loop, and it is the same failure the loop
+    // already defends against for a token-capped turn.
+    //
+    // MEASURED twice: `shell` returning "" for a successful `mkdir` (6 turns), and
+    // `read_file` returning "" for a 0-byte file (17 turns). Each tool that can be silent
+    // says something specific above; this is the floor under all of them, including any
+    // tool added later.
+    if (r.summary.empty()) {
+        r.summary = "(" + name + " " +
+                    (r.ok() ? "succeeded and produced no output"
+                            : std::string("failed: ") + std::string(to_string(r.status)) +
+                                  ", with no detail") +
+                    ")";
+    }
+    return r;
 }
 
 std::string Registry::tools_json() const {
@@ -224,6 +271,17 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                         " lines, above the " + std::to_string(ctx_.max_model_read_bytes) +
                         "-byte prompt budget. Use read_slice(path, start_line, end_line) "
                         "to read a range.");
+            }
+            // An empty file is a FACT, and it has to be stated. Returning "" makes a
+            // successful read indistinguishable from nothing happening at all -- and an
+            // empty observation is dropped from the rendered prompt entirely
+            // (context.cpp), so the next turn cannot see that the call was ever made.
+            //
+            // MEASURED: a run wrote 0 bytes to src/kv_store.py, then read it back 17 turns
+            // running, getting "" each time and re-issuing the identical call, until the
+            // budget ended the run.
+            if (f.bytes.empty()) {
+                return ToolResult::okay("(" + *path + " exists and is empty: 0 bytes)");
             }
             return ToolResult::okay(number_lines(f.bytes, 1));
         });
@@ -447,7 +505,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             }
             const fsx::WriteResult w = commit_write(abs, *get(p, "content"));
             if (!w.ok()) {
-                return ToolResult::error(ErrorClass::Transient, true, w.error);
+                return write_failure(w);
             }
             return ToolResult::okay("wrote " +
                                     std::to_string(get(p, "content")->size()) +
@@ -510,7 +568,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             }
             const fsx::WriteResult w = commit_write(abs, g.result);
             if (!w.ok()) {
-                return ToolResult::error(ErrorClass::Transient, true, w.error);
+                return write_failure(w);
             }
             return ToolResult::okay("replaced one occurrence in " + *get(p, "path"));
         });
@@ -537,7 +595,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             }
             const fsx::WriteResult w = commit_write(abs, content);
             if (!w.ok()) {
-                return ToolResult::error(ErrorClass::Transient, true, w.error);
+                return write_failure(w);
             }
             return ToolResult::okay("appended " +
                                     std::to_string(get(p, "content")->size()) +
@@ -611,6 +669,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             // Compact through the cookoff-merged triage engine (S6.2): anchors first,
             // own-code beats system headers, never head-truncate.
             r.summary = log_triage::compact(o.output, ctx_.max_result_bytes);
+            r.exit_code = o.exit_code;
             if (o.wall_clock_killed) {
                 r.error_class = ErrorClass::Transient;
                 r.retryable = false;

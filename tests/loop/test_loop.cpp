@@ -94,6 +94,57 @@ TEST(repeat_detection_keys_on_tool_and_arguments) {
     CHECK_EQ(d.seen_count("read_file", a), std::size_t{2});
 }
 
+// A repeat is the same CALL, not the same bytes. Keying on the raw argument let a run
+// alternate a trailing slash and repeat itself forever without the detector counting past
+// one -- measured in the editor as 80 turns of `list_dir ResMon` / `list_dir ResMon/`.
+TEST(a_cosmetic_path_difference_is_not_a_different_call) {
+    RepeatDetector d;
+    const std::vector<tools::ToolParamValue> plain = {{"path", "ResMon"}};
+    const std::vector<tools::ToolParamValue> slashed = {{"path", "ResMon/"}};
+    const std::vector<tools::ToolParamValue> dotted = {{"path", "./ResMon"}};
+
+    d.record("list_dir", plain);
+    CHECK_EQ(d.seen_count("list_dir", slashed), std::size_t{1});
+    CHECK_EQ(d.seen_count("list_dir", dotted), std::size_t{1});
+    d.record("list_dir", slashed);
+    CHECK_EQ(d.seen_count("list_dir", plain), std::size_t{2}); // enough to trip BreakRepeat
+
+    // A genuinely different directory is still a different call.
+    CHECK_EQ(d.seen_count("list_dir", {{"path", "Other"}}), std::size_t{0});
+    // And a non-path argument is raw text, where a trailing slash is a real difference.
+    RepeatDetector c;
+    c.record("shell", {{"command", "ls x"}});
+    CHECK_EQ(c.seen_count("shell", {{"command", "ls x/"}}), std::size_t{0});
+}
+
+// BreakRepeat's declared mechanism is "force a different tool by narrowing the grammar's
+// registry for the next turn". For most of this project's life it narrowed nothing and
+// only appended a sentence, so the identical call stayed samplable and a run could repeat
+// itself until the budget died -- 80 turns of it, measured in the editor.
+TEST(a_repeated_tool_is_unsamplable_on_the_next_turn) {
+    std::vector<parsephony::ToolSpec> specs;
+    for (const char* n : {"plan", "list_dir", "read_file", "write_file"}) {
+        parsephony::ToolSpec s;
+        s.name = n;
+        specs.push_back(s);
+    }
+
+    const std::vector<parsephony::ToolSpec> narrowed = without_suppressed(specs, "list_dir");
+    CHECK_EQ(narrowed.size(), std::size_t{3});
+    for (const parsephony::ToolSpec& s : narrowed) {
+        CHECK(s.name != "list_dir");
+    }
+
+    // Nothing suppressed: the list is untouched.
+    CHECK_EQ(without_suppressed(specs, "").size(), specs.size());
+
+    // Suppressing the ONLY samplable tool would leave the grammar unsatisfiable, so the
+    // turn keeps it rather than being handed a turn it cannot spend.
+    std::vector<parsephony::ToolSpec> only_plan;
+    only_plan.push_back(specs.front());
+    CHECK_EQ(without_suppressed(only_plan, "plan").size(), std::size_t{1});
+}
+
 TEST(at_most_one_corrective_and_budget_outranks_everything) {
     RepeatDetector d;
     RefusalLedger rl;
@@ -165,11 +216,14 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     CHECK(rl.is_blocked("delete_file"));
     CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
 
-    // Budget still outranks it (S9.2).
+    // Budget still outranks it (S9.2). Expressed against the budget's own limit rather
+    // than a literal, so raising the default ceiling cannot quietly turn this into a test
+    // of something else.
     rl.record("shell");
     rl.record("shell");
     t.tool_name = "shell";
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true) ==
+          Corrective::HaltOnBudget);
 }
 
 // --- completion gate (S10.4) -------------------------------------------------
@@ -210,6 +264,25 @@ TEST(a_proven_green_completes_the_run) {
     ctx.record_deliverable("src/main.cpp");
     ctx.record_verification(observed("ctest", true, true));
     CHECK(evaluate_completion(ctx).complete);
+}
+
+// The ledger is keyed by the CANONICAL check -- both writers file records that way -- so
+// the completion gate has to look the contract up in the same form it was stored under.
+// Comparing the raw declared string means a contract carrying any wrapper at all matches
+// no record, and a run whose check is green and proven keeps reporting "the declared
+// contract has not run" until its budget runs out.
+TEST(a_contract_declared_with_a_wrapper_still_matches_its_own_ledger) {
+    context::ContextStore ctx("Add a --version flag");
+    ctx.set_checklist({{"add flag", true}});
+    // As a model actually writes it: redirect, and a truncator to keep the output short.
+    ctx.set_verify_contract("pytest tests/ 2>&1 | tail -20");
+    ctx.record_deliverable("src/main.cpp");
+    // As the Verifier files it.
+    ctx.record_verification(observed(canonicalize_check("pytest tests/ 2>&1 | tail -20"),
+                                     true, true));
+
+    const CompletionVerdict v = evaluate_completion(ctx);
+    CHECK(v.complete);
 }
 
 // The gate the seventh pass removed. `completed` is an EVIDENTIAL verdict; a checklist
@@ -386,6 +459,65 @@ TEST(a_reporting_wrapper_does_not_mint_a_second_identity) {
     CHECK_EQ(canonicalize_check("cmake --build build && echo $? | cat"), base);
     // A genuinely different check keeps its own identity -- the proof is per-check.
     CHECK(canonicalize_check("cmake --build build2") != base);
+}
+
+// A run must be told the edge is coming while it can still act on it. The falsifiability
+// proof (S10.2) has a state in the middle where the workspace is deliberately broken, and
+// a halt that lands there leaves the damage behind -- observed twice on real runs.
+TEST(a_run_is_warned_before_the_budget_ends_it) {
+    const Budget budget{40, 900};
+    TurnResult turn;
+    turn.outcome = Outcome::ToolCallExecuted;
+    turn.tool_name = "shell";
+    turn.tool_result = tools::ToolResult::okay("fine");
+    const RepeatDetector repeats;
+    const RefusalLedger refusals;
+
+    const auto at = [&](int used) {
+        return choose_corrective(turn, repeats, refusals, used, budget, false, true);
+    };
+
+    const int warn_at = budget.max_iterations - kBudgetWarningTurns;
+    CHECK(at(warn_at - 1) == Corrective::None);
+    CHECK(at(warn_at) == Corrective::BudgetNearlyGone); // exactly once
+    CHECK(at(warn_at + 1) == Corrective::None);
+    // The halt still outranks it, and still ends the run.
+    CHECK(at(budget.max_iterations) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true) ==
+          Corrective::HaltOnBudget);
+}
+
+// A pipeline exits with the status of its LAST command, so a check that ends in a
+// truncator reports the truncator's success as the check's. The contract that cost a real
+// run its entire feedback loop was `python -m pytest tests/ -v --tb=short 2>&1 | tail -20`
+// -- recorded PASSING in an empty workspace where `python` did not even exist.
+TEST(a_trailing_formatter_pipe_is_not_part_of_the_check) {
+    const std::string base = canonicalize_check("python -m pytest tests/ -v --tb=short");
+    CHECK_EQ(canonicalize_check("python -m pytest tests/ -v --tb=short 2>&1 | tail -20"),
+             base);
+    CHECK_EQ(canonicalize_check("python -m pytest tests/ -v --tb=short | head -n 5"), base);
+    CHECK_EQ(canonicalize_check("python -m pytest tests/ -v --tb=short | tail -20 | cat"),
+             base);
+
+    // A pipe whose right-hand side DECIDES the outcome is part of the check, and removing
+    // it would verify something else entirely.
+    CHECK(canonicalize_check("pytest tests/ | grep -q PASSED") !=
+          canonicalize_check("pytest tests/"));
+    CHECK(canonicalize_check("pytest tests/ | wc -l") != canonicalize_check("pytest tests/"));
+    // `||` is an or-list, not a pipe into `| foo`.
+    CHECK(canonicalize_check("pytest tests/ || echo broken") !=
+          canonicalize_check("pytest tests/"));
+}
+
+// What RUNS keeps the model's bytes; only the identity is normalised. Collapsing
+// whitespace is right for a ledger key and wrong for a command line -- executing the
+// canonical form would silently rewrite a quoted argument.
+TEST(the_form_that_runs_is_not_the_form_that_identifies) {
+    CHECK_EQ(executable_form("pytest -k \"a  or  b\" 2>&1 | tail -20"),
+             std::string("pytest -k \"a  or  b\""));
+    // Same check, one ledger entry, spacing not part of the identity.
+    CHECK_EQ(canonicalize_check("pytest -k \"a  or  b\""),
+             canonicalize_check("pytest  -k  \"a or b\""));
 }
 
 // --- context tiers and compaction (S8.3) ------------------------------------

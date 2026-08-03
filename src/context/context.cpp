@@ -113,6 +113,17 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     system += persona_.empty() ? kPersona : persona_.c_str();
     system += "\n\n";
     system += std::string(tool_guidance);
+    // Immediately after the tools, because it is the one fact every path argument to
+    // every one of them depends on. Says what relative paths mean as well as what the
+    // root is -- "you are in /x" alone still leaves open whether tools want absolute
+    // paths, and the run that guessed /home/user guessed absolute.
+    if (!workspace_root_.empty()) {
+        system += "\n\n# Workspace\n\nYou are working in " + workspace_root_ +
+                  ". Paths you pass to tools are resolved against it, and anything "
+                  "outside it is refused, so write them relative to it -- `src/store.py`, "
+                  "not `/home/user/src/store.py`. Directories in a path you write to are "
+                  "created for you.";
+    }
     if (!project_instructions_.empty()) {
         system += "\n\n# Project conventions\n\n" + project_instructions_;
     }

@@ -228,6 +228,10 @@
       {
         "name": "tokens_generated",
         "type": "int"
+      },
+      {
+        "name": "compactions",
+        "type": "int"
       }
     ]
   },
