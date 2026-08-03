@@ -42,6 +42,7 @@ export interface RunSettings {
   system_prompt: string;
   allowed_commands: string;
   context_budget_tokens: number;
+  max_new_tokens: number;
   mcp_servers: McpServerSettings[];
 }
 
@@ -94,6 +95,8 @@ export interface EditAppliedResult {
 export interface ApproveParams {
   request_id: string;
   approved: boolean;
+  allow_writes_for_run: boolean;
+  allow_command_for_run: boolean;
 }
 export interface ApproveResult {
   accepted: boolean;

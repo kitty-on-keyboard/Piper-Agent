@@ -97,6 +97,26 @@ enum class Corrective : std::uint8_t {
     // the run, by dropping it from the grammar's spec list. Asking again is then not
     // discouraged, it is impossible.
     BlockRefusedTool,
+    // Mechanism: make `plan` the only samplable tool for one turn, so the run must restate
+    // its verification contract, and hand it the failure that has stopped being about the
+    // code.
+    //
+    // The one corrective aimed at the CRITERION rather than the work. A contract whose red
+    // no amount of work moves cannot pass, so completion is unreachable and every
+    // remaining turn is spent on the wrong problem -- and none of the other correctives
+    // can see it, because from their side the run looks busy and productive.
+    //
+    // MEASURED: 45 turns and 2508 seconds against `xcodebuild build -scheme ResMon` in a
+    // project whose only scheme was `Untitled Project`. The run found the real scheme by
+    // itself on turn ~30 and rebuilt with it; the harness kept requiring the contract it
+    // was given. See unmoved_contract() for the full trace.
+    //
+    // Uses the SAME mechanism as a stale plan -- narrowing the grammar to `plan` -- because
+    // that mechanism already exists and already terminates: restating the checklist is what
+    // clears it. Prose would not do it. This repo's `prose_correctives` ratchet exists
+    // because a corrective that composes a sentence and changes nothing was tried first,
+    // eleven times, and none of them worked.
+    RederiveContract,
     // Mechanism: tell the run how many turns remain, once, while it still has enough of
     // them to land safely.
     //
@@ -180,11 +200,23 @@ class RefusalLedger {
 // `list_dir ResMon/`, and on the turns BreakRepeat did fire, nothing changed.
 //
 // Separate from without_blocked() because the lifetime is different -- a refused tool is
-// gone for the rest of the run, this one is gone for a single turn -- and because a
+// gone for the rest of the run, this one is gone for a few turns -- and because a
 // repeated tool is usually the RIGHT tool with wrong arguments. Same floor: never returns
 // an empty list, since a turn with nothing samplable can emit no call at all.
+//
+// A SET WITH DEADLINES, not one tool for one turn. One tool for one turn was the first
+// fix, and it turned a one-cycle into a two-cycle: a model with two ways to ask the same
+// question just asks the other way and comes straight back. The run that prompted this
+// alternated `list_dir ResMon` and `shell find . -name '*.swift'` for twenty-seven turns
+// -- a third of its budget -- with BreakRepeat firing on nearly every one of them and
+// suppressing a tool that was already not the one about to be called.
+//
+// So suppressions accumulate and their windows grow with the repeat count (see
+// Agent::kMaxSuppressTurns). Once both halves of a ping-pong are held down at once, the
+// only samplable moves left are the ones that make progress.
 [[nodiscard]] std::vector<parsephony::ToolSpec> without_suppressed(
-    const std::vector<parsephony::ToolSpec>& specs, const std::string& tool);
+    const std::vector<parsephony::ToolSpec>& specs,
+    const std::vector<std::pair<std::string, int>>& suppressed);
 
 [[nodiscard]] std::vector<parsephony::ToolSpec> without_blocked(
     const std::vector<parsephony::ToolSpec>& specs, const RefusalLedger& refusals,
@@ -226,12 +258,19 @@ inline constexpr int kBudgetWarningTurns = 8;
 // nothing to synthesize, and the corrective used to run a hardcoded `cmake --build build`
 // regardless -- which on the eight Python fixtures in evals/agent is a command that cannot
 // work. Passed as a bool rather than the store so this stays a pure function (S11.2).
+// `contract_unmoved` gates RederiveContract. Passed as a bool for the same reason
+// `have_verify_contract` is -- this stays a pure function (S11.2) -- and it carries the
+// Agent's once-per-contract policy as well as the ledger's verdict: a run that has already
+// been told about this exact contract and re-declared it unchanged must not be pinned to
+// `plan` every turn thereafter. That is the deadlock the deleted `must_reconcile`
+// restriction caused, and it is worth not building a second time.
 [[nodiscard]] Corrective choose_corrective(const TurnResult& turn,
                                            const RepeatDetector& repeats,
                                            const RefusalLedger& refusals,
                                            int iterations_used, const Budget& budget,
                                            bool wall_clock_exhausted,
-                                           bool have_verify_contract);
+                                           bool have_verify_contract,
+                                           bool contract_unmoved);
 
 // --- classification ---------------------------------------------------------
 

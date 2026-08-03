@@ -149,19 +149,29 @@ bool RefusalLedger::is_blocked(const std::string& tool) const {
 }
 
 std::vector<parsephony::ToolSpec> without_suppressed(
-    const std::vector<parsephony::ToolSpec>& specs, const std::string& tool) {
-    if (tool.empty()) {
+    const std::vector<parsephony::ToolSpec>& specs,
+    const std::vector<std::pair<std::string, int>>& suppressed) {
+    if (suppressed.empty()) {
         return specs;
     }
     std::vector<parsephony::ToolSpec> allowed;
     for (const parsephony::ToolSpec& s : specs) {
-        if (s.name != tool) {
+        bool held = false;
+        for (const auto& [name, turns_left] : suppressed) {
+            if (turns_left > 0 && name == s.name) {
+                held = true;
+                break;
+            }
+        }
+        if (!held) {
             allowed.push_back(s);
         }
     }
-    // Suppressing the only samplable tool would leave the grammar unsatisfiable, and the
+    // Suppressing every samplable tool would leave the grammar unsatisfiable, and the
     // turn would come back TextOnly for a reason the model cannot see. Better to allow the
-    // repeat than to hand it a turn it cannot spend.
+    // repeat than to hand it a turn it cannot spend. This floor matters more now that
+    // suppressions accumulate: holding down two tools is the point, holding down all of
+    // them would be a turn the run cannot spend at all.
     return allowed.empty() ? specs : allowed;
 }
 
@@ -190,7 +200,7 @@ std::vector<parsephony::ToolSpec> without_blocked(
 Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repeats,
                              const RefusalLedger& refusals, int iterations_used,
                              const Budget& budget, bool wall_clock_exhausted,
-                             bool have_verify_contract) {
+                             bool have_verify_contract, bool contract_unmoved) {
     // Ranked; the highest applicable one wins, and only one is returned (S9.2).
     if (wall_clock_exhausted || iterations_used >= budget.max_iterations) {
         return Corrective::HaltOnBudget;
@@ -212,6 +222,20 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
     if (turn.outcome == Outcome::ToolCallRefused &&
         refusals.refused_count(turn.tool_name) >= 2 && !refusals.is_blocked(turn.tool_name)) {
         return Corrective::BlockRefusedTool;
+    }
+    // ABOVE BreakRepeat, and above everything else a working run can trigger.
+    //
+    // A run with a broken criterion IS repeating itself, and it is re-reading, and it will
+    // narrate -- so the lower correctives all have something to say and every one of them
+    // aims at the work. None of them can end the run, because the run is not failing at the
+    // work. Fixing the criterion is the only move that changes the outcome, so it outranks
+    // the symptoms it causes.
+    //
+    // Below BlockRefusedTool because that one is the operator's own "no", and below the
+    // budget arms because a run about to be cut off needs to land before it needs a better
+    // criterion.
+    if (contract_unmoved) {
+        return Corrective::RederiveContract;
     }
     // A repeat is a repeat whether it SUCCEEDED or failed unrecoverably.
     //
@@ -242,10 +266,35 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
     if (have_verify_contract && turn.outcome == Outcome::TextOnly &&
         !turn.assistant_text.empty()) {
         const std::string& t = turn.assistant_text;
-        const bool claims_verification =
-            t.find("should pass") != std::string::npos ||
-            t.find("should now build") != std::string::npos ||
-            t.find("should work") != std::string::npos;
+        // BOTH TENSES. These were all forward-looking -- "should pass", "should work" --
+        // which catches a model predicting success and misses a model ASSERTING it. The
+        // second is the more dangerous claim and the more common ending.
+        //
+        // MEASURED: a run implemented both modules, made the suite green, beat a stale
+        // Makefile by symlinking the suite into the path the Makefile expected, then ran
+        // pytest directly and finished with "Confirmed: `make test` passes with 7/7 tests
+        // green." It never re-ran its DECLARED contract, so the ledger held two reds and no
+        // green, and the run ended text_only_no_progress with the mission complete and the
+        // workspace correct. The corrective that exists for exactly this did not fire,
+        // because the model happened to state it in the past tense.
+        //
+        // Still only on a TextOnly turn with a contract declared, so the cost of a false
+        // positive is one run of a command the run already said proves it -- and the
+        // Verifier is the only thing that may write the ledger, so a synthesized run is
+        // recorded exactly as an honest one is.
+        static constexpr std::string_view kClaims[] = {
+            "should pass", "should now build", "should work",
+            "tests pass",  "tests now pass",   "all tests pass",
+            "suite passes", "passes with",     "is now green",
+            "are now green", "builds cleanly",
+        };
+        bool claims_verification = false;
+        for (const std::string_view claim : kClaims) {
+            if (t.find(claim) != std::string::npos) {
+                claims_verification = true;
+                break;
+            }
+        }
         if (claims_verification) {
             return Corrective::SynthesizeVerification;
         }
@@ -341,10 +390,15 @@ CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
     // A green counts only if that exact check has been proven capable of red (S10.2).
     // An unproven green does not complete a run.
     if (!latest->falsifiable) {
+        // Names the ACTION that clears this, because the completion reason is shown to the
+        // model and a reason with no exit is read as a demand to keep grinding. The action
+        // is never "break your code": a check that passed before the work began is the
+        // wrong check, and re-declaring it costs one call.
         return {false,
                 "verification '" + latest->contract +
-                    "' passed but has never been shown capable of failing; "
-                    "it does not count as evidence yet",
+                    "' has passed but has never been seen to fail, so it is not evidence "
+                    "yet -- declare a verify_with that was red before this work and is "
+                    "green now",
                 open};
     }
     // Evidence has to POSTDATE the instruction it is offered against. Without this a

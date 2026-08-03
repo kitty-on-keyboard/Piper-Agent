@@ -47,6 +47,7 @@ function settingsFromConfig(): RunSettings {
     // newline is the one character a shell command cannot carry unescaped.
     allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
+    max_new_tokens: cfg.get<number>("maxNewTokens", 4096),
     // We can apply edits ourselves, so the sidecar routes writes back through
     // lmp/edit and VS Code's WorkspaceEdit API applies them -- undo, dirty buffers
     // and diff review all work (S12.4). A headless client leaves this false and the
@@ -142,7 +143,16 @@ export function activate(context: vscode.ExtensionContext): void {
   const sidebar = new SidebarProvider(
     context.extensionUri, client, host, context.workspaceState);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar),
+    // retainContextWhenHidden: without it the editor DESTROYS the webview every time the
+    // user clicks to another panel, and rebuilds it blank when they come back -- the
+    // transcript gone, the composer text gone, the model chip back to "unloaded" while
+    // 19 GB of weights sit loaded in the sidecar. The transcript lives only in the view's
+    // DOM (deliberately: the sidecar owns the context, the view owns the pixels), so the
+    // DOM is the thing to keep. The cost is one webview's memory for the lifetime of the
+    // window, which this panel -- a transcript and a settings drawer -- can afford.
+    vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     sidebar
   );
 

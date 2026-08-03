@@ -221,3 +221,19 @@ TEST(repetition_penalty_discourages_recent_ids) {
     const SampleResult r = s.sample(logits, nullptr, {1});
     CHECK_EQ(r.id, TokenId{0});
 }
+
+TEST(repetition_penalty_does_not_compound_across_duplicates) {
+    // The window keeps duplicates, and code repeats identifier subtokens: at the shipped
+    // 1.05, one application keeps the model's choice, while occurrence-compounding flips
+    // it from the second duplicate on (18/1.05^2 = 16.3 < 17). That flip is what wrote
+    // "idlePer cent" into an agent's output file.
+    SamplingParams p;
+    p.temperature = 0.0001F;
+    p.top_k = 1;
+    p.repetition_penalty = 1.05F;
+    Sampler s(p);
+    std::vector<float> logits = {17.0F, 18.0F};
+    const std::vector<TokenId> recent(12, TokenId{1});
+    const SampleResult r = s.sample(logits, nullptr, recent);
+    CHECK_EQ(r.id, TokenId{1});
+}

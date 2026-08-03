@@ -1,8 +1,9 @@
 #pragma once
 //
-// Tool registry (spec S6). Sixteen tools, and it resists growth -- every tool is
-// permanent surface area, advertised in the KV prefix, and impossible to remove once a
-// model has been trained to expect it.
+// Tool registry (spec S6). Sixteen tools always, eighteen when this run has a durable
+// context store -- and it resists growth either way: every tool is permanent surface
+// area, advertised in the KV prefix, and impossible to remove once a model has been
+// trained to expect it.
 //
 //   read_file  read_slice  list_dir  search  locate_symbol
 //   write_file  replace_in_file  append_file  delete_file
@@ -10,6 +11,14 @@
 //   git_status  git_diff  git_log      (read-only; the agent never MUTATES git)
 //   remember                           (cross-session notes, S8)
 //   plan                               (declared here, executed by the loop)
+//
+// and, only when a journal opened for this run (see declare_context_tools):
+//
+//   context_recall  context_rehydrate  (src/tools/context_tools.cpp, reading src/pcc)
+//
+// Those two are CONDITIONAL rather than always-on because a run whose database will not
+// open must keep working, and advertising a tool whose store is absent teaches the model
+// to call something that can only answer "there is nothing there".
 //
 // The count was "eleven, the spec's set" for long enough that five tools landed under a
 // comment saying they had not. A number in a header is a claim like any other.
@@ -32,6 +41,14 @@
 
 #include "src/platform/fs.hpp"
 #include "src/tools/tool_result.hpp"
+
+namespace lmp::pcc {
+// Forward-declared rather than included. src/pcc is at L1 and src/tools may reach it
+// (see src/pcc/CMakeLists.txt), but store.hpp pulls <sqlite3.h> through sqlite.hpp, and
+// every translation unit that includes this header would then be compiling against
+// SQLite for the sake of two tools. The one .cpp that needs the type includes it.
+class Store;
+} // namespace lmp::pcc
 
 namespace lmp::tools {
 
@@ -141,12 +158,64 @@ class Registry {
     // native one even if the namespacing above it were wrong. Returns false if it did.
     [[nodiscard]] bool declare_remote(ToolDecl decl, Handler handler);
 
+    // --- the durable context store (src/pcc) --------------------------------
+
+    // Where the recall tools read from, resolved at CALL time rather than captured.
+    //
+    // THIS INDIRECTION IS NOT OPTIONAL. ensure_registry() REUSES a Registry across
+    // missions whenever the workspace and the MCP server list are unchanged, while
+    // start_mission() replaces session.journal -- and therefore destroys the pcc::Store
+    // behind it -- on every mission. A handler holding `pcc::Store&` from mission one is
+    // a dangling reference for the whole of mission two, on a path that would read freed
+    // memory and usually get plausible bytes back.
+    //
+    // `store` is null when this run has no journal (the database could not be opened).
+    // The tools answer honestly in that case rather than pretending to search.
+    struct ContextSource {
+        pcc::Store* store = nullptr;
+        std::string session; // this mission's partition; see declare_context_tools
+    };
+    using ContextSourceFn = std::function<ContextSource()>;
+
+    // Counts tokens the way the model does. Same signature as pcc::TokenCounter, which is
+    // the same std::function type; spelled out here so this header does not need pcc's.
+    using TokenCounter = std::function<std::size_t(std::string_view)>;
+
+    // Declares `context_recall` and `context_rehydrate` against the session's own store.
+    //
+    // NATIVE, where the same two tools already exist in the out-of-process
+    // pcc_mcp_server. Three reasons, and the third is the one that decides it:
+    //
+    //   - it needs no configuration. The MCP server is not staged into the VSIX and wants
+    //     a hand-written server entry with an absolute --db path, and "works when
+    //     configured" does not count for a product whose whole pitch is that the model is
+    //     in the box.
+    //   - no process hop and no JSON round trip per call.
+    //   - IT GETS THE REAL TOKENIZER. recall()'s entire contract is that what it returns
+    //     FITS A TOKEN BUDGET, and pcc::TokenCounter defaults to bytes/4 -- an estimate
+    //     the header is careful to name as one at every call site, because src/pcc
+    //     deliberately does not link src/model. In-process the sidecar can pass
+    //     QwenTokenizer::encode_content, so the budget is measured in the units it is
+    //     denominated in. Out of process it cannot, and a budgeted retrieval whose budget
+    //     is a guess is the one thing this component must not be.
+    //
+    // Returns false if the tools are already declared, which is the reused-Registry case
+    // above: the source function resolves the current mission's store on its own, so a
+    // second declaration would only duplicate the entries in decls_ and specs_ while
+    // handlers_.emplace silently kept the first handler.
+    bool declare_context_tools(ContextSourceFn source, TokenCounter count_tokens);
+
   private:
 
     void declare(ToolDecl decl, Handler handler);
 
     // Appends one fact to the workspace's memory file, deduplicated and bounded.
-    [[nodiscard]] ToolResult remember_fact(const std::string& raw);
+    // `key` empty appends a standalone note; a non-empty key makes the note SUPERSEDE
+    // whatever was written under the same key before, in the markdown mirror and in the
+    // durable store alike. A keyed fact is stored with no session, because the notes worth
+    // correcting are the ones an EARLIER session wrote and supersession is scoped by
+    // (session, key).
+    [[nodiscard]] ToolResult remember_fact(const std::string& raw, const std::string& key);
 
     // THE one door for workspace bytes: through the edit sink when one is attached, and
     // atomically to disk when none is. Every mutating tool goes through here, so the
@@ -161,10 +230,22 @@ class Registry {
 
     WorkspaceContext ctx_;
     EditSink edit_sink_;
+    // Set by declare_context_tools. Read by remember_fact() too, which mirrors each note
+    // into the store -- see memory_file.cpp.
+    ContextSourceFn context_source_;
     std::vector<ToolDecl> decls_;
     std::vector<parsephony::ToolSpec> specs_;
     std::map<std::string, Handler> handlers_;
 };
+
+// Declaration helpers, shared by the files that declare tools -- registry.cpp for the
+// sixteen above and context_tools.cpp for the two that read the durable store. They were
+// local to registry.cpp until there was a second declarations file; copying twelve lines
+// of boilerplate into it would have been the cheaper edit and the wrong one.
+[[nodiscard]] parsephony::ParamSpec param(const char* name, parsephony::ParamType type,
+                                          bool required);
+[[nodiscard]] const std::string* get(const std::vector<ToolParamValue>& params,
+                                     const char* name);
 
 // Pure helper shared by tools and tests: resolves `rel` against root/cwd and refuses
 // anything that escapes. Empty result means refused.

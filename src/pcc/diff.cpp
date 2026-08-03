@@ -139,24 +139,34 @@ std::vector<Hunk> group_hunks(const std::vector<Op>& ops, std::size_t context) {
 
 void render_hunk(std::string& out, const std::vector<Op>& ops, const Hunk& hunk,
                  const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    // Where the hunk starts in EACH file, counted from the top of the script.
+    //
+    // Both numbers used to be read off the first op's `index`, which is an index into `a`
+    // for Equal and Delete and into `b` for Insert -- so one value was printed under two
+    // labels. They agree only while nothing has been added or removed above the hunk;
+    // after a single insertion every later hunk's `+` line number is short by the number
+    // of insertions before it. The diff still READS correctly, because the body lines are
+    // right, which is why this survived: it is only the header that lies, and only when
+    // the file changed length. A consumer that trusts the header -- `patch`, or anything
+    // mapping a hunk back to a line in the new file -- lands in the wrong place.
     std::size_t a_start = 0;
     std::size_t b_start = 0;
+    for (std::size_t k = 0; k < hunk.begin; ++k) {
+        a_start += ops[k].tag != Tag::Insert ? 1 : 0;
+        b_start += ops[k].tag != Tag::Delete ? 1 : 0;
+    }
     std::size_t a_count = 0;
     std::size_t b_count = 0;
-    bool started = false;
     for (std::size_t k = hunk.begin; k < hunk.end; ++k) {
-        const Op& op = ops[k];
-        const bool from_a = op.tag != Tag::Insert;
-        if (!started) {
-            a_start = from_a ? op.index : (op.index > 0 ? op.index : 0);
-            b_start = op.tag == Tag::Insert ? op.index : op.index;
-            started = true;
-        }
-        a_count += from_a ? 1 : 0;
-        b_count += op.tag != Tag::Delete ? 1 : 0;
+        a_count += ops[k].tag != Tag::Insert ? 1 : 0;
+        b_count += ops[k].tag != Tag::Delete ? 1 : 0;
     }
-    out += "@@ -" + std::to_string(a_start + 1) + "," + std::to_string(a_count) + " +" +
-           std::to_string(b_start + 1) + "," + std::to_string(b_count) + " @@\n";
+    // An empty range is numbered by the line it follows, not by the line after it -- the
+    // unified-diff convention, and what makes a pure insertion at the top read `-0,0`.
+    const std::size_t a_at = a_count == 0 ? a_start : a_start + 1;
+    const std::size_t b_at = b_count == 0 ? b_start : b_start + 1;
+    out += "@@ -" + std::to_string(a_at) + "," + std::to_string(a_count) + " +" +
+           std::to_string(b_at) + "," + std::to_string(b_count) + " @@\n";
     for (std::size_t k = hunk.begin; k < hunk.end; ++k) {
         const Op& op = ops[k];
         const char sign = op.tag == Tag::Equal ? ' ' : (op.tag == Tag::Delete ? '-' : '+');

@@ -141,6 +141,7 @@ struct RunSettings {
     std::string system_prompt;
     std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
+    std::int64_t max_new_tokens = 0;
     std::vector<McpServerSettings> mcp_servers;
 };
 inline void append_value(std::string& out, const RunSettings& v) {
@@ -186,6 +187,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"context_budget_tokens\":";
     append_value(out, v.context_budget_tokens);
+    out += ",";
+    out += "\"max_new_tokens\":";
+    append_value(out, v.max_new_tokens);
     out += ",";
     out += "\"mcp_servers\":";
     append_value(out, v.mcp_servers);
@@ -299,6 +303,8 @@ struct EditAppliedResult {
 struct ApproveParams {
     std::string request_id;
     bool approved = false;
+    bool allow_writes_for_run = false;
+    bool allow_command_for_run = false;
 };
 struct ApproveResult {
     bool accepted = false;

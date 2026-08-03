@@ -24,6 +24,7 @@
 //
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib> // strtol, below -- reached only transitively before, via <string>
 #include <string>
 #include <string_view>
 #include <vector>

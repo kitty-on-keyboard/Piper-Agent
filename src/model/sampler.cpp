@@ -42,12 +42,20 @@ void apply_mask(std::vector<float>& logits, const TokenMask* mask) {
     }
 }
 
+// Once per UNIQUE id, never per occurrence. `recent` is a sliding window that keeps
+// duplicates, and generated code repeats identifier subtokens densely -- compounding the
+// division (penalty^n) sank a subtoken the model was copying below its space-prefixed
+// twin after ~8 repeats, which wrote "idlePer cent" into a real agent's file. The pinned
+// Qwen defaults (1.05) assume the HF semantics, which are per-id.
 void apply_repetition_penalty(std::vector<float>& logits, const std::vector<TokenId>& recent,
                               float penalty) {
     if (penalty == 1.0F) {
         return;
     }
-    for (TokenId id : recent) {
+    std::vector<TokenId> unique_ids(recent);
+    std::sort(unique_ids.begin(), unique_ids.end());
+    unique_ids.erase(std::unique(unique_ids.begin(), unique_ids.end()), unique_ids.end());
+    for (TokenId id : unique_ids) {
         if (id < 0 || static_cast<std::size_t>(id) >= logits.size()) {
             continue;
         }

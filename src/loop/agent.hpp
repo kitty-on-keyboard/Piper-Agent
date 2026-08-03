@@ -9,6 +9,9 @@
 //
 #include <functional>
 #include <map>
+#include <set>
+#include <utility>
+#include <vector>
 #include <memory>
 #include <optional>
 #include <string>
@@ -207,6 +210,23 @@ class Agent {
     // neither narration nor repeated token-cap truncation can burn the whole wall clock.
     static constexpr int kMaxConsecutiveNoProgress = 3;
 
+    // When a trim starts, and where it trims to, as percentages of the context budget.
+    //
+    // Two marks rather than one because trimming AT the budget leaves no slack: the next
+    // turn's observation puts the prompt straight back over, so every turn from then on
+    // pays a compaction. Starting at 75% and going to 55% means a trim buys room for
+    // several turns, and the run is never rendering a prompt at the very edge of the
+    // budget when the model is about to add a 4k-token generation to it.
+    static constexpr std::size_t kCompactAtPercent = 75;
+    static constexpr std::size_t kCompactToPercent = 55;
+
+    // How long a repeated tool stays out of the grammar, at most. The window is the
+    // repeat count minus one -- second sighting costs one turn, third costs two -- so a
+    // tool the run keeps coming back to is held longer each time, and a ping-pong runs out
+    // of partners. Capped because a repeated tool is usually the RIGHT tool with wrong
+    // arguments, and taking `read_file` away for a dozen turns would end the run.
+    static constexpr int kMaxSuppressTurns = 4;
+
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
     // Logs and surfaces every ledger entry added since `before`. The one place a
     // verification reaches either the log or the UI, so the two cannot disagree.
@@ -221,6 +241,9 @@ class Agent {
     // contract for the path, when the check could not run, or when it came back clean --
     // silence is the default, because a per-turn "no checker for .md" is prompt noise.
     void annotate_with_syntax_check(const std::string& path, tools::ToolResult& result);
+    // The prompt step() would send right now, in tokens. One function so the budget check
+    // and the context meter cannot measure a different prompt from the one that is sent.
+    [[nodiscard]] std::size_t prompt_tokens() const;
     void compact_to_budget();
     // Drains the steer source into the context. Returns how many instructions landed.
     [[nodiscard]] std::size_t take_steering();
@@ -230,10 +253,24 @@ class Agent {
     [[nodiscard]] tools::ToolResult dispatch_call(
         const std::string& name, const std::vector<tools::ToolParamValue>& params,
         bool& executed);
+    // The answer to a read whose content is already verbatim in the prompt, or nothing when
+    // the call has to actually run. See ReadNote.
+    [[nodiscard]] std::optional<tools::ToolResult> already_in_context(
+        const std::string& name, const std::vector<tools::ToolParamValue>& params) const;
+    // Files a successful call has made this run's copy of stale. Called for every executed
+    // call, because the set of things that can change a file is not the set of tools that
+    // declare a path.
+    void invalidate_reads(const std::string& name,
+                          const std::vector<tools::ToolParamValue>& params);
+    void note_read(const std::string& name,
+                   const std::vector<tools::ToolParamValue>& params);
+    // Whether the declared contract has ever been seen to pass in this run.
+    [[nodiscard]] bool contract_has_passed() const;
     // Whether a batched call may be executed off the agent thread, and the serial tail
     // such a call still owes. See parallel_calls.hpp.
     [[nodiscard]] bool can_run_in_parallel(const std::string& name) const;
     [[nodiscard]] bool adopt_readonly_result(const std::string& name,
+                                             const std::vector<tools::ToolParamValue>& params,
                                              const tools::ToolResult& result);
     void apply_corrective(Corrective c, const TurnResult& turn);
 
@@ -260,13 +297,64 @@ class Agent {
     // The last completion verdict logged, so the reason is emitted when it changes rather
     // than once per turn. See the `not_complete` emit in run().
     std::string last_incomplete_reason_;
-    // Set by BreakRepeat, consumed by the next step(): the tool that just repeated is
-    // dropped from that turn's grammar, which is the "narrow the registry" half of the
-    // corrective that was declared but never implemented.
-    std::string suppress_tool_next_turn_;
+    // Set by BreakRepeat, consumed by step(): tools that have repeated, each with the
+    // number of turns it stays out of the grammar. That is the "narrow the registry" half
+    // of the corrective, and it accumulates -- see without_suppressed() for why one tool
+    // for one turn was not enough to break a ping-pong between two tools.
+    std::vector<std::pair<std::string, int>> suppressed_tools_;
+    // Paths this run has written. A whole-file rewrite of one of them is the run editing
+    // its OWN output, not destroying the operator's data -- see the approval gate.
+    std::set<std::string> run_wrote_;
+
+    // One read this run has already made, and the two facts that decide whether making it
+    // again would tell the model anything.
+    //
+    // MEASURED, and it is the largest single consumer of a run's budget: 45 turns produced
+    // 65 turn records, of which 23 were read_file, 11 read_slice and 10 list_dir, against
+    // 11 writes. One 12.5 KB file was read ELEVEN times. Peak prompt was 47,220 tokens
+    // against a 96,000 budget, so compaction never ran once -- every one of those re-reads
+    // was answered with bytes that were still sitting verbatim in the prompt.
+    //
+    // This is not the memory problem PCC solves and `context_recall` cannot touch it. It is
+    // the run paying a full turn, a full prefill and 12.5 KB of context to be told
+    // something it was already looking at.
+    struct ReadNote {
+        // The slice arguments, or empty for a whole-file read. A whole-file read subsumes
+        // any later slice of the same file; a slice subsumes only itself. That asymmetry is
+        // what closes the hole the exact-match repeat detector leaves open --
+        // read_file(x), read_slice(x,1,50), read_file(x) is three distinct keys to
+        // RepeatDetector and one file to this.
+        std::string range;
+        // ContextStore::compaction_count() when the read happened. A trim SUMMARIZES the
+        // turns it drops, so content read before the last compaction is no longer verbatim
+        // in the prompt and re-reading it is legitimate work, not a repeat. Comparing
+        // counts is conservative -- it also releases reads that survived the trim -- and
+        // conservative is the only safe direction here: suppressing a read the model
+        // genuinely no longer has is how this feature would start causing the failures it
+        // exists to prevent.
+        std::size_t compactions = 0;
+    };
+    std::map<std::string, std::vector<ReadNote>> run_read_;
+    // Canonical contracts RederiveContract has already reported. Once each: the corrective
+    // pins the grammar to `plan`, and re-arming it on a contract the run declined to change
+    // would leave `plan` as the only legal move for the rest of the run.
+    std::set<std::string> disputed_contracts_;
+    // Turns of `plan`-only grammar owed to RederiveContract. Spent in step(), never
+    // latched -- see that corrective.
+    int replan_turns_ = 0;
+    // A command that runs the declared contract's program a different way, PASSED, and did
+    // so while the contract itself has never passed. The run's own evidence that its
+    // criterion is measuring the wrong thing. Cleared when the corrective reports it.
+    std::string passing_near_miss_;
     int consecutive_no_progress_ = 0;
     bool halted_ = false;
     std::string halt_reason_;
+    // Which of the two budgets was spent when the run was cut off. Both used to end a run
+    // as "budget_exhausted", so a run killed by the clock at 45 of 80 turns was
+    // indistinguishable from one that ran out of turns -- and the obvious reading of that
+    // word is the turn cap, so the wrong dial gets raised. Set in run(), read once by the
+    // HaltOnBudget corrective.
+    bool out_of_time_ = false;
 };
 
 } // namespace lmp::loop

@@ -12,6 +12,7 @@
 
 #include "src/loop/agent.hpp"
 #include "src/loop/turn.hpp"
+#include "src/platform/fs.hpp"
 
 namespace lmp::loop {
 
@@ -143,14 +144,61 @@ std::optional<tools::ToolResult> Agent::gate_call(
     // replace_in_file is deliberately NOT covered. It refuses on ambiguity, leaves the file
     // untouched on failure, and changes one matched span -- a scalpel with a contract, not
     // an overwrite. Gating it would raise a card on every ordinary edit and buy nothing.
+    //
+    // ITS OWN OUTPUT IS NOT THE OPERATOR'S DATA. A run that writes HostStatsService.swift
+    // and then rewrites it eight times as the build teaches it more is iterating, not
+    // destroying: the only bytes it overwrites are bytes it wrote a few turns earlier.
+    // Gating that raised a card on every one of those turns with auto-approve ON, which
+    // is how the switch came to look broken -- while ledger.csv, the case this gate was
+    // actually built for, is a file the run never wrote and still asks about.
+    // Normalised the way the repeat detector normalises: `ResMon` and `ResMon/` name one
+    // directory, and a set keyed on raw bytes would forget its own writes over a slash.
+    const std::string write_path =
+        platform::lexically_normal(param_value(params, "path"));
     const bool overwrites_content =
         decl != nullptr && decl->mutates_workspace && name == "write_file" &&
-        tools::would_overwrite_existing(registry_.workspace().root,
-                                        param_value(params, "path"));
+        run_wrote_.find(write_path) == run_wrote_.end() &&
+        tools::would_overwrite_existing(registry_.workspace().root, write_path);
     const bool irreversible_tool =
         (decl != nullptr && decl->irreversible) || overwrites_content;
-    if (decl != nullptr && decl->mutates_workspace &&
-        (!config_.auto_approve_writes || irreversible_tool)) {
+    const bool write_gate = decl != nullptr && decl->mutates_workspace;
+    const bool ask_for_write =
+        write_gate && (!config_.auto_approve_writes || irreversible_tool);
+
+    // EVERY DECISION, INCLUDING THE ONES THAT ASK NOTHING.
+    //
+    // Until this event the gate was only audible when it fired: `irreversible` on a card,
+    // `tool_denied` on a refusal, and NOTHING on an auto-approval. So a run where the gate
+    // silently passed everything and a run with no gate at all produced identical logs,
+    // and "why am I approving every write when the switch is on" had no answer in the
+    // record -- it had to be re-derived by reading this function.
+    //
+    // MEASURED, which is why it is here: a run with auto_approve_writes=1 raised eleven
+    // write_file cards. The reason is one line below -- irreversibility overrides the
+    // blanket switch -- and nothing in the log said so. `why` now carries it.
+    if (write_gate) {
+        emit("approval",
+             {{"gate", "write"},
+              {"tool", name},
+              {"path", param_value(params, "path")},
+              // ESCALATED, not "asked". The gate decides that a call needs a human
+              // decision; whether a CARD is actually shown is the approver's business,
+              // and it may answer on its own from consent the operator already gave for
+              // this run. Both were briefly called `asked`, which put two events with
+              // opposite values against one call.
+              {"escalated", ask_for_write ? "1" : "0"},
+              {"auto_writes", config_.auto_approve_writes ? "1" : "0"},
+              {"destroys_data", irreversible_tool ? "1" : "0"},
+              // Whether this run wrote this path earlier. The one input that decides
+              // between "iterating on its own output" and "overwriting the operator's".
+              {"own_output", run_wrote_.find(write_path) != run_wrote_.end() ? "1" : "0"},
+              {"why", !ask_for_write
+                          ? "auto_approve_writes is on and nothing is destroyed"
+                          : (!config_.auto_approve_writes
+                                 ? "auto_approve_writes is off"
+                                 : "destroys data, which overrides auto_approve_writes")}});
+    }
+    if (ask_for_write) {
         tools::RiskHint hint;
         // Declared, not inferred, and reported to the card as the fact it is.
         hint.caps.destroys_data = irreversible_tool;
@@ -175,17 +223,42 @@ std::optional<tools::ToolResult> Agent::gate_call(
     // --- HITL: commands -----------------------------------------------------
     if (decl != nullptr && decl->executes_commands) {
         const std::string cmd = param_value(params, "command");
+        // THE REAL ROOT, and the real cwd, which is the root -- the same pair the shell
+        // tool passes to run_sandboxed. This used to pass ("", ""), and blast_radius
+        // defines writes_outside_workspace RELATIVE TO THE ROOT -- so with an empty root
+        // every write anywhere was "outside the workspace", every mkdir and compile and
+        // redirect scored 0.30, is_irreversible() fired on all of them, and the gate
+        // asked about everything while both auto-approve switches were on.
+        //
+        // MEASURED, in the run that prompted this: the event log shows
+        // auto_approve_exec=1 on the policy line and then an "irreversible" card for
+        // nearly every shell call the run made, at risks from 0.30 to 0.80. The registry's
+        // own advisory call site had the arguments right; this one starved the classifier
+        // of the fact that makes "outside" mean anything.
+        const std::string& root = registry_.workspace().root;
         const tools::RiskHint hint =
-            !cmd.empty() ? tools::classify_command(cmd, "", "") : tools::RiskHint{};
+            !cmd.empty() ? tools::classify_command(cmd, root, root) : tools::RiskHint{};
         Approval route = route_approval(hint, config_.hitl);
 
-        // Three checks, and the ORDER is the design.
+        // Four checks, and the ORDER is the design.
         //
-        //   1. The allowlist can only ever loosen, and only for ordinary commands.
-        //   2. auto_approve_exec off can only ever tighten.
-        //   3. Irreversibility overrides both, in the tightening direction, always.
+        //   1. The allowlist loosens an escalation -- and it also survives the
+        //      irreversibility override below, because it is the operator's EXPLICIT
+        //      decision about this exact command.
+        //   2. auto_approve_exec ON loosens an escalation; OFF tightens an auto-approval.
+        //   3. Irreversibility overrides the BLANKET policies, in the tightening
+        //      direction, always -- but not the per-command rule.
         //
-        // Written as three separate steps rather than one condition because each is a
+        // The distinction in 3 is what makes the "Always allow" button true. The card it
+        // sits on appears precisely for escalated commands, and the commands that
+        // escalate under auto-approve are precisely the irreversible ones -- so an
+        // override that beat the allowlist made the button a no-op for every command it
+        // was ever shown on: the operator clicked "Always allow `rm -rf .build`", the rule
+        // was stored, and the same card came back next turn. A blanket switch yielding to
+        // the hint is caution; a named, remembered rule yielding to it is the machine
+        // overruling the person it just asked.
+        //
+        // Written as separate steps rather than one condition because each is a
         // different kind of claim -- "the operator said yes to this before", "the
         // operator wants to see everything", "this cannot be undone" -- and collapsing
         // them into one boolean is how the last one got lost.
@@ -193,15 +266,47 @@ std::optional<tools::ToolResult> Agent::gate_call(
         if (allowlisted && route == Approval::Escalate) {
             route = Approval::AutoApprove;
         }
+        // ON LOOSENS. This switch used to be tightening-only: it could turn an
+        // auto-approval into an escalation and never the reverse, so the route came
+        // entirely from the risk thresholds and turning "auto-approve command execution"
+        // ON changed nothing an operator could observe. It was the same shape as the
+        // sandbox_tier and require_approval fields before it -- generated, wired,
+        // acknowledged in the editor, consumed by nobody.
+        //
+        // Reject is deliberately NOT loosened: that is the risk score being above the
+        // reject threshold, which is a policy ceiling and not a question to ask. And the
+        // irreversible check below still runs afterwards, so this cannot approve something
+        // that destroys data -- it can only skip the card for an ORDINARY command, which
+        // is exactly what the switch says it does.
+        if (config_.auto_approve_exec && route == Approval::Escalate) {
+            route = Approval::AutoApprove;
+        }
         if (!config_.auto_approve_exec && route == Approval::AutoApprove && !allowlisted) {
             route = Approval::Escalate;
         }
-        if (is_irreversible(hint) && route == Approval::AutoApprove) {
+        if (is_irreversible(hint) && route == Approval::AutoApprove && !allowlisted) {
             emit("irreversible", {{"tool", name},
                                   {"risk", std::to_string(risk_score(hint))},
-                                  {"allowlisted", allowlisted ? "1" : "0"}});
+                                  {"allowlisted", "0"}});
             route = Approval::Escalate;
         }
+
+        // The command gate's counterpart to the write event above, emitted once the route
+        // is settled and before anyone is asked. Carries every input the four steps read,
+        // so a surprising card can be explained from the log instead of from this file:
+        // the risk the classifier produced, both switches, and whether the operator's own
+        // allowlist rule was what let it through.
+        emit("approval", {{"gate", "command"},
+                          {"tool", name},
+                          {"command", cmd},
+                          {"escalated", route == Approval::Escalate ? "1" : "0"},
+                          {"route", route == Approval::AutoApprove  ? "auto"
+                                    : route == Approval::Escalate   ? "ask"
+                                                                    : "reject"},
+                          {"risk", std::to_string(risk_score(hint))},
+                          {"destroys_data", is_irreversible(hint) ? "1" : "0"},
+                          {"allowlisted", allowlisted ? "1" : "0"},
+                          {"auto_exec", config_.auto_approve_exec ? "1" : "0"}});
 
         // An escalation with nobody to escalate TO is a denial, not a pass. This is the
         // unattended path: an eval, a script, a dead editor. Deny-by-default (S7.2).

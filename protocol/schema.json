@@ -160,6 +160,11 @@
         "type": "int"
       },
       {
+        "_comment": "The generation cap for ONE turn. AgentConfig has always had this field and the protocol never carried it, so it was pinned at 4096 for every run the editor or the driver could start -- the same wired-on-one-side-consumed-by-nobody shape as sandbox_tier and require_approval before them. MEASURED: a cold start on a five-task mission spent FIVE of its nine turns hitting the cap, produced no tool call on any of them, and ended length_capped_no_progress with an empty workspace. A capped turn leaves nothing behind (reasoning is not carried forward), so it is the one failure that can burn a whole budget while looking like the model is working. Raise it for missions that need a long first plan; it costs decode time per turn, not context.",
+        "name": "max_new_tokens",
+        "type": "int"
+      },
+      {
         "_comment": "MCP servers to connect at run start. Each is spawned over stdio, initialized and asked for its tool list; a server that fails to start or answer leaves its tools ABSENT and the run continues, because a broken server must not be able to stall a turn.",
         "name": "mcp_servers",
         "type": "McpServerSettings",
@@ -300,6 +305,16 @@
         },
         {
           "name": "approved",
+          "type": "bool"
+        },
+        {
+          "_comment": "The operator consenting to the REST OF THIS RUN's whole-file writes, from the card in front of them. Scoped to the run and never persisted. Why a run scope rather than a per-path allowlist like `allowed_commands`: the two gates have opposite repeat behaviour. A command recurs verbatim -- `pytest` is the same string every turn -- so remembering it saves every later click. A path does not: a run rewriting eleven scaffolded stubs writes eleven DIFFERENT paths once each, so a per-path rule can only ever be created after its one and only use, and the operator still answers eleven cards. MEASURED: exactly that, eleven write_file cards in one ResMon run with auto_approve_writes on. Applied in the sidecar's approver rather than as a config field because it has to take effect on the NEXT CARD of the SAME run -- an allowlist entry written to editor settings only reaches the sidecar at the next lmp/start, which is one run too late to help the run that asked.",
+          "name": "allow_writes_for_run",
+          "type": "bool"
+        },
+        {
+          "_comment": "The 'Always allow' button's OTHER half, for the run that is asking. The rule itself is persisted by the extension into `allowedCommands`, which is right and is where it must live -- but settings reach the sidecar at the next lmp/start, so within the run that raised the card the identical command escalates again and the button reads as broken. MEASURED: an operator clicked 'Always allow' on a build command and answered the same card on the next turn. Latched here for the rest of the run and never persisted (the persistent copy is the extension's); the two halves are deliberately separate, because one has to survive the run and the other has to take effect inside it. Matched on the command VERBATIM rather than by the `allowed_commands` prefix rule: this consent was given for one exact string on one card, and a prefix is a decision the operator makes deliberately in settings, not a side effect of clicking yes.",
+          "name": "allow_command_for_run",
           "type": "bool"
         }
       ],

@@ -76,6 +76,13 @@ inline constexpr const char* kFact = "fact";         // a durable claim; superse
 inline constexpr const char* kArtifact = "artifact"; // a named revision of content
 } // namespace kind
 
+// Titles this component itself reasons about. `title` is otherwise free-form -- it is the
+// tool name for a turn row -- but the mission is special enough to be recognised by two
+// places at once, so the string lives in one.
+namespace title {
+inline constexpr const char* kMission = "mission";
+} // namespace title
+
 struct Item {
     std::int64_t id = 0;
     std::string session;
@@ -172,6 +179,9 @@ class Store {
 
     // The turns whose event range overlaps [first, last] -- the query that turns a
     // compacted span's provenance pointer back into the turns it was made from.
+    //
+    // Restricted to kTurn. Span rows carry the same range as the turns they cover, so
+    // without that restriction this returns the summary alongside its own source.
     [[nodiscard]] std::vector<Item> events_between(std::uint64_t first,
                                                    std::uint64_t last,
                                                    std::string_view session = {}) const;

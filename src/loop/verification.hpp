@@ -34,6 +34,98 @@ namespace lmp::loop {
 // argument (`pytest -k "a  or  b"`). Use executable_form() to execute.
 [[nodiscard]] std::string canonicalize_check(std::string_view command);
 
+// Why this command's exit status cannot mean what a criterion needs it to mean, or empty
+// when there is nothing wrong with it. Takes the EXECUTABLE form -- the swallowers
+// executable_form() can simply remove are removed, and this catches what survives that.
+//
+// The point is to tell a run its CRITERION is broken instead of letting it conclude its
+// WORK is. A check that cannot go red never becomes evidence, so the run is told its green
+// is unproven every turn forever -- and the honest reading of that, if nobody names the
+// real cause, is "my code must still be wrong".
+[[nodiscard]] std::string_view unfalsifiable_reason(std::string_view command);
+
+// The part of a failure that is ABOUT THE WORKSPACE, with the volatile parts removed.
+//
+// Two readings of one contract get compared to answer "did any of the work move this
+// failure?", and a raw string compare answers "no" for every tool that stamps its output.
+//
+// MEASURED on the run this exists for: two `xcodebuild` failures nineteen turns and eleven
+// file writes apart, both reporting the same missing scheme, differed in exactly three
+// places -- a wall-clock timestamp, a `pid:tid` pair, and a result-bundle filename with
+// the time embedded in it. "Byte-identical across attempts" is the right idea and the
+// wrong comparison; it would never once have fired.
+//
+// Digit runs collapse to `#` and whitespace collapses. One rule covers timestamps, pids,
+// temp-directory names, uuids and elapsed times, rather than a pattern list that rots. It
+// deliberately also collapses LINE NUMBERS and error COUNTS, so "3 errors" and "10 errors"
+// share a signature -- safe only because the rest of a compiler's output (the file names,
+// the messages) differs whenever the errors themselves differ. A run making progress never
+// produces two identical signatures; a run whose entire output is the same modulo numbers
+// has not moved.
+[[nodiscard]] std::string failure_signature(std::string_view detail);
+
+// Whether ledger[index] is a red that says nothing about the code.
+//
+// TRUE when another reading of the SAME contract failed with the SAME signature at a
+// DIFFERENT number of workspace writes. That pair is the whole argument: the workspace
+// changed between them and the failure did not, so whatever this check is looking at, it
+// is not the work.
+//
+// SYMMETRIC on purpose -- both readings in such a pair are disqualified, not just the
+// later one. The asymmetric version (only a red with a matching red after it) leaves the
+// most recent red standing, and the most recent red is exactly the one is_proven() reaches
+// first. The run that motivated this certified `falsifiable: 1` off a "scheme not found"
+// that could never have been about the code, and would have gone on doing so.
+//
+// A repeat at the SAME write count is not unmoved: re-running a check without touching
+// anything in between is expected to report the same thing, and says nothing either way.
+[[nodiscard]] bool failure_is_unmoved(
+    const std::vector<context::VerificationRecord>& ledger, std::size_t index);
+
+// The declared contract, when its latest reading is a red that no work has moved.
+//
+// This is a finding about the CRITERION, and the distinction is the whole point. A run
+// whose contract cannot pass is not failing -- it is unable to succeed, at any budget, and
+// every turn it spends on the code is spent on the wrong thing.
+//
+// MEASURED: a 45-turn, 2508-second run declared `xcodebuild build -scheme ResMon` against
+// a project whose only scheme is `Untitled Project`. It ran the contract twice, nineteen
+// turns apart, and got the same "does not contain a scheme named ResMon" both times. It
+// then DIAGNOSED the problem itself, found the real scheme, and rebuilt with it -- and
+// because that command no longer contains the declared contract it never reached the
+// Verifier at all. The last 31 minutes of the run produced no verification of any kind.
+// Completion was unreachable from turn one and nothing in the harness said so.
+struct UnmovedContract {
+    bool unmoved = false;
+    std::string contract;
+    std::string failure; // the latest reading's detail, for the observation
+};
+[[nodiscard]] UnmovedContract unmoved_contract(const context::ContextStore& ctx);
+
+// The program a check invokes: the first word that is not a directory change, an
+// environment assignment or a shell connective.
+//
+// `cd /abs/path && xcodebuild -scheme X` is a check whose program is `xcodebuild`, and
+// every model writes it that way -- the contract is declared bare and executed with a `cd`
+// in front. Taking the literal first word would make the program `cd` for nearly every
+// real invocation, which is the same as having no rule at all.
+[[nodiscard]] std::string_view check_program(std::string_view command);
+
+// Whether `command` runs the same program as `contract` WITHOUT being that check.
+//
+// The declared contract is matched by containment (Agent::dispatch_call), so a command
+// that runs the same tool a different way is not the check and never reaches the ledger.
+// That is the correct default -- widening the match would let a WEAKER command be recorded
+// as the contract passing, which is the `rename_across_files` failure this whole gate
+// exists to stop -- but it is silent, and silence is what cost the run.
+//
+// MEASURED: a 45-turn run declared `xcodebuild -scheme ResMon`, discovered mid-run that the
+// only scheme was `Untitled Project`, rebuilt correctly with it, and recorded ZERO
+// verifications for its last 31 minutes. It did the right thing and the harness simply
+// stopped watching. Naming the near miss turns a silent gap into a choice the run can act
+// on, without changing what counts as evidence.
+[[nodiscard]] bool is_near_miss(std::string_view command, std::string_view contract);
+
 class Verifier {
   public:
     Verifier(tools::Registry& registry, context::ContextStore& ctx)
@@ -65,6 +157,12 @@ class Verifier {
     [[nodiscard]] bool is_proven(const std::string& command) const;
 
   private:
+    // is_proven() asked against the ledger WITH `pending` appended, but with `pending`
+    // itself barred from being the proof. See the call site: a record has to be visible to
+    // disqualify an earlier identical red, and must still never certify itself.
+    [[nodiscard]] bool proven_by(const std::string& contract,
+                                 const context::VerificationRecord& pending) const;
+
     tools::Registry& registry_;
     context::ContextStore& ctx_;
     std::vector<std::string> proven_; // canonical forms
