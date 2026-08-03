@@ -25,6 +25,20 @@ import {
   RunEndNotification,
 } from "./protocol.generated";
 
+/** One finished run, as the history panel shows it.
+ *
+ *  Deliberately NOT the transcript. Keeping every turn of every run in workspace state
+ *  would be a slow leak that nobody reads; what a human wants weeks later is what they
+ *  asked for, whether it worked, and roughly when.
+ */
+interface RunRecord {
+  mission: string;
+  reason: string;
+  iterations: number;
+  completed: boolean;
+  at: number;
+}
+
 /** What the view needs from the extension host.
  *
  *  The sidebar can now start things -- which is the whole point of it, and was the whole
@@ -77,10 +91,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     elapsed_ms: 0,
   };
 
+  /** The mission of the run currently in flight, so run_end can file it under something
+   *  a human recognises. run_end carries the outcome and not the ask. */
+  private missionInFlight = "";
+
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly client: SidecarClient,
-    private readonly host: ExtensionHost
+    private readonly host: ExtensionHost,
+    /** Where run history lives. Workspace-scoped on purpose: "what did I ask this repo to
+     *  do" is a property of the repo, and a global list would mix every project together.
+     *  It survives a window reload, which is the whole point -- the transcript does not. */
+    private readonly memento: vscode.Memento
   ) {
     this.client.on("token", (n: TokenNotification) => this.observe(n.run_id, "token", n));
     this.client.on("turn", (n: TurnNotification) => this.observe(n.run_id, "turn", n));
@@ -122,8 +144,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       // (S14). It is shown, not summarized away.
       this.observe(n.run_id, "run_end", n);
       this.runInFlight = false;
+      this.record(n);
       this.post("idle", {});
     });
+  }
+
+  /** One line of history per finished run.
+   *
+   *  `completed` is the EVIDENTIAL verdict, not the model's opinion, so the dot in the
+   *  list means the same thing it means everywhere else in this UI (S10.4).
+   */
+  private record(n: RunEndNotification): void {
+    const runs = this.history();
+    runs.unshift({
+      mission: this.missionInFlight || "(untitled run)",
+      reason: n.termination_reason,
+      iterations: n.iterations,
+      completed: n.completed,
+      at: Date.now(),
+    });
+    // Bounded. This is a Memento, not a database, and an unbounded list in workspace
+    // state is a slow leak nobody ever looks at.
+    void this.memento.update("runHistory", runs.slice(0, 50));
+    this.missionInFlight = "";
+  }
+
+  private history(): RunRecord[] {
+    return this.memento.get<RunRecord[]>("runHistory", []);
   }
 
   /** Applies a workspace edit through VS Code, then answers the sidecar.
@@ -195,6 +242,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  clearing the feed there would delete the thing they just typed. */
   beginRun(mission: string, reset = true): void {
     this.runInFlight = true;
+    this.missionInFlight = mission;
     this.post("run_start", { mission, reset });
   }
 
@@ -319,6 +367,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         if (msg.kind === "cancel") {
           void vscode.commands.executeCommand("lmPipe.cancel");
+        }
+        if (msg.kind === "history") {
+          this.post("history", { runs: this.history() });
         }
         if (msg.kind === "message" && msg.text) {
           void this.send(msg.text);
