@@ -128,7 +128,8 @@ loop::Observer make_observer(const std::string& id) {
         n.items_json += "]";
         notify(n);
     };
-    obs.on_perf = [id](const model::GenResult& g, std::size_t used, std::size_t max) {
+    obs.on_perf = [id](const model::GenResult& g, std::size_t used, std::size_t max,
+                       std::size_t compactions) {
         protocol::PerfNotification n;
         n.run_id = id;
         n.sample.ttft_ms = g.ttft_ms;
@@ -137,6 +138,7 @@ loop::Observer make_observer(const std::string& id) {
         n.sample.context_used = static_cast<std::int64_t>(used);
         n.sample.context_max = static_cast<std::int64_t>(max);
         n.sample.tokens_generated = g.tokens_generated;
+        n.sample.compactions = static_cast<std::int64_t>(compactions);
         notify(n);
     };
     return obs;
@@ -578,6 +580,7 @@ bool start_mission(const std::string& id, const std::string& message,
     // the agent's own notes change mid-run, so they cost one prefill for the whole run.
     session.ctx->set_project_instructions(surface::load_project_instructions(workspace));
     session.ctx->set_project_memory(surface::load_project_memory(workspace));
+    session.ctx->set_workspace_root(workspace);
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
     // Logged the way a failed MCP server is (see connect_mcp_servers): a degradation the
@@ -626,8 +629,23 @@ void handle_load_model(const std::string& id, const std::string& message,
 // run_loop and RunInbox refuses every method it does not recognise. Freeing the weights
 // out from under a generating model is therefore not a case that has to be defended
 // against here -- the structure already excludes it.
-void handle_unload_model(const std::string& id, surface::Session& session) {
+// The before/after is logged because "unloaded" was a claim nobody could check from
+// outside: the reply said true while ~19 GB stayed resident, and the only way to notice
+// was Activity Monitor. Now the run that frees nothing says so in its own trace.
+void handle_unload_model(const std::string& id, surface::Session& session,
+                         platform::EventLogWriter& log, const platform::Clock& clock) {
+    const model::MemoryReport before = model::mlx_memory_report();
     surface::unload_model(session);
+    const model::MemoryReport after = model::mlx_memory_report();
+
+    platform::Event ev;
+    ev.kind = "unload_model";
+    ev.fields = {{"active_before", std::to_string(before.active)},
+                 {"cache_before", std::to_string(before.cache)},
+                 {"active_after", std::to_string(after.active)},
+                 {"cache_after", std::to_string(after.cache)}};
+    log.append(ev, clock);
+
     notify_model(protocol::modelstate_values::kUnloaded, "");
     reply_result(id, R"({"unloaded":true})");
 }
@@ -690,7 +708,7 @@ bool dispatch_one(const std::string& message, surface::Session& session,
         return false;
     }
     if (method == "lmp/unload_model") {
-        handle_unload_model(id, session);
+        handle_unload_model(id, session, log, clock);
         return false;
     }
 

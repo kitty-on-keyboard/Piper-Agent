@@ -183,6 +183,17 @@ class ContextStore {
 
     void set_persona(std::string text) { persona_ = std::move(text); }
 
+    // The absolute path the run is rooted at. Stated in the prompt because the model
+    // otherwise has to GUESS it, and a wrong guess is not cheap: every path tool resolves
+    // against this root and refuses anything outside it, so the guess costs a refusal per
+    // turn until something happens to reveal the truth.
+    //
+    // MEASURED: a real run opened with `list_dir /home/user` (refused), then
+    // `mkdir -p /home/user/src` (denied by the sandbox), and did not learn where it
+    // actually was until turn 25, when it thought to run `pwd`. Stable for the run, so it
+    // costs nothing after the first prefill.
+    void set_workspace_root(std::string path) { workspace_root_ = std::move(path); }
+
     // --- T2 recent ----------------------------------------------------------
     // The most an observation may carry into the prompt. The tool layer is supposed to
     // bound every result before it gets here -- tool_result.hpp says so -- but only the
@@ -283,6 +294,7 @@ class ContextStore {
     // that arrived later. front() is therefore always valid.
     std::vector<std::string> user_turns_;
     std::string persona_;
+    std::string workspace_root_;
     std::string project_instructions_;
     std::string project_memory_;
     std::string verify_contract_;

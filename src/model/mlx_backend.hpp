@@ -24,6 +24,7 @@
 //   speculative decoding                -- the seam is the draft_model_dir config; not
 //                                          yet implemented, and says so
 //
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -33,6 +34,17 @@
 #include "src/platform/clock.hpp"
 
 namespace lmp::model {
+
+// What MLX is holding right now, in bytes. `active` is what live arrays use; `cache` is
+// what its allocator has taken from the OS and NOT given back, which is the number that
+// makes "unloaded" a lie -- see ~MlxBackend. All zero in a build without MLX.
+struct MemoryReport {
+    std::size_t active = 0;
+    std::size_t cache = 0;
+    std::size_t peak = 0;
+};
+
+[[nodiscard]] MemoryReport mlx_memory_report();
 
 struct MlxBackendConfig {
     std::string model_dir; // required (S7.5: no defaultable security-relevant input)

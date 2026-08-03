@@ -152,7 +152,11 @@ struct Observer {
     std::function<void(const std::string& channel, const std::string& text)> on_token;
     std::function<void(const TurnResult&, double duration_ms)> on_turn;
     std::function<void(const context::VerificationRecord&)> on_verification;
-    std::function<void(const model::GenResult&, std::size_t ctx_used, std::size_t ctx_max)>
+    // `compactions` is how many times this run has had to trim its own context. The
+    // surface renders it beside the context meter: a run that is compacting is one whose
+    // history is being thrown away, and that is worth seeing BEFORE the answers get worse.
+    std::function<void(const model::GenResult&, std::size_t ctx_used, std::size_t ctx_max,
+                       std::size_t compactions)>
         on_perf;
     // Fired whenever the checklist CHANGES, which is the only time it is news. The
     // sidebar had a Checklist panel and nothing ever filled it: `lmp/checklist` was
@@ -204,6 +208,9 @@ class Agent {
     static constexpr int kMaxConsecutiveNoProgress = 3;
 
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
+    // Logs and surfaces every ledger entry added since `before`. The one place a
+    // verification reaches either the log or the UI, so the two cannot disagree.
+    void emit_verifications(std::size_t before);
     // The HITL gate: mode policy, then writes, then commands. Returns the refusal when a
     // call must not run, and nothing when it may. Defined in approval.cpp with the pure
     // routing functions it drives -- the loop file stays about the loop.
@@ -250,6 +257,13 @@ class Agent {
     // FAIL_TO_PASS reasoning verification.cpp applies to the declared contract.
     std::map<std::string, bool> pre_edit_clean_;
     std::string tools_guidance_;
+    // The last completion verdict logged, so the reason is emitted when it changes rather
+    // than once per turn. See the `not_complete` emit in run().
+    std::string last_incomplete_reason_;
+    // Set by BreakRepeat, consumed by the next step(): the tool that just repeated is
+    // dropped from that turn's grammar, which is the "narrow the registry" half of the
+    // corrective that was declared but never implemented.
+    std::string suppress_tool_next_turn_;
     int consecutive_no_progress_ = 0;
     bool halted_ = false;
     std::string halt_reason_;

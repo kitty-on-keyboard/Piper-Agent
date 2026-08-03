@@ -45,6 +45,24 @@ struct ToolResult {
     // Paths of spooled full outputs (S14): oversized tool output goes to disk, bounded,
     // and the summary references it.
     std::vector<std::string> artifacts;
+    // The command's exit status, for the tools that run one; -1 when no command ran (any
+    // other tool, or a refusal). A FIELD rather than the `[exit N]` prefix on the summary,
+    // because callers that need to tell 127 from 1 are exactly the callers this header
+    // forbids to inspect strings -- and one of them decides whether a run may complete.
+    int exit_code = -1;
+
+    // Whether the shell could not execute the command AT ALL: 127 is "not found", 126 is
+    // "found but not executable", and both are also what the sandbox's own child returns
+    // when it cannot chdir or exec.
+    //
+    // This is not a failing check, it is an ABSENT one, and the difference decides whether
+    // a red counts as evidence. A run declared `python -m pytest ...` on a host with no
+    // `python`; the baseline came back red, and a red baseline is what proves a check
+    // capable of failing (S10.2). It proved nothing of the sort -- pytest never ran -- but
+    // the contract was marked falsifiable on the strength of it.
+    [[nodiscard]] bool never_executed() const noexcept {
+        return exit_code == 126 || exit_code == 127;
+    }
 
     [[nodiscard]] bool ok() const noexcept { return status == Status::Ok; }
 

@@ -241,6 +241,7 @@ struct PerfSample {
     std::int64_t context_used = 0;
     std::int64_t context_max = 0;
     std::int64_t tokens_generated = 0;
+    std::int64_t compactions = 0;
 };
 inline void append_value(std::string& out, const PerfSample& v) {
     out += "{";
@@ -261,6 +262,9 @@ inline void append_value(std::string& out, const PerfSample& v) {
     out += ",";
     out += "\"tokens_generated\":";
     append_value(out, v.tokens_generated);
+    out += ",";
+    out += "\"compactions\":";
+    append_value(out, v.compactions);
     out += "}";
 }
 
