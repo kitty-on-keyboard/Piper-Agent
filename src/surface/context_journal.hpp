@@ -46,6 +46,11 @@ class ContextJournal {
 
     [[nodiscard]] pcc::Store& store() noexcept { return store_; }
 
+    // Which partition this mission's rows are written under. Exposed because the recall
+    // tools need it to offer "this session only" against a store that deliberately holds
+    // every session this workspace has ever had.
+    [[nodiscard]] const std::string& session_id() const noexcept { return session_; }
+
   private:
     ContextJournal(const std::string& path, std::string session_id)
         : store_(path), session_(std::move(session_id)) {}

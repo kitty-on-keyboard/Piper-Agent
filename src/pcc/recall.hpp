@@ -46,6 +46,19 @@ struct RecallRequest {
     // recency more room to promote; 60 is where the promotion stops changing on the
     // corpus in tests/pcc.
     int candidates = 60;
+    // The session whose MISSION row the caller is already looking at, or empty.
+    //
+    // The mission is T0 of the prompt: always present, never compacted, verbatim. Handing
+    // it back spends a slice of the recall budget on text already on screen -- and it
+    // ranks HIGH, because a query drawn from the mission is a near-perfect BM25 match for
+    // the mission. MEASURED on the first run with a populated store: ~60 tokens of a 1500
+    // token budget went on the run's own opening instruction.
+    //
+    // Narrow on purpose. Only the LIVE session's, and only the mission row: an earlier
+    // mission in this workspace is genuinely new information, and every other row of this
+    // session is too -- including the turns this run has since compacted away, which are
+    // the whole reason the store exists.
+    std::string suppress_mission_of;
 };
 
 struct RecallEntry {

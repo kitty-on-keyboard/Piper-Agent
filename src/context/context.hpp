@@ -73,6 +73,15 @@ struct VerificationRecord {
     // the timeline there is no way to tell the two apart: a follow-up would complete
     // instantly on the previous run's green.
     std::size_t seq = 0;
+    // How many successful workspace writes the run had made when this reading was taken.
+    //
+    // The one input that separates "this check fails because the code is not finished"
+    // from "this check fails for a reason no amount of code will change". Two readings
+    // reporting the SAME failure with writes in between say the work did not touch what
+    // the check is looking at -- which is a fact about the CHECK. Without this number the
+    // two readings are indistinguishable, and the run spends its budget fixing code that
+    // was never the problem (see loop/verification.hpp, failure_is_unmoved).
+    std::size_t workspace_writes = 0;
 };
 
 class ContextStore {
@@ -149,6 +158,12 @@ class ContextStore {
     }
     // Deduplicated: editing one file four times produces one deliverable, not four.
     void record_deliverable(std::string path) {
+        // The COUNTER is not deduplicated, and that is the point of it being separate.
+        // "How many files exist" and "how much work has happened since that check last
+        // ran" are different questions, and only the second one can tell an unmoved
+        // failure from an unfinished one. A run iterating on a single file writes it
+        // eight times and the deliverable list never moves.
+        ++workspace_writes_;
         if (std::find(deliverables_.begin(), deliverables_.end(), path) ==
             deliverables_.end()) {
             deliverables_.push_back(std::move(path));
@@ -156,6 +171,9 @@ class ContextStore {
     }
     [[nodiscard]] const std::vector<std::string>& deliverables() const noexcept {
         return deliverables_;
+    }
+    [[nodiscard]] std::size_t workspace_writes() const noexcept {
+        return workspace_writes_;
     }
 
     // The repo's own conventions (AGENTS.md / CLAUDE.md / .cursorrules), loaded once and
@@ -215,6 +233,10 @@ class ContextStore {
         }
         ++seq_;
         recent_.push_back(std::move(t));
+        // Durable BEFORE anything can drop it. See set_turn_sink().
+        if (turn_sink_) {
+            turn_sink_(recent_.back());
+        }
     }
     [[nodiscard]] const std::vector<TurnRecord>& recent() const noexcept { return recent_; }
 
@@ -256,9 +278,33 @@ class ContextStore {
     // diffable, which is the property the whole prompt-purity argument rests on; and this
     // layer keeps knowing nothing about databases, so a ContextStore in a unit test needs
     // no fixture. Unset, behaviour is exactly what it was.
+    // `summary` is the span this compaction just produced -- the same text render() will
+    // put in the prompt. Passed rather than left for the sink to rebuild from `dropped`,
+    // because a sink that reformats the turns itself is a second implementation of the
+    // summary that can drift from the one the model actually sees.
     using CompactionSink =
-        std::function<void(const std::vector<TurnRecord>& dropped, std::size_t span_index)>;
+        std::function<void(const std::vector<TurnRecord>& dropped, std::size_t span_index,
+                           std::string_view summary)>;
     void set_compaction_sink(CompactionSink sink) { compaction_sink_ = std::move(sink); }
+
+    // Called with every turn AS IT IS RECORDED, before anything can drop it.
+    //
+    // The compaction sink above was for a long time the only door to the durable store,
+    // and it opens only when the prompt crosses the compaction threshold. On real work it
+    // frequently never does -- a long run adds little per turn -- so a workspace with
+    // several complete 80-turn runs through it ended with a context database holding its
+    // schema and ZERO rows. The one component whose whole job is to remember what got
+    // trimmed had never been handed anything to remember.
+    //
+    // MEASURED 2026-08-03 on ~/Desktop/Agent_testing/ResMon: `select kind,count(*) from
+    // item group by kind` returned nothing, and the event log had no compaction events to
+    // explain it. Nothing was broken; the door was simply never reached.
+    //
+    // So the durable write now happens at the moment the turn exists, and compaction goes
+    // back to being what its name says -- a summarizer -- instead of doubling as the only
+    // way anything is ever persisted.
+    using TurnSink = std::function<void(const TurnRecord& turn)>;
+    void set_turn_sink(TurnSink sink) { turn_sink_ = std::move(sink); }
 
     // Moves the oldest `keep_recent`-excess turns into a summarized span. Returns the
     // number of turns compacted. The summary keeps every observation's ANCHOR (tool
@@ -305,7 +351,10 @@ class ContextStore {
     std::vector<TurnRecord> recent_;
     std::vector<std::string> spans_;
     CompactionSink compaction_sink_;
+    TurnSink turn_sink_;
     std::size_t compactions_ = 0;
+    // Every successful write, not every distinct path. See record_deliverable().
+    std::size_t workspace_writes_ = 0;
     // Monotonic position in the conversation. Never reset -- compaction moves turns into
     // spans but must not renumber the timeline, or evidence would appear to move.
     std::size_t seq_ = 0;

@@ -357,13 +357,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       (msg: {
         kind: string; id?: string; approved?: boolean; text?: string;
         key?: string; value?: unknown; remember?: string; dir?: string;
+        allowWrites?: boolean;
       }) => {
         if (msg.kind === "approve" && msg.id !== undefined) {
           // "Always allow" is an approval PLUS a remembered rule. The rule is stored on
           // this side, not the sidecar's: it has to outlive the run, and the sidecar
           // deliberately owns no persistent state.
+          //
+          // It also has to reach the RUN, which settings cannot do: they are read at
+          // lmp/start, so the run that raised this card would ask about the identical
+          // command again on the next turn and the button would read as broken. The
+          // sidecar latches it for the rest of the run; settings carry it past the end.
           if (msg.remember) this.remember(msg.remember);
-          void this.client.approve(msg.id, msg.approved === true);
+          // "Allow writes for this run" goes the OTHER way -- to the sidecar and not to
+          // settings. It must take effect on the next card of the run in flight, which
+          // nothing stored here can do: settings reach the sidecar at lmp/start, one run
+          // too late to help the run that asked. It is also the reason it is not
+          // persisted; consent given to one mission is not consent to the next.
+          void this.client.approve(
+            msg.id,
+            msg.approved === true,
+            msg.allowWrites === true,
+            msg.remember !== undefined && msg.remember !== ""
+          );
         }
         if (msg.kind === "cancel") {
           void vscode.commands.executeCommand("lmPipe.cancel");
@@ -377,6 +393,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (msg.kind === "load_model") void this.loadModel();
         if (msg.kind === "unload_model") void this.unloadModel();
         if (msg.kind === "pick_model") void vscode.commands.executeCommand("lmPipe.selectModel");
+        if (msg.kind === "ready") {
+          // The view's script is up and listening -- NOW replay works. Anything posted
+          // before this arrived while the webview was still parsing HTML and was
+          // silently dropped, which is why the replay lives here and not below the
+          // resolve: the old unconditional post raced the script load and lost often
+          // enough that a loaded model showed "unloaded" after every rebuild.
+          this.pushSettings();
+          this.post("model", this.model);
+        }
         if (msg.kind === "setting" && msg.key !== undefined) {
           // Only the keys the drawer owns. A webview message is untrusted input, and
           // "write whatever key it names into the user's settings" is not a thing to
@@ -388,11 +413,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
       }
     );
-    this.pushSettings();
-    // Replayed, because a hidden panel's webview is destroyed and rebuilt: without this
-    // a model that is loaded and working comes back as "no model" the moment the user
-    // switches away and back.
-    this.post("model", this.model);
+    // No replay here: it waits for the view's "ready" message. Posting now races the
+    // script load -- the webview drops messages until its listener exists -- and losing
+    // that race is how a loaded model showed "unloaded" after every rebuild.
     // Settings changed elsewhere -- the Settings UI, another window, a sync -- must
     // reach the drawer too, or it would show a stale copy of state it does not own.
     this.watcher?.dispose();
