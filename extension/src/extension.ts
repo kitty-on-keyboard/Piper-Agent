@@ -34,8 +34,8 @@ function settingsFromConfig(): RunSettings {
       repetition_penalty: cfg.get<number>("sampling.repetitionPenalty", 1.05),
       seed: cfg.get<number>("sampling.seed", 0),
     },
-    max_iterations: cfg.get<number>("maxIterations", 40),
-    wall_clock_seconds: cfg.get<number>("wallClockSeconds", 900),
+    max_iterations: cfg.get<number>("maxIterations", 80),
+    wall_clock_seconds: cfg.get<number>("wallClockSeconds", 1800),
     sandbox_tier: cfg.get<number>("sandboxTier", 1),
     auto_approve_exec: cfg.get<boolean>("autoApproveExec", true),
     auto_approve_writes: cfg.get<boolean>("autoApproveWrites", true),
@@ -139,7 +139,8 @@ export function activate(context: vscode.ExtensionContext): void {
     confirmContainment,
   };
 
-  const sidebar = new SidebarProvider(context.extensionUri, client, host);
+  const sidebar = new SidebarProvider(
+    context.extensionUri, client, host, context.workspaceState);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar),
     sidebar

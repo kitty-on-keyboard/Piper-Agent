@@ -406,7 +406,10 @@ export function orbStyles(): string {
   return `
 :root { --orb-size: ${ORB_SIZE}px; }
 
-#headRow { display: flex; align-items: center; gap: 11px; padding-right: 26px; }
+/* The orb no longer lives here -- it sits at the head of the composer, where every other
+   assistant puts its activity indicator. The row keeps its own layout because the header
+   still has to leave room for the gear and history buttons. */
+#headRow { display: flex; align-items: center; gap: 11px; padding-right: 56px; }
 #headText { flex: 1; min-width: 0; }
 
 #orb {
