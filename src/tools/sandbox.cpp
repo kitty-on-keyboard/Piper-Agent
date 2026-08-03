@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <climits>
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <chrono>
@@ -29,26 +30,78 @@ RiskHint classify_command(std::string_view command, std::string_view workspace_r
 
 ExecutionGrant grant_execution(SandboxTier tier) { return ExecutionGrant(tier); }
 
+SandboxTier tier_for(int approved_tier) noexcept {
+    switch (approved_tier) {
+        case 0:
+            return SandboxTier::T0_NoExec;
+        case 1:
+            return SandboxTier::T1_Seatbelt;
+        case 2:
+            return SandboxTier::T2_Container;
+        case 3:
+            return SandboxTier::T3_HostUnsandboxed;
+        default:
+            break;
+    }
+    // Below the range is "no execution"; above it is the container. Neither direction
+    // lands on T3, which is reachable only by naming it exactly.
+    return approved_tier < 0 ? SandboxTier::T0_NoExec : SandboxTier::T2_Container;
+}
+
 std::string resolve_real(const std::string& path) {
     // Seatbelt matches subpaths against RESOLVED paths. /tmp is a symlink to
     // /private/tmp on macOS, so a profile written with the unresolved path silently
     // matches nothing -- and a jail that matches nothing denies the workspace's own
     // writes while looking correctly configured. Found by attempting a write inside
     // the root and watching it be refused.
+    //
+    // A trailing slash is stripped for the same reason: `(subpath "/x/y/")` matches
+    // nothing at all. realpath removes it when the path resolves, so this only bites on
+    // the paths that do not exist yet -- which is most of the toolchain state below the
+    // first time a build runs.
     char buf[PATH_MAX];
-    if (::realpath(path.c_str(), buf) != nullptr) {
-        return {buf};
+    std::string out = ::realpath(path.c_str(), buf) != nullptr ? std::string(buf) : path;
+    while (out.size() > 1 && out.back() == '/') {
+        out.pop_back();
     }
-    return path;
+    return out;
 }
 
+namespace {
+
+// A per-user directory the OS names for us, resolved. Empty when the platform declines.
+std::string darwin_dir(int name) {
+    char buf[PATH_MAX];
+    const std::size_t n = ::confstr(name, buf, sizeof(buf));
+    if (n == 0 || n > sizeof(buf)) {
+        return {};
+    }
+    return resolve_real(buf);
+}
+
+std::string home_dir() {
+    const char* home = std::getenv("HOME");
+    return home != nullptr && *home != '\0' ? resolve_real(home) : std::string();
+}
+
+void allow_subpath(std::string& profile, const std::string& path) {
+    // An empty or relative path would produce a rule that matches nothing, or -- worse --
+    // one that matches something unintended. Dropped rather than written.
+    if (path.empty() || path.front() != '/') {
+        return;
+    }
+    profile += "(allow file-write* (subpath \"" + path + "\"))\n";
+}
+
+} // namespace
+
 std::string seatbelt_profile(const std::string& workspace_root) {
-    // Deny by default. Writes ONLY under the workspace root -- no /tmp allowance, no
-    // /var/folders allowance. An earlier version allow-listed /private/var/folders for
-    // build scratch; that is the user's entire temp tree, which is precisely "writes
-    // outside the workspace", and the test that attempts the escape caught it. Build
-    // tools get scratch space via TMPDIR pointed inside the root instead (see
-    // run_sandboxed), so nothing legitimate needs the hole.
+    // Deny by default. Writes are the workspace, plus the narrow set of TOOLCHAIN STATE
+    // directories below -- no /tmp allowance, and emphatically not the per-user temp root.
+    // An earlier version allow-listed /private/var/folders wholesale for build scratch;
+    // that is the user's entire temp tree, which is precisely "writes outside the
+    // workspace", and the break-out test caught it. It still would: that test writes
+    // straight into the temp root, which stays denied here.
     //
     // Network is denied here, in the profile, not by inspecting the command (S7.4).
     // Reads stay open: toolchains legitimately read /usr and the SDKs, and the assets
@@ -60,11 +113,138 @@ std::string seatbelt_profile(const std::string& workspace_root) {
     p += "(allow default)\n";
     p += "(deny network*)\n";
     p += "(deny file-write*)\n";
-    p += "(allow file-write* (subpath \"" + root + "\"))\n";
+    allow_subpath(p, root);
+
+    // --- toolchain state -----------------------------------------------------
+    //
+    // MEASURED, on the run that prompted this. `swift build` inside the jail died with
+    // "You don't have permission to save the file output-file-map.json", and the agent
+    // spent thirty turns trying to configure its way out of it.
+    //
+    // The cause is that macOS's atomic save does not write the destination file: it
+    // stages the bytes in the per-user ITEM REPLACEMENT directory and renames them into
+    // place. That directory is NOT TMPDIR and cannot be moved by setting TMPDIR -- it is
+    // .../T/TemporaryItems, read from confstr(). So a jail that denies it denies every
+    // atomic save any tool makes, into the workspace or anywhere else, and the error
+    // names the destination file rather than the staging directory that was actually
+    // refused. That is what made it unreadable.
+    //
+    // TemporaryItems ONLY, never .../T itself. mkdtemp, `echo > /var/folders/.../x` and
+    // every other ordinary write outside the workspace land in the temp root, which is
+    // still denied -- so this buys atomic saves without buying an escape hatch.
+    const std::string user_temp = darwin_dir(_CS_DARWIN_USER_TEMP_DIR);
+    if (!user_temp.empty()) {
+        allow_subpath(p, user_temp + "/TemporaryItems");
+    }
+    // The per-user CACHE directory (.../C), which is where clang puts its module cache.
+    // A cache is derived data by definition: losing it costs a rebuild and nothing else.
+    allow_subpath(p, darwin_dir(_CS_DARWIN_USER_CACHE_DIR));
+
+    // Xcode's and SwiftPM's own state. Each of these is build output or a package cache
+    // that the tool creates, owns and can rebuild -- none of them is the user's work.
+    // Named individually rather than allowing ~/Library, which holds every application's
+    // data on the machine.
+    const std::string home = home_dir();
+    if (!home.empty()) {
+        allow_subpath(p, home + "/Library/Developer/Xcode/DerivedData");
+        allow_subpath(p, home + "/Library/Caches/org.swift.swiftpm");
+        allow_subpath(p, home + "/Library/org.swift.swiftpm");
+        allow_subpath(p, home + "/.swiftpm");
+        allow_subpath(p, home + "/Library/Caches/clang");
+    }
+
     p += "(allow file-write-data (literal \"/dev/null\"))\n";
     p += "(allow file-write-data (literal \"/dev/stdout\"))\n";
     p += "(allow file-write-data (literal \"/dev/stderr\"))\n";
     return p;
+}
+
+namespace {
+
+constexpr std::string_view kDisableSandbox = "--disable-sandbox";
+
+bool is_word_char(char c) {
+    return (std::isalnum(static_cast<unsigned char>(c)) != 0) || c == '_' || c == '-' ||
+           c == '.';
+}
+
+// True when the token starting at `start` is where a COMMAND goes, rather than an
+// argument to one. Without this, `echo "swift build is how you build it"` would be
+// rewritten -- the match has to be the program being run, not the word appearing.
+bool at_command_position(const std::string& s, std::size_t start) {
+    // Back over the program's own path: /usr/bin/swift is the same command as swift.
+    while (start > 0 && (is_word_char(s[start - 1]) || s[start - 1] == '/')) {
+        --start;
+    }
+    while (start > 0 && (std::isspace(static_cast<unsigned char>(s[start - 1])) != 0)) {
+        --start;
+    }
+    if (start == 0) {
+        return true;
+    }
+    const char prev = s[start - 1];
+    return prev == ';' || prev == '&' || prev == '|' || prev == '(' || prev == '\n';
+}
+
+// The next whitespace-delimited word after `pos`, and where it ends.
+std::string_view next_word(const std::string& s, std::size_t pos, std::size_t& end) {
+    while (pos < s.size() && (std::isspace(static_cast<unsigned char>(s[pos])) != 0)) {
+        ++pos;
+    }
+    const std::size_t begin = pos;
+    while (pos < s.size() && is_word_char(s[pos])) {
+        ++pos;
+    }
+    end = pos;
+    return std::string_view(s).substr(begin, pos - begin);
+}
+
+} // namespace
+
+std::string t1_compat_rewrite(const std::string& command) {
+    // Already asked for by hand -- leave it exactly as written. A second copy of the flag
+    // is harmless to swift and confusing to read, and the model that typed it does not
+    // need to be told the harness agrees.
+    if (command.find(kDisableSandbox) != std::string::npos) {
+        return {};
+    }
+
+    std::string out;
+    std::size_t scan = 0;
+    bool changed = false;
+    while (true) {
+        const std::size_t at = command.find("swift", scan);
+        if (at == std::string::npos) {
+            break;
+        }
+        const std::size_t after = at + 5;
+        // Whole word on the right, so `swiftc` and `swift-format` are not this command.
+        const bool whole_word = after >= command.size() || !is_word_char(command[after]);
+        if (!whole_word || !at_command_position(command, at)) {
+            out.append(command, scan, after - scan);
+            scan = after;
+            continue;
+        }
+        std::size_t sub_end = 0;
+        const std::string_view sub = next_word(command, after, sub_end);
+        if (sub != "build" && sub != "test" && sub != "run") {
+            out.append(command, scan, sub_end - scan);
+            scan = sub_end;
+            continue;
+        }
+        // After the subcommand, where swift-argument-parser takes it and where it stays
+        // out of the way of anything the caller appended (`2>&1 | tee ...`).
+        out.append(command, scan, sub_end - scan);
+        out += ' ';
+        out += kDisableSandbox;
+        scan = sub_end;
+        changed = true;
+    }
+    if (!changed) {
+        return {};
+    }
+    out.append(command, scan, std::string::npos);
+    return out;
 }
 
 namespace {
@@ -204,6 +384,18 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         }
         effective_command = container_command(rt, command, workspace_root, cwd, limits);
         containerised = true;
+    }
+
+    // T1 ONLY. T3 has no profile to nest inside, and T2's jail is the container, so in
+    // both of those the command runs exactly as written -- which is also what makes the
+    // tiers comparable when a build fails: if it fails the same way at T1 and T3, the
+    // sandbox is not what is failing.
+    if (grant.tier() == SandboxTier::T1_Seatbelt) {
+        std::string rewritten = t1_compat_rewrite(effective_command);
+        if (!rewritten.empty()) {
+            effective_command = rewritten;
+            out.rewritten_command = effective_command;
+        }
     }
 
     // T3 keeps every OTHER containment the harness has -- rlimits, the process group and

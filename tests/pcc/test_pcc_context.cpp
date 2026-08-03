@@ -10,6 +10,7 @@
 // at nothing.
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/context/context.hpp"
@@ -26,22 +27,38 @@ using namespace lmp::pcc;
 lmp::pcc::TimeUs g_now = 1000;
 lmp::pcc::TimeUs manual_clock() { return g_now; }
 
-// The sidecar's wiring, in miniature: turns the context is about to drop become rows in
-// the store, keyed by the same event sequence numbers the summary prints.
-ContextStore::CompactionSink journal_to(Store& store) {
-    return [&store](const std::vector<TurnRecord>& dropped, std::size_t) {
-        for (const TurnRecord& turn : dropped) {
-            Record rec;
-            rec.kind = kind::kTurn;
-            rec.first_event = turn.first_event_seq;
-            rec.last_event = turn.last_event_seq;
-            rec.title = turn.tool_name;
-            rec.body = turn.user_text + turn.assistant_text +
-                       (turn.observation.empty() ? "" : "\n" + turn.observation);
-            store.append(std::move(rec));
-            g_now += 100;
-        }
-    };
+// The sidecar's wiring, in miniature (src/surface/context_journal.cpp).
+//
+// TURNS ARE WRITTEN AS THEY ARRIVE, not when a trim is about to destroy them. The
+// compaction sink alone used to be the whole adapter, and it only fires once the prompt
+// crosses the compaction threshold -- which on real work it often never does. Measured
+// 2026-08-03: a workspace with several complete 80-turn runs through it had a context
+// database with its schema and zero rows.
+void journal_to(ContextStore& ctx, Store& store) {
+    ctx.set_turn_sink([&store](const TurnRecord& turn) {
+        Record rec;
+        rec.kind = kind::kTurn;
+        rec.first_event = turn.first_event_seq;
+        rec.last_event = turn.last_event_seq;
+        rec.title = turn.tool_name;
+        rec.body = turn.user_text + turn.assistant_text +
+                   (turn.observation.empty() ? "" : "\n" + turn.observation);
+        store.append(std::move(rec));
+        g_now += 100;
+    });
+    // Compaction now contributes the SUMMARY and nothing else: the turns behind it are
+    // already rows, and appending them again would double every compacted turn.
+    ctx.set_compaction_sink([&store](const std::vector<TurnRecord>& dropped,
+                                     std::size_t span_index, std::string_view summary) {
+        Record rec;
+        rec.kind = kind::kSpan;
+        rec.first_event = dropped.front().first_event_seq;
+        rec.last_event = dropped.back().last_event_seq;
+        rec.title = "compacted span " + std::to_string(span_index + 1);
+        rec.body = std::string(summary);
+        store.append(std::move(rec));
+        g_now += 100;
+    });
 }
 
 TurnRecord tool_turn(const std::string& tool, const std::string& args,
@@ -67,11 +84,41 @@ TEST(compaction_without_a_sink_is_unchanged) {
     CHECK_EQ(ctx.compacted_spans().size(), std::size_t{1});
 }
 
+TEST(turns_are_durable_before_any_trim_happens) {
+    // THE BUG THIS COMPONENT WAS BUILT WITH, and the reason the turn sink exists.
+    //
+    // Journalling used to hang entirely off compaction, so a run that never filled its
+    // context window never wrote a row -- and the store whose whole job is to outlive the
+    // window was empty for exactly the runs that had the most history to keep. No trim
+    // happens anywhere in this test, which is the point.
+    Store store(":memory:");
+    store.set_clock(&manual_clock);
+    ContextStore ctx("mission");
+    journal_to(ctx, store);
+
+    ctx.add_turn(tool_turn("read_file", "a.cpp",
+                           "the retry budget is seven attempts, not three", 1));
+    for (std::uint64_t i = 2; i <= 5; ++i) {
+        ctx.add_turn(tool_turn("read_file", "a.cpp", "line " + std::to_string(i), i));
+    }
+    CHECK_EQ(ctx.compaction_count(), std::size_t{0});
+    CHECK_EQ(ctx.recent().size(), std::size_t{5});
+    CHECK_EQ(store.stats().items, std::int64_t{5});
+
+    // And it is retrievable by content, not merely present. This is what a later session
+    // actually does: it asks a question, having forgotten which turn held the answer.
+    RecallRequest req;
+    req.query = "retry budget attempts";
+    const Recall out = recall(store, req);
+    REQUIRE(!out.entries.empty());
+    CHECK(out.text.find("seven attempts") != std::string::npos);
+}
+
 TEST(compaction_journals_the_full_text_before_dropping_it) {
     Store store(":memory:");
     store.set_clock(&manual_clock);
     ContextStore ctx("mission");
-    ctx.set_compaction_sink(journal_to(store));
+    journal_to(ctx, store);
 
     // The detail that matters survives only in the observation body -- the anchor line
     // the summary keeps is truncated to 200 characters and would lose it.
@@ -110,7 +157,7 @@ TEST(journalled_turns_are_searchable_after_the_trim) {
     Store store(":memory:");
     store.set_clock(&manual_clock);
     ContextStore ctx("mission");
-    ctx.set_compaction_sink(journal_to(store));
+    journal_to(ctx, store);
 
     ctx.add_turn(tool_turn("search", "utf8proc", "utf8proc decompose has a null pointer "
                                                  "offset in the second branch",
@@ -136,7 +183,7 @@ TEST(repeated_trims_accumulate_rather_than_overwrite) {
     Store store(":memory:");
     store.set_clock(&manual_clock);
     ContextStore ctx("mission");
-    ctx.set_compaction_sink(journal_to(store));
+    journal_to(ctx, store);
 
     std::uint64_t event = 1;
     for (int trim = 0; trim < 4; ++trim) {
@@ -149,11 +196,21 @@ TEST(repeated_trims_accumulate_rather_than_overwrite) {
     }
 
     CHECK_EQ(ctx.compaction_count(), std::size_t{4});
-    // 20 turns added. The first trim sees 5 and drops 4; each later trim sees the one
-    // survivor plus 5 new and drops 5. 4 + 5 + 5 + 5 = 19 journalled, 1 still in the
-    // prompt -- every turn is in exactly one of the two places, which is the invariant.
-    CHECK_EQ(store.stats().items, std::int64_t{19});
+    // 20 turns added and every one of them is a row, INCLUDING the one still sitting in
+    // the prompt -- that is the change: durability no longer waits for a trim, so the
+    // invariant is "every turn is in the store" rather than the old "every turn is in
+    // exactly one of the two places". Plus one span row per trim: 20 + 4 = 24.
+    CHECK_EQ(store.stats().items, std::int64_t{24});
+    CHECK_EQ(store.by_kind(kind::kTurn).size(), std::size_t{20});
+    CHECK_EQ(store.by_kind(kind::kSpan).size(), std::size_t{4});
     CHECK_EQ(ctx.recent().size(), std::size_t{1});
+
+    // The span rows carry the same event ranges as the turns they summarize, so a
+    // rehydrate must not hand back the summary the model is already looking at.
+    // events_between() filters to turns for exactly this reason.
+    const Recall span_range = rehydrate(store, 1, 4, 4000);
+    CHECK_EQ(span_range.included, std::size_t{4});
+    CHECK(span_range.text.find("compacted span") == std::string::npos);
 
     // The earliest trim's content is still there, which is the property that fails first
     // if the sink is stateful in the wrong way.

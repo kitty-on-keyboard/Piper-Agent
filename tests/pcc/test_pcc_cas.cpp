@@ -218,6 +218,29 @@ TEST(diff_shows_the_changed_lines_only) {
     CHECK(out.find("@@") != std::string::npos);
 }
 
+TEST(hunk_headers_number_each_file_separately) {
+    // The two sides of a hunk header are positions in DIFFERENT files, and they only
+    // coincide until something changes the length above. Here one line is inserted at the
+    // top and one changed near the bottom, so the second hunk sits at line 8 of `before`
+    // and line 9 of `after` -- reading both off the same op index reported 8 for each.
+    std::string before;
+    std::string after = "INSERTED\n";
+    for (int i = 1; i <= 10; ++i) {
+        const std::string line = "line" + std::to_string(i) + "\n";
+        before += line;
+        after += i == 9 ? "CHANGED\n" : line;
+    }
+
+    const std::string out = unified_diff(before, after, "a", "b", 1);
+    // The insertion is at the top of both files.
+    CHECK(out.find("@@ -1,") != std::string::npos);
+    // The change is `before` line 9 / `after` line 10, with one line of context either
+    // side -- so the second hunk starts at 8 and 9. The `+9` is the half that was wrong.
+    CHECK(out.find("@@ -8,3 +9,3 @@") != std::string::npos);
+    CHECK(out.find("-line9") != std::string::npos);
+    CHECK(out.find("+CHANGED") != std::string::npos);
+}
+
 TEST(diff_handles_pure_insertion_and_deletion) {
     CHECK(unified_diff("", "one\ntwo\n", "a", "b").find("+one") != std::string::npos);
     CHECK(unified_diff("one\ntwo\n", "", "a", "b").find("-two") != std::string::npos);

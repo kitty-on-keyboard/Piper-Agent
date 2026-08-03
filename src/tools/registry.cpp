@@ -53,21 +53,43 @@ ToolResult write_failure(const fsx::WriteResult& w) {
     return ToolResult::error(ErrorClass::Transient, true, w.error);
 }
 
-ParamSpec param(const char* name, ParamType type, bool required) {
-    ParamSpec p;
-    p.name = name;
-    p.type = type;
-    p.required = required;
-    return p;
-}
+// The one sandbox failure a model cannot read, turned into one it can act on.
+//
+// macOS refuses a NESTED sandbox: a process already running under a Seatbelt profile gets
+// EPERM from sandbox_apply, and that holds whatever the outer profile allows -- measured
+// against a profile containing nothing but `(allow default)` plus a single deny. SwiftPM
+// applies a sandbox of its own to compile Package.swift, so `swift build` and `swift test`
+// inside T1 die on `sandbox-exec: sandbox_apply: Operation not permitted`, wrapped in an
+// "Invalid manifest" dump listing forty compiler flags, none of which is the reason.
+//
+// MEASURED: a real run spent thirty turns on that message. It invented cache directories,
+// deleted DerivedData, rewrote correct code and re-read its own files, because nothing in
+// the output says the harness is the thing in the way and nothing names the one-word fix.
+//
+// Passing --disable-sandbox is not a downgrade: OUR jail is still fully in force around
+// the command, and the flag removes only SwiftPM's second jail inside the first. Said as
+// an observed fact about this workspace, which is what T2 is for -- the model is free to
+// do something else with it.
+// Matched on the two halves of that message that are not identifiers -- the tool that
+// printed it and the errno text. The middle word is the C function's name, and spelling
+// it here would read to the tool-honesty ratchet (S6.3) as a claim that `sandbox_apply`
+// is a registered tool. Both halves must be present, which is what keeps this from
+// firing on an unrelated permission error.
+constexpr std::string_view kSandboxExecPrefix = "sandbox-exec: ";
+constexpr std::string_view kNotPermitted = "Operation not permitted";
 
-const std::string* get(const std::vector<ToolParamValue>& params, const char* name) {
-    for (const ToolParamValue& p : params) {
-        if (p.name == name) {
-            return &p.value;
-        }
+[[nodiscard]] std::string nested_sandbox_note(std::string_view output) {
+    if (output.find(kSandboxExecPrefix) == std::string_view::npos ||
+        output.find(kNotPermitted) == std::string_view::npos) {
+        return {};
     }
-    return nullptr;
+    return "\n[sandbox] That failed because the command tried to start a sandbox of its "
+           "own inside this one, and macOS refuses to nest them -- it is not a problem "
+           "with your code, your caches or your build directory, and no amount of "
+           "cleaning or reconfiguring will change it. Swift Package Manager does this to "
+           "compile Package.swift. Re-run the same command with `--disable-sandbox` "
+           "(`swift build --disable-sandbox`, `swift test --disable-sandbox`); this "
+           "workspace jail stays in force around it either way.";
 }
 
 ToolResult refused_path(const std::string& p) {
@@ -112,6 +134,23 @@ void append_json_escaped(std::string& out, std::string_view in) {
 
 } // namespace
 
+ParamSpec param(const char* name, ParamType type, bool required) {
+    ParamSpec p;
+    p.name = name;
+    p.type = type;
+    p.required = required;
+    return p;
+}
+
+const std::string* get(const std::vector<ToolParamValue>& params, const char* name) {
+    for (const ToolParamValue& p : params) {
+        if (p.name == name) {
+            return &p.value;
+        }
+    }
+    return nullptr;
+}
+
 std::string resolve_contained(const std::string& root, const std::string& rel) {
     const std::string abs = fsx::resolve_against(root, rel);
     return fsx::is_within(root, abs) ? abs : std::string();
@@ -130,10 +169,7 @@ ToolResult Registry::run_git(const std::string& args, int approved_tier) {
     // Read-only git still runs in the jail: `git` reads config from outside the
     // workspace, and T1 allows reads. What it must not do is write, and the profile --
     // not this function -- is what guarantees that.
-    const ExecutionGrant grant =
-        grant_execution(approved_tier <= 0   ? SandboxTier::T0_NoExec
-                        : approved_tier == 1 ? SandboxTier::T1_Seatbelt
-                                             : SandboxTier::T2_Container);
+    const ExecutionGrant grant = grant_execution(tier_for(approved_tier));
     const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
     const ExecOutcome o = run_sandboxed(grant, "git " + args, ctx_.root, ctx_.root, limits);
 
@@ -491,9 +527,18 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
     {
         ToolDecl d;
         d.name = "write_file";
+        // The last sentence is a FACT ABOUT THE GATE, not encouragement. "Prefer
+        // replace_in_file" was already here, and already in the persona, and a real run
+        // still made 11 whole-file writes against 0 partial edits -- so the description was
+        // saying which tool is nicer without saying what the other one costs. Overwriting
+        // content this run did not write raises an approval card whatever the auto-approve
+        // setting says (it destroys data), and a model that knows the price can weigh it.
         d.description = "Create or fully replace a file with the given content. "
                         "Atomic: a crash leaves the old file or the new one, never a "
-                        "prefix. For a partial change use replace_in_file.";
+                        "prefix. For a partial change use replace_in_file: it is not just "
+                        "tidier, it is cheaper -- replacing the whole of a file this run "
+                        "did not write destroys the existing content and stops for a "
+                        "human decision, while a scoped edit does not.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
                          param("content", ParamType::Text, true)};
@@ -647,10 +692,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.executes_commands = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
             const std::string& cmd = *get(p, "command");
-            const ExecutionGrant grant = grant_execution(
-                approved_tier <= 0   ? SandboxTier::T0_NoExec
-                : approved_tier == 1 ? SandboxTier::T1_Seatbelt
-                                     : SandboxTier::T2_Container);
+            const ExecutionGrant grant = grant_execution(tier_for(approved_tier));
             const ExecLimits limits{ctx_.shell_wall_clock_seconds,
                                     ctx_.shell_wall_clock_seconds,
                                     8LL << 30,
@@ -694,6 +736,21 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                 if (fsx::write_file_atomic(spool, o.output).ok()) {
                     r.artifacts.push_back(spool);
                 }
+            }
+            // LAST, and read off the FULL output rather than the compacted summary: the
+            // signature is one line inside a manifest dump that log_triage may well have
+            // elided. After the spool decision, so appending it cannot make the summary
+            // look long enough to skip spooling the output it is explaining.
+            r.summary += nested_sandbox_note(o.output);
+            // What actually ran, when it was not what was asked for. Said even on
+            // SUCCESS: a command that quietly ran differently is how a model comes to
+            // believe something about its environment that is not true, and the next
+            // thing it does is act on that belief.
+            if (!o.rewritten_command.empty()) {
+                r.summary += "\n[sandbox] Ran `" + o.rewritten_command +
+                             "`. macOS will not let SwiftPM start its own sandbox inside "
+                             "this one, so the harness added `--disable-sandbox`; the "
+                             "workspace jail is unchanged and still in force.";
             }
             return r;
         });
@@ -800,16 +857,23 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             "Save one durable fact about this project so a later session starts already "
             "knowing it: how it builds, where a subsystem lives, a constraint you had to "
             "discover the hard way. For things that stay true after this mission ends -- "
-            "not the current task's progress, which the checklist already carries.";
+            "not the current task's progress, which the checklist already carries. Give "
+            "`key` a short stable name for what the note is ABOUT (\"build\", "
+            "\"test-layout\") and a later note under the same key REPLACES this one "
+            "instead of piling up beside it -- use it whenever you are correcting or "
+            "refining something you or an earlier session already wrote down. Leave it "
+            "empty only for a standalone observation that supersedes nothing.";
         d.spec.name = d.name;
-        d.spec.params = {param("fact", ParamType::Text, true)};
+        d.spec.params = {param("fact", ParamType::Text, true),
+                         param("key", ParamType::Text, false)};
         // It writes a file inside the workspace, so it is a mutation: it raises a card
         // when the operator has asked to approve writes, and it stays off the parallel
         // read-only dispatch path. Not irreversible -- the note is additive and the file
         // is the agent's own.
         d.mutates_workspace = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            return remember_fact(*get(p, "fact"));
+            const std::string* k = get(p, "key");
+            return remember_fact(*get(p, "fact"), k == nullptr ? "" : *k);
         });
     }
     // --- plan ---------------------------------------------------------------

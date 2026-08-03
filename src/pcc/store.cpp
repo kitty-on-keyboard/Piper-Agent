@@ -283,8 +283,14 @@ std::vector<Item> Store::events_between(std::uint64_t first, std::uint64_t last,
                                         std::string_view session) const {
     // Overlap, not containment: a turn straddling the edge of a compacted span is part
     // of that span's story, and asking for containment would silently drop it.
+    //
+    // TURNS ONLY, and that is now load-bearing rather than incidental. A compacted span
+    // is written with the SAME event range as the turns it summarizes -- that is what
+    // makes the range in the prompt resolvable -- so without this predicate rehydrating
+    // "events 40-91" hands back the summary the model is already looking at, charged
+    // against the budget it was trying to spend on the detail underneath it.
     Stmt stmt(db_, std::string("SELECT ") + kColumns +
-                       " FROM item WHERE (? = '' OR session = ?) "
+                       " FROM item WHERE (? = '' OR session = ?) AND kind = 'turn' "
                        "AND last_event >= ? AND first_event <= ? AND first_event > 0 "
                        "ORDER BY first_event ASC, id ASC");
     stmt.bind(1, session);

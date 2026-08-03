@@ -45,6 +45,10 @@ ap.add_argument("--mode", default="agent", choices=["plan", "debug", "agent"])
 ap.add_argument("--deadline", type=float, default=1800.0)
 ap.add_argument("--max-iterations", type=int, default=80)
 ap.add_argument("--wall-clock", type=int, default=1800)
+ap.add_argument("--max-new-tokens", type=int, default=4096,
+                help="generation cap for one turn. A capped turn makes no "
+                     "tool call and leaves nothing behind, so a long first "
+                     "plan can stall a run on it.")
 ap.add_argument("--sandbox-tier", type=int, default=1)
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--auto", action="store_true",
@@ -148,6 +152,7 @@ for raw in proc.stdout:
                 "auto_approve_writes": bool(args.auto),
                 "system_prompt": "",
                 "context_budget_tokens": 96000,
+                "max_new_tokens": args.max_new_tokens,
             },
         }})
     elif method == "lmp/token":

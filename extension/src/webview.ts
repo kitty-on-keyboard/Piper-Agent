@@ -1705,13 +1705,37 @@ window.addEventListener('message', (e) => {
     row.className = 'row';
     const yes = document.createElement('button'); yes.className = 'primary'; yes.textContent = 'Approve';
     const no = document.createElement('button'); no.className = 'ghost'; no.textContent = 'Deny';
-    const answer = (ok, remember) => {
-      api.postMessage({ kind: 'approve', id: payload.request_id, approved: ok, remember });
+    const answer = (ok, remember, allowWrites) => {
+      api.postMessage({
+        kind: 'approve', id: payload.request_id, approved: ok, remember,
+        allowWrites: allowWrites === true,
+      });
       card.remove();
     };
     yes.onclick = () => answer(true);
     no.onclick = () => answer(false);
     row.append(yes, no);
+
+    // The WRITE gate's counterpart to "Always allow", and it is scoped to the run rather
+    // than remembered, because the two gates repeat differently. A command recurs
+    // verbatim, so a stored rule pays off on every later turn. A path does not: a run
+    // rewriting eleven scaffolded stubs writes eleven different paths once each, so a
+    // per-path rule could only ever be written after its one use and the operator would
+    // still answer eleven cards. MEASURED: exactly eleven, in one run, with
+    // auto-approve-writes already on.
+    //
+    // A write card is the one with no command -- the same test the sidecar's approver
+    // uses, so the button appears exactly where the backend will honour it.
+    if (!payload.command) {
+      const runAllow = document.createElement('button');
+      runAllow.className = 'ghost';
+      runAllow.textContent = 'Allow writes for this run';
+      runAllow.title =
+        'Stop asking about whole-file writes for the rest of this run. Not remembered: ' +
+        'the next run asks again.';
+      runAllow.onclick = () => answer(true, undefined, true);
+      row.append(runAllow);
+    }
 
     // "Always allow" is offered only where it would actually do something. An
     // irreversible call escalates whatever is on the allowlist, so offering to remember
@@ -1729,9 +1753,18 @@ window.addEventListener('message', (e) => {
     if (payload.irreversible) {
       const note = document.createElement('div');
       note.className = 'warnbox';
-      note.textContent =
-        'This cannot be undone, so it always asks — no allowlist entry and no ' +
-        '"run without asking" setting will skip this card.';
+      // The old text said no allowlist entry and no setting could ever skip this card.
+      // That stopped being true when the command gate was changed so a NAMED, remembered
+      // rule survives the irreversibility override -- the reasoning is in approval.cpp:
+      // a blanket switch yielding to a risk hint is caution, a rule the operator wrote
+      // yielding to it is the machine overruling the person it just asked. The warning
+      // was never updated, so the UI spent that time asserting the opposite of what the
+      // gate did. It now says what is actually true of each gate.
+      note.textContent = payload.command
+        ? 'This cannot be undone, so the blanket "run without asking" setting will not ' +
+          'skip it. Only "Always allow", which remembers this exact command, will.'
+        : 'This overwrites existing content, so auto-approve-writes will not skip it. ' +
+          '"Allow writes for this run" covers the rest of this run only.';
       card.append(note);
     }
     add(card, '');
@@ -1789,6 +1822,13 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'idle') goIdle();
 });
+
+// LAST, after every listener above is attached. The host replays its state -- model
+// status, settings -- in answer to this, so a view that was rebuilt (window reload; the
+// hidden-panel destroy this used to suffer from) starts from the truth instead of from
+// blank. The host posting on its own schedule was a race: a message sent before this
+// script ran was silently dropped, which is how a loaded model came back "unloaded".
+api.postMessage({ kind: 'ready' });
 `;
 }
 

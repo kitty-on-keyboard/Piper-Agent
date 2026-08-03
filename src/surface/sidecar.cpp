@@ -12,8 +12,12 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "src/loop/agent.hpp"
+// The recall tools' token counter is built here, so this file needs the estimator it
+// falls back to when no model is loaded.
+#include "src/pcc/recall.hpp"
 #include "src/platform/event_log.hpp"
 #include "src/surface/protocol_generated.hpp"
 #include "src/surface/session.hpp"
@@ -175,6 +179,22 @@ class RunInbox {
         return out;
     }
 
+    // Whether the operator has already consented to this run's remaining whole-file
+    // writes. See the `allow_writes_for_run` comment in protocol/schema.json for why this
+    // is run-scoped rather than an allowlist of paths.
+    [[nodiscard]] bool writes_allowed_for_run() const noexcept {
+        return allow_writes_for_run_;
+    }
+
+    // Whether the operator clicked "Always allow" on this exact command earlier in this
+    // run. VERBATIM, not by the `allowed_commands` prefix rule: the consent was given for
+    // one string on one card, and widening it to a prefix is a decision that belongs in
+    // settings where the operator can see and edit it.
+    [[nodiscard]] bool command_allowed_for_run(const std::string& command) const {
+        return std::find(run_allowed_commands_.begin(), run_allowed_commands_.end(),
+                         command) != run_allowed_commands_.end();
+    }
+
     bool ask(const std::string& tool, const std::string& command,
              const std::string& preview, const tools::RiskHint& hint) {
         const std::string request_id = run_id_ + "/" + std::to_string(++seq_);
@@ -189,6 +209,10 @@ class RunInbox {
         req.irreversible = loop::is_irreversible(hint);
         req.risk = loop::risk_score(hint);
         req.capabilities = chips_of(hint);
+        // Held so the answer can name what it consented TO. `lmp/approve` carries a
+        // request_id and a flag, not the command -- and taking the command from the reply
+        // would let a malformed one grant consent for something the card never showed.
+        pending_command_ = command;
         notify(req);
 
         bool answer = false;
@@ -293,6 +317,22 @@ class RunInbox {
             if (awaiting != nullptr && surface::string_field(msg, "request_id") == *awaiting) {
                 reply_result(id, R"({"accepted":true})");
                 *answer = surface::bool_field(msg, "approved");
+                // Read even on a denial, and deliberately: "no to this one, yes to the
+                // rest" is not a coherent answer, so the flag only ever arrives with an
+                // approval from the UI. Latching it here rather than in the caller keeps
+                // the run-scoped consent in the one object that owns the card protocol.
+                if (surface::bool_field(msg, "allow_writes_for_run")) {
+                    allow_writes_for_run_ = true;
+                }
+                // Same latch, the command gate's half. Only on an APPROVAL and only for a
+                // card that actually carried a command: "always allow" attached to a
+                // denial, or to a write card, is not a coherent answer and the UI never
+                // sends one.
+                if (*answer && surface::bool_field(msg, "allow_command_for_run") &&
+                    !pending_command_.empty() &&
+                    !command_allowed_for_run(pending_command_)) {
+                    run_allowed_commands_.push_back(pending_command_);
+                }
                 return true;
             }
             // An answer to a card this run has already moved past, or one nobody asked
@@ -332,6 +372,16 @@ class RunInbox {
     std::uint64_t seq_ = 0;
     tools::EditOutcome edit_answer_;
     bool shutdown_ = false;
+    // Latched by one card, spent by the rest of the run, and gone when the run ends. A
+    // member of the inbox rather than of the session, so it cannot outlive the mission
+    // the operator was actually looking at when they granted it.
+    bool allow_writes_for_run_ = false;
+    // The command on the card currently in front of the operator, and the ones they have
+    // said "always" to during this run. Run-scoped for the same reason the write flag is:
+    // the persistent copy is the extension's `allowedCommands`, and consent given to one
+    // mission is not consent to the next.
+    std::string pending_command_;
+    std::vector<std::string> run_allowed_commands_;
 };
 
 // How much the operator wants to be asked, and what may run without asking.
@@ -429,6 +479,8 @@ class RunInbox {
 
     config.context_budget_tokens = static_cast<std::int32_t>(surface::double_field(
         message, "context_budget_tokens", config.context_budget_tokens));
+    config.max_new_tokens = static_cast<std::int32_t>(
+        surface::double_field(message, "max_new_tokens", config.max_new_tokens));
     config.budget.max_iterations = static_cast<int>(
         surface::double_field(message, "max_iterations", config.budget.max_iterations));
     config.budget.wall_clock_seconds = static_cast<int>(surface::double_field(
@@ -486,9 +538,47 @@ bool run_loop(const std::string& run_id, surface::Session& session,
     agent.set_observer(make_observer(run_id));
 
     RunInbox run_inbox(inbox, run_id);
-    agent.set_approver([&run_inbox](const std::string& tool, const std::string& command,
-                                    const std::string& preview,
-                                    const tools::RiskHint& hint) {
+    agent.set_approver([&run_inbox, &log, &clock](const std::string& tool,
+                                                  const std::string& command,
+                                                  const std::string& preview,
+                                                  const tools::RiskHint& hint) {
+        // An empty command is how gate_call spells "this is the write gate" -- the
+        // command path always passes the command verbatim, because a truncated preview is
+        // the wrong thing to build an allowlist rule from.
+        const bool write_gate = command.empty();
+        if (write_gate && run_inbox.writes_allowed_for_run()) {
+            // Answered without a card, so it must still be answered in the LOG. An
+            // auto-approval that leaves no trace is the blind spot the `approval` event
+            // was just added to close, and re-opening it one layer up would be worse:
+            // here the operator really did consent, and the record should say when.
+            platform::Event ev;
+            ev.kind = "approval";
+            ev.fields.push_back({"gate", "write"});
+            ev.fields.push_back({"tool", tool});
+            // The ANSWER to the escalation the gate just recorded: no card was shown, and
+            // the reason is consent the operator gave earlier in this same run.
+            ev.fields.push_back({"card", "0"});
+            ev.fields.push_back({"answer", "approved"});
+            ev.fields.push_back({"why", "operator allowed writes for this run"});
+            log.append(ev, clock);
+            return true;
+        }
+        // The command gate's half. "Always allow" writes a persistent rule through the
+        // extension, and that rule reaches the sidecar at the next `lmp/start` -- so
+        // without this the operator clicks "always" and answers the identical card again
+        // on the very next turn, which is the button not working.
+        if (!write_gate && run_inbox.command_allowed_for_run(command)) {
+            platform::Event ev;
+            ev.kind = "approval";
+            ev.fields.push_back({"gate", "command"});
+            ev.fields.push_back({"tool", tool});
+            ev.fields.push_back({"command", command});
+            ev.fields.push_back({"card", "0"});
+            ev.fields.push_back({"answer", "approved"});
+            ev.fields.push_back({"why", "operator allowed this command for this run"});
+            log.append(ev, clock);
+            return true;
+        }
         return run_inbox.ask(tool, command, preview, hint);
     });
     agent.set_steer_source([&run_inbox]() { return run_inbox.take_messages(); });
@@ -598,6 +688,38 @@ bool start_mission(const std::string& id, const std::string& message,
         log.append(ev, clock);
     }
     session.journal = std::move(journal.journal);
+
+    // The READ side of the store, which for a long time did not exist: src/pcc journalled
+    // faithfully and no tool in this binary could get a byte back out. Declared only when
+    // there is a journal to read -- a run whose database would not open keeps every other
+    // tool and simply does not advertise these two.
+    //
+    // BOTH LAMBDAS RESOLVE THROUGH `session` AT CALL TIME, and neither may capture what
+    // it resolves. ensure_registry() reuses a Registry across missions in the same
+    // workspace, while the two things these tools need are replaced on every mission
+    // (the journal, just above) and on every model load (the tokenizer). Capturing either
+    // by reference would leave mission two reading mission one's freed memory.
+    if (session.journal != nullptr) {
+        (void)session.registry->declare_context_tools(
+            [&session] {
+                tools::Registry::ContextSource src;
+                if (session.journal != nullptr) {
+                    src.store = &session.journal->store();
+                    src.session = session.journal->session_id();
+                }
+                return src;
+            },
+            [&session](std::string_view text) {
+                // THE REAL TOKENIZER, which is the whole reason these tools are native
+                // rather than the pcc_mcp_server's. pcc::recall packs to a TOKEN budget
+                // and its default counter is bytes/4 -- an estimate src/pcc names as one
+                // at every call site because it deliberately does not link src/model.
+                // In-process there is no need to estimate.
+                return session.tok != nullptr
+                           ? session.tok->encode_content(text).size()
+                           : pcc::estimate_tokens(text);
+            });
+    }
     session.client_applies_edits = surface::bool_field(message, "applies_edits");
 
     return run_loop(id, session, inbox, cancel, log, clock);

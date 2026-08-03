@@ -63,9 +63,24 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
             span += "- said: " + first_line(t.assistant_text, 160) + "\n";
             continue;
         }
-        span += "- " + t.tool_name;
-        if (!t.tool_args_summary.empty()) {
-            span += "(" + first_line(t.tool_args_summary, 80) + ")";
+        // The two producers of tool_args_summary do not agree on format, and this line is
+        // PROMPT-FACING. A turn's own call gets preview_of(), which already names the tool
+        // -- "read_file(path=x)" -- while the extra calls batched behind it get a bare path
+        // or command. Prepending the name unconditionally is right for the second and
+        // produced "- read_file(read_file(path=x)) -> ..." for the first, in every
+        // compacted line of every run that ever trimmed.
+        //
+        // The same bug was fixed in the journal (surface/context_journal.cpp, turn_body);
+        // this is the copy that costs tokens rather than index space, in the one place a
+        // run is already short of them.
+        span += "- ";
+        if (t.tool_args_summary.rfind(t.tool_name + "(", 0) == 0) {
+            span += first_line(t.tool_args_summary, 80);
+        } else {
+            span += t.tool_name;
+            if (!t.tool_args_summary.empty()) {
+                span += "(" + first_line(t.tool_args_summary, 80) + ")";
+            }
         }
         span += t.observation_is_error ? " FAILED: " : " -> ";
         span += first_line(t.observation, 200) + "\n";
@@ -79,7 +94,7 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
         const std::vector<TurnRecord> dropped(recent_.begin(),
                                               recent_.begin() +
                                                   static_cast<std::ptrdiff_t>(drop));
-        compaction_sink_(dropped, spans_.size() - 1);
+        compaction_sink_(dropped, spans_.size() - 1, spans_.back());
     }
 
     recent_.erase(recent_.begin(), recent_.begin() + static_cast<std::ptrdiff_t>(drop));
@@ -203,12 +218,44 @@ std::string ContextStore::render_live_state() const {
     }
     if (!verifications_.empty()) {
         s += "\n# Verification ledger\n\n";
+        // ONE LINE PER CONTRACT -- its LATEST state, not every run of it.
+        //
+        // This used to print every record. A run that checks the same command eight times
+        // got eight lines, and if that check was an unproven green it got the same
+        // "(UNPROVEN...)" sentence eight times, growing by one every time it verified.
+        // Repetition is not emphasis to a model reading its own context; it is evidence
+        // that something is escalating, and the run reads the pile as pressure to act on.
+        // The ledger's job is to say what is currently known, and running the same check
+        // twice does not change what is known -- so the count goes in the line instead.
+        std::vector<std::pair<std::string, const VerificationRecord*>> latest;
+        std::vector<std::size_t> runs;
         for (const VerificationRecord& v : verifications_) {
+            bool seen = false;
+            for (std::size_t i = 0; i < latest.size(); ++i) {
+                if (latest[i].first == v.contract) {
+                    latest[i].second = &v;
+                    ++runs[i];
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                latest.emplace_back(v.contract, &v);
+                runs.push_back(1);
+            }
+        }
+        for (std::size_t i = 0; i < latest.size(); ++i) {
+            const VerificationRecord& v = *latest[i].second;
             s += std::string(v.passed ? "- PASS " : "- FAIL ") + v.contract;
+            if (runs[i] > 1) {
+                s += " (run " + std::to_string(runs[i]) + "x)";
+            }
             // A green that has not been proven capable of red is reported as unproven,
-            // to the model as well as the UI (S10.2).
-            s += v.passed && !v.falsifiable ? "  (UNPROVEN: this check has not been"
-                                              " shown capable of failing)\n"
+            // to the model as well as the UI (S10.2). Said ONCE, and said as a fact about
+            // the check rather than as a demand -- what to do about it belongs to the
+            // baseline finding, which says it once, at the point the criterion is set.
+            s += v.passed && !v.falsifiable ? "  (not yet evidence: this check has not been"
+                                              " seen to fail)\n"
                                             : "\n";
         }
     }
