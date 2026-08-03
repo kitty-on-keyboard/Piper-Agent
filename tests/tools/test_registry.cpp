@@ -153,6 +153,79 @@ TEST(write_read_replace_round_trip) {
     CHECK(rd.summary.find("42") != std::string::npos);
 }
 
+// Writing into a directory that does not exist yet is the FIRST thing an agent does in an
+// empty workspace, and it used to fail -- on the atomic write's temp file, so the message
+// named `src/store.py.tmp.8276: No such file or directory`, a path the model never wrote.
+//
+// This is the defect that cost a real 40-turn run everything it had: the model produced
+// 8 KB of correct code six times against that error before stumbling onto `mkdir -p src`
+// in a shell call. The parent is made now, at the one choke point every write tool shares.
+TEST(a_write_creates_the_directories_its_path_names) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    const ToolResult w = reg.execute(
+        "write_file", args({{"path", "src/store.py"}, {"content", "VALUE = 1\n"}}), 1);
+    REQUIRE(w.ok());
+
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(root + "/src/store.py", 1U << 20);
+    CHECK_EQ(f.bytes, std::string("VALUE = 1\n"));
+
+    // Nested, and via append_file -- the other tool that may name a path nothing created.
+    const ToolResult a = reg.execute(
+        "append_file", args({{"path", "tests/unit/test_store.py"}, {"content", "pass\n"}}), 1);
+    REQUIRE(a.ok());
+    const lmp::platform::FileContents g =
+        lmp::platform::read_file_whole(root + "/tests/unit/test_store.py", 1U << 20);
+    CHECK_EQ(g.bytes, std::string("pass\n"));
+
+    // Still contained: a path that escapes is refused before any directory is made.
+    const ToolResult esc = reg.execute(
+        "write_file", args({{"path", "../escaped/x.py"}, {"content", "x\n"}}), 1);
+    CHECK(esc.status == Status::Refused);
+}
+
+// A write that failed for a reason the same call will hit again must not be advertised as
+// worth retrying: `retryable` is what the loop's BreakRepeat corrective keys off, and a
+// retryable error is never counted as an unrecoverable repeat. Every write failure used to
+// be Transient+retryable, so a byte-identical failing write could loop until the budget ran
+// out -- and did, six times in one run.
+// A successful call that says nothing is worse than a failure: an empty observation is
+// dropped from the rendered prompt, so the next turn's prompt is byte-identical and a
+// fixed seed reproduces the same call forever. Two real runs died this way -- `shell` on
+// a silent `mkdir`, and `read_file` on a 0-byte file for 17 consecutive turns.
+TEST(no_tool_returns_a_silent_success) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    // A file that exists and is empty says so, rather than returning "".
+    REQUIRE(reg.execute("write_file", args({{"path", "empty.py"}, {"content", ""}}), 1).ok());
+    const ToolResult rd = reg.execute("read_file", args({{"path", "empty.py"}}), 1);
+    REQUIRE(rd.ok());
+    CHECK(!rd.summary.empty());
+    CHECK(rd.summary.find("empty") != std::string::npos);
+
+    // A command with no output does too.
+    const ToolResult sh = reg.execute("shell", args({{"command", "mkdir -p made/here"}}), 1);
+    REQUIRE(sh.ok());
+    CHECK(!sh.summary.empty());
+}
+
+TEST(a_deterministic_write_failure_is_not_reported_as_retryable) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file", args({{"path", "occupied"}, {"content", "x"}}), 1).ok());
+
+    // `occupied` is a file, so `occupied/inside.py` can never be created, however often
+    // it is tried.
+    const ToolResult r = reg.execute(
+        "write_file", args({{"path", "occupied/inside.py"}, {"content", "y"}}), 1);
+    CHECK(r.status == Status::ToolError);
+    CHECK(!r.retryable);
+    CHECK(r.error_class != ErrorClass::Transient);
+}
+
 TEST(ambiguous_replace_refuses_and_leaves_the_file_alone) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);

@@ -63,6 +63,35 @@ TEST(the_choke_point_records_every_result_including_refusals) {
     CHECK(ctx.verifications()[2].detail.find("REFUSED") == 0);
 }
 
+// A red that only means "there is no such command" is not evidence the check can fail,
+// and must not buy a falsifiability proof (S10.2, S6.2).
+//
+// MEASURED: a run declared `python -m pytest ...` on a host whose only interpreter is
+// `python3`. The baseline came back red -- exit 127, `command not found` -- and that red
+// marked the contract falsifiable. pytest had never been executed once.
+TEST(a_command_that_could_not_run_is_not_a_red) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    tools::Registry reg = make_registry(root);
+    context::ContextStore ctx("m");
+    loop::Verifier v(reg, ctx);
+
+    CHECK(!v.run_and_record("definitely-not-a-real-command-xyz --version", 1));
+    REQUIRE(ctx.verifications().size() == 1);
+    const context::VerificationRecord& rec = ctx.verifications()[0];
+    CHECK(!rec.passed);
+    CHECK(!rec.ran); // never executed, so not evidence in either direction
+    CHECK(rec.detail.find("NEVER RAN") == 0);
+
+    // And therefore it proves nothing: a later green off the back of it stays unproven.
+    CHECK(!v.is_proven("definitely-not-a-real-command-xyz --version"));
+
+    // A command that DOES run and fails is still a real red.
+    CHECK(!v.run_and_record("false", 1));
+    CHECK(ctx.verifications()[1].ran);
+    CHECK(v.is_proven("false"));
+}
+
 TEST(an_unproven_check_is_recorded_as_unproven) {
     const std::string root = temp_dir();
     REQUIRE(!root.empty());

@@ -97,6 +97,22 @@ enum class Corrective : std::uint8_t {
     // the run, by dropping it from the grammar's spec list. Asking again is then not
     // discouraged, it is impossible.
     BlockRefusedTool,
+    // Mechanism: tell the run how many turns remain, once, while it still has enough of
+    // them to land safely.
+    //
+    // This exists because the completion rule has a sharp edge. A green check does not
+    // finish a run until it has been shown capable of RED (S10.2), so a run whose contract
+    // was already green when declared has to prove it: break the behaviour, watch it fail,
+    // restore, watch it pass. That is the right procedure and the model performs it -- but
+    // it is the one procedure with a state in the middle where the workspace is
+    // DELIBERATELY BROKEN, and HaltOnBudget does not care.
+    //
+    // MEASURED, twice: a run that had written a complete, passing implementation started
+    // the proof around turn 38 and the budget ended at 40, mid-proof. Both times the
+    // workspace was left with the injected bug still in it -- once with 9 failing tests,
+    // once not even importable. The harness's own evidence rule corrupted the deliverable
+    // it was there to protect.
+    BudgetNearlyGone,
     // Mechanism: end the run. Not a request -- a control-flow change.
     HaltOnBudget,
 };
@@ -155,14 +171,54 @@ class RefusalLedger {
 // Never returns an empty list. With nothing samplable a turn can emit no call at all,
 // which is exactly the deadlock the deleted `must_reconcile` restriction caused; `plan`
 // is always a legal move and always clears its own precondition, so it is the floor.
+// Drops ONE tool for ONE turn -- the narrowing half of BreakRepeat, which was declared as
+// this corrective's mechanism from the start and was never implemented. Until it was, the
+// corrective appended a note asking the model to stop repeating itself and left the
+// identical call fully samplable on the next turn.
+//
+// MEASURED: a real editor run spent all 80 turns alternating `list_dir ResMon` and
+// `list_dir ResMon/`, and on the turns BreakRepeat did fire, nothing changed.
+//
+// Separate from without_blocked() because the lifetime is different -- a refused tool is
+// gone for the rest of the run, this one is gone for a single turn -- and because a
+// repeated tool is usually the RIGHT tool with wrong arguments. Same floor: never returns
+// an empty list, since a turn with nothing samplable can emit no call at all.
+[[nodiscard]] std::vector<parsephony::ToolSpec> without_suppressed(
+    const std::vector<parsephony::ToolSpec>& specs, const std::string& tool);
+
 [[nodiscard]] std::vector<parsephony::ToolSpec> without_blocked(
     const std::vector<parsephony::ToolSpec>& specs, const RefusalLedger& refusals,
     const std::vector<parsephony::ToolSpec>& all_specs);
 
+// What a run is allowed to spend. These are ceilings on a RUNAWAY, not a target for a
+// healthy run, and they were set too low to finish real work.
+//
+// MEASURED on the KV-store-with-TTL-and-transactions mission (write an implementation,
+// write a suite, iterate until green, prove the check falsifiable): the run that got all
+// the way through declared completion on turn 41. At the old ceiling of 40 it was cut off
+// one turn short -- and the two before it were cut off mid-falsifiability-proof, each
+// leaving a deliberately-injected bug in the workspace. Coding and debugging take turns;
+// a ceiling tight enough to end ordinary work is measuring the ceiling, not the agent.
+//
+// The two must move TOGETHER. Turns measured 12.1-12.7 s on that mission, so 80 turns is
+// ~1000 s of wall clock and the old 900 s limit would have ended every long run on time
+// before it ended on turns -- swapping one arbitrary cutoff for another while looking
+// like a fix. 1800 s is ~1.8x the measured rate, which absorbs the slow turns (a 3000-token
+// write is ~40 s) without letting a genuinely hung run sit forever.
 struct Budget {
-    int max_iterations = 40;
-    int wall_clock_seconds = 900;
+    int max_iterations = 80;
+    int wall_clock_seconds = 1800;
 };
+
+// How many iterations before the limit the run is warned. See Corrective::BudgetNearlyGone
+// for why a warning exists at all: it is the margin in which a half-finished
+// falsifiability proof can be undone.
+//
+// Eight rather than five: five was tried and measured too short. The run it fired on was
+// part-way through restoring a multi-method edit, acted on the warning immediately, and
+// still ran out -- so the margin has to cover a restore that is several edits long, not
+// just one file write and a re-run.
+inline constexpr int kBudgetWarningTurns = 8;
 
 // Ranks the applicable correctives and returns the single highest. At most one per
 // turn (S9.2).
