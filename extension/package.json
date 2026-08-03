@@ -172,11 +172,13 @@
         },
         "lmPipe.maxIterations": {
           "type": "number",
-          "default": 40
+          "default": 80,
+          "description": "Turns a run may take before it is cut off. Measured: a full build-and-test mission declared completion on turn 41, and shorter ceilings ended runs mid-work. Raise wallClockSeconds with this -- at ~13s a turn the two must not disagree about which one stops the run."
         },
         "lmPipe.wallClockSeconds": {
           "type": "number",
-          "default": 900
+          "default": 1800,
+          "description": "Seconds a run may take. A ceiling on a hung run, not a target: keep it comfortably above maxIterations x the per-turn time, or it ends healthy runs on time before they end on turns."
         },
         "lmPipe.contextBudgetTokens": {
           "type": "number",
