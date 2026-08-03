@@ -64,6 +64,7 @@ export interface PerfSample {
   context_used: number;
   context_max: number;
   tokens_generated: number;
+  compactions: number;
 }
 
 export interface StartParams {

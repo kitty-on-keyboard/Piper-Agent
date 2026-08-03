@@ -19,7 +19,19 @@
 
 namespace lmp::loop {
 
+// The command with its status-swallowing wrappers removed, and NOTHING else changed --
+// this is the form that is actually executed.
+//
+// A shell pipeline exits with the status of its last element, so `pytest tests/ | tail -20`
+// reports tail's success as the check's: it cannot fail, and a run whose contract cannot
+// fail has no feedback loop at all. Running this form instead is what makes the exit code
+// mean what the ledger says it means.
+[[nodiscard]] std::string executable_form(std::string_view command);
+
 // Strips reporting wrappers and normalises whitespace so one contract has one identity.
+//
+// The IDENTITY, never something to run: the whitespace collapse would rewrite a quoted
+// argument (`pytest -k "a  or  b"`). Use executable_form() to execute.
 [[nodiscard]] std::string canonicalize_check(std::string_view command);
 
 class Verifier {

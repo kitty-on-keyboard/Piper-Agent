@@ -2,6 +2,13 @@
 
 #include <algorithm>
 
+// For canonicalize_check: the completion gate has to look a contract up in the same form
+// the Verifier files it under.
+#include "src/loop/verification.hpp"
+// For lexically_normal: a repeat is the same call, not the same bytes. See
+// RepeatDetector::key.
+#include "src/platform/fs.hpp"
+
 namespace lmp::loop {
 
 std::string_view to_string(Outcome o) noexcept {
@@ -61,6 +68,17 @@ Outcome classify_turn(const model::GenResult& gen, const model::TurnGrammar& gra
     return grammar.has_tool_call() ? Outcome::ToolCallRefused : Outcome::TextOnly;
 }
 
+// A repeat is the same CALL, not the same bytes. `ResMon` and `ResMon/` name one
+// directory, and keying on the raw value made them two different calls -- so a run could
+// alternate the trailing slash and repeat itself forever without the detector ever
+// counting past one.
+//
+// MEASURED: a real run in the editor spent its entire 80-turn budget alternating
+// `list_dir ResMon` and `list_dir ResMon/`, learning nothing, and BreakRepeat fired on
+// almost none of it. Normalising the path arguments is what makes the two the same key.
+//
+// Only path-shaped parameters are normalised. A `command` or a `content` argument is raw
+// text where a trailing slash is a real difference.
 std::string RepeatDetector::key(const std::string& tool,
                                 const std::vector<tools::ToolParamValue>& params) {
     std::string k = tool;
@@ -68,7 +86,7 @@ std::string RepeatDetector::key(const std::string& tool,
         k += '\x1f';
         k += p.name;
         k += '\x1e';
-        k += p.value;
+        k += p.name == "path" ? platform::lexically_normal(p.value) : p.value;
     }
     return k;
 }
@@ -130,6 +148,23 @@ bool RefusalLedger::is_blocked(const std::string& tool) const {
     return false;
 }
 
+std::vector<parsephony::ToolSpec> without_suppressed(
+    const std::vector<parsephony::ToolSpec>& specs, const std::string& tool) {
+    if (tool.empty()) {
+        return specs;
+    }
+    std::vector<parsephony::ToolSpec> allowed;
+    for (const parsephony::ToolSpec& s : specs) {
+        if (s.name != tool) {
+            allowed.push_back(s);
+        }
+    }
+    // Suppressing the only samplable tool would leave the grammar unsatisfiable, and the
+    // turn would come back TextOnly for a reason the model cannot see. Better to allow the
+    // repeat than to hand it a turn it cannot spend.
+    return allowed.empty() ? specs : allowed;
+}
+
 std::vector<parsephony::ToolSpec> without_blocked(
     const std::vector<parsephony::ToolSpec>& specs, const RefusalLedger& refusals,
     const std::vector<parsephony::ToolSpec>& all_specs) {
@@ -159,6 +194,16 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
     // Ranked; the highest applicable one wins, and only one is returned (S9.2).
     if (wall_clock_exhausted || iterations_used >= budget.max_iterations) {
         return Corrective::HaltOnBudget;
+    }
+    // Immediately below the halt, and above everything else: a run about to be cut off
+    // needs to hear that before it needs anything else. Fires on ONE exact iteration, so
+    // it cannot repeat -- and the loop's own emit records that it was delivered.
+    //
+    // Five turns is enough to restore a broken file and re-run the check (the proof it is
+    // most likely to be in the middle of), and small enough that a healthy run never sees
+    // it as anything but a footnote.
+    if (iterations_used == budget.max_iterations - kBudgetWarningTurns) {
+        return Corrective::BudgetNearlyGone;
     }
     // Above BreakRepeat: this one is the difference between a run that ends and a run
     // that spends its whole budget asking a question already answered. The second
@@ -263,7 +308,17 @@ CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
     // proof of falsifiability -- so the ledger of a healthy run always contains a
     // failure. Scanning the whole ledger read the evidence of rigour as evidence of
     // breakage.
-    const std::string& declared = ctx.verify_contract();
+    // CANONICALIZED, because that is the form every record is filed under -- the store
+    // keeps the contract exactly as it was declared, and both writers (baseline_check and
+    // the shell path in dispatch_call) key their records by canonicalize_check() of it.
+    // Comparing the raw string here means a contract that is not already in canonical
+    // form matches NOTHING: `latest` stays null, and a run whose check is green and proven
+    // reports "the declared contract has not run" until the budget kills it.
+    //
+    // Any wrapper is enough to trigger it -- doubled whitespace, a trailing `2>&1`, a
+    // `| tail -20` -- and the failure is silent, because every individual reading in the
+    // ledger looks correct.
+    const std::string declared = canonicalize_check(ctx.verify_contract());
     const context::VerificationRecord* latest = nullptr;
     for (const context::VerificationRecord& v : vs) {
         if (!v.ran) {

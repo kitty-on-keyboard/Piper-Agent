@@ -13,9 +13,48 @@ std::string trim(std::string s) {
     return s;
 }
 
+// A trailing pipe into a pager or a truncator: `| tail -20`, `| head -n 5`, `| cat`.
+//
+// These are not neutral, and that is the point of removing them rather than tolerating
+// them. A shell pipeline exits with the status of its LAST element, so
+// `pytest tests/ | tail -20` exits 0 when pytest fails, when pytest errors, and when
+// there is no pytest at all -- `tail` succeeded either way.
+//
+// MEASURED: a run declared `python -m pytest tests/ -v --tb=short 2>&1 | tail -20` as its
+// contract in an EMPTY workspace. `python` does not exist on this host, so the baseline
+// was `command not found` -- and it was recorded as PASSING, because tail exited 0. The
+// agent was told its tests already passed before it had written a line, and no failing
+// test it wrote afterwards could ever be seen to fail.
+//
+// Only formatters are stripped. `| grep -q FAIL` and `| wc -l` are predicates whose
+// status is load-bearing, and removing one would change what is being checked.
+std::size_t formatter_pipe_at(const std::string& s) {
+    static constexpr std::string_view kFormatters[] = {"cat", "tail", "head",
+                                                       "tee", "less", "more"};
+    const std::size_t bar = s.find_last_of('|');
+    // `||` is an or-list, not a pipe, and its right side is a real command.
+    if (bar == std::string::npos || bar == 0 || s[bar - 1] == '|' ||
+        (bar + 1 < s.size() && s[bar + 1] == '|')) {
+        return std::string::npos;
+    }
+    const std::size_t word = s.find_first_not_of(" \t", bar + 1);
+    if (word == std::string::npos) {
+        return std::string::npos;
+    }
+    const std::size_t end = s.find_first_of(" \t", word);
+    const std::string name =
+        s.substr(word, end == std::string::npos ? std::string::npos : end - word);
+    for (std::string_view f : kFormatters) {
+        if (name == f) {
+            return bar;
+        }
+    }
+    return std::string::npos;
+}
+
 } // namespace
 
-std::string canonicalize_check(std::string_view command) {
+std::string executable_form(std::string_view command) {
     std::string s(command);
 
     // Strip reporting wrappers that change nothing about what is being verified. This
@@ -35,9 +74,19 @@ std::string canonicalize_check(std::string_view command) {
                 changed = true;
             }
         }
+        // After the fixed trailers, so `... | tail -20` and then the `2>&1` it was hiding
+        // both come off in one pass.
+        if (const std::size_t bar = formatter_pipe_at(s); bar != std::string::npos) {
+            s.resize(bar);
+            changed = true;
+        }
     }
+    return s;
+}
 
-    // Collapse internal whitespace so spacing is not an identity.
+namespace {
+
+std::string collapse_spaces_for_identity(const std::string& s) {
     std::string out;
     bool in_space = false;
     for (char c : s) {
@@ -53,6 +102,16 @@ std::string canonicalize_check(std::string_view command) {
         out.push_back(c);
     }
     return out;
+}
+
+} // namespace
+
+// IDENTITY, not something to run. The whitespace collapse is exactly why this and
+// executable_form() are two functions: `pytest -k "a  or  b"` is the same CHECK as its
+// single-spaced spelling and must share one ledger entry, but it is NOT the same command,
+// and running this form would silently rewrite the model's own quoted arguments.
+std::string canonicalize_check(std::string_view command) {
+    return collapse_spaces_for_identity(executable_form(command));
 }
 
 bool Verifier::is_proven(const std::string& command) const {
@@ -83,20 +142,34 @@ bool Verifier::run_and_record(const std::string& command, int approved_tier) {
 
 bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
                                  const std::string& contract_id) {
+    // What RUNS has the status-swallowing wrappers removed and nothing else changed.
+    // A contract came to be recorded green on the strength of `tail`'s exit status; this
+    // is the fix. It cannot run something weaker than what was asked for -- it removes
+    // only the part that was hiding the answer. Deliberately NOT canonicalize_check(),
+    // which also collapses whitespace: that is right for a ledger key and wrong for a
+    // command line.
+    const std::string to_run = executable_form(command);
     const tools::ToolResult r =
-        registry_.execute("shell", {{"command", command}}, approved_tier);
+        registry_.execute("shell", {{"command", to_run}}, approved_tier);
 
     context::VerificationRecord rec;
     rec.contract = contract_id;
     // Refused is NOT failed (S6.2): the command never ran, so it is not evidence in
     // either direction, and recording it as a failure would send the agent off fixing
     // a build that was never attempted.
+    //
+    // A command the shell could not execute is the same case wearing a different exit
+    // code -- see ToolResult::never_executed(). `python: command not found` is not the
+    // test suite failing, and counting it as a red would hand the run a falsifiability
+    // proof for a check that has never once been executed.
     rec.passed = r.status == tools::Status::Ok;
-    rec.ran = r.status != tools::Status::Refused;
+    rec.ran = r.status != tools::Status::Refused && !r.never_executed();
     // Asked BEFORE this record joins the ledger, so a check cannot prove itself.
     rec.falsifiable = is_proven(contract_id);
-    rec.detail = r.status == tools::Status::Refused
-                     ? "REFUSED (never ran): " + r.summary
+    rec.detail = r.status == tools::Status::Refused ? "REFUSED (never ran): " + r.summary
+                 : r.never_executed()
+                     ? "NEVER RAN (the command could not be executed, so this is not "
+                       "evidence either way): " + r.summary
                      : r.summary;
     ctx_.record_verification(rec);
     return rec.passed;
@@ -111,8 +184,11 @@ bool Verifier::prove_falsifiable(const std::string& command, int approved_tier,
     }
 
     const auto run = [&]() {
-        return registry_.execute("shell", {{"command", command}}, approved_tier).status ==
-               tools::Status::Ok;
+        // Same reason as run_and_record_as: a green/red/green sequence read off a
+        // formatter's exit status would prove nothing at all.
+        return registry_.execute("shell", {{"command", executable_form(command)}},
+                                 approved_tier)
+                   .status == tools::Status::Ok;
     };
 
     // Green first: a check that is already red proves nothing by being broken.

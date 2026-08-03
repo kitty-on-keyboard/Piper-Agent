@@ -15,6 +15,7 @@
 #include <mlx/device.h>
 #include <mlx/memory.h>
 #include <mlx/ops.h>
+#include <mlx/stream.h>
 #include <mlx/transforms.h>
 
 #include "src/model/mlx/qwen35_moe_model.hpp"
@@ -28,6 +29,11 @@ namespace mx = mlx::core;
 
 struct MlxBackend::Impl {
     mlxl::Qwen35MoeModel model;
+    // What wire_working_set() displaced, so unloading can put it back. Held here rather
+    // than in the header because the no-MLX build never sets it, and an unread private
+    // member is a -Wunused-private-field error in this tree.
+    std::size_t prev_wired_limit = 0;
+    bool wired = false;
     // The turn checkpoint: the caches as they stood at the end of the last prompt's
     // STABLE prefix. Held here rather than in the header because CacheCheckpoint is
     // MLX-shaped and mlx headers stay out of mlx_backend.hpp.
@@ -67,24 +73,61 @@ std::size_t prefill_chunk() {
 //
 // max_recommended_working_set_size is what mlx-lm passes, and a value above the system
 // wired limit is an error, so clamp to it rather than to the model size.
-void wire_working_set() {
+// Returns the displaced limit through `previous`, and whether it wired anything at all:
+// undoing this on unload is what gives the memory back (see ~MlxBackend), and undoing a
+// limit that was never raised would pin the WRONG value.
+bool wire_working_set(std::size_t& previous) {
     if (!mx::metal::is_available()) {
-        return;
+        return false;
     }
     // mx::metal::device_info() is declared in the headers but no longer exported by the
     // 0.31.2 dylib; mx::device_info() is the current spelling and carries the same keys.
     const auto& info = mx::device_info();
     const auto it = info.find("max_recommended_working_set_size");
     if (it == info.end()) {
-        return;
+        return false;
     }
     if (const auto* limit = std::get_if<std::size_t>(&it->second)) {
-        mx::set_wired_limit(*limit);
+        previous = mx::set_wired_limit(*limit);
+        return true;
     }
+    return false;
+}
+
+MemoryReport mlx_memory_report() {
+    return {mx::get_active_memory(), mx::get_cache_memory(), mx::get_peak_memory()};
 }
 
 MlxBackend::MlxBackend(const platform::Clock& clock) : clock_(clock) {}
-MlxBackend::~MlxBackend() = default;
+
+// UNLOADING HAS TO SAY SO TO MLX. Destroying the arrays is necessary and not sufficient:
+// MLX's allocator returns their Metal buffers to its OWN cache, not to the OS, and the
+// working set is still wired resident from load. So `lmp/unload_model` replied
+// `{"unloaded":true}`, the surface said "unloaded", and all ~19 GB stayed resident until
+// the process exited -- which is the whole reason unload existed.
+//
+// Three steps, in this order:
+//   synchronize   -- pending GPU work holds references to the very buffers being freed
+//   destroy       -- arrays go, their buffers land in MLX's cache
+//   clear_cache   -- the cache gives them back to the OS. This is the step that was
+//                    missing; without it the two above only move the memory sideways.
+//   unwire        -- restore the limit load() displaced, so nothing stays pinned
+//
+// This also runs on the RELOAD path, where load_model() resets the backend before
+// reading new weights precisely so the peak is one checkpoint and not two.
+MlxBackend::~MlxBackend() {
+    if (!impl_) {
+        return;
+    }
+    const std::size_t prev_wired = impl_->prev_wired_limit;
+    const bool wired = impl_->wired;
+    mx::synchronize();
+    impl_.reset();
+    mx::clear_cache();
+    if (wired) {
+        mx::set_wired_limit(prev_wired);
+    }
+}
 
 LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
     if (loaded_) {
@@ -95,11 +138,15 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
     }
     impl_ = std::make_unique<Impl>();
     if (!impl_->model.load(config.model_dir)) {
+        // A load that got part way still allocated, and those buffers are in MLX's cache
+        // exactly as a successful load's would be. Giving them back here matters most on
+        // the reload path, where the caller is about to try a different checkpoint.
         impl_.reset();
+        mx::clear_cache();
         return {false, config.model_dir + ": model load failed (missing config.json or "
                        "safetensors)"};
     }
-    wire_working_set();
+    impl_->wired = wire_working_set(impl_->prev_wired_limit);
     spec_ = config.speculative;
     loaded_ = true;
     return {true, {}};
@@ -466,6 +513,9 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
 #else // !LMP_HAVE_MLX
 
 struct MlxBackend::Impl {};
+
+// Nothing is allocated without MLX, so there is nothing to report and nothing to free.
+MemoryReport mlx_memory_report() { return {}; }
 
 MlxBackend::MlxBackend(const platform::Clock& clock) : clock_(clock) {}
 MlxBackend::~MlxBackend() = default;
