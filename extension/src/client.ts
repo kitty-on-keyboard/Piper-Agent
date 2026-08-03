@@ -177,8 +177,26 @@ export class SidecarClient extends EventEmitter {
     return this.request("lmp/cancel", { run_id: runId });
   }
 
-  approve(requestId: string, approved: boolean): Promise<Reply<{ accepted: boolean }>> {
-    return this.request("lmp/approve", { request_id: requestId, approved });
+  /** `allowWritesForRun` carries the operator's consent to the rest of THIS run's
+   *  whole-file writes. Run-scoped and never persisted, unlike the command allowlist,
+   *  which the extension stores in settings -- see protocol/schema.json for why the two
+   *  gates need different shapes. */
+  /** `allowCommandForRun` is the other half of "Always allow". The persistent rule goes
+   *  to settings, which is where it belongs -- but settings reach the sidecar only at the
+   *  next lmp/start, so the run that raised the card would keep asking. Both halves are
+   *  sent because each covers what the other cannot. */
+  approve(
+    requestId: string,
+    approved: boolean,
+    allowWritesForRun = false,
+    allowCommandForRun = false
+  ): Promise<Reply<{ accepted: boolean }>> {
+    return this.request("lmp/approve", {
+      request_id: requestId,
+      approved,
+      allow_writes_for_run: allowWritesForRun,
+      allow_command_for_run: allowCommandForRun,
+    });
   }
 
   /** The answer to an lmp/edit. The sidecar BLOCKS on this: `applied:false` carries the

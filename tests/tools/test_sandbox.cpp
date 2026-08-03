@@ -3,6 +3,7 @@
 // These tests attack the sandbox and pass only when the attack fails.
 
 #include <csignal>
+#include <climits>
 #include <unistd.h>
 
 #include <cstdlib>
@@ -232,4 +233,131 @@ TEST(the_seatbelt_profile_denies_by_default_where_it_matters) {
     CHECK(p.find("(deny network*)") != std::string::npos);
     CHECK(p.find("(deny file-write*)") != std::string::npos);
     CHECK(p.find("(subpath \"/work/repo\")") != std::string::npos);
+}
+
+namespace {
+
+// RESOLVED, like the profile's own paths: confstr answers /var/folders/..., /var is a
+// symlink to /private/var, and Seatbelt matches subpaths after resolution -- so an
+// unresolved rule matches nothing. Comparing the unresolved form here would fail against
+// a correct profile, which is how this test first ran.
+std::string user_temp_root() {
+    char buf[PATH_MAX];
+    const std::size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, buf, sizeof(buf));
+    if (n == 0 || n > sizeof(buf)) {
+        return {};
+    }
+    char real[PATH_MAX];
+    std::string out = ::realpath(buf, real) != nullptr ? std::string(real) : std::string(buf);
+    while (out.size() > 1 && out.back() == '/') {
+        out.pop_back();
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(atomic_saves_are_allowed_without_opening_the_temp_root) {
+    // macOS stages every atomic save in .../T/TemporaryItems and renames it into place,
+    // so a jail that denies that directory denies `swift build` writing its own build
+    // manifests INSIDE the workspace -- with an error naming the destination file, which
+    // is why it read as a permissions problem with the workspace.
+    //
+    // The narrowness is the assertion: TemporaryItems is allowed, the temp root that
+    // contains it is not. Allowing the root instead is the escape the next test attacks.
+    const std::string p = seatbelt_profile("/work/repo");
+    const std::string temp_root = user_temp_root();
+    REQUIRE(!temp_root.empty());
+
+    CHECK(p.find("(subpath \"" + temp_root + "/TemporaryItems\")") != std::string::npos);
+    CHECK(p.find("(subpath \"" + temp_root + "\")") == std::string::npos);
+}
+
+TEST(a_write_into_the_per_user_temp_root_is_still_stopped) {
+    // The break-out test above writes wherever TMPDIR points, which on a machine that
+    // does not set it is /tmp. This one names the per-user temp root explicitly, because
+    // that is the directory the toolchain allowance sits INSIDE and the one an
+    // over-broad rule would have opened.
+    const std::string root = temp_dir();
+    const std::string temp_root = user_temp_root();
+    REQUIRE(!root.empty());
+    REQUIRE(!temp_root.empty());
+
+    const std::string target = temp_root + "/lmp_escape_probe.txt";
+    ::unlink(target.c_str());
+    const ExecutionGrant grant = grant_execution(SandboxTier::T1_Seatbelt);
+    const ExecOutcome o =
+        run_sandboxed(grant, "echo pwned > '" + target + "'", root, root, limits(10));
+
+    CHECK(o.status == Status::ToolError);
+    const lmp::platform::FileContents f = lmp::platform::read_file_whole(target, 1024);
+    CHECK(f.status == lmp::platform::FsStatus::NotFound);
+}
+
+TEST(an_approved_tier_number_names_the_tier_the_operator_asked_for) {
+    // sandbox_tier=3 was accepted by the wire, acknowledged by name in the editor, and
+    // then routed to the container by every execution site -- which refused for want of a
+    // runtime. The operator's own opt-in was unreachable.
+    CHECK(tier_for(0) == SandboxTier::T0_NoExec);
+    CHECK(tier_for(1) == SandboxTier::T1_Seatbelt);
+    CHECK(tier_for(2) == SandboxTier::T2_Container);
+    CHECK(tier_for(3) == SandboxTier::T3_HostUnsandboxed);
+    // Out of range clamps DOWN, never onto the least contained tier: an unrecognised
+    // number must not be how the jail comes off (S13).
+    CHECK(tier_for(-1) == SandboxTier::T0_NoExec);
+    CHECK(tier_for(4) == SandboxTier::T2_Container);
+    CHECK(tier_for(99) == SandboxTier::T2_Container);
+}
+
+TEST(t1_makes_swiftpm_runnable_without_touching_the_tier) {
+    // The nesting is not a filesystem problem and no profile allowance fixes it: macOS
+    // refuses the inner sandbox_apply outright. Measured against a real package -- T1
+    // with the flag and T3 without it produce byte-identical compiler output.
+    CHECK(t1_compat_rewrite("swift build") == "swift build --disable-sandbox");
+    CHECK(t1_compat_rewrite("swift test") == "swift test --disable-sandbox");
+    CHECK(t1_compat_rewrite("swift run") == "swift run --disable-sandbox");
+
+    // The shape an operator's verify contract actually has. This is the case the note
+    // could never fix: the contract is run verbatim, so a `swift test` contract was
+    // unpassable at T1 however correct the code became.
+    CHECK(t1_compat_rewrite("cd /w/p && swift test") ==
+          "cd /w/p && swift test --disable-sandbox");
+    // Inserted after the SUBCOMMAND, so a caller's own trailing pipeline still applies to
+    // the whole invocation rather than being handed to swift as arguments.
+    CHECK(t1_compat_rewrite("swift test 2>&1 | tee out.txt") ==
+          "swift test --disable-sandbox 2>&1 | tee out.txt");
+    CHECK(t1_compat_rewrite("/usr/bin/swift build -v") ==
+          "/usr/bin/swift build --disable-sandbox -v");
+}
+
+TEST(t1_leaves_alone_everything_that_is_not_a_swiftpm_build) {
+    // Empty means "unchanged", and the quiet cases matter as much as the loud one: a
+    // rewrite that fires on the wrong command line is a command the operator did not
+    // write, running as if they had.
+    CHECK(t1_compat_rewrite("swift build --disable-sandbox").empty()); // already asked
+    CHECK(t1_compat_rewrite("swiftc main.swift").empty());             // different program
+    CHECK(t1_compat_rewrite("swift --version").empty());               // rejects the flag
+    CHECK(t1_compat_rewrite("swift package describe").empty());        // out of scope
+    CHECK(t1_compat_rewrite("xcodebuild test").empty());  // needs T3, not a flag
+    CHECK(t1_compat_rewrite("cmake --build build").empty());
+    // The word appearing is not the command running.
+    CHECK(t1_compat_rewrite("echo swift build").empty());
+    CHECK(t1_compat_rewrite("grep -r 'swift test' .").empty());
+}
+
+TEST(only_t1_rewrites_because_only_t1_nests) {
+    // T3 exists so a toolchain T1 cannot host still has a way to run. If the harness
+    // altered the command there too, the two tiers would stop being comparable -- and
+    // "it fails identically at T1 and T3" is the evidence that separates a harness
+    // problem from a broken build. A real run lost its whole budget for want of it.
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    const ExecOutcome host = run_sandboxed(grant_execution(SandboxTier::T3_HostUnsandboxed),
+                                           "echo swift build", root, root, limits(10));
+    CHECK(host.rewritten_command.empty());
+
+    const ExecOutcome jailed = run_sandboxed(grant_execution(SandboxTier::T1_Seatbelt),
+                                             "echo hello", root, root, limits(10));
+    CHECK(jailed.rewritten_command.empty());
 }

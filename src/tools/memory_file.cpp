@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <system_error>
 
+#include "src/pcc/store.hpp"
 #include "src/platform/fs.hpp"
 
 // The cross-session memory file (spec S8). Split out of registry.cpp because it is the one
@@ -64,25 +65,85 @@ platform::WriteResult Registry::commit_write(const std::string& abs_path,
     return w;
 }
 
-ToolResult Registry::remember_fact(const std::string& raw) {
+namespace {
+
+// One line's worth of text: newlines and tabs folded to spaces, ends trimmed. Empty when
+// there was nothing but whitespace.
+std::string one_line(const std::string& raw) {
+    std::string s;
+    s.reserve(raw.size());
+    for (const char c : raw) {
+        s += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+    }
+    const std::size_t first = s.find_first_not_of(' ');
+    if (first == std::string::npos) {
+        return {};
+    }
+    return s.substr(first, s.find_last_not_of(' ') - first + 1);
+}
+
+// The key, reduced to something that can be a stable marker in the markdown mirror.
+//
+// `]` is removed because the mirror writes `- [key] fact` and a key containing the closing
+// bracket would make the marker unparseable -- and this marker is what supersession
+// matches on, so an ambiguous one silently stops replacing and starts appending, which is
+// the exact failure the key exists to prevent.
+constexpr std::size_t kMaxKeyBytes = 64;
+
+std::string sanitize_key(const std::string& raw) {
+    std::string k;
+    for (const char c : one_line(raw)) {
+        if (c != ']' && c != '[') {
+            k += c;
+        }
+    }
+    if (k.size() > kMaxKeyBytes) {
+        k.resize(kMaxKeyBytes);
+    }
+    return one_line(k);
+}
+
+// Replaces the `- [key] ...` line in `body`, or reports that there was none.
+// Position is PRESERVED on replacement rather than moving the note to the end: the file is
+// trimmed from the front when it overflows, so re-appending on every update would make a
+// frequently-corrected note immortal and quietly evict everything else.
+bool replace_keyed_line(std::string& body, const std::string& marker,
+                        const std::string& line) {
+    std::size_t at = body.rfind(marker, 0) == 0 ? 0 : body.find("\n" + marker);
+    if (at == std::string::npos) {
+        return false;
+    }
+    if (body.compare(0, marker.size(), marker) != 0) {
+        ++at; // step over the newline the search anchored on
+    }
+    const std::size_t end = body.find('\n', at);
+    body.replace(at, end == std::string::npos ? std::string::npos : end - at + 1, line);
+    return true;
+}
+
+} // namespace
+
+ToolResult Registry::remember_fact(const std::string& raw, const std::string& raw_key) {
     // Folded to ONE LINE, not refused. Dedupe and trimming both work line-wise, so a
     // multi-line note would silently defeat both; folding keeps every character the
     // model wrote and keeps the file's one invariant.
-    std::string fact;
-    fact.reserve(raw.size());
-    for (const char c : raw) {
-        fact += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
-    }
-    const std::size_t first = fact.find_first_not_of(' ');
-    const std::size_t last = fact.find_last_not_of(' ');
-    if (first == std::string::npos) {
+    const std::string fact = one_line(raw);
+    if (fact.empty()) {
         return ToolResult::error(ErrorClass::Malformed, false,
                                  "a note cannot be blank");
     }
-    fact = fact.substr(first, last - first + 1);
+    const std::string key = sanitize_key(raw_key);
 
     const std::string path = ctx_.root + "/" + kMemoryFileName;
-    const std::string line = "- " + fact + "\n";
+    // KEYED NOTES CARRY THEIR KEY IN THE LINE, and that marker is the whole mechanism.
+    //
+    // Without it the mirror can only append, so a corrected note leaves the stale one in
+    // place and the next session's prompt carries BOTH -- which is precisely the failure
+    // the durable store exists to end, reintroduced one layer up. The marker is also what
+    // a human sees when they open the file, so the supersession is legible rather than
+    // implicit.
+    const std::string marker = key.empty() ? std::string() : "- [" + key + "] ";
+    const std::string line = key.empty() ? "- " + fact + "\n" : marker + fact + "\n";
 
     // Read wider than the cap so a file that is already oversized can be trimmed back
     // rather than refused -- otherwise one oversized write would wedge the tool forever.
@@ -95,7 +156,10 @@ ToolResult Registry::remember_fact(const std::string& raw) {
     if (body.find(line) != std::string::npos) {
         return ToolResult::okay("already noted: " + fact);
     }
-    body += line;
+    const bool superseded = !key.empty() && replace_keyed_line(body, marker, line);
+    if (!superseded) {
+        body += line;
+    }
 
     // Trimmed from the FRONT, so a full file drops its OLDEST notes. Truncating the tail
     // instead would freeze the memory at whatever the project learned first and silently
@@ -112,7 +176,62 @@ ToolResult Registry::remember_fact(const std::string& raw) {
     if (!w.ok()) {
         return ToolResult::error(ErrorClass::Transient, true, w.error);
     }
-    return ToolResult::okay("noted for later sessions: " + fact);
+
+    // MIRRORED INTO THE DURABLE STORE, where a note is searchable and dated.
+    //
+    // The markdown file is the weaker of the two homes and the header above says why:
+    // it is 16 KiB of undated one-liners with no search, trimmed from the front, and a
+    // note that stopped being true last week is indistinguishable from one written this
+    // morning. PCC's fact kind is strictly better on every one of those counts, and
+    // context_recall can reach it.
+    //
+    // BOTH, not one. The file is what gets prepended to the next session's prompt whether
+    // or not anything queries it, and it is the only half a human can open in an editor;
+    // switching to the store alone would trade a working feature for a better-designed
+    // one. So the file stays the mirror and the store gets the searchable copy.
+    //
+    // SUPERSEDED WHEN KEYED, APPENDED WHEN NOT, and the store is told the same thing the
+    // file was.
+    //
+    // Store::remember() closes the previous row under a key; Store::append() adds a row
+    // that supersedes nothing. A note with no key must take the second path -- inventing a
+    // key from the prose would make two unrelated notes that happen to start alike
+    // overwrite each other, which is worse than a duplicate.
+    //
+    // A keyed fact is stored with NO SESSION, and that is the point of keying it. The
+    // supersession query is `WHERE session = ? AND key = ?`, so a key recorded under this
+    // run's session would only ever supersede notes from this same run -- and the whole
+    // reason to correct a note is that it was written by an EARLIER session. Provenance is
+    // the price, and it is the right one to pay: an unkeyed note keeps its session and
+    // stays a dated observation, a keyed one is a standing claim about the project that
+    // belongs to the workspace rather than to whoever last touched it.
+    if (context_source_) {
+        const Registry::ContextSource src = context_source_();
+        if (src.store != nullptr) {
+            pcc::Record rec;
+            rec.kind = pcc::kind::kFact;
+            rec.body = fact;
+            rec.key = key;
+            rec.session = key.empty() ? src.session : std::string();
+            try {
+                if (key.empty()) {
+                    (void)src.store->append(std::move(rec));
+                } else {
+                    (void)src.store->remember(std::move(rec));
+                }
+            } catch (const std::exception&) {
+                // The file write already succeeded, so the note is not lost and the
+                // model's next session still sees it. Failing the tool here would report
+                // a loss that did not happen.
+            }
+        }
+    }
+    // Says WHICH of the two things happened, because they are different facts about the
+    // project's memory and the model cannot see the file.
+    return ToolResult::okay((superseded ? "replaced the earlier note under '" + key +
+                                              "': "
+                                        : "noted for later sessions: ") +
+                            fact);
 }
 
 } // namespace lmp::tools

@@ -184,6 +184,11 @@
           "type": "number",
           "default": 96000
         },
+        "lmPipe.maxNewTokens": {
+          "type": "number",
+          "default": 4096,
+          "markdownDescription": "Generation cap for one turn. A turn that hits the cap makes no tool call and leaves nothing behind, so a mission needing a long first plan can stall on it; raise this rather than the turn budget."
+        },
         "lmPipe.egressPolicy": {
           "type": "string",
           "default": "deny",

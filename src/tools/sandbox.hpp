@@ -73,6 +73,21 @@ class ExecutionGrant {
 // routed there) HITL approval -- the loop wires that in one place (S9.3).
 [[nodiscard]] ExecutionGrant grant_execution(SandboxTier tier);
 
+// The tier an approved-tier NUMBER names, in one place so the tools cannot disagree
+// about what the operator asked for.
+//
+// They did. Every execution site open-coded the mapping, and all of them collapsed
+// "anything above 1" into T2: `shell` and the git tools sent a tier-3 run to the
+// container, which then refused for want of a runtime. So the operator could set
+// sandbox_tier=3, the wire accepted it, the editor made them acknowledge an UNSANDBOXED
+// run by name -- and every command they ran came back "no container runtime is usable".
+// T3 was documented, plumbed, acknowledged and unreachable.
+//
+// Not a ranking: 3 is the LEAST contained tier, not the most. An out-of-range number is
+// therefore clamped DOWN to the container rather than up, because a number nobody
+// recognises must never be how the jail comes off (S13).
+[[nodiscard]] SandboxTier tier_for(int approved_tier) noexcept;
+
 struct ExecLimits {
     // All required -- no defaultable security input (S7.5).
     int wall_clock_seconds;
@@ -91,7 +106,36 @@ struct ExecOutcome {
     bool wall_clock_killed = false;
     std::string output; // interleaved stdout+stderr, capped at max_output_bytes
     bool output_truncated = false;
+    // Non-empty when the harness had to alter the command to make it runnable at this
+    // tier -- see t1_compat_rewrite(). Surfaced to the model, because a command that ran
+    // differently from the one it asked for is not something to keep quiet about.
+    std::string rewritten_command;
 };
+
+// The same command, made runnable under T1, or empty when it already was.
+//
+// NOT A CLASSIFIER, and specifically not the thing S7 forbids: it decides nothing about
+// authorization, reads no risk, and cannot change the tier. The grant is already minted
+// and the Seatbelt profile is applied either way; this only removes a SECOND jail that
+// the command would otherwise try to build inside the first one.
+//
+// macOS refuses to nest Seatbelt profiles -- a process already under one gets EPERM from
+// the apply, and that holds under any restrictive outer profile. SwiftPM sandboxes its own
+// manifest compile, so `swift build` and `swift test` die at T1 on
+// `sandbox-exec: ... Operation not permitted` buried in an "Invalid manifest" dump of
+// forty compiler flags, none of which is the reason. `--disable-sandbox` is the only way
+// through; there is no environment variable for it.
+//
+// The harness applies it rather than telling the model to, because the model is not the
+// only caller that needs it: the VERIFY CONTRACT is run verbatim, so an operator whose
+// contract is `swift test` had a check that could never pass at T1 no matter what the
+// model fixed. A note the model reads cannot repair that; this can.
+//
+// Confined to `swift build|test|run`, the three that take the flag and matter for
+// builds. `swift package` and `xcodebuild` are deliberately left alone: xcodebuild writes
+// its result bundle to the per-user temp root and cannot be talked out of it, so it needs
+// T3, not a flag.
+[[nodiscard]] std::string t1_compat_rewrite(const std::string& command);
 
 // Runs `command` via /bin/sh -c inside the granted tier. T0 refuses (that is its
 // meaning); T2 refuses when no container runtime is usable -- refusal, not silent

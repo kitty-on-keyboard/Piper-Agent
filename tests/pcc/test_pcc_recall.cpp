@@ -45,7 +45,7 @@ std::int64_t add_turn(Store& store, std::uint64_t event, const std::string& body
 
 TEST(recall_returns_nothing_for_an_empty_store) {
     Store store = fresh_store();
-    const Recall out = recall(store, {"anything", "", 500, {}, 60});
+    const Recall out = recall(store, {"anything", "", 500, {}, 60, ""});
     CHECK(out.text.empty());
     CHECK_EQ(out.tokens_used, std::size_t{0});
     CHECK_EQ(out.entries.size(), std::size_t{0});
@@ -226,10 +226,55 @@ TEST(check_framework_can_still_fail_here) {
     Store store = fresh_store();
     add_fact(store, "k", "v");
     EXPECT_FAILING_CHECKS(2, {
-        const Recall out = recall(store, {"v", "", 500, {}, 60});
+        const Recall out = recall(store, {"v", "", 500, {}, 60, ""});
         CHECK(out.entries.empty());
         CHECK_EQ(out.tokens_used, std::size_t{99999});
     });
 }
 
 } // namespace
+
+// The live run's own mission is T0 of its own prompt -- always there, never compacted --
+// and it is a near-perfect BM25 match for any query drawn from it, so it ranks first and
+// spends a slice of the recall budget quoting the model's instructions back at it.
+//
+// MEASURED on the first run with a populated store: ~60 tokens of a 1500-token budget.
+TEST(recall_does_not_hand_back_the_live_sessions_own_mission) {
+    Store store = fresh_store();
+
+    const auto mission_row = [&](const char* session, const char* body) {
+        Record r;
+        r.session = session;
+        r.kind = kind::kTurn;
+        r.title = title::kMission;
+        r.body = body;
+        return store.append(std::move(r));
+    };
+    mission_row("live", "you were told: build a resource monitor in SwiftUI");
+    mission_row("older", "you were told: build a resource monitor in AppKit");
+    Record turn;
+    turn.session = "live";
+    turn.kind = kind::kTurn;
+    turn.title = "read_file";
+    turn.body = "resource monitor sampling lives in HostStatsService";
+    store.append(std::move(turn));
+
+    RecallRequest req;
+    req.query = "resource monitor";
+    req.token_budget = 500;
+
+    // Unfiltered, all three match and the live mission is among them.
+    const Recall all = recall(store, req);
+    CHECK(all.text.find("SwiftUI") != std::string::npos);
+
+    req.suppress_mission_of = "live";
+    const Recall filtered = recall(store, req);
+    // THE ASSERTION: this session's mission is gone...
+    CHECK(filtered.text.find("SwiftUI") == std::string::npos);
+    // ...while an EARLIER mission in the same workspace is genuinely new information and
+    // stays, and so does every other row of the live session -- including the turns a long
+    // run has since compacted away, which are the whole reason this store exists.
+    CHECK(filtered.text.find("AppKit") != std::string::npos);
+    CHECK(filtered.text.find("HostStatsService") != std::string::npos);
+    CHECK(filtered.entries.size() == all.entries.size() - 1);
+}

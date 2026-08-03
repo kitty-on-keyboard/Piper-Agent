@@ -203,8 +203,15 @@ std::string item_uri(const Item& item) {
 Recall recall(const Store& store, const RecallRequest& request,
               const TokenCounter& count_tokens) {
     Recall out;
-    const std::vector<Item> candidates =
+    std::vector<Item> candidates =
         store.search(request.query, request.as_of, request.session, request.candidates);
+    // Dropped BEFORE the fusion, so removing it promotes a real result into the budget
+    // rather than leaving a hole. See RecallRequest::suppress_mission_of.
+    if (!request.suppress_mission_of.empty()) {
+        std::erase_if(candidates, [&](const Item& c) {
+            return c.session == request.suppress_mission_of && c.title == title::kMission;
+        });
+    }
     if (candidates.empty()) {
         return out;
     }

@@ -269,6 +269,42 @@ TEST(shell_reports_exit_codes_and_compacts) {
     CHECK(bad.retryable);
 }
 
+TEST(a_nested_sandbox_failure_says_what_it_is_and_what_to_do) {
+    // The real thing, not a stubbed string: macOS refuses a second Seatbelt profile
+    // inside the first, so running sandbox-exec under T1 produces exactly the message
+    // Swift Package Manager produces when it compiles Package.swift.
+    //
+    // Left bare, that message cost a real run thirty turns of inventing cache
+    // directories and deleting build output, because nothing in it says the harness is
+    // the obstacle and nothing names the flag that gets past it.
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const ToolResult r = reg.execute(
+        "shell",
+        args({{"command", "/usr/bin/sandbox-exec -p '(version 1)(allow default)' "
+                          "/usr/bin/true"}}),
+        1);
+
+    CHECK(r.status == Status::ToolError);
+    CHECK(r.summary.find("[sandbox]") != std::string::npos);
+    CHECK(r.summary.find("--disable-sandbox") != std::string::npos);
+    // It must say the workspace is NOT the problem, which is the wrong conclusion the
+    // bare message leads to.
+    CHECK(r.summary.find("not a problem with your code") != std::string::npos);
+}
+
+TEST(an_ordinary_permission_error_gets_no_sandbox_note) {
+    // The note must be specific to the nesting failure. A plain denied write is a fact
+    // about the jail the model SHOULD read at face value, and telling it to reach for
+    // --disable-sandbox there would send it chasing a flag that changes nothing.
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const ToolResult r =
+        reg.execute("shell", args({{"command", "echo x > /Denied/nope.txt"}}), 1);
+    CHECK(!r.ok());
+    CHECK(r.summary.find("[sandbox]") == std::string::npos);
+}
+
 TEST(shell_at_t0_is_refused_with_the_reason) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
@@ -512,4 +548,33 @@ TEST(overwriting_existing_content_is_recognised) {
     CHECK(!would_overwrite_existing(root, "empty.txt"));
     // Outside the root is refused upstream for a different reason; this must not claim it.
     CHECK(!would_overwrite_existing(root, "../../etc/hosts"));
+}
+
+// A keyed note REPLACES the earlier note under the same key, in the file the next session
+// actually reads. Without this the mirror could only append, so a corrected note left the
+// stale one in place and the next prompt carried BOTH -- the exact failure the durable
+// store exists to end, reintroduced one layer up.
+TEST(a_keyed_note_supersedes_the_earlier_note_under_that_key) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    Registry reg = make_registry(root);
+
+    CHECK(reg.execute("remember", {{"fact", "the suite runs with pytest tests/"},
+                                   {"key", "test-layout"}}, 1).ok());
+    CHECK(reg.execute("remember", {{"fact", "an unrelated standalone note"}}, 1).ok());
+    const ToolResult fixed =
+        reg.execute("remember", {{"fact", "the suite runs with pytest spec/"},
+                                 {"key", "test-layout"}}, 1);
+    CHECK(fixed.ok());
+    CHECK(fixed.summary.find("replaced") != std::string::npos);
+
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(root + "/" + kMemoryFileName, 1 << 20);
+    REQUIRE(f.ok());
+    // The stale line is GONE, not merely followed by a newer one.
+    CHECK(f.bytes.find("pytest tests/") == std::string::npos);
+    CHECK(f.bytes.find("- [test-layout] the suite runs with pytest spec/") !=
+          std::string::npos);
+    // An unkeyed note is untouched by any of it.
+    CHECK(f.bytes.find("- an unrelated standalone note") != std::string::npos);
 }

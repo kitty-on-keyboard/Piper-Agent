@@ -1,6 +1,7 @@
 add_library(lmp_tools
   registry.cpp
   memory_file.cpp
+  context_tools.cpp
   sandbox.cpp
   container.cpp
   syntax_check.cpp
@@ -10,8 +11,12 @@ target_include_directories(lmp_tools PUBLIC "${PROJECT_SOURCE_DIR}")
 # lmp_mcp is PUBLIC because mcp_host.hpp is part of this library's interface (M1: MCP is
 # how LM_Pipe uses MCP, not a library beside it). nlohmann is PUBLIC for the same reason:
 # tool_spec_from_schema takes a json, and its tests must be able to build one.
+# lmp_pcc is PRIVATE: context_tools.cpp needs the store, but registry.hpp only
+# forward-declares pcc::Store, so no consumer of this library compiles against SQLite for
+# the sake of two tools. src/pcc sits at L1 and src/tools at L2, so the dependency points
+# the allowed way (scripts/ratchets.json, layers gate).
 target_link_libraries(lmp_tools
-  PRIVATE lmp_warnings lmp_assertions simdjson
+  PRIVATE lmp_warnings lmp_assertions simdjson lmp_pcc
   PUBLIC lmp_platform parsephony lmp_mcp nlohmann_json)
 
 # A diagnostic driver, not a test: points McpHost at a real third-party MCP server and

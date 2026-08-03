@@ -241,6 +241,11 @@ TOOL_MENTION_STOPLIST = {
     # blast-radius capability flags: model-facing vocabulary from the S7 contract,
     # deliberately shown to the model by job_status's advisory output.
     "write_out", "read_out",
+    # The recall tools' parameters (src/tools/context_tools.cpp). Named in their own
+    # descriptions because a budget the model cannot see is a budget it cannot choose,
+    # and named in error text because the fix for a bad range is to re-read the two
+    # numbers the prompt printed. Parameters, not tools.
+    "token_budget", "this_session_only", "first_event", "last_event",
 }
 
 
@@ -249,31 +254,48 @@ def gate_tool_honesty(root, cfg):
     tool. v1 audited this once and 7 of 13 tools were lying -- describing follow-up
     tools that did not exist, teaching the model to call ghosts.
 
-    Scope: the string literals of src/tools/registry.cpp (the declarations file). A
-    mention is any snake_case token; declared names plus a stoplist of parameter-ish
+    Scope: the string literals of EVERY file that declares tools. That used to be
+    src/tools/registry.cpp alone and is now registry.cpp plus context_tools.cpp, which
+    declares the two that read the durable context store. The union matters in both
+    directions: a description in the new file is checked, and a description in the old
+    one may legally name a tool the new one declares. A gate whose scope silently stops
+    covering half its subjects is the failure this file's own header is about.
+
+    A mention is any snake_case token; declared names plus a stoplist of parameter-ish
     words are legal, and anything else that LOOKS like a tool reference fails."""
-    path = os.path.join(root, "src", "tools", "registry.cpp")
-    if not os.path.exists(path):
+    rels = [os.path.join("src", "tools", name)
+            for name in ("registry.cpp", "context_tools.cpp")]
+    sources = [(rel, os.path.join(root, rel)) for rel in rels]
+    sources = [(rel, path) for rel, path in sources if os.path.exists(path)]
+    if not sources:
         return 0, []
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    declared = set(TOOL_DECL_RE.findall(text))
+    texts = {}
+    for rel, path in sources:
+        with open(path, encoding="utf-8") as fh:
+            texts[rel] = fh.read()
+    # Declared across ALL of them before any is checked: registry.cpp's `plan` mentions
+    # no other file's tools today, but a description that names one must not fail merely
+    # because the two declarations live apart.
+    declared = set()
+    for text in texts.values():
+        declared |= set(TOOL_DECL_RE.findall(text))
     findings = []
     if not declared:
-        findings.append(Finding("tool_honesty", "src/tools/registry.cpp", 0,
+        findings.append(Finding("tool_honesty", sources[0][0], 0,
                                 "registry file exists but declares no tools"))
         return 1, findings
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        if line.lstrip().startswith("#include"):
-            continue  # an include path is not a model-facing string
-        for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
-            for mention in TOOL_MENTION_RE.findall(lit):
-                if mention in declared or mention in TOOL_MENTION_STOPLIST:
-                    continue
-                findings.append(Finding(
-                    "tool_honesty", "src/tools/registry.cpp", lineno,
-                    f"model-facing string mentions '{mention}', which is not a "
-                    f"registered tool (declared: {', '.join(sorted(declared))})"))
+    for rel, text in texts.items():
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if line.lstrip().startswith("#include"):
+                continue  # an include path is not a model-facing string
+            for lit in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
+                for mention in TOOL_MENTION_RE.findall(lit):
+                    if mention in declared or mention in TOOL_MENTION_STOPLIST:
+                        continue
+                    findings.append(Finding(
+                        "tool_honesty", rel, lineno,
+                        f"model-facing string mentions '{mention}', which is not a "
+                        f"registered tool (declared: {', '.join(sorted(declared))})"))
     return len(declared), findings
 
 

@@ -129,20 +129,48 @@ TEST(a_repeated_tool_is_unsamplable_on_the_next_turn) {
         specs.push_back(s);
     }
 
-    const std::vector<parsephony::ToolSpec> narrowed = without_suppressed(specs, "list_dir");
+    const std::vector<parsephony::ToolSpec> narrowed =
+        without_suppressed(specs, {{"list_dir", 1}});
     CHECK_EQ(narrowed.size(), std::size_t{3});
     for (const parsephony::ToolSpec& s : narrowed) {
         CHECK(s.name != "list_dir");
     }
 
     // Nothing suppressed: the list is untouched.
-    CHECK_EQ(without_suppressed(specs, "").size(), specs.size());
+    CHECK_EQ(without_suppressed(specs, {}).size(), specs.size());
+    // An entry whose window has run out holds nothing. Expiry is what lets a tool the run
+    // legitimately needs come back.
+    CHECK_EQ(without_suppressed(specs, {{"list_dir", 0}}).size(), specs.size());
 
     // Suppressing the ONLY samplable tool would leave the grammar unsatisfiable, so the
     // turn keeps it rather than being handed a turn it cannot spend.
     std::vector<parsephony::ToolSpec> only_plan;
     only_plan.push_back(specs.front());
-    CHECK_EQ(without_suppressed(only_plan, "plan").size(), std::size_t{1});
+    CHECK_EQ(without_suppressed(only_plan, {{"plan", 1}}).size(), std::size_t{1});
+}
+
+// The two-cycle. One tool held for one turn is not a mechanism against a model that has
+// two ways to ask the same question -- it alternates, and the run that prompted this
+// burned twenty-seven turns on `list_dir` / `shell find` before writing a single file.
+// Holding BOTH at once is what leaves only the moves that make progress.
+TEST(suppressions_accumulate_so_a_ping_pong_runs_out_of_partners) {
+    std::vector<parsephony::ToolSpec> specs;
+    for (const char* n : {"plan", "list_dir", "shell", "write_file"}) {
+        parsephony::ToolSpec s;
+        s.name = n;
+        specs.push_back(s);
+    }
+
+    const std::vector<parsephony::ToolSpec> narrowed =
+        without_suppressed(specs, {{"list_dir", 2}, {"shell", 1}});
+    CHECK_EQ(narrowed.size(), std::size_t{2});
+    for (const parsephony::ToolSpec& s : narrowed) {
+        CHECK(s.name != "list_dir");
+        CHECK(s.name != "shell");
+    }
+    // The floor still holds when everything on offer is held down.
+    CHECK_EQ(without_suppressed(narrowed, {{"plan", 3}, {"write_file", 3}}).size(),
+             std::size_t{2});
 }
 
 TEST(at_most_one_corrective_and_budget_outranks_everything) {
@@ -159,10 +187,10 @@ TEST(at_most_one_corrective_and_budget_outranks_everything) {
     Budget budget;
     budget.max_iterations = 40;
     // Repeat alone -> BreakRepeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BreakRepeat);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BreakRepeat);
     // Budget exhausted outranks it; only ONE is returned.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, rl, 1, budget, true, true) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 1, budget, true, true, false) == Corrective::HaltOnBudget);
 }
 
 TEST(a_claimed_verification_synthesizes_a_real_one) {
@@ -173,16 +201,16 @@ TEST(a_claimed_verification_synthesizes_a_real_one) {
     t.assistant_text = "I fixed the include. The build should pass now.";
     const Budget budget;
     // Mechanism, not prose: the loop MAKES the call the model only described.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::SynthesizeVerification);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::SynthesizeVerification);
 
     t.assistant_text = "Here is a summary of the file.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
 
     // With no contract declared there is nothing to synthesize. Before this gate the
     // corrective fired anyway and ran a hardcoded `cmake --build build` -- on a Python
     // workspace, a guaranteed failure filed against a contract nobody declared.
     t.assistant_text = "I fixed the include. The build should pass now.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false) == Corrective::None);
 }
 
 // A refusal is neither an execution nor an error, so before RefusalLedger existed the
@@ -200,21 +228,21 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     // First refusal: the model could not have known. Taking the tool away over one "no"
     // would be the wrong trade.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
 
     // Second: fire.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BlockRefusedTool);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BlockRefusedTool);
 
     // Counted by TOOL, not by (tool, params) -- varying the path is not a new question.
     t.tool_params = {{"path", "b"}};
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BlockRefusedTool);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BlockRefusedTool);
 
     // Once blocked it must not re-fire: the mechanism already ran, and a corrective that
     // keeps selecting itself would crowd out every other one for the rest of the run.
     rl.block("delete_file");
     CHECK(rl.is_blocked("delete_file"));
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
 
     // Budget still outranks it (S9.2). Expressed against the budget's own limit rather
     // than a literal, so raising the default ceiling cannot quietly turn this into a test
@@ -222,7 +250,7 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     rl.record("shell");
     rl.record("shell");
     t.tool_name = "shell";
-    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true) ==
+    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true, false) ==
           Corrective::HaltOnBudget);
 }
 
@@ -254,7 +282,11 @@ TEST(completion_is_driven_by_ledgers_not_by_prose) {
     const CompletionVerdict unproven = evaluate_completion(ctx);
     // A green that has never been shown capable of red is not evidence (S10.2).
     CHECK(!unproven.complete);
-    CHECK(unproven.reason.find("capable of failing") != std::string::npos);
+    CHECK(unproven.reason.find("never been seen to fail") != std::string::npos);
+    // The reason names the way OUT, because it is shown to the model and a reason with no
+    // exit reads as a demand to keep grinding. The exit is a better criterion -- never
+    // breaking working code, which is what the harness used to ask for and get.
+    CHECK(unproven.reason.find("verify_with") != std::string::npos);
 }
 
 TEST(a_proven_green_completes_the_run) {
@@ -474,7 +506,7 @@ TEST(a_run_is_warned_before_the_budget_ends_it) {
     const RefusalLedger refusals;
 
     const auto at = [&](int used) {
-        return choose_corrective(turn, repeats, refusals, used, budget, false, true);
+        return choose_corrective(turn, repeats, refusals, used, budget, false, true, false);
     };
 
     const int warn_at = budget.max_iterations - kBudgetWarningTurns;
@@ -483,7 +515,7 @@ TEST(a_run_is_warned_before_the_budget_ends_it) {
     CHECK(at(warn_at + 1) == Corrective::None);
     // The halt still outranks it, and still ends the run.
     CHECK(at(budget.max_iterations) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true) ==
+    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true, false) ==
           Corrective::HaltOnBudget);
 }
 
@@ -504,9 +536,14 @@ TEST(a_trailing_formatter_pipe_is_not_part_of_the_check) {
     CHECK(canonicalize_check("pytest tests/ | grep -q PASSED") !=
           canonicalize_check("pytest tests/"));
     CHECK(canonicalize_check("pytest tests/ | wc -l") != canonicalize_check("pytest tests/"));
-    // `||` is an or-list, not a pipe into `| foo`.
-    CHECK(canonicalize_check("pytest tests/ || echo broken") !=
-          canonicalize_check("pytest tests/"));
+    // `||` is an or-list, not a pipe into `| foo` -- the formatter stripper must never
+    // treat it as one. A REAL fallback keeps its own status and stays part of the check.
+    CHECK(canonicalize_check("make || make clean") != canonicalize_check("make"));
+    // But an or-list into a STATUS SWALLOWER is a wrapper like any other, and the most
+    // common one there is: `|| echo ...` forces exit 0 whatever happened, so the check can
+    // never go red. Handled on its own path, not by the pipe stripper above.
+    CHECK_EQ(canonicalize_check("pytest tests/ || echo broken"),
+             canonicalize_check("pytest tests/"));
 }
 
 // What RUNS keeps the model's bytes; only the identity is normalised. Collapsing
@@ -642,10 +679,10 @@ TEST(a_repeated_unrecoverable_failure_breaks_the_repeat) {
     t.tool_result = tools::ToolResult::error(tools::ErrorClass::Conflict, false,
                                              "old_text matches more than one site");
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
 
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::BreakRepeat);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BreakRepeat);
 }
 
 // A TRANSIENT failure is still legitimate retry -- a flaky build or a timeout deserves a
@@ -662,7 +699,7 @@ TEST(a_repeated_transient_failure_is_still_a_retry) {
     t.tool_result = tools::ToolResult::error(tools::ErrorClass::Transient, true, "[exit 1]");
     d.record(t.tool_name, t.tool_params);
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
 }
 
 // --- whose criterion was met (S10.4) -----------------------------------------
@@ -727,4 +764,146 @@ TEST(an_incomplete_verdict_is_never_self_declared) {
     const CompletionVerdict v = evaluate_completion(ctx);
     CHECK(!v.complete);
     CHECK(!v.self_declared());
+}
+
+// The ledger is rendered into the prompt EVERY turn. It used to print one line per RUN,
+// so a run that verified the same command eight times read eight identical lines -- and
+// if that check was an unproven green, the same "not yet evidence" sentence eight times,
+// growing by one on every verification.
+//
+// Repetition is not emphasis to a model reading its own context. The run that prompted
+// this took the accumulating pile as pressure and wrote a syntax error into its own source
+// to manufacture a red. The ledger's job is to say what is currently KNOWN, and running a
+// check twice does not change what is known.
+TEST(the_ledger_states_what_is_known_once_per_contract) {
+    context::ContextStore ctx("mission");
+    for (int i = 0; i < 4; ++i) {
+        context::VerificationRecord v;
+        v.contract = "swift build";
+        v.ran = true;
+        v.passed = true;
+        v.falsifiable = false;
+        ctx.record_verification(v);
+    }
+    context::VerificationRecord other;
+    other.contract = "swift test";
+    other.ran = true;
+    other.passed = false;
+    ctx.record_verification(other);
+
+    const std::string rendered = ctx.render_live_state();
+    const auto count_of = [&rendered](std::string_view needle) {
+        std::size_t n = 0;
+        for (std::size_t at = rendered.find(needle); at != std::string::npos;
+             at = rendered.find(needle, at + 1)) {
+            ++n;
+        }
+        return n;
+    };
+
+    // One line for the contract that ran four times, carrying the count instead.
+    CHECK_EQ(count_of("- PASS swift build"), std::size_t{1});
+    CHECK(rendered.find("(run 4x)") != std::string::npos);
+    // ...and the unproven note said ONCE, not once per run.
+    CHECK_EQ(count_of("not yet evidence"), std::size_t{1});
+    // A second contract keeps its own line, with its own latest state.
+    CHECK_EQ(count_of("- FAIL swift test"), std::size_t{1});
+}
+
+// A FAIL that follows a PASS is the current state of that contract, and the ledger must
+// say so -- collapsing to one line per contract must never collapse to the FIRST reading.
+TEST(the_ledger_line_is_the_latest_reading_not_the_first) {
+    context::ContextStore ctx("mission");
+    context::VerificationRecord green;
+    green.contract = "swift build";
+    green.ran = true;
+    green.passed = true;
+    ctx.record_verification(green);
+
+    context::VerificationRecord red;
+    red.contract = "swift build";
+    red.ran = true;
+    red.passed = false;
+    ctx.record_verification(red);
+
+    const std::string rendered = ctx.render_live_state();
+    CHECK(rendered.find("- FAIL swift build") != std::string::npos);
+    CHECK(rendered.find("- PASS swift build") == std::string::npos);
+}
+
+// A compacted span line is PROMPT-FACING, and it named the tool twice: every trimmed turn
+// rendered as "- read_file(read_file(path=x)) -> ...". The two producers of
+// tool_args_summary disagree -- a turn's own call gets preview_of(), which already names
+// the tool, while the extra calls batched behind it get a bare path -- and prepending
+// unconditionally is right for the second only.
+//
+// The identical bug in the journal is already fixed (surface/context_journal.cpp,
+// turn_body). This is the copy that costs tokens in every run that trims.
+TEST(a_compacted_span_names_each_tool_once) {
+    context::ContextStore ctx("trim me");
+
+    // The two shapes, side by side, because a fix for one that breaks the other would
+    // otherwise pass: preview_of()'s form, and the bare argument the batched calls carry.
+    context::TurnRecord own;
+    own.tool_name = "read_file";
+    own.tool_args_summary = "read_file(path=src/a.swift)"; // preview_of()
+    own.observation = "contents";
+    ctx.add_turn(std::move(own));
+
+    context::TurnRecord batched;
+    batched.tool_name = "read_slice";
+    batched.tool_args_summary = "src/b.swift"; // a bare path
+    batched.observation = "contents";
+    ctx.add_turn(std::move(batched));
+
+    ctx.add_turn(turn("list_dir", "keep me"));
+    REQUIRE(ctx.compact_oldest(1) == std::size_t{2});
+    REQUIRE(ctx.compacted_spans().size() == std::size_t{1});
+    const std::string& span = ctx.compacted_spans().front();
+
+    CHECK(span.find("read_file(read_file(") == std::string::npos);
+    CHECK(span.find("- read_file(path=src/a.swift)") != std::string::npos);
+    // The bare-argument form still gets its tool name and its parentheses.
+    CHECK(span.find("- read_slice(src/b.swift)") != std::string::npos);
+}
+
+// SynthesizeVerification's trigger was forward-looking only -- "should pass", "should
+// work" -- so it caught a model PREDICTING success and missed one ASSERTING it. The
+// assertion is the more dangerous claim and the more common ending.
+//
+// MEASURED: a run implemented both modules, made the suite green, beat a stale Makefile by
+// symlinking the suite into the path the Makefile expected, ran pytest directly, and
+// finished with "Confirmed: `make test` passes with 7/7 tests green." It never re-ran its
+// declared contract, so the ledger held two reds and no green -- and the run ended
+// text_only_no_progress with the mission complete and the workspace correct.
+TEST(a_past_tense_claim_of_success_synthesizes_the_verification_too) {
+    const Budget budget;
+    RepeatDetector d;
+    RefusalLedger rl;
+    TurnResult t;
+    t.outcome = Outcome::TextOnly;
+
+    const auto verdict = [&](const char* text) {
+        t.assistant_text = text;
+        return choose_corrective(t, d, rl, 1, budget, false, true, false);
+    };
+
+    // The forward-looking half, which always worked and must keep working.
+    CHECK(verdict("the build should pass now") == Corrective::SynthesizeVerification);
+    // The half that lost the run.
+    CHECK(verdict("Confirmed: `make test` passes with 7/7 tests green.") ==
+          Corrective::SynthesizeVerification);
+    CHECK(verdict("All tests pass.") == Corrective::SynthesizeVerification);
+    CHECK(verdict("The suite passes and the module is complete.") ==
+          Corrective::SynthesizeVerification);
+    CHECK(verdict("Everything is now green.") == Corrective::SynthesizeVerification);
+
+    // A turn that claims nothing about verification must still be left alone -- this
+    // corrective RUNS A COMMAND, so firing it on ordinary narration would spend a turn
+    // per turn.
+    CHECK(verdict("I will start with the ring buffer.") == Corrective::None);
+    CHECK(verdict("Reading the test file to see what it expects.") == Corrective::None);
+    // And with no contract declared there is nothing to synthesize.
+    t.assistant_text = "All tests pass.";
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false) == Corrective::None);
 }
