@@ -102,20 +102,63 @@ void TokenStreamer::run() {
     }
 }
 
+bool LoopBreaker::saw(model::TokenId id) {
+    window_.push_back(id);
+    if (window_.size() < kWindow) {
+        return false;
+    }
+    if (window_.size() > kWindow) {
+        window_.erase(window_.begin());
+    }
+    // FNV-1a over the window. Order matters -- a bag of the same tokens in a different
+    // arrangement is a different sentence, and treating them alike would cut turns that are
+    // merely on-topic.
+    std::uint64_t h = 1469598103934665603ULL;
+    for (const model::TokenId t : window_) {
+        const auto u = static_cast<std::uint64_t>(static_cast<std::uint32_t>(t));
+        for (int b = 0; b < 4; ++b) {
+            h ^= (u >> (b * 8)) & 0xFFULL;
+            h *= 1099511628211ULL;
+        }
+    }
+    for (auto& [key, count] : seen_) {
+        if (key == h) {
+            ++count;
+            worst_ = std::max(worst_, count);
+            return count >= kMaxRepeats;
+        }
+    }
+    seen_.emplace_back(h, 1);
+    worst_ = std::max(worst_, std::size_t{1});
+    return false;
+}
+
 bool GrammarSink::on_token(model::TokenId id) {
     const std::size_t think_before = g_.think_ids().size();
     const std::size_t text_before = g_.text_ids().size();
 
     last = g_.advance(id);
 
+    const bool is_think = g_.think_ids().size() > think_before;
+    const bool is_text = g_.text_ids().size() > text_before;
     if (streamer_ != nullptr) {
-        if (g_.think_ids().size() > think_before) {
+        if (is_think) {
             streamer_->push(id, StreamChannel::Thinking);
-        } else if (g_.text_ids().size() > text_before) {
+        } else if (is_text) {
             streamer_->push(id, StreamChannel::Answer);
         }
     }
-    return last == model::Advance::Ok;
+    if (last != model::Advance::Ok) {
+        return false;
+    }
+    // Only what the grammar filed as PROSE. A tool call's tokens grow neither buffer, so a
+    // file being written cannot be cut short here -- see LoopBreaker.
+    if ((is_think || is_text) && breaker_.saw(id)) {
+        looped = true;
+        loop_repeats = breaker_.repeats();
+        return false;
+    }
+    return true;
 }
 
 } // namespace lmp::loop

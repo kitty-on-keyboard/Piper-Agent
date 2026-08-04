@@ -219,6 +219,13 @@ class Agent {
     // budget when the model is about to add a 4k-token generation to it.
     static constexpr std::size_t kCompactAtPercent = 75;
     static constexpr std::size_t kCompactToPercent = 55;
+    // Where the duplicate collapse starts paying for itself, as a percentage of the same
+    // budget. Deliberately equal to the low-water mark and deliberately NOT the same
+    // constant: this one answers "is the saving worth a full re-prefill", which is a
+    // different question from "how far should a trim go", and the two must be free to move
+    // apart. See collapse_duplicate_read() for the measurement -- a 22x TTFT penalty paid
+    // 33 times in a run that never used more than a third of its context.
+    static constexpr std::size_t kCollapseAtPercent = 55;
 
     // How long a repeated tool stays out of the grammar, at most. The window is the
     // repeat count minus one -- second sighting costs one turn, third costs two -- so a
@@ -253,17 +260,12 @@ class Agent {
     [[nodiscard]] tools::ToolResult dispatch_call(
         const std::string& name, const std::vector<tools::ToolParamValue>& params,
         bool& executed);
-    // The answer to a read whose content is already verbatim in the prompt, or nothing when
-    // the call has to actually run. See ReadNote.
-    [[nodiscard]] std::optional<tools::ToolResult> already_in_context(
-        const std::string& name, const std::vector<tools::ToolParamValue>& params) const;
-    // Files a successful call has made this run's copy of stale. Called for every executed
-    // call, because the set of things that can change a file is not the set of tools that
-    // declare a path.
-    void invalidate_reads(const std::string& name,
-                          const std::vector<tools::ToolParamValue>& params);
-    void note_read(const std::string& name,
-                   const std::vector<tools::ToolParamValue>& params);
+    // Collapses an earlier byte-identical copy of this read's result, leaving the newest
+    // one live. Called after a successful content read; never refuses or alters the result
+    // the model receives.
+    void collapse_duplicate_read(const std::string& name,
+                                 const std::vector<tools::ToolParamValue>& params,
+                                 const tools::ToolResult& result);
     // Whether the declared contract has ever been seen to pass in this run.
     [[nodiscard]] bool contract_has_passed() const;
     // Whether a batched call may be executed off the agent thread, and the serial tail
@@ -302,46 +304,61 @@ class Agent {
     // of the corrective, and it accumulates -- see without_suppressed() for why one tool
     // for one turn was not enough to break a ping-pong between two tools.
     std::vector<std::pair<std::string, int>> suppressed_tools_;
+    // Content reads this turn, and how many of them returned bytes the prompt already
+    // held. Reset in step(), written at dispatch, read once by run()'s no-progress test --
+    // which could not otherwise tell a turn of work from a turn of re-reading, because
+    // both call a tool and both come back ToolCallExecuted.
+    std::size_t turn_reads_ = 0;
+    std::size_t turn_reads_redundant_ = 0;
+    // Tokens in the prompt step() actually sent this turn. Set during prompt assembly,
+    // where the tokenizer has just produced it; read by the duplicate collapse, which pays
+    // a full re-prefill and so must know whether the context is short of room first.
+    std::size_t last_prompt_tokens_ = 0;
     // Paths this run has written. A whole-file rewrite of one of them is the run editing
     // its OWN output, not destroying the operator's data -- see the approval gate.
     std::set<std::string> run_wrote_;
 
-    // One read this run has already made, and the two facts that decide whether making it
-    // again would tell the model anything.
+    // WHAT USED TO BE HERE: `run_read_`, a per-path ledger of which reads this run had
+    // already made, which REFUSED a re-read it believed was still in the prompt.
     //
-    // MEASURED, and it is the largest single consumer of a run's budget: 45 turns produced
-    // 65 turn records, of which 23 were read_file, 11 read_slice and 10 list_dir, against
-    // 11 writes. One 12.5 KB file was read ELEVEN times. Peak prompt was 47,220 tokens
-    // against a 96,000 budget, so compaction never ran once -- every one of those re-reads
-    // was answered with bytes that were still sitting verbatim in the prompt.
+    // The measurement that built it is still true and still worth acting on -- 45 turns
+    // produced 65 turn records, 34 of them content reads against 11 writes, one 12.5 KB file
+    // read ELEVEN times -- but refusing the read was the wrong lever, and the ledger could
+    // not be made correct: it had to predict staleness from a path string, and it answered
+    // slice requests from whole-file notes that never recorded how much of the answer
+    // survived the byte cap. It cost a 66-turn run everything (see collapse_duplicate_read).
     //
-    // This is not the memory problem PCC solves and `context_recall` cannot touch it. It is
-    // the run paying a full turn, a full prefill and 12.5 KB of context to be told
-    // something it was already looking at.
-    struct ReadNote {
-        // The slice arguments, or empty for a whole-file read. A whole-file read subsumes
-        // any later slice of the same file; a slice subsumes only itself. That asymmetry is
-        // what closes the hole the exact-match repeat detector leaves open --
-        // read_file(x), read_slice(x,1,50), read_file(x) is three distinct keys to
-        // RepeatDetector and one file to this.
-        std::string range;
-        // ContextStore::compaction_count() when the read happened. A trim SUMMARIZES the
-        // turns it drops, so content read before the last compaction is no longer verbatim
-        // in the prompt and re-reading it is legitimate work, not a repeat. Comparing
-        // counts is conservative -- it also releases reads that survived the trim -- and
-        // conservative is the only safe direction here: suppressing a read the model
-        // genuinely no longer has is how this feature would start causing the failures it
-        // exists to prevent.
-        std::size_t compactions = 0;
-    };
-    std::map<std::string, std::vector<ReadNote>> run_read_;
+    // The cost it was aimed at is now paid by collapsing the DUPLICATE copy instead of
+    // withholding the answer, keyed on byte identity, which needs no ledger and no
+    // invalidation rule: a file that changed produces different bytes and nothing collapses.
+    // How many times each corrective has fired against the same target, so a mechanism
+    // that is firing correctly and achieving nothing can be seen doing it. See the
+    // `corrective_ineffective` emit: BreakRepeat suppressed one tool thirteen times in a
+    // single run, each firing textbook-correct and none of them changing what happened
+    // next. Keyed "corrective:target" because the same tool repeating under two different
+    // correctives is two different findings.
+    std::map<std::string, std::size_t> corrective_hits_;
     // Canonical contracts RederiveContract has already reported. Once each: the corrective
     // pins the grammar to `plan`, and re-arming it on a contract the run declined to change
     // would leave `plan` as the only legal move for the rest of the run.
     std::set<std::string> disputed_contracts_;
-    // Turns of `plan`-only grammar owed to RederiveContract. Spent in step(), never
-    // latched -- see that corrective.
+    // Turns of `plan`-only grammar owed to RederiveContract and ReconcileChecklist. Spent
+    // in step(), never latched -- see those correctives.
     int replan_turns_ = 0;
+    // Whether this run has already been asked to reconcile a green ledger against an
+    // unticked list, and whether the checklist has stopped gating completion as a result.
+    //
+    // ONCE PER RUN, and asking is what spends it. The deleted `must_reconcile` restriction
+    // re-derived its own precondition every turn and pinned `plan` for fourteen turns
+    // straight; the difference is not the question, it is that this one is asked a single
+    // time and then answered by whatever the run does next.
+    //
+    // The waiver is set in exactly two places: when the run answers the ask without
+    // clearing its list AND then stops moving (run(), at the stall break), and never by
+    // anything the model can say. A run that answers by DOING the work does not need it --
+    // the list clears itself and completion goes through unanimous.
+    bool reconcile_asked_ = false;
+    bool checklist_waived_ = false;
     // A command that runs the declared contract's program a different way, PASSED, and did
     // so while the contract itself has never passed. The run's own evidence that its
     // criterion is measuring the wrong thing. Cleared when the corrective reports it.

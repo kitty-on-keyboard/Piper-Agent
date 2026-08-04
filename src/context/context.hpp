@@ -240,6 +240,57 @@ class ContextStore {
     }
     [[nodiscard]] const std::vector<TurnRecord>& recent() const noexcept { return recent_; }
 
+    // Collapses EARLIER records whose observation is byte-identical to `observation` down
+    // to `replacement`, and returns how many were collapsed.
+    //
+    // This is what a re-read costs now: nothing. The read runs, the model gets the bytes it
+    // asked for, and the copy it was already holding turns into one line -- so the prompt
+    // ends the turn the same size it started, with the newest copy live.
+    //
+    // BYTE IDENTITY IS THE WHOLE TEST, and it is why this replaced a ledger of paths and
+    // invalidation rules. That ledger had to PREDICT whether a file had changed, from a
+    // path string, against tools that rename and shell commands that can do anything -- and
+    // when it predicted wrong it fed the model stale bytes, or refused a read of a file that
+    // had moved. Identical bytes cannot be stale: if the file changed, the new observation
+    // differs and nothing collapses. There is no rule to get wrong.
+    // Whether these exact bytes are ALREADY in the prompt.
+    //
+    // Asked before the new record is added, this answers "did that read tell the model
+    // anything it was not already holding?" -- which is the one question the no-progress
+    // counter could not ask, and the reason a run could spend thirty turns re-reading four
+    // files with `no_progress_streak=0` on every single line of the trace.
+    //
+    // Byte identity, for the same reason supersede_duplicate_observation uses it: a file
+    // that changed produces different bytes, so a re-read after a write is never mistaken
+    // for a redundant one and there is no staleness rule to get wrong.
+    //
+    // Stays correct as copies are collapsed, because the collapse always leaves exactly
+    // ONE live copy -- the newest. The third read of an unchanged file still finds the
+    // second read's bytes sitting in recent_.
+    [[nodiscard]] bool has_observation(const std::string& observation) const {
+        if (observation.empty()) {
+            return false;
+        }
+        return std::any_of(recent_.begin(), recent_.end(), [&](const TurnRecord& t) {
+            return t.observation == observation;
+        });
+    }
+
+    std::size_t supersede_duplicate_observation(const std::string& observation,
+                                                const std::string& replacement) {
+        if (observation.empty()) {
+            return 0;
+        }
+        std::size_t collapsed = 0;
+        for (TurnRecord& t : recent_) {
+            if (t.observation == observation) {
+                t.observation = replacement;
+                ++collapsed;
+            }
+        }
+        return collapsed;
+    }
+
     // What the human said, mid-run or between runs. Not prompt IMPURITY: a user
     // instruction is an observed fact about this session, in the same sense a tool
     // result is (S8.4). What stays forbidden is text nobody said -- an inferred

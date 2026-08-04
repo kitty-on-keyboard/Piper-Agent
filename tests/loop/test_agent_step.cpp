@@ -14,6 +14,7 @@
 // because what IT asserts is the byte-fragment property and 944 of the real checkpoint's
 // tokens are the subject. That is a genuine need for the real vocab; this is not.
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "src/model/qwen_tokenizer.hpp"
 #include "src/platform/clock.hpp"
 #include "src/platform/event_log.hpp"
+#include "src/platform/fs.hpp"
 #include "src/tools/registry.hpp"
 
 #include "tests/check.hpp"
@@ -490,21 +492,24 @@ TEST(the_gate_classifies_against_the_real_workspace_root) {
     (void)::system(("rm -rf " + root).c_str());
 }
 
-// --- the read ledger (Gap 3) -------------------------------------------------
+// --- re-reads are answered; the duplicate is what gets collapsed ---------------
 //
-// MEASURED, and it is the largest consumer of a run's budget: 45 turns produced 65 turn
-// records, of which 44 were reads against 11 writes, and one 12.5 KB file was read ELEVEN
-// times. Peak prompt was 47,220 tokens against a 96,000 budget, so compaction never ran --
-// every one of those re-reads was answered with bytes still sitting verbatim in the prompt.
-TEST(a_file_already_in_context_is_not_read_again_until_something_changes_it) {
+// The measurement that started this is real: 45 turns produced 65 turn records, 34 of them
+// content reads against 11 writes, and one 12.5 KB file was read ELEVEN times. The first fix
+// was a ledger that REFUSED the re-read and told the model the bytes were already in its
+// context. That fix cost a later 66-turn run everything -- one file refused seventeen times,
+// `read_file` suppressed by BreakRepeat thirteen times, cancelled with nothing written.
+//
+// A tool result is never withheld to save tokens. The read runs, the model gets its bytes,
+// and the copy it was already holding collapses to one line -- so the saving survives and
+// the failure mode does not.
+TEST(a_repeated_read_is_answered_and_the_older_copy_is_collapsed) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
 
-    const std::string root = "/tmp/lmp_read_ledger_test";
+    const std::string root = "/tmp/lmp_read_dedupe_test";
     (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
-    // Big enough for the saving to be the point. The reported run re-read a 12.5 KB file;
-    // against a three-line fixture the suppression message is larger than the content and
-    // the test would assert the opposite of what this exists to do.
+    // Big enough for the saving to be the point, as in the run this came from.
     (void)::system(("printf 'alpha\\n' > " + root + "/f.txt; "
                     "for i in $(seq 1 400); do echo 'padding line for size' >> " +
                     root + "/f.txt; done")
@@ -512,20 +517,13 @@ TEST(a_file_already_in_context_is_not_read_again_until_something_changes_it) {
 
     const std::string read_body =
         "<function=read_file>\n<parameter=path>\nf.txt\n</parameter>\n</function>\n";
-    const std::string slice_body =
-        "<function=read_slice>\n<parameter=path>\nf.txt\n</parameter>\n"
-        "<parameter=start_line>\n1\n</parameter>\n"
-        "<parameter=end_line>\n2\n</parameter>\n</function>\n";
-    const std::string write_body =
-        "<function=write_file>\n<parameter=path>\nf.txt\n</parameter>\n"
-        "<parameter=content>\ndelta\n</parameter>\n</function>\n";
 
     model::ScriptedBackend backend;
-    backend.enqueue_response(call_turn(tok, read_body));  // 1: the real read
-    backend.enqueue_response(call_turn(tok, read_body));  // 2: the repeat
-    backend.enqueue_response(call_turn(tok, slice_body)); // 3: a slice of what it has
-    backend.enqueue_response(call_turn(tok, write_body)); // 4: changes the file
-    backend.enqueue_response(call_turn(tok, read_body));  // 5: legitimate again
+    backend.enqueue_response(call_turn(tok, read_body)); // 1: the real read
+    backend.enqueue_response(call_turn(tok, read_body)); // 2: the repeat
+    // Two is the whole property. A third would be suppressed by BreakRepeat -- which is the
+    // correct answer to a model repeating itself, and not what this test is about.
+    backend.enqueue_response(text_turn(tok, "t", "done"));
 
     tools::Registry registry(workspace(root));
     context::ContextStore ctx("read it");
@@ -534,51 +532,49 @@ TEST(a_file_already_in_context_is_not_read_again_until_something_changes_it) {
     platform::SystemClock clock;
     loop::AgentConfig config;
     config.auto_syntax_check = false;
+    // The collapse only runs under context pressure now, because it rewrites a record
+    // inside the KV-cached prefix and so costs a full re-prefill -- see
+    // collapse_duplicate_read(). This budget puts the run above that mark; it stays clear
+    // of compaction, which needs more than kMinRecentTurns records before it drops one.
+    config.context_budget_tokens = 100;
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
-    // f.txt is the operator's file, not this run's output, so the whole-file write over it
-    // raises an irreversibility card whatever auto_approve_writes says. Answering yes is
-    // the point here -- the write has to SUCCEED for the release to be exercised.
-    agent.set_approver([](const std::string&, const std::string&, const std::string&,
-                          const tools::RiskHint&) { return true; });
     const model::CancelToken cancel;
+    // Driven through run(), not step(): the turn RECORDS are what this is about, and step()
+    // returns a result without adding one.
+    (void)agent.run(cancel);
 
-    const loop::TurnResult first = agent.step(cancel);
-    REQUIRE(first.tool_result.ok());
-    CHECK(first.tool_result.summary.find("alpha") != std::string::npos);
-
-    // THE ASSERTION. The content is not handed over a second time, and the answer says
-    // why rather than being empty -- an empty observation is dropped from the rendered
-    // prompt entirely, which is how read_file's own zero-byte case came to be re-issued
-    // seventeen turns running.
-    const loop::TurnResult second = agent.step(cancel);
-    CHECK(second.tool_result.ok());
-    CHECK(second.tool_result.summary.find("alpha") == std::string::npos);
-    CHECK(second.tool_result.summary.find("not re-read") != std::string::npos);
-    CHECK(second.tool_result.summary.size() < first.tool_result.summary.size());
-
-    // A whole-file read subsumes a later slice of it. This is the case exact-match repeat
-    // detection cannot see: read_file(x) then read_slice(x,1,2) is two distinct keys.
-    const loop::TurnResult sliced = agent.step(cancel);
-    CHECK(sliced.tool_result.ok());
-    CHECK(sliced.tool_result.summary.find("not re-read") != std::string::npos);
-
-    // A write to the path releases it. Keyed on "unchanged since last read", never on
-    // "read before" -- suppressing a read of a file the run just rewrote would hand the
-    // model its own stale bytes, which is worse than the repetition this exists to stop.
-    const loop::TurnResult wrote = agent.step(cancel);
-    REQUIRE(wrote.tool_result.ok());
-    const loop::TurnResult after = agent.step(cancel);
-    CHECK(after.tool_result.ok());
-    CHECK(after.tool_result.summary.find("delta") != std::string::npos);
+    // THE ASSERTION, and it is the one the old test had backwards. Every read was answered
+    // with the file -- no refusal, nothing about scrolling up -- and the context still holds
+    // exactly ONE verbatim copy, the newest, with the earlier ones collapsed to a pointer.
+    std::size_t verbatim = 0;
+    std::size_t collapsed = 0;
+    std::size_t refused = 0;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("alpha") != std::string::npos &&
+            t.observation.find("padding line") != std::string::npos) {
+            ++verbatim;
+        }
+        if (t.observation.find("collapsed to keep one copy") != std::string::npos) {
+            ++collapsed;
+        }
+        if (t.observation.find("not re-read") != std::string::npos ||
+            t.observation.find("scroll up") != std::string::npos) {
+            ++refused;
+        }
+    }
+    CHECK_EQ(verbatim, std::size_t{1});
+    CHECK_EQ(collapsed, std::size_t{1});
+    CHECK_EQ(refused, std::size_t{0});
 }
 
-// A slice the run has NOT seen must always be read. The ledger answers from what is in the
-// prompt, so a wrong answer here is the model being handed lines it never received.
-TEST(a_slice_that_was_never_read_is_not_answered_from_the_ledger) {
+// The half that must never regress into the old behaviour: a slice the run has not seen is
+// real work, and so is a re-read of a file that CHANGED. Byte identity handles both without
+// a staleness rule -- different bytes simply do not match.
+TEST(a_changed_file_and_an_unseen_slice_are_both_read_in_full) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
 
-    const std::string root = "/tmp/lmp_read_slice_test";
+    const std::string root = "/tmp/lmp_read_change_test";
     (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
     (void)::system(("printf 'l1\\nl2\\nl3\\nl4\\n' > " + root + "/g.txt").c_str());
 
@@ -588,11 +584,18 @@ TEST(a_slice_that_was_never_read_is_not_answered_from_the_ledger) {
                from + "\n</parameter>\n<parameter=end_line>\n" + to +
                "\n</parameter>\n</function>\n";
     };
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\ng.txt\n</parameter>\n</function>\n";
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\ng.txt\n</parameter>\n"
+        "<parameter=content>\ndelta\n</parameter>\n</function>\n";
 
     model::ScriptedBackend backend;
     backend.enqueue_response(call_turn(tok, slice("1", "2")));
     backend.enqueue_response(call_turn(tok, slice("3", "4"))); // never seen
-    backend.enqueue_response(call_turn(tok, slice("1", "2"))); // seen
+    backend.enqueue_response(call_turn(tok, read_body));
+    backend.enqueue_response(call_turn(tok, write_body)); // changes it
+    backend.enqueue_response(call_turn(tok, read_body));  // must show the new bytes
 
     tools::Registry registry(workspace(root));
     context::ContextStore ctx("read it");
@@ -602,13 +605,83 @@ TEST(a_slice_that_was_never_read_is_not_answered_from_the_ledger) {
     loop::AgentConfig config;
     config.auto_syntax_check = false;
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    agent.set_approver([](const std::string&, const std::string&, const std::string&,
+                          const tools::RiskHint&) { return true; });
     const model::CancelToken cancel;
 
     CHECK(agent.step(cancel).tool_result.summary.find("l1") != std::string::npos);
-    const loop::TurnResult fresh = agent.step(cancel);
-    CHECK(fresh.tool_result.summary.find("l3") != std::string::npos);
-    CHECK(fresh.tool_result.summary.find("not re-read") == std::string::npos);
-    CHECK(agent.step(cancel).tool_result.summary.find("not re-read") != std::string::npos);
+    // The case the old whole-file note got WRONG by answering it from coverage it never
+    // had: these lines were never delivered, so they have to be read.
+    CHECK(agent.step(cancel).tool_result.summary.find("l3") != std::string::npos);
+    CHECK(agent.step(cancel).tool_result.summary.find("l4") != std::string::npos);
+
+    REQUIRE(agent.step(cancel).tool_result.ok()); // the write
+    const loop::TurnResult after = agent.step(cancel);
+    REQUIRE(after.tool_result.ok());
+    CHECK(after.tool_result.summary.find("delta") != std::string::npos);
+    CHECK(after.tool_result.summary.find("l1") == std::string::npos);
+}
+
+// THE PROPERTY THE LOOP BREAKER MUST NEVER VIOLATE. A file whose content legitimately
+// repeats -- boilerplate, a table, forty near-identical struct members -- is written inside
+// a `tool_call` phase, and those tokens grow neither think_ids nor text_ids. The breaker
+// counts only what the grammar filed as prose, so it cannot cut a write short.
+//
+// This is asserted rather than reasoned about because the failure would be silent and
+// terrible: a truncated file that compiles is worse than any loop.
+TEST(a_write_whose_content_repeats_is_never_cut_short) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_loopbreak_write_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    // Far past LoopBreaker::kMaxRepeats copies of an identical line -- if the breaker were
+    // watching tool-call tokens this would be cut in the first fifth of the file.
+    std::string repeated;
+    for (int i = 0; i < 40; ++i) {
+        repeated += "    let value = compute(input, index, scale)\n";
+    }
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\nRepeated.swift\n</parameter>\n"
+        "<parameter=content>\n" + repeated + "</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, write_body));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write it");
+    ctx.set_checklist({{"write", false}});
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    // The mini vocabulary has almost no merges, so this content is near one token per
+    // character. The default cap would end the turn as LengthCapped and the test would pass
+    // for the wrong reason -- never having reached the breaker at all.
+    config.max_new_tokens = 32768;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+
+    const loop::TurnResult t = agent.step(cancel);
+    REQUIRE(t.outcome == loop::Outcome::ToolCallExecuted);
+    REQUIRE(t.tool_result.ok());
+
+    // EVERY copy landed. Counted rather than spot-checked, because a breaker that cut
+    // anywhere would leave a plausible-looking prefix that still parses as Swift.
+    //
+    // One byte short of `repeated` is correct and not a truncation: the newline before
+    // `</parameter>` is framing, and the tool-call parser consumes it.
+    const platform::FileContents f =
+        platform::read_file_whole(root + "/Repeated.swift", 1U << 22);
+    REQUIRE(f.ok());
+    std::size_t copies = 0;
+    for (std::size_t at = f.bytes.find("let value = compute"); at != std::string::npos;
+         at = f.bytes.find("let value = compute", at + 1)) {
+        ++copies;
+    }
+    CHECK_EQ(copies, std::size_t{40});
+    CHECK_EQ(f.bytes.size() + 1, repeated.size());
 }
 
 // --- an unmoved contract (Gap 1) ---------------------------------------------
@@ -733,6 +806,231 @@ TEST(the_contract_finding_is_raised_once_and_does_not_pin_the_run_to_plan) {
     CHECK(ctx.deliverables().size() >= 1);
 }
 
+// --- the checklist a run finishes without ------------------------------------
+//
+// MEASURED, twice in the same session, on the same macOS mission: 47 turns ending
+// `completed` with 4 of 11 items ticked, then 65 turns ending `completed` with 3 of 11.
+// Both were reported to the operator as "Complete (self-checked) -- evidence says done,
+// 8 item(s) left unticked", which is not a report of one thing, it is two contradictory
+// claims printed next to each other. The seventh pass had removed the checklist from the
+// gate on the reasoning that a tick is a self-report; an UNTICK is a different statement,
+// and there is nothing in the ledgers that can contradict it.
+TEST(a_green_ledger_does_not_finish_a_run_over_its_own_open_items) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_reconcile_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    // Red until the work lands, green after: the FAIL_TO_PASS pair that makes the green
+    // evidence rather than an assertion.
+    const std::string check = "test -f " + root + "/new.swift";
+    const std::string plan_open =
+        "<function=plan>\n<parameter=items>\n"
+        "[x] find the scheme\n[ ] fix the compile errors\n[ ] make the build pass\n"
+        "</parameter>\n<parameter=verify_with>\n" + check + "\n</parameter>\n</function>\n";
+    const std::string plan_ticked =
+        "<function=plan>\n<parameter=items>\n"
+        "[x] find the scheme\n[x] fix the compile errors\n[x] make the build pass\n"
+        "</parameter>\n</function>\n";
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\nnew.swift\n</parameter>\n"
+        "<parameter=content>\nlet x = 1\n</parameter>\n</function>\n";
+    const std::string check_body =
+        "<function=shell>\n<parameter=command>\n" + check + "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_open));  // declared; baseline goes red
+    backend.enqueue_response(call_turn(tok, write_body)); // the work
+    backend.enqueue_response(call_turn(tok, check_body)); // green, and now proven
+    // Under the old gate the run ended HERE, completed, at one of three items. It does not:
+    // the next turn is pinned to `plan`, and this is the answer to that.
+    backend.enqueue_response(call_turn(tok, plan_ticked));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("fix the build");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // The ask happened, in the history, naming both legal answers.
+    bool asked = false;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("your own checklist still lists") != std::string::npos &&
+            t.observation.find("verify_with") != std::string::npos) {
+            asked = true;
+        }
+    }
+    CHECK(asked);
+    // And the run finished UNANIMOUS: the same green, and a list that agrees with it.
+    CHECK(report.completed);
+    CHECK_EQ(report.unfinished_items, std::size_t{0});
+    CHECK_EQ(report.termination_reason, std::string("completed"));
+}
+
+// The other half, and the one that must not become the deleted `must_reconcile` deadlock:
+// a run that answers the ask without clearing its list, and then stops moving. Ending that
+// `text_only_no_progress` would throw a proven green away over bookkeeping -- which is the
+// exact failure that made the seventh pass rip the checklist out of the gate.
+//
+// So the ask is spent ONCE, and a run that has been asked and has stopped working finishes
+// on its evidence with the disagreement reported rather than resolved.
+TEST(a_run_that_is_asked_once_and_says_nothing_still_finishes_on_its_evidence) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_reconcile_waiver_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    const std::string check = "test -f " + root + "/new.swift";
+    const std::string plan_open =
+        "<function=plan>\n<parameter=items>\n"
+        "[x] find the scheme\n[ ] fix the compile errors\n[ ] make the build pass\n"
+        "</parameter>\n<parameter=verify_with>\n" + check + "\n</parameter>\n</function>\n";
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\nnew.swift\n</parameter>\n"
+        "<parameter=content>\nlet x = 1\n</parameter>\n</function>\n";
+    const std::string check_body =
+        "<function=shell>\n<parameter=command>\n" + check + "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_open));
+    backend.enqueue_response(call_turn(tok, write_body));
+    backend.enqueue_response(call_turn(tok, check_body)); // the ask fires after this
+    backend.enqueue_response(call_turn(tok, plan_open));  // restated UNCHANGED
+    // Then it narrates. kMaxConsecutiveNoProgress of these is a stall.
+    backend.enqueue_response(text_turn(tok, "t", "The work is complete."));
+    backend.enqueue_response(text_turn(tok, "t", "The work is complete."));
+    backend.enqueue_response(text_turn(tok, "t", "The work is complete."));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("fix the build");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // Asked ONCE. A second ask would pin `plan` again on a run that has already answered,
+    // and re-entering a restriction that only `plan` can clear is how the deleted
+    // `must_reconcile` reached fourteen consecutive plan turns and no work.
+    std::size_t asks = 0;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("your own checklist still lists") != std::string::npos) {
+            ++asks;
+        }
+    }
+    CHECK_EQ(asks, std::size_t{1});
+    // The green still counts. The disagreement is reported, not buried.
+    CHECK(report.completed);
+    CHECK_EQ(report.termination_reason, std::string("completed"));
+    CHECK(report.unfinished_items > 0);
+}
+
+// --- the trace a bad run leaves behind ---------------------------------------
+//
+// Every event here was added after a 66-turn run could not be diagnosed from its own log.
+// The log had `generation`, `tool_result` and `corrective` and still could not answer the
+// three questions that mattered: what did turn 41 do, why was `read_file` refused, and was
+// the corrective that fired thirteen times accomplishing anything.
+//
+// Asserted end to end through a real EventLogWriter rather than by unit-testing the
+// helpers, because the failure mode being guarded against is an event that is computed
+// correctly and never written -- which is exactly what the old `repeat_read` did with the
+// one field that would have explained the loop.
+TEST(a_run_leaves_a_trace_that_explains_its_own_repeats) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_trace_events_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    const std::string log_path = root + "/events.jsonl";
+
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] read it\n[ ] fix it\n</parameter>\n"
+        "<parameter=verify_with>\ntrue\n</parameter>\n</function>\n";
+    // Over the collapse threshold, because a file small enough that the pointer costs more
+    // than the bytes is deliberately left alone -- and a fixture under it would assert the
+    // collapse never runs while looking like it asserts the opposite.
+    std::string payload;
+    for (int i = 0; i < 60; ++i) {
+        payload += "padding line for size\n";
+    }
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\nnotes.txt\n</parameter>\n"
+        "<parameter=content>\n" + payload + "</parameter>\n</function>\n";
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nnotes.txt\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_body));
+    backend.enqueue_response(call_turn(tok, write_body));
+    backend.enqueue_response(call_turn(tok, read_body)); // the real read
+    backend.enqueue_response(call_turn(tok, read_body)); // the repeat: answered, deduped
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read the file");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    // UNDER CONTEXT PRESSURE, because that is now the only condition under which the
+    // collapse runs at all. It rewrites a turn record inside the KV-cached stable prefix,
+    // which costs a full re-prefill, so a run with room to spare keeps its cache and its
+    // duplicate -- see collapse_duplicate_read(). A budget this small puts every prompt
+    // above the collapse mark while leaving compaction alone: the trim needs MORE than
+    // kMinRecentTurns records to drop one, and this run never holds more than four.
+    config.context_budget_tokens = 100;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    log.flush();
+
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    const std::string& trace = f.bytes;
+
+    // One line per turn, so a run is reconstructable without correlating four event kinds
+    // by sequence number.
+    CHECK(trace.find("\"kind\":\"turn\"") != std::string::npos);
+    CHECK(trace.find("\"no_progress_streak\"") != std::string::npos);
+
+    // The checklist's TEXT, not just its count. A count cannot distinguish a healthy plan
+    // from five items that parsed with no text at all, which is what one run displayed.
+    CHECK(trace.find("\"kind\":\"checklist\"") != std::string::npos);
+    CHECK(trace.find("read it") != std::string::npos);
+
+    // Writes, with the normalised path the ledger keys on.
+    CHECK(trace.find("\"kind\":\"write\"") != std::string::npos);
+    CHECK(trace.find("\"first_touch\"") != std::string::npos);
+
+    // The re-read HAPPENED -- there is a tool_result for it, not a refusal -- and the
+    // duplicate copy was collapsed instead, with the saving named. This is the line that
+    // replaced `read_suppressed`, and the difference between them is the difference between
+    // a run that works and the 66-turn one that did not.
+    CHECK(trace.find("\"kind\":\"duplicate_read_collapsed\"") != std::string::npos);
+    CHECK(trace.find("\"copies_collapsed\"") != std::string::npos);
+    CHECK(trace.find("\"bytes_reclaimed\"") != std::string::npos);
+    CHECK(trace.find("\"kind\":\"read_suppressed\"") == std::string::npos);
+
+    // And when the harness takes a tool away, it says so. A run flailing between two tools
+    // looks identical whether the model is confused or the grammar was narrowed under it.
+    CHECK(trace.find("\"kind\":\"grammar\"") != std::string::npos);
+    CHECK(trace.find("\"withheld\"") != std::string::npos);
+}
+
 // A run that verifies its work with a command that is NOT its declared contract gets no
 // credit for it, silently -- the contract is matched by containment, so the moment a run
 // corrects its own command it stops being watched.
@@ -787,4 +1085,438 @@ TEST(a_passing_command_that_is_not_the_contract_is_reported_rather_than_counted)
         }
     }
     CHECK(told);
+}
+
+// --- the re-read loop ------------------------------------------------------
+//
+// The four defects below were found in ONE cancelled 38-turn run whose entire visible
+// behaviour was reading the same handful of files over and over. They are separate bugs
+// with separate fixes, and each one alone was enough to keep the loop turning.
+
+// A turn that batches four reads recorded ONE of them in the repeat detector, so three
+// reads per turn were invisible to it no matter how often they came back.
+//
+// MEASURED: turns 34, 35 and 37 of the cancelled run were each `read_file` plus three
+// batched reads of the SAME four files. seen_count() for the batched three never left
+// zero, so BreakRepeat could not fire on the calls that made up three quarters of the loop.
+TEST(batched_calls_are_counted_by_the_repeat_detector) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_batched_repeat_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    // Three files, each big enough to be a real read.
+    for (const char* name : {"a.txt", "b.txt", "c.txt"}) {
+        (void)::system(("for i in $(seq 1 80); do echo 'padding line for size' >> " + root +
+                        "/" + name + "; done")
+                           .c_str());
+    }
+
+    // Two reads in one turn, each in its own <tool_call> block -- the surface form the
+    // grammar batches on.
+    const auto two_reads = [&tok](const char* lead, const char* batched) {
+        std::vector<model::TokenId> script;
+        script.push_back(tok.specials().think_close);
+        for (const char* path : {lead, batched}) {
+            script.push_back(tok.specials().tool_call_open);
+            const std::string body = std::string("<function=read_file>\n<parameter=path>\n") +
+                                     path + "\n</parameter>\n</function>\n";
+            for (model::TokenId id : tok.encode_content(body)) {
+                script.push_back(id);
+            }
+            script.push_back(tok.specials().tool_call_close);
+        }
+        script.push_back(tok.specials().im_end);
+        return script;
+    };
+
+    // THE REPEAT IS IN THE TAIL, AND ONLY IN THE TAIL. The leading call differs between the
+    // two turns, so the primary is never a repeat and the old code -- which recorded and
+    // examined the primary alone -- had nothing to fire on. `b.txt` is read twice.
+    model::ScriptedBackend backend;
+    backend.enqueue_response(two_reads("a.txt", "b.txt"));
+    backend.enqueue_response(two_reads("c.txt", "b.txt"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read them");
+    // The plan gate leaves `plan` as the only samplable tool until a checklist exists.
+    ctx.set_checklist({{"read them", false}});
+    platform::EventLogWriter log;
+    const std::string trace_path = root + "/events.jsonl";
+    platform::EventLogOptions opts;
+    opts.path = trace_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    log.flush();
+
+    const platform::FileContents tf = platform::read_file_whole(trace_path, 1U << 22);
+    REQUIRE(tf.ok());
+    const std::string& trace = tf.bytes;
+    // BreakRepeat fires on the second turn. Before the fix it could not: the only call the
+    // detector had ever seen was the primary one.
+    CHECK(trace.find("\"corrective\":\"break_repeat\"") != std::string::npos);
+    // And the suppression covers BOTH read tools, not just the name that led the turn --
+    // otherwise the next turn simply asks the same question with the other one.
+    CHECK(trace.find("\"family\":\"read_file,read_slice\"") != std::string::npos);
+}
+
+// Suppressing `read_file` alone routes the next turn to `read_slice` on the same path,
+// which is the same answer bought for one turn of delay.
+//
+// MEASURED: 15 BreakRepeat firings in 38 turns, alternating the two, with
+// `corrective_ineffective` firing ten times against a run that made two writes in total.
+TEST(break_repeat_holds_both_halves_of_a_read_ping_pong) {
+    std::vector<parsephony::ToolSpec> specs;
+    for (const char* n : {"read_file", "read_slice", "shell", "plan"}) {
+        parsephony::ToolSpec s;
+        s.name = n;
+        specs.push_back(s);
+    }
+    // What apply_corrective now installs: the whole answer family, one window each.
+    const std::vector<std::pair<std::string, int>> held = {{"read_file", 2},
+                                                           {"read_slice", 2}};
+    const std::vector<parsephony::ToolSpec> allowed = loop::without_suppressed(specs, held);
+
+    bool has_read_file = false;
+    bool has_read_slice = false;
+    for (const parsephony::ToolSpec& s : allowed) {
+        has_read_file = has_read_file || s.name == "read_file";
+        has_read_slice = has_read_slice || s.name == "read_slice";
+    }
+    CHECK(!has_read_file);
+    CHECK(!has_read_slice);
+    // The floor still holds: a turn must have something to spend.
+    CHECK(allowed.size() == 2);
+}
+
+// `plan` split its items on '\n' and nothing else, so a JSON array -- which is what a
+// list-shaped parameter looks like to a model trained on JSON tool calls -- arrived as ONE
+// line and became ONE checklist item whose text was its own JSON source.
+//
+// MEASURED, and it is what the operator saw on the surface: `items=1 open=1`, a checklist
+// reading `0/1`, and an item whose text began `["[ ] Task 1: `. It also replaced a healthy
+// six-item checklist and left one item that could never be ticked.
+TEST(plan_accepts_a_json_array_of_items) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        "[\"[ ] Fix HostStatsService\", \"[x] Fix RingBuffer\", \"[ ] Fix the gauge\"]\n"
+        "</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix them");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 3);
+    CHECK(ctx.checklist()[0].text == "Fix HostStatsService");
+    CHECK(!ctx.checklist()[0].done);
+    CHECK(ctx.checklist()[1].text == "Fix RingBuffer");
+    CHECK(ctx.checklist()[1].done);
+    CHECK(ctx.checklist()[2].text == "Fix the gauge");
+    CHECK(ctx.open_checklist_items() == 2);
+}
+
+// The one string a looser JSON test would eat. A checklist item may legitimately open with
+// the `[ ]` marker, and that is not an array.
+TEST(plan_still_reads_a_plain_markdown_checklist) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        "[ ] build it\n- [x] test it\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("build it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 2);
+    CHECK(ctx.checklist()[0].text == "build it");
+    CHECK(ctx.checklist()[1].text == "test it");
+    CHECK(ctx.checklist()[1].done);
+}
+
+// The duplicate collapse rewrites a turn record that sits INSIDE the KV-cached stable
+// prefix, so plan_turn_reuse() correctly finds the divergence and re-prefills the whole
+// prompt from token zero. Nothing is stale; the saving is simply bought with the entire
+// prefill.
+//
+// MEASURED on the run this came from, with no overlap between the two groups:
+//
+//     turns where a collapse fired (n=15)   median TTFT  21,011 ms
+//     turns where none fired      (n=22)    median TTFT     940 ms
+//
+// The run peaked at 34,096 tokens against a 96,000-token budget, so every one of its 33
+// collapses reclaimed a few KB of a context that was two thirds empty, and each cost about
+// twenty seconds of a wall-clock-bounded run.
+//
+// So a run with room to spare keeps its cache AND its duplicate. The companion case above
+// (a_repeated_read_is_answered_and_the_older_copy_is_collapsed) holds the other half: once
+// the context is genuinely short, the collapse runs, because then it may spare a compaction
+// that costs the same prefill and destroys information the collapse keeps.
+TEST(a_run_with_context_to_spare_keeps_its_kv_cache_instead_of_collapsing) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_collapse_gate_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    (void)::system(("printf 'alpha\\n' > " + root + "/f.txt; "
+                    "for i in $(seq 1 400); do echo 'padding line for size' >> " +
+                    root + "/f.txt; done")
+                       .c_str());
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nf.txt\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body));
+    backend.enqueue_response(call_turn(tok, read_body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read it");
+    ctx.set_checklist({{"read", false}});
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    // The DEFAULT budget, which is the whole point: this run uses a rounding error of it.
+    const model::CancelToken cancel;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    (void)agent.run(cancel);
+
+    std::size_t verbatim = 0;
+    std::size_t collapsed = 0;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("alpha") != std::string::npos &&
+            t.observation.find("padding line") != std::string::npos) {
+            ++verbatim;
+        }
+        if (t.observation.find("collapsed to keep one copy") != std::string::npos) {
+            ++collapsed;
+        }
+    }
+    // Both reads answered in full, and HISTORY WAS NOT REWRITTEN -- which is the property
+    // the cache depends on. The duplicate copy is the cheaper of the two things to lose.
+    CHECK_EQ(verbatim, std::size_t{2});
+    CHECK_EQ(collapsed, std::size_t{0});
+}
+
+// --- a contract is a SET of checks, not one string ----------------------------
+//
+// The trap this closes, in full: a run declared `swift test && swift build`, then ran the
+// two halves as separate commands -- which is what a model does, and what a person does.
+// Containment against the whole declared string matched NEITHER, so the Verifier never saw
+// a single one of them. The ledger kept one red from turn 20 with `workspace_writes=0`,
+// `not_complete: verification still failing` never changed, and the run could not have
+// completed no matter what it wrote.
+TEST(each_half_of_an_and_contract_is_recorded_when_it_runs) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_compound_contract_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    // Two real commands. `true` passes; the contract is the two of them joined, exactly as
+    // the reported run spelled its own.
+    const std::string declared = "true alpha && true beta";
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] do it\n</parameter>\n"
+        "<parameter=verify_with>\n" + declared + "\n</parameter>\n</function>\n";
+    // Each half run on its own, wrapped the way a model actually wraps it.
+    const std::string half_one =
+        "<function=shell>\n<parameter=command>\ncd " + root +
+        " && true alpha\n</parameter>\n</function>\n";
+    const std::string half_two =
+        "<function=shell>\n<parameter=command>\ncd " + root +
+        " && true beta 2>&1\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_body));
+    backend.enqueue_response(call_turn(tok, half_one));
+    backend.enqueue_response(call_turn(tok, half_two));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    // BOTH halves have their own ledger identity, and each was read TWICE: once by the
+    // baseline at declaration time, and once from the command the model actually ran.
+    //
+    // Counting rather than existence-checking is the point. The baseline alone produces one
+    // reading per half whatever dispatch_call does, so an existence check passes even when
+    // the model's own commands are being ignored -- which is the entire defect. The second
+    // reading is the only thing that proves the routing works.
+    std::size_t alpha = 0;
+    std::size_t beta = 0;
+    for (const context::VerificationRecord& v : ctx.verifications()) {
+        if (!v.ran) {
+            continue;
+        }
+        alpha += v.contract == "true alpha" ? 1 : 0;
+        beta += v.contract == "true beta" ? 1 : 0;
+    }
+    CHECK_EQ(alpha, std::size_t{2});
+    CHECK_EQ(beta, std::size_t{2});
+    // And no record was ever filed under the compound string, which is not a check anyone
+    // can run -- that identity is what the whole gap was made of.
+    for (const context::VerificationRecord& v : ctx.verifications()) {
+        CHECK(v.contract != loop::canonicalize_check(declared));
+    }
+}
+
+// The decomposition itself, at the unit. `&&` means ALL OF THESE; `||` and `;` do not, and
+// splitting either would change what the operator asked for. `cd` asserts nothing and must
+// not become a vacuous always-green check -- one of those can never be proven falsifiable,
+// so keeping it would deadlock the completion gate rather than loosen it.
+TEST(a_contract_decomposes_on_and_alone) {
+    using loop::contract_checks;
+
+    const std::vector<std::string> two = contract_checks("swift test && swift build");
+    REQUIRE(two.size() == 2);
+    CHECK(two[0] == "swift test");
+    CHECK(two[1] == "swift build");
+
+    // Navigation is not a criterion.
+    const std::vector<std::string> nav = contract_checks("cd /tmp/x && pytest -q");
+    REQUIRE(nav.size() == 1);
+    CHECK(nav[0] == "pytest -q");
+
+    // An or-list means EITHER, and a sequence means REGARDLESS. Neither decomposes.
+    REQUIRE(contract_checks("make || make clean").size() == 1);
+    REQUIRE(contract_checks("lint ; test").size() == 1);
+
+    // `&&` inside quotes belongs to the command, not to the contract.
+    const std::vector<std::string> quoted = contract_checks("sh -c \"a && b\"");
+    REQUIRE(quoted.size() == 1);
+    CHECK(quoted[0] == "sh -c \"a && b\"");
+
+    // A contract with no `&&` at all is itself, so everything downstream is unchanged.
+    const std::vector<std::string> one = contract_checks("cargo test");
+    REQUIRE(one.size() == 1);
+    CHECK(one[0] == "cargo test");
+}
+
+// One green half does not finish a run: `&&` means all of them. This is the half of the
+// decomposition that must not be a loosening -- running the cheaper of two checks and
+// stopping is exactly the shortcut the contract gate exists to prevent.
+TEST(one_green_half_of_an_and_contract_does_not_complete_a_run) {
+    context::ContextStore ctx("do it");
+    ctx.set_checklist({{"do it", true}});
+    ctx.record_deliverable("out.txt");
+    ctx.set_verify_contract("swift test && swift build");
+
+    context::VerificationRecord green;
+    green.contract = "swift test";
+    green.passed = true;
+    green.falsifiable = true;
+    green.ran = true;
+    ctx.record_verification(green);
+
+    const loop::CompletionVerdict half = loop::evaluate_completion(ctx, false);
+    CHECK(!half.complete);
+    // Named, so the run knows WHICH criterion is outstanding rather than being told the
+    // contract "has not run" when half of it plainly has.
+    CHECK(half.reason.find("swift build") != std::string::npos);
+
+    context::VerificationRecord second;
+    second.contract = "swift build";
+    second.passed = true;
+    second.falsifiable = true;
+    second.ran = true;
+    ctx.record_verification(second);
+
+    CHECK(loop::evaluate_completion(ctx, false).complete);
+}
+
+// A command that satisfies BOTH halves at once produces two readings of ONE execution --
+// not two executions. Recording per check by calling the verifier in a loop would run the
+// operator's build twice for one request, and two separate runs are not two readings of the
+// same event: they can disagree, and a flaky check would then be recorded both ways.
+TEST(a_command_covering_both_halves_runs_once_and_is_recorded_twice) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_one_execution_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] do it\n</parameter>\n"
+        "<parameter=verify_with>\ntrue alpha && true beta\n</parameter>\n</function>\n";
+    // Leaves one line per execution, and contains both atomic checks.
+    const std::string both =
+        "<function=shell>\n<parameter=command>\ncd " + root +
+        " && echo x >> hits.txt && true alpha && true beta\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_body));
+    backend.enqueue_response(call_turn(tok, both));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    // The `>>` redirect puts this command past the risk threshold, so it escalates. With
+    // no approver attached it is refused, never runs, and never reaches the Verifier.
+    agent.set_approver([](const std::string&, const std::string&, const std::string&,
+                          const tools::RiskHint&) { return true; });
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    // Two readings from that one command, one per check.
+    std::size_t alpha = 0;
+    std::size_t beta = 0;
+    for (const context::VerificationRecord& v : ctx.verifications()) {
+        alpha += v.contract == "true alpha" ? 1 : 0;
+        beta += v.contract == "true beta" ? 1 : 0;
+    }
+    CHECK_EQ(alpha, std::size_t{2}); // baseline + this command
+    CHECK_EQ(beta, std::size_t{2});
+
+    // And the shell saw it ONCE.
+    const platform::FileContents hits =
+        platform::read_file_whole(root + "/hits.txt", 1U << 16);
+    REQUIRE(hits.ok());
+    CHECK_EQ(std::count(hits.bytes.begin(), hits.bytes.end(), '\n'), std::ptrdiff_t{1});
 }

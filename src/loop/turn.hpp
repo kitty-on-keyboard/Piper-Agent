@@ -117,6 +117,29 @@ enum class Corrective : std::uint8_t {
     // because a corrective that composes a sentence and changes nothing was tried first,
     // eleven times, and none of them worked.
     RederiveContract,
+    // Mechanism: pin the next turn's grammar to `plan`, so the run must restate its
+    // checklist at the moment its evidence says the mission is met and its own list says
+    // otherwise.
+    //
+    // The disagreement this resolves is the one the completion gate used to just PRINT.
+    // Evidence green, three of eleven items ticked, run reported "Complete" -- and the two
+    // readings of that are opposite. Either the work is done and the list is stale, or the
+    // list is right and the contract the model chose is weaker than the mission. Nothing in
+    // the ledgers can tell them apart, because the list is the only place the remaining
+    // scope is written down.
+    //
+    // MEASURED: a five-task macOS mission ended `completed` at 3/11 and again at 3/11 of a
+    // different eleven. Both times the work was in fact further along than the list said,
+    // and both times the ending read as "gave up two thirds of the way in".
+    //
+    // So ASK, once, with the mechanism that already exists for making a run restate its
+    // plan. One `plan` call answers it either way: tick what is done, or leave items open
+    // and declare a verify_with that covers them. This is not the deleted `must_reconcile`
+    // restriction -- that one latched, re-entered its own precondition every turn, and
+    // deadlocked at fourteen consecutive plan turns. This fires ONCE per run (see
+    // Agent::reconcile_asked_), spends one turn like every other narrowing, and the run
+    // proceeds whatever the answer is.
+    ReconcileChecklist,
     // Mechanism: tell the run how many turns remain, once, while it still has enough of
     // them to land safely.
     //
@@ -136,6 +159,10 @@ enum class Corrective : std::uint8_t {
     // Mechanism: end the run. Not a request -- a control-flow change.
     HaltOnBudget,
 };
+
+// The corrective's name, for the trace. The log used to print these as hand-written
+// strings at each emit site, which is how a name and a mechanism drift apart.
+[[nodiscard]] std::string_view to_string(Corrective c) noexcept;
 
 // Exactly one repeat detector. A call is a repeat when the same tool is invoked with
 // the same arguments as a previous turn AND that turn's observation was not an error
@@ -232,14 +259,32 @@ class RefusalLedger {
 // leaving a deliberately-injected bug in the workspace. Coding and debugging take turns;
 // a ceiling tight enough to end ordinary work is measuring the ceiling, not the agent.
 //
-// The two must move TOGETHER. Turns measured 12.1-12.7 s on that mission, so 80 turns is
-// ~1000 s of wall clock and the old 900 s limit would have ended every long run on time
-// before it ended on turns -- swapping one arbitrary cutoff for another while looking
-// like a fix. 1800 s is ~1.8x the measured rate, which absorbs the slow turns (a 3000-token
-// write is ~40 s) without letting a genuinely hung run sit forever.
+// 80 was then measured too low IN TURN, on a bigger mission than the KV store: a five-task
+// macOS app (a Mach telemetry actor, a ring buffer, an @Observable view model, Canvas
+// visualisers, a MenuBarExtra shell). It ended `turn_budget_exhausted` at exactly 80 with
+// the build still red -- not thrashing, not looping, just still writing the sixth of ten
+// files it needed. A multi-task mission spends turns on ORDINARY work: each file is a
+// write, each build is a shell call, each compile error is a read and an edit. Eighty
+// turns is roughly two files' worth of that once a Swift build starts talking back.
+//
+// 200 turns is the ceiling for a mission of that size with room to iterate, and it is
+// still a ceiling: the run that hangs or ping-pongs is caught by the correctives above
+// long before it gets here, and by the clock if they miss.
+//
+// The two must move TOGETHER. Turns measured 12.1-12.7 s on the KV mission, so 200 turns
+// is ~2500 s of wall clock; the old 1800 s would have ended every long run on time before
+// it ended on turns -- swapping one arbitrary cutoff for another while looking like a fix,
+// and reading afterwards as if the turn limit were the thing that fired (see
+// Agent::halt_reason_ for why that mattered enough to name the two separately). 4800 s is
+// ~1.9x the measured rate, which absorbs the slow turns (a 3000-token write is ~40 s)
+// without letting a genuinely hung run sit forever.
+//
+// Both are operator-settable -- lmPipe.maxIterations and lmPipe.wallClockSeconds, live in
+// the sidebar drawer -- and the drawer says which of the two will stop the run first,
+// because a raised turn limit under an unraised clock does nothing at all.
 struct Budget {
-    int max_iterations = 80;
-    int wall_clock_seconds = 1800;
+    int max_iterations = 200;
+    int wall_clock_seconds = 4800;
 };
 
 // How many iterations before the limit the run is warned. See Corrective::BudgetNearlyGone
@@ -264,13 +309,17 @@ inline constexpr int kBudgetWarningTurns = 8;
 // been told about this exact contract and re-declared it unchanged must not be pinned to
 // `plan` every turn thereafter. That is the deadlock the deleted `must_reconcile`
 // restriction caused, and it is worth not building a second time.
+// `checklist_unreconciled` gates ReconcileChecklist, and carries the once-per-run policy
+// for the same reason: the Agent knows whether it has already asked, and this function has
+// no memory to know it with.
 [[nodiscard]] Corrective choose_corrective(const TurnResult& turn,
                                            const RepeatDetector& repeats,
                                            const RefusalLedger& refusals,
                                            int iterations_used, const Budget& budget,
                                            bool wall_clock_exhausted,
                                            bool have_verify_contract,
-                                           bool contract_unmoved);
+                                           bool contract_unmoved,
+                                           bool checklist_unreconciled);
 
 // --- classification ---------------------------------------------------------
 
@@ -283,12 +332,21 @@ inline constexpr int kBudgetWarningTurns = 8;
 // --- completion -------------------------------------------------------------
 
 // Driven by the deliverable and verification ledgers, never by prose guessing whether the
-// model sounded finished -- and, since the seventh pass, never by the model's checklist
-// ticks either, which are a self-report wearing a checkbox (S10.4).
+// model sounded finished (S10.4).
 //
-// `open_items` is REPORTED, not enforced. completing with open_items > 0 means the
-// evidence says the mission is met while the model's own list says otherwise. That
-// disagreement is worth a human's attention and worth none of the harness's authority.
+// THE CHECKLIST IS NOT A VOTE, IT IS A SCOPE STATEMENT. The seventh pass dropped it from
+// the gate entirely, reasoning that a tick is a self-report and a run that had proved its
+// fix should not need the model to agree in checkbox form. Half right. A tick is indeed no
+// evidence that work HAPPENED -- but an untick is the model's own statement that work
+// REMAINS, and the ledgers cannot contradict it, because nothing in them knows what the
+// mission's remaining scope is. Only the list does.
+//
+// So the disagreement gets resolved instead of printed. `evidence_complete` says every
+// evidential gate passed; `complete` additionally requires the run's own list to agree, or
+// `checklist_waived` -- which the Agent sets only after asking once, with a mechanism, and
+// getting no answer (Corrective::ReconcileChecklist). A waived completion still reports
+// `open_items`, because "the evidence says done and the run never said so" is a real
+// ending and worth a human's attention.
 struct CompletionVerdict {
     bool complete = false;
     std::string reason;
@@ -306,8 +364,18 @@ struct CompletionVerdict {
         return complete &&
                contract_source == context::ContextStore::ContractSource::Model;
     }
+    // Every EVIDENTIAL gate passed: a deliverable was written, the declared contract ran,
+    // it is green, that green has been proven capable of red, and the reading postdates
+    // the latest instruction. Separate from `complete` because the checklist gate sits on
+    // top of it, and the corrective that clears that gate has to be able to tell "the
+    // evidence is not there yet" from "the evidence is there and the list disagrees".
+    bool evidence_complete = false;
 };
 
-[[nodiscard]] CompletionVerdict evaluate_completion(const context::ContextStore& ctx);
+// `checklist_waived` lets a run finish over its own open items. It is the Agent's answer
+// to a question it has already asked once and been given no answer to -- never a default,
+// and never something the model can set for itself.
+[[nodiscard]] CompletionVerdict evaluate_completion(const context::ContextStore& ctx,
+                                                    bool checklist_waived = false);
 
 } // namespace lmp::loop

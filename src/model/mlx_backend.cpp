@@ -162,6 +162,34 @@ void MlxBackend::reset_cache() {
 
 namespace {
 
+// How many recent tokens the repetition penalty sees.
+//
+// WHAT THIS NUMBER CAN AND CANNOT DO, because it was an undocumented 64 and the obvious
+// reading of a repetition bug is "the window is too small". It usually is not.
+//
+// The penalty is applied ONCE PER UNIQUE ID (apply_repetition_penalty, HF semantics; it was
+// made non-compounding after per-occurrence division wrote "idlePer cent" into a real
+// agent's file). At the pinned Qwen default of 1.05 that turns a winning logit of ~15 into
+// ~14.3. A model that is near-certain of its next token stays near-certain, so this cannot
+// break a confident degenerate cycle AT ANY WINDOW SIZE -- widening it trades a real risk
+// to generated code, where identifiers legitimately recur, for a fraction of a logit.
+//
+// MEASURED: a Qwen3.6 4-bit run repeated one ~70-token paragraph about fifty times. 64 was
+// shorter than the cycle, so no copy was ever in the window beside its predecessor and the
+// penalty saw no repetition at all. Raising it to 256 would have made the window longer than
+// the cycle and still not stopped it, because 1.05 per unique id is not enough force.
+//
+// 256 anyway: it is the scale modern stacks use for a recent-context penalty (mlx-lm
+// defaults to 20, HF applies over the whole sequence and is the version known to damage
+// code), it is comfortably longer than the loops actually observed, and at per-unique-id
+// 1.05 the cost to code is small. It is a better default, not a fix.
+//
+// The fix for a cycle is loop::LoopBreaker, which detects the repeat and ends the turn.
+// Qwen's own guidance for endless repetition in long generations is a PRESENCE penalty, not
+// a longer repetition window -- if distribution-level pressure is ever wanted here, that is
+// the knob to add, and it needs its own measurement.
+constexpr std::size_t kPenaltyWindow = 256;
+
 // One logits row -> CPU floats. The sync point per decode step (S5.11).
 //
 // The float32 cast is deliberately issued AFTER the forward has been evaluated, not
@@ -308,7 +336,11 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
             }
             ++r.tokens_generated;
             recent.push_back(id);
-            if (recent.size() > 64) {
+            // The SAME window as the plain path. Two copies of this number is how the
+            // speculative and non-speculative paths start sampling from different
+            // distributions -- which would make speculation observable, and S5.12 says it
+            // must not be.
+            if (recent.size() > kPenaltyWindow) {
                 recent.erase(recent.begin());
             }
             // The sink is the authority on when a turn ends (S5.5). A block may commit
@@ -480,7 +512,7 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
         }
         ++r.tokens_generated;
         recent.push_back(pick.id);
-        if (recent.size() > 64) {
+        if (recent.size() > kPenaltyWindow) {
             recent.erase(recent.begin());
         }
         ledger_.append(pick.id);
