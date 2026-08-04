@@ -91,6 +91,56 @@ class TokenStreamer {
 // decision -- a `</think>` closes the phase without being content, `<tool_call>` opens a
 // phase whose tokens are structure rather than text -- and a second copy of those rules
 // here would be free to drift from them. Observing the effect cannot.
+// Stops a turn that has started repeating itself verbatim.
+//
+// WHY THIS IS NOT A SAMPLING FIX. The repetition penalty cannot reach this failure, and
+// tuning it is a dead end worth documenting so nobody re-tries it. The penalty is applied
+// ONCE PER UNIQUE ID (HF semantics -- see apply_repetition_penalty, which was made
+// non-compounding after per-occurrence division wrote "idlePer cent" into a real file), so
+// at the pinned Qwen default of 1.05 a winning logit of ~15 becomes ~14.3. A model that is
+// near-certain of its next token is still near-certain. That is true at ANY window size, so
+// the sliding window's length -- 64 tokens, and see kPenaltyWindow for what it is actually
+// worth -- is not the reason this run looped.
+//
+// MEASURED: a Qwen3.6-35B-A3B 4-bit run emitted one 281-character paragraph roughly fifty
+// times inside a single thinking block and stopped only when it hit the 4096-token cap,
+// having produced nothing. The repeated unit was ~70 tokens long -- longer than the whole
+// penalty window -- so each copy fell out of `recent` before the next one began and the
+// penalty never saw a repeat at all. Endless repetition is a known failure of quantized
+// Qwen3 in long generations; the vendor's own advice for it is a presence penalty, not a
+// bigger repetition window.
+//
+// PROSE ONLY, AND THAT IS A SAFETY PROPERTY, NOT A HEURISTIC. This counts a token only when
+// the grammar routed it into think_ or text_. File content is written inside a `tool_call`
+// phase, whose tokens go to the parsephony guard and enter NEITHER buffer -- so this cannot
+// truncate a file the model is in the middle of writing, which would be far worse than the
+// loop it exists to stop. It is structurally incapable of it, rather than tuned not to.
+class LoopBreaker {
+  public:
+    // A repeat this long is not style. Legitimate prose and legitimate code both repeat
+    // short runs constantly -- `}`, `return nil`, a boilerplate line -- and both stay far
+    // below 32 tokens of EXACT match. The observed loop was ~70, so a cycle contains many
+    // whole windows of itself and trips this well before a second full copy lands.
+    static constexpr std::size_t kWindow = 32;
+    // Three, because two can be honest. A model legitimately restates a signature or a path
+    // twice; the third verbatim recurrence of the same 32 tokens is a cycle. The run this
+    // was built from produced fifty.
+    static constexpr std::size_t kMaxRepeats = 3;
+
+    // Returns true when the turn should be cut. Feed it PROSE tokens only.
+    [[nodiscard]] bool saw(model::TokenId id);
+
+    [[nodiscard]] std::size_t repeats() const noexcept { return worst_; }
+
+  private:
+    std::vector<model::TokenId> window_;
+    // Rolling hash -> how many times that exact window has been seen. A hash collision
+    // costs a spuriously-cut turn, never a wrong answer, and at 64 bits over a few thousand
+    // windows it is not a real risk.
+    std::vector<std::pair<std::uint64_t, std::size_t>> seen_;
+    std::size_t worst_ = 0;
+};
+
 class GrammarSink final : public model::TokenSink {
   public:
     // `streamer` may be null, which is the non-streaming path (no observer attached).
@@ -99,10 +149,16 @@ class GrammarSink final : public model::TokenSink {
     bool on_token(model::TokenId id) override;
 
     model::Advance last = model::Advance::Ok;
+    // Set when the turn was cut for looping rather than by the grammar. The agent reports
+    // this as its own ending -- a turn that was stopped is not a turn that finished, and
+    // blurring the two is how the LengthCapped case used to read as completion.
+    bool looped = false;
+    std::size_t loop_repeats = 0;
 
   private:
     model::TurnGrammar& g_;
     TokenStreamer* streamer_;
+    LoopBreaker breaker_;
 };
 
 } // namespace lmp::loop

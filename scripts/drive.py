@@ -42,9 +42,15 @@ ap.add_argument("--mission", required=True)
 ap.add_argument("--model", default=os.environ.get("LMP_QWEN_DIR", DEFAULT_MODEL))
 ap.add_argument("--sidecar", default=DEFAULT_SIDECAR)
 ap.add_argument("--mode", default="agent", choices=["plan", "debug", "agent"])
-ap.add_argument("--deadline", type=float, default=1800.0)
-ap.add_argument("--max-iterations", type=int, default=80)
-ap.add_argument("--wall-clock", type=int, default=1800)
+# These three track loop::Budget and the editor's defaults on purpose. When they did not,
+# a CLI run and an editor run of the same mission were cut off in different places and the
+# difference read as the agent behaving differently.
+#
+# The driver's own deadline sits ABOVE the sidecar's wall clock: the sidecar ending a run
+# is a result, the driver giving up on it first is a lost measurement.
+ap.add_argument("--deadline", type=float, default=5400.0)
+ap.add_argument("--max-iterations", type=int, default=200)
+ap.add_argument("--wall-clock", type=int, default=4800)
 ap.add_argument("--max-new-tokens", type=int, default=4096,
                 help="generation cap for one turn. A capped turn makes no "
                      "tool call and leaves nothing behind, so a long first "
