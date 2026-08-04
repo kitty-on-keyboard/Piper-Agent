@@ -880,13 +880,22 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
     {
         ToolDecl d;
         d.name = "plan";
+        // Says BOTH halves of the completion rule, because the model acts on this
+        // description and it used to state only one of them. A run told that finishing
+        // means "the command passes" has no reason to keep its ticks current -- and two
+        // real runs duly finished at 3 of 11 items with a green check, having last touched
+        // their lists forty turns earlier. The list is now part of the gate; the tool that
+        // writes it has to say so.
         d.description =
             "State or restate the checklist for this mission: one item per line, each "
             "prefixed '[ ] ' for open or '[x] ' for done. Call it first, before doing "
-            "the work, and call it again to tick items off as you finish them. Give "
-            "`verify_with` the exact shell command that proves the mission is complete "
-            "(a test or build command); a run is only finished when that command has "
-            "been seen to pass.";
+            "the work, and call it again to tick items off as you finish them -- "
+            "restating replaces the whole list, so ticking one item means sending them "
+            "all. Give `verify_with` the exact shell command that proves the mission is "
+            "complete (a test or build command). A run finishes when that command has "
+            "been seen to pass AND no item is still open, so keep the list honest in "
+            "both directions: an item left open says work remains and will hold the run "
+            "back, and an item ticked early claims work that was never done.";
         d.spec.name = d.name;
         d.spec.params = {param("items", ParamType::Text, true),
                          param("verify_with", ParamType::Text, false)};

@@ -34,6 +34,32 @@ namespace lmp::loop {
 // argument (`pytest -k "a  or  b"`). Use executable_form() to execute.
 [[nodiscard]] std::string canonicalize_check(std::string_view command);
 
+// A contract, decomposed into the ATOMIC CHECKS it is made of -- one per top-level `&&`,
+// each canonicalized, in declaration order. A contract with no top-level `&&` yields itself
+// and everything downstream behaves exactly as it did before this existed.
+//
+// WHY A CONTRACT IS A SET, NOT A STRING. `swift test && swift build` is two criteria
+// written on one line, and a run satisfies it by running two commands -- which is what
+// models do, and what a person does. Matching by containment against the whole string then
+// recognises NEITHER: `cd /path && swift test` does not contain `swift test && swift build`.
+//
+// MEASURED: a run declared exactly that, ran both halves repeatedly over 18 turns, and the
+// Verifier saw none of it. The ledger kept a single red from turn 20 with
+// `workspace_writes=0`, `not_complete: verification still failing` never changed, and the
+// run could not have completed no matter what it wrote.
+//
+// This is NOT a widening of the containment match, which would let a WEAKER command be
+// recorded as the whole contract passing. Each atomic check keeps its own identity, its own
+// ledger history and its own falsifiability proof, and completion requires EVERY one of
+// them to be green -- so running only `swift build` records only `swift build`, and the
+// contract stays unsatisfied until `swift test` has its own green.
+//
+// Splits on `&&` ALONE. `||` means either-of, `;` means regardless-of, and a pipeline is
+// one command -- decomposing any of those would change what the operator asked for. Segments
+// that assert nothing (`cd somewhere`, `VAR=value`) are dropped rather than kept as vacuous
+// always-green checks that could never be proven falsifiable and so would deadlock the gate.
+[[nodiscard]] std::vector<std::string> contract_checks(std::string_view contract);
+
 // Why this command's exit status cannot mean what a criterion needs it to mean, or empty
 // when there is nothing wrong with it. Takes the EXECUTABLE form -- the swallowers
 // executable_form() can simply remove are removed, and this catches what survives that.
@@ -142,6 +168,18 @@ class Verifier {
     // variation a fresh identity with no history, so none could ever be falsifiable.
     bool run_and_record_as(const std::string& command, int approved_tier,
                            const std::string& contract_id);
+
+    // ONE EXECUTION, recorded against every atomic check it covers.
+    //
+    // A decomposed contract (`swift test && swift build`) can be satisfied by a single
+    // command that runs both halves, and that command must produce one reading per half.
+    // Calling run_and_record_as() in a loop would instead EXECUTE the operator's
+    // verification once per half -- two builds for one request -- and two records of two
+    // different executions are not two readings of the same event.
+    //
+    // Returns whether the execution passed. Empty ids records nothing and returns false.
+    bool run_and_record_as(const std::string& command, int approved_tier,
+                           const std::vector<std::string>& contract_ids);
 
     // Proves the check can fail, by intervention: `breaker` mutates the workspace so
     // the check MUST fail, the check is re-run and required to be red, then `restore`

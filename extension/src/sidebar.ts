@@ -335,6 +335,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     "sampling.topK",
     "sampling.minP",
     "sampling.repetitionPenalty",
+    // Both budgets, together. The turn limit is the one that keeps ending real missions
+    // mid-work, and it is worthless on the drawer on its own: raised without the clock it
+    // just moves the cutoff to `wall_clock_exhausted` at the same wall.
+    "maxIterations",
+    "wallClockSeconds",
     "prompts.agent",
     "prompts.plan",
     "prompts.debug",

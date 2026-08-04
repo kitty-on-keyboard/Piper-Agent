@@ -34,8 +34,11 @@ function settingsFromConfig(): RunSettings {
       repetition_penalty: cfg.get<number>("sampling.repetitionPenalty", 1.05),
       seed: cfg.get<number>("sampling.seed", 0),
     },
-    max_iterations: cfg.get<number>("maxIterations", 80),
-    wall_clock_seconds: cfg.get<number>("wallClockSeconds", 1800),
+    // Ceilings on a runaway, not targets (see loop::Budget). They must be read together:
+    // a turn limit raised on its own just moves the cutoff to the clock and ends the run
+    // for a different stated reason.
+    max_iterations: cfg.get<number>("maxIterations", 200),
+    wall_clock_seconds: cfg.get<number>("wallClockSeconds", 4800),
     sandbox_tier: cfg.get<number>("sandboxTier", 1),
     auto_approve_exec: cfg.get<boolean>("autoApproveExec", true),
     auto_approve_writes: cfg.get<boolean>("autoApproveWrites", true),

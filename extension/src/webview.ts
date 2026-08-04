@@ -405,6 +405,9 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 .warnbox {
   font-size: 10px; color: var(--warn); margin-top: 4px; line-height: 1.4;
 }
+/* The same box saying a true thing that is not a problem: which of the two budgets is
+   going to stop the run. Amber only when they disagree. */
+.warnbox.calm { color: var(--faint); }
 #promptBox {
   width: 100%; min-height: 66px; max-height: 200px; resize: vertical;
   background: var(--vscode-input-background); color: var(--vscode-input-foreground);
@@ -576,6 +579,13 @@ function markup(): string {
     </div>
     <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec"></div></div>
     <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite"></div></div>
+    <div class="set">
+      <label>Turn limit <b id="turnVal"></b></label>
+      <input type="range" id="turnRange" min="20" max="600" step="10">
+      <label style="margin-top:8px">Time limit <b id="clockVal"></b></label>
+      <input type="range" id="clockRange" min="300" max="14400" step="300">
+      <div class="warnbox" id="budgetWarn"></div>
+    </div>
     <div class="set" id="sliders"></div>
     <div class="set">
       <label>System prompt <b id="promptMode"></b></label>
@@ -1469,6 +1479,39 @@ function sw(id, key) {
 sw('swExec', 'autoApproveExec');
 sw('swWrite', 'autoApproveWrites');
 
+// --- the two budgets ------------------------------------------------------
+// Both, on one panel, with the consequence spelled out. A turn limit alone is a trap:
+// raise it without the clock and the run stops at the same wall it always did, for a
+// different stated reason. The seconds-per-turn figure below is measured (12.1-12.7 s on
+// the mission the ceiling was set from), which is what makes the comparison worth showing
+// rather than guessing at.
+const SECONDS_PER_TURN = 12.5;
+
+const dragging = (id, key, live) => {
+  const r = $(id);
+  r.oninput = () => { live(Number(r.value)); paintBudget(Number($('turnRange').value), Number($('clockRange').value)); };
+  r.onchange = () => put(key, Number(r.value));
+};
+dragging('turnRange', 'maxIterations', (v) => { $('turnVal').textContent = v + ' turns'; });
+dragging('clockRange', 'wallClockSeconds', (v) => { $('clockVal').textContent = Math.round(v / 60) + ' min'; });
+
+function paintBudget(turns, seconds) {
+  const clockStopsAt = Math.floor(seconds / SECONDS_PER_TURN);
+  const warn = $('budgetWarn');
+  if (clockStopsAt < turns) {
+    warn.className = 'warnbox';
+    warn.textContent =
+      'The clock stops this run first: at ~' + SECONDS_PER_TURN + 's a turn, ' +
+      Math.round(seconds / 60) + ' min is about ' + clockStopsAt + ' turns, not ' + turns +
+      '. Raise the time limit or the extra turns are unreachable.';
+  } else {
+    warn.className = 'warnbox calm';
+    warn.textContent =
+      'Turns run out first, which is the intent: ~' + Math.round(turns * SECONDS_PER_TURN / 60) +
+      ' min of work at the measured rate, with the clock as the backstop for a hung run.';
+  }
+}
+
 $('promptBox').addEventListener('change', () => {
   put('prompts.' + (settings.mode || 'agent'), $('promptBox').value);
 });
@@ -1520,6 +1563,24 @@ function paint() {
     wrap.querySelector('input').value = v;
     wrap.querySelector('b').textContent = v;
   }
+  // The budgets. A range input silently CLAMPS a value outside its bounds, and this one
+  // writes back on change -- so a settings.json saying 1500 turns would show as 600 and
+  // become 600 the moment the slider was touched. Widen the track instead: the drawer
+  // must never quietly overrule a number the operator set somewhere else.
+  const budget = (id, key, fallback, span, fmt) => {
+    const v = typeof settings[key] === 'number' ? settings[key] : fallback;
+    const r = $(id);
+    r.max = String(Math.max(span, v));
+    r.value = v;
+    $(fmt.id).textContent = fmt.text(v);
+    return v;
+  };
+  const turns = budget('turnRange', 'maxIterations', 200, 600,
+    { id: 'turnVal', text: (v) => v + ' turns' });
+  const seconds = budget('clockRange', 'wallClockSeconds', 4800, 14400,
+    { id: 'clockVal', text: (v) => Math.round(v / 60) + ' min' });
+  paintBudget(turns, seconds);
+
   $('promptMode').textContent = '· ' + (settings.mode || 'agent');
   $('promptBox').value = settings['prompts.' + (settings.mode || 'agent')] || '';
 }
@@ -1790,10 +1851,13 @@ window.addEventListener('message', (e) => {
     d.className = 'ended';
     let t = 'Ended: ' + payload.termination_reason + ' · ' + payload.iterations + ' turn(s)';
     // completed is EVIDENTIAL -- a recorded deliverable plus a falsifiable passing
-    // verification. When it disagrees with the model's own checklist, both are shown
-    // rather than whichever is more flattering (S10.4).
+    // verification -- and it now also requires the run's own checklist to agree, or to
+    // have been asked once and not answered. This line is that second case, and it says
+    // so: "left unticked" read like the run forgot, when what happened is it was asked
+    // point-blank and did not reply (S10.4).
     if (payload.completed && payload.unfinished_items > 0) {
-      t += ' · evidence says done, ' + payload.unfinished_items + ' item(s) left unticked';
+      t += ' · ' + payload.unfinished_items +
+           ' item(s) left open after the run was asked to reconcile them';
     }
     // WHOSE criterion was met. "Complete" against a contract the model chose for itself
     // is a weaker claim than "Complete" against one you set, and both used to print the

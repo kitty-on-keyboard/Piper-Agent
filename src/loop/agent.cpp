@@ -44,6 +44,140 @@ std::string capped(std::string s) {
     return s;
 }
 
+// How repetitive a generation is, measured on the text rather than guessed from its
+// length. Reported ALWAYS, unlike the text itself, because these three numbers are small
+// and a degenerate turn is invisible without them.
+//
+// MEASURED: one turn of a real run emitted "I'll fix all compilation errors
+// systematically. Let me read all source files first." roughly two hundred times and then
+// hit the token cap. In the event log that turn is `generation tokens=4096 status=1` and
+// nothing else -- indistinguishable from a legitimately long write_file. The run had 66
+// turns and several like it; the trace could not tell them apart, so nothing in the
+// harness could either.
+struct TextShape {
+    std::size_t lines = 0;
+    std::size_t distinct = 0;
+    std::size_t worst_line_repeats = 0; // how often the most-repeated non-blank line occurs
+};
+
+TextShape shape_of(const std::string& text) {
+    TextShape s;
+    std::vector<std::pair<std::string_view, std::size_t>> counts;
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        std::size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) {
+            nl = text.size();
+        }
+        const std::string_view line(text.data() + at, nl - at);
+        at = nl + 1;
+        // Blank and near-blank lines repeat in every healthy generation (indentation,
+        // paragraph breaks) and would dominate the count without saying anything.
+        if (line.find_first_not_of(" \t\r") == std::string_view::npos) {
+            continue;
+        }
+        ++s.lines;
+        bool seen = false;
+        for (auto& [text_seen, n] : counts) {
+            if (text_seen == line) {
+                ++n;
+                s.worst_line_repeats = std::max(s.worst_line_repeats, n);
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            counts.emplace_back(line, 1);
+            s.worst_line_repeats = std::max<std::size_t>(s.worst_line_repeats, 1);
+        }
+    }
+    s.distinct = counts.size();
+    return s;
+}
+
+// When a generation is worth flagging as degenerate rather than merely long.
+//
+// The discriminator is HOW MUCH DISTINCT CONTENT there is, not how often the commonest
+// line recurs. That distinction was found by testing rather than reasoning: a repeat-count
+// threshold flags a perfectly good `write_file` of a source file, because real code
+// repeats `    }` a hundred times in two hundred lines. Measured on four inputs --
+//
+//   the real failure  lines=200 distinct=  1 worst=200   <- 0.5% distinct
+//   a source file     lines=244 distinct=125 worst=120   <- 51% distinct
+//   a brace-heavy file lines=200 distinct=101 worst=100  <- 50% distinct
+//   a short answer    lines=  2 distinct=  2 worst=  1
+//
+// -- the repeat counts of the last three are indistinguishable from the first's, and the
+// distinct ratio separates them by an order of magnitude. Both halves still have to hold:
+// the floor keeps short answers out, since two identical lines out of two is 100% repeat
+// and no evidence of anything.
+constexpr std::size_t kRepeatFloor = 8;
+constexpr std::size_t kDistinctCeilingPercent = 25;
+
+bool looks_degenerate(const TextShape& s) {
+    return s.lines >= kRepeatFloor && s.worst_line_repeats >= kRepeatFloor &&
+           s.distinct * 100 <= s.lines * kDistinctCeilingPercent;
+}
+
+// A JSON array of strings, rewritten as one element per line. Empty when the text is not
+// one, which is the signal to parse it as the newline-separated list it claims to be.
+//
+// THE TEST IS DELIBERATELY NARROW: first non-space character `[`, next non-space character
+// `"`, and a `]` at the end. That is a JSON array and cannot be anything else -- in
+// particular it cannot be the checklist item `[ ] ship the parser`, which is the one
+// string a looser test would eat. A malformed array (an unterminated quote) flattens to
+// nothing and falls through to the line parser, which is the behaviour that was there
+// before this function existed.
+std::string flatten_json_array(const std::string& raw) {
+    const std::size_t open = raw.find_first_not_of(" \t\r\n");
+    if (open == std::string::npos || raw[open] != '[') {
+        return {};
+    }
+    const std::size_t first = raw.find_first_not_of(" \t\r\n", open + 1);
+    if (first == std::string::npos || raw[first] != '"') {
+        return {};
+    }
+    const std::size_t close = raw.find_last_not_of(" \t\r\n");
+    if (close == std::string::npos || raw[close] != ']') {
+        return {};
+    }
+
+    std::string out;
+    bool in_string = false;
+    std::string current;
+    for (std::size_t i = first; i < close; ++i) {
+        const char c = raw[i];
+        if (!in_string) {
+            if (c == '"') {
+                in_string = true;
+            }
+            continue;
+        }
+        if (c == '\\' && i + 1 < close) {
+            // Only the escapes that can appear in a checklist item. Anything else keeps
+            // its literal character, which is what the line parser would have seen anyway.
+            const char next = raw[++i];
+            switch (next) {
+                case 'n': current += '\n'; break;
+                case 't': current += '\t'; break;
+                case 'r': break;
+                default: current += next; break;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = false;
+            out += current;
+            out += '\n';
+            current.clear();
+            continue;
+        }
+        current += c;
+    }
+    // An unterminated final string means the text was not the array it looked like.
+    return in_string ? std::string{} : out;
+}
+
 } // namespace
 
 Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
@@ -115,13 +249,28 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     if (raw == nullptr) {
         return {false, "plan requires 'items'"};
     }
+    // ONE ITEM PER LINE -- unless the model sent a JSON array, which it does, because
+    // `items` is a list-shaped parameter and that is what a list looks like to a model
+    // that has spent its training on JSON tool calls.
+    //
+    // This parser split on '\n' and nothing else, so an array arrived as ONE line, the
+    // `[ ]` test failed against the leading `["`, and the entire array became a single
+    // checklist item whose text was its own JSON source.
+    //
+    // MEASURED, and it is what the operator saw on the surface: a run replanned mid-flight
+    // with a seven-element array and the log recorded `items=1 open=1`, the checklist read
+    // `0/1`, and the item's text was `["[ ] Task 1: ...", "[ ] Task 2: ...", ...]`. It also
+    // destroyed a healthy six-item checklist from turn 1 and left one item that could never
+    // be ticked, so the completion gate spent the rest of the run guarding a syntax error.
+    const std::string flattened = flatten_json_array(*raw);
+    const std::string& source = flattened.empty() ? *raw : flattened;
     std::size_t at = 0;
-    while (at < raw->size()) {
-        std::size_t nl = raw->find('\n', at);
+    while (at < source.size()) {
+        std::size_t nl = source.find('\n', at);
         if (nl == std::string::npos) {
-            nl = raw->size();
+            nl = source.size();
         }
-        std::string line = raw->substr(at, nl - at);
+        std::string line = source.substr(at, nl - at);
         at = nl + 1;
         // Tolerate a leading "- " and either bracket style; the model writes prose-ish
         // markdown and refusing it over a dash would be theatre.
@@ -152,6 +301,23 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     emit("plan", {{"items", std::to_string(total)},
                   {"open", std::to_string(open)},
                   {"verify_with", ctx_.verify_contract()}});
+    // THE PARSED ITEMS, not just how many. `plan` reports a count, and a count is exactly
+    // the wrong thing to trust here: this parser tolerates prose-ish markdown, so a
+    // checklist that arrives on one line, or with the marker but no text, or with nesting
+    // it cannot see, still produces a plausible number. A run was observed showing five
+    // items with no text at all in the surface, and the log said `items=5 open=5` -- which
+    // is what a healthy plan looks like. The text is the only way to tell them apart.
+    {
+        std::string joined;
+        for (const context::ChecklistItem& item : ctx_.checklist()) {
+            joined += joined.empty() ? "" : " | ";
+            joined += (item.done ? "[x] " : "[ ] ") +
+                      (item.text.empty() ? std::string("<EMPTY>") : item.text);
+        }
+        emit("checklist", {{"count", std::to_string(total)},
+                           {"open", std::to_string(open)},
+                           {"items", capped(joined)}});
+    }
     if (observer_.on_checklist) {
         observer_.on_checklist(ctx_.checklist());
     }
@@ -159,6 +325,14 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
                     std::to_string(total) + " done";
     if (!ctx_.verify_contract().empty()) {
         s += "; completion requires '" + ctx_.verify_contract() + "' to pass";
+        // Named on every plan call, with the current count, because the two halves of the
+        // gate are easy to hold as one. A run that reads "completion requires the command
+        // to pass" and nothing else will let its list rot -- which is the whole failure
+        // ReconcileChecklist exists to catch, and catching it costs a turn that saying so
+        // here does not.
+        if (open != 0) {
+            s += " and all " + std::to_string(open) + " open item(s) to be closed";
+        }
         s += baseline_check();
     }
     return {true, std::move(s)};
@@ -176,14 +350,32 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
 // telling the model, and neither is worth pretending otherwise.
 std::string Agent::baseline_check() {
     const std::string canon = canonicalize_check(ctx_.verify_contract());
-    for (const context::VerificationRecord& v : ctx_.verifications()) {
-        if (v.contract == canon) {
-            return {}; // already have a reading for this contract
+    // ONE BASELINE PER ATOMIC CHECK, because each is a criterion in its own right and each
+    // needs its own red-before-the-work to ever become evidence. A single reading filed
+    // under the compound string proved nothing about either half.
+    const std::vector<std::string> checks = contract_checks(ctx_.verify_contract());
+    std::vector<std::string> unread;
+    for (const std::string& check : checks) {
+        bool seen = false;
+        for (const context::VerificationRecord& v : ctx_.verifications()) {
+            seen = seen || v.contract == check;
+        }
+        if (!seen) {
+            unread.push_back(check);
         }
     }
-    const bool passed =
-        verifier_.run_and_record_as(ctx_.verify_contract(), policy_.sandbox_tier, canon);
-    emit("baseline_check", {{"contract", canon}, {"passed", passed ? "1" : "0"}});
+    if (unread.empty()) {
+        return {}; // already have a reading for every check in this contract
+    }
+    // The contract AS DECLARED is what runs -- `swift test && swift build` short-circuits,
+    // and running the halves separately here would be a different command from the one the
+    // operator asked for. One execution, recorded against each half that still needs a
+    // baseline.
+    const bool passed = verifier_.run_and_record_as(ctx_.verify_contract(),
+                                                    policy_.sandbox_tier, unread);
+    emit("baseline_check", {{"contract", canon},
+                            {"checks", std::to_string(checks.size())},
+                            {"passed", passed ? "1" : "0"}});
     // A contract that could not be executed is neither the red this wants nor the green
     // it warns about, and calling it "FAILS, as expected" -- which is what the red branch
     // below would say -- actively misleads: it reads as confirmation that the criterion
@@ -327,6 +519,12 @@ void Agent::emit_verifications(std::size_t before) {
 
 TurnResult Agent::step(const model::CancelToken& cancel) {
     TurnResult turn;
+    // Per-turn, so the no-progress counter can ask "did this turn add any bytes the model
+    // was not already holding?" -- see the `made_no_move` test in run(). Counted at
+    // dispatch because that is the only moment the answer exists: the duplicate collapse
+    // rewrites the earlier copy immediately afterwards.
+    turn_reads_ = 0;
+    turn_reads_redundant_ = 0;
 
     // --- prompt assembly ---------------------------------------------------
     const model::ChatTemplate tmpl(tok_);
@@ -338,6 +536,11 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // getting it wrong reuses a cache against the wrong prefix without crashing (S5.10).
     std::vector<std::size_t> offsets;
     task.prompt = tmpl.render_with_offsets(messages, tools_guidance_, offsets);
+    // The real size of the prompt this turn, free of charge -- it has just been tokenized.
+    // Read by collapse_duplicate_read, which must not call prompt_tokens() per read: that
+    // re-renders and re-tokenizes the whole context, and a batched turn would do it four
+    // times to answer a question this number already answers.
+    last_prompt_tokens_ = task.prompt.size();
     // Everything except the live-state block, which changes every turn. The backend
     // snapshots here so the next turn rolls back instead of re-prefilling the context.
     const std::size_t stable = ctx_.stable_message_count("");
@@ -422,6 +625,38 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     }
     std::erase_if(suppressed_tools_,
                   [](const auto& e) { return e.second <= 0; });
+    // WHAT THIS TURN WAS ALLOWED TO DO. Emitted only when something was withheld, so a
+    // healthy turn costs nothing and a constrained one is impossible to miss.
+    //
+    // The gap this closes: a run flailing between two tools looks identical in the trace
+    // whether the model is confused or the harness has quietly removed the tool it was
+    // reaching for. Four separate mechanisms narrow this grammar -- the plan gate,
+    // RederiveContract, BreakRepeat's suppressions and BlockRefusedTool -- and none of
+    // them said so in the log. A run measured at 66 turns had `read_file` suppressed
+    // thirteen separate times and the trace showed only that it kept calling `read_slice`.
+    if (specs.size() != registry_.guard_specs().size()) {
+        std::string withheld;
+        for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
+            bool present = false;
+            for (const parsephony::ToolSpec& kept : specs) {
+                if (kept.name == s.name) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                withheld += withheld.empty() ? "" : ",";
+                withheld += s.name;
+            }
+        }
+        emit("grammar", {{"samplable", std::to_string(specs.size())},
+                         {"of", std::to_string(registry_.guard_specs().size())},
+                         {"withheld", withheld},
+                         {"why_plan_only", must_replan               ? "1"
+                                           : ctx_.checklist().empty() ? "no_checklist"
+                                                                      : "0"},
+                         {"replan_turns_left", std::to_string(replan_turns_)}});
+    }
     // Spent here for the same reason, and only after the grammar has been built from it:
     // the turn this narrowing was bought for is the one being assembled right now.
     if (replan_turns_ > 0) {
@@ -472,6 +707,56 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
                         {"ttft_ms", std::to_string(turn.generation.ttft_ms)},
                         {"decode_tok_per_s", std::to_string(turn.generation.decode_tok_per_s)}});
 
+    // THE SHAPE OF WHAT WAS SAID, always, even when the text itself is not traced. Three
+    // integers per turn, and they separate the two failures that `tokens=4096 status=1`
+    // cannot: a long legitimate write, and a model stuck emitting one sentence until the
+    // cap. A `degenerate` line in the log is the run saying the model went into a loop --
+    // which is not a harness bug, and until now looked exactly like one.
+    {
+        const TextShape said = shape_of(turn.reasoning + "\n" + turn.assistant_text);
+        const bool degenerate = looks_degenerate(said);
+        if (degenerate || sink.looped ||
+            turn.generation.status == model::GenStatus::LengthCapped) {
+            emit("degenerate_text",
+                 {{"lines", std::to_string(said.lines)},
+                  {"distinct", std::to_string(said.distinct)},
+                  {"worst_line_repeats", std::to_string(said.worst_line_repeats)},
+                  {"length_capped",
+                   turn.generation.status == model::GenStatus::LengthCapped ? "1" : "0"},
+                  {"degenerate", degenerate ? "1" : "0"},
+                  // Whether the harness CUT it, as against merely noticing afterwards. The
+                  // detector above has always been able to see a loop; until the breaker
+                  // existed it saw it only once the run had already spent 4096 tokens and
+                  // ~60 seconds on it.
+                  {"cut_for_looping", sink.looped ? "1" : "0"},
+                  {"loop_repeats", std::to_string(sink.loop_repeats)},
+                  {"tokens", std::to_string(turn.generation.tokens_generated)}});
+        }
+    }
+
+    // A turn the breaker cut is TextOnly, which is accurate -- no tool ran -- so it feeds
+    // the no-progress counter and three of them end the run, which is the right ending for
+    // a model that has started looping.
+    //
+    // What must NOT survive is the text. Carrying fifty copies of one paragraph into the
+    // next prompt is how a loop seeds its own successor: the next turn renders a context
+    // whose most recent content is the cycle, at a fixed seed, and draws it again. So the
+    // reasoning and the answer are dropped and replaced by the FACT of the loop, which is
+    // an observed property of this run and the one thing about it worth remembering.
+    //
+    // Deliberately NOT reclassified as LengthCapped. It is a different failure with a
+    // different fix, and this repo has already paid once for a word that meant two limits
+    // (see Agent::halt_reason_).
+    if (sink.looped) {
+        turn.reasoning.clear();
+        turn.assistant_text =
+            "(this turn was cut: the same " + std::to_string(loop::LoopBreaker::kWindow) +
+            " tokens were emitted " + std::to_string(sink.loop_repeats) +
+            " times over, so it had stopped making progress. Nothing was produced and "
+            "nothing ran. Do not restate the plan or re-describe the situation -- take the "
+            "next concrete action instead, as one tool call.)";
+    }
+
     if (trace_text_enabled()) {
         emit("turn_text", {{"reasoning", capped(turn.reasoning)},
                            {"text", capped(turn.assistant_text)},
@@ -519,13 +804,11 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // it was. See parallel_calls.hpp for which calls qualify and why the others cannot.
     std::vector<std::size_t> parallel;
     for (std::size_t i = 0; i < calls.size(); ++i) {
-        // A read the ledger can already answer is NOT eligible, so it falls through to the
-        // serial path where dispatch_call owns that decision. Asking the same predicate
-        // here rather than re-deriving a cheaper one is deliberate: two tests of "is this a
-        // repeat read" that could disagree is how a batched call would quietly keep costing
-        // 12.5 KB while a lone one stopped.
-        if (can_run_in_parallel(calls[i].name) &&
-            !already_in_context(calls[i].name, params[i])) {
+        // Every read is eligible now. There used to be a second condition here excluding a
+        // read the ledger would refuse -- when reads could be refused, running one in
+        // parallel would have raced the decision. Reads always run, so the only question
+        // left is the one this predicate was named for.
+        if (can_run_in_parallel(calls[i].name)) {
             parallel.push_back(i);
         }
     }
@@ -605,11 +888,10 @@ bool Agent::can_run_in_parallel(const std::string& name) const {
 bool Agent::adopt_readonly_result(const std::string& name,
                                   const std::vector<tools::ToolParamValue>& params,
                                   const tools::ToolResult& result) {
-    // The read ledger, on the same terms as the serial path. Nothing to invalidate: a call
-    // is only eligible for this path if it mutates nothing and executes nothing.
-    if (result.ok()) {
-        note_read(name, params);
-    }
+    // Same duplicate collapse as the serial path. Safe here for the same reason this path
+    // exists at all: a call is only eligible for it if it mutates nothing and executes
+    // nothing, and the collapse touches only records already in the context.
+    collapse_duplicate_read(name, params, result);
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
                          {"summary", result.summary}});
@@ -641,6 +923,52 @@ bool is_content_read(const std::string& tool) {
     return tool == "read_file" || tool == "read_slice";
 }
 
+// Every tool that answers the SAME question as this one, including itself.
+//
+// BreakRepeat's mechanism is to take the repeated tool out of the grammar, and it was
+// taking exactly one name. `read_file` and `read_slice` return the same bytes about the
+// same path, so holding one down routes the next turn straight to the other -- and the
+// window is sized from seen_count(), which is keyed on (tool, params), so the substitute
+// arrives with a fresh count and the smallest possible window. The suppression never got
+// ahead of the ping-pong.
+//
+// MEASURED: 15 BreakRepeat firings in 38 turns, alternating `read_file` and `read_slice`
+// over the same four files, with `corrective_ineffective` firing ten times and the run
+// making two writes in total.
+//
+// The list is deliberately tiny and explicit. A family is a claim that two tools are
+// interchangeable ANSWERS, which is true of these two and is not something to infer from a
+// schema -- `list_dir` and `search` overlap but neither substitutes for the other.
+std::vector<std::string> answer_family(const std::string& tool) {
+    if (is_content_read(tool)) {
+        return {"read_file", "read_slice"};
+    }
+    return {tool};
+}
+
+// Whether a turn did nothing but read file content -- primary call and every batched one.
+//
+// The guard on the re-read stall test: one write, one build, one search anywhere in the
+// turn and the turn is work, whatever else it also did.
+bool turn_is_reads_only(const TurnResult& turn) {
+    if (!is_content_read(turn.tool_name)) {
+        return false;
+    }
+    return std::all_of(turn.extra_calls.begin(), turn.extra_calls.end(),
+                       [](const TurnResult::ExtraCall& e) {
+                           return is_content_read(e.tool_name);
+                       });
+}
+
+std::string join_names(const std::vector<std::string>& names) {
+    std::string out;
+    for (const std::string& n : names) {
+        out += out.empty() ? "" : ",";
+        out += n;
+    }
+    return out;
+}
+
 } // namespace
 
 // Whether the declared contract has ever been observed to pass in this run.
@@ -657,98 +985,108 @@ bool Agent::contract_has_passed() const {
     return false;
 }
 
-std::optional<tools::ToolResult> Agent::already_in_context(
-    const std::string& name, const std::vector<tools::ToolParamValue>& params) const {
-    if (!is_content_read(name)) {
-        return std::nullopt;
-    }
-    const std::string path = platform::lexically_normal(param_value(params, "path"));
-    if (path.empty()) {
-        return std::nullopt;
-    }
-    const auto it = run_read_.find(path);
-    if (it == run_read_.end()) {
-        return std::nullopt;
-    }
-    const std::string range = read_range(name, params);
-    for (const ReadNote& note : it->second) {
-        if (note.compactions != ctx_.compaction_count()) {
-            continue; // trimmed since; the bytes are no longer in the prompt
-        }
-        // An earlier WHOLE-file read covers any range of it. An earlier slice covers only
-        // the identical slice -- a run that read lines 1-50 and now wants 200-260 has
-        // never seen those lines, and answering it from the ledger would be a lie.
-        if (!note.range.empty() && note.range != range) {
-            continue;
-        }
-        // Ok, not Refused and not an error. It is a true answer to what was asked, and the
-        // two error-shaped statuses both do damage here: Refused feeds the RefusalLedger,
-        // and two of those would make `read_file` unsamplable for the rest of the run
-        // (BlockRefusedTool) over a call nobody refused. Left as an ordinary execution, the
-        // repeat machinery handles a model that keeps asking -- RepeatDetector records it
-        // and BreakRepeat suppresses the tool for a turn.
-        //
-        // NEVER SILENT, and never empty: an empty observation is dropped from the rendered
-        // prompt entirely, which is how read_file's own zero-byte case came to be re-issued
-        // seventeen turns running. This says what happened and what to do instead.
-        return tools::ToolResult::okay(
-            "(not re-read: " + path +
-            (note.range.empty() ? " was already read in full" : " lines " + note.range +
-                                                                    " were already read") +
-            " earlier in this run and nothing has written to it since, so the content is "
-            "still in your context above -- scroll up rather than spending a turn on it. "
-            "Read it again only after something changes it.)");
-    }
-    return std::nullopt;
-}
-
-void Agent::note_read(const std::string& name,
-                      const std::vector<tools::ToolParamValue>& params) {
-    if (!is_content_read(name)) {
-        return;
-    }
-    const std::string path = platform::lexically_normal(param_value(params, "path"));
-    if (path.empty()) {
-        return;
-    }
-    const std::string range = read_range(name, params);
-    std::vector<ReadNote>& notes = run_read_[path];
-    // Idempotent, because a suppressed read returns Ok and lands here too. Without this a
-    // model that keeps asking for one file grows a note per attempt -- the exact repetition
-    // this ledger exists to stop, moved into the ledger itself.
-    for (const ReadNote& note : notes) {
-        if (note.range == range && note.compactions == ctx_.compaction_count()) {
-            return;
-        }
-    }
-    notes.push_back({range, ctx_.compaction_count()});
-}
-
-// WHAT CAN CHANGE A FILE IS NOT WHAT DECLARES A PATH.
+// A RE-READ IS ANSWERED, ALWAYS. What it costs is charged to the context, not to the model.
 //
-// write_file, replace_in_file and delete_file name the file they touch, so they invalidate
-// exactly it. `shell` names nothing and can do anything -- `sed -i`, a formatter, a
-// codegen step, a build that rewrites a manifest -- so it drops the whole ledger. That is
-// blunt and it is the right blunt: a stale suppression hands the model old bytes for a file
-// that has changed underneath it, which is a correctness bug, while an over-eager drop
-// costs one re-read. In the run this was built from `shell` ran 4 times in 65 turns, so
-// the blunt rule gives up almost nothing.
-void Agent::invalidate_reads(const std::string& name,
-                             const std::vector<tools::ToolParamValue>& params) {
-    const tools::ToolDecl* decl = registry_.find(name);
-    const bool mutates = decl != nullptr && decl->mutates_workspace;
-    if (!mutates && !(decl != nullptr && decl->executes_commands)) {
+// What this replaced: a ledger of (path, range) notes that REFUSED a read whose bytes it
+// believed were still in the prompt, and told the model to "scroll up". Two things were
+// wrong with it, and only one of them was a coding error.
+//
+// The coding error: a whole-file note answered ANY later slice of that path, on the
+// reasoning that whole covers part. It does not. The note records that a read HAPPENED, never
+// how much of the answer survived the tool's own byte cap into the prompt -- so a whole-file
+// note for a 12 KB file elided at the cap would answer "give me lines 96-103" with a refusal
+// and no lines. And invalidation keyed on the raw path string, so a write to
+// `ResMon/Sources/Swift/HostStatsService.swift` never cleared the note for
+// `Sources/Swift/HostStatsService.swift` -- the same file, two spellings, in a workspace that
+// really did have both.
+//
+// MEASURED: one file refused SEVENTEEN times in a 66-turn run, almost all of them slice
+// requests answered by a single whole-file note from turn 4. BreakRepeat then fired 13 times
+// and took `read_file` away, and the run was cancelled having written nothing.
+//
+// The design error, which is the one that matters: "scroll up" is not an instruction a model
+// can follow. It has a context window, not a viewport. Withholding a tool result to save
+// tokens trades a bounded cost (a few thousand tokens) for an unbounded one (a turn, and then
+// another turn, because the model asks again). No agent worth shipping refuses to read a file.
+//
+// So the read runs, and the DUPLICATE is collapsed instead: the newest copy stays verbatim,
+// the copy the model was already holding becomes one line, and the prompt ends the turn the
+// size it started. That keeps the only thing the ledger was actually built for -- a 12.5 KB
+// file read eleven times must not cost eleven copies of 12.5 KB -- and it keeps it on a test
+// that cannot be wrong, because identical bytes are identical bytes.
+void Agent::collapse_duplicate_read(const std::string& name,
+                                    const std::vector<tools::ToolParamValue>& params,
+                                    const tools::ToolResult& result) {
+    if (!is_content_read(name) || !result.ok()) {
         return;
     }
-    const std::string path =
-        mutates ? platform::lexically_normal(param_value(params, "path")) : std::string();
-    if (path.empty()) {
-        // A command, or a mutating tool that did not say which file. Neither can be
-        // narrowed, so nothing survives.
-        run_read_.clear();
+    // Counted BEFORE the collapse, and for every read regardless of size: once the earlier
+    // copy has been rewritten to a pointer, "were these bytes already here?" can no longer
+    // be answered. This is the measurement the run that prompted all of this did not have
+    // -- thirty turns of re-reading four unchanged files, and `no_progress_streak=0` on
+    // every line of the trace, because a turn that calls a tool looked like a turn that did
+    // something.
+    ++turn_reads_;
+    if (ctx_.has_observation(result.summary)) {
+        ++turn_reads_redundant_;
+    }
+
+    // ONLY UNDER CONTEXT PRESSURE -- because this rewrites HISTORY, and rewritten history
+    // is a KV cache thrown away.
+    //
+    // The collapse edits a turn record that sits INSIDE the stable prefix the backend
+    // checkpoints. plan_turn_reuse() compares the cache against the new prompt token by
+    // token (kv_cache.cpp), finds the divergence at the rewritten message, and correctly
+    // returns ReuseMode::Reset -- a full re-prefill from token zero. Nothing is stale and
+    // nothing is wrong; the saving is simply bought with the entire prefill.
+    //
+    // MEASURED on the run this came from, and the separation is total:
+    //
+    //     turns where a collapse fired (n=15)   median TTFT  21,011 ms
+    //     turns where none fired      (n=22)    median TTFT     940 ms
+    //
+    // -- a 22x penalty, with no overlap between the two groups. The run peaked at 34,096
+    // tokens against a 96,000-token budget, so all 33 collapses were reclaiming a few KB
+    // of a context that was two thirds empty, and each one cost twenty seconds of a
+    // wall-clock-bounded run. Roughly five minutes went to re-prefilling for a saving
+    // nothing was short of.
+    //
+    // So the rule is the one this file already applies to compaction (S8.3: "since a trim
+    // pays a full re-prefill anyway, it spends that cost on a summary"): pay the prefill
+    // only when buying something with it. Below the mark a compaction would trim TO, the
+    // bytes are free and the cache is worth more. Above it, a collapse may spare the run a
+    // compaction that costs the same prefill AND destroys information the collapse keeps --
+    // so at that point it is strictly the better of the two.
+    const auto budget = static_cast<std::size_t>(std::max(1, config_.context_budget_tokens));
+    if (last_prompt_tokens_ <= budget * kCollapseAtPercent / 100) {
         return;
     }
-    run_read_.erase(path);
+
+    // Below this, the pointer costs more than the bytes it replaces and the collapse is
+    // pure loss -- and short results are things like "(empty file)", where two identical
+    // observations are not duplication worth touching.
+    static constexpr std::size_t kMinDuplicateBytes = 512;
+    if (result.summary.size() < kMinDuplicateBytes) {
+        return;
+    }
+    const std::string path = param_value(params, "path");
+    const std::string range = read_range(name, params);
+    const std::size_t collapsed = ctx_.supersede_duplicate_observation(
+        result.summary,
+        "(" + path + (range.empty() ? "" : " lines " + range) +
+            " was read again below and is unchanged; this earlier identical copy is "
+            "collapsed to keep one copy in context)");
+    if (collapsed == 0) {
+        return;
+    }
+    // The saving, named. This is the number that justifies the mechanism, and if it stops
+    // being large the mechanism should go rather than be tuned.
+    emit("duplicate_read_collapsed",
+         {{"tool", name},
+          {"path", path},
+          {"range", range.empty() ? "<whole-file>" : range},
+          {"copies_collapsed", std::to_string(collapsed)},
+          {"bytes_reclaimed", std::to_string(collapsed * result.summary.size())}});
 }
 
 tools::ToolResult Agent::dispatch_call(const std::string& name,
@@ -799,19 +1137,29 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // and the ledger stayed empty while the agent watched its own tests pass.
     const std::string canon_cmd = canonicalize_check(cmd);
     const std::string canon_contract = canonicalize_check(ctx_.verify_contract());
-    const bool is_the_check = name == "shell" && !canon_contract.empty() &&
-                              canon_cmd.find(canon_contract) != std::string::npos;
-    // Answered from the read ledger before anything runs. Placed here rather than in the
-    // registry because the fact it turns on -- what is in THIS run's prompt right now -- is
-    // the loop's to know; the registry has no idea a prompt exists.
-    if (std::optional<tools::ToolResult> cached = already_in_context(name, params)) {
-        result = std::move(*cached);
-        emit("repeat_read", {{"tool", name}, {"path", param_value(params, "path")}});
-    } else if (is_the_check) {
+    // AGAINST EACH ATOMIC CHECK, not against the contract as one string. `swift test &&
+    // swift build` is two criteria, and a run satisfies it with two commands -- neither of
+    // which contains the whole declared string, so neither used to be recognised. See
+    // contract_checks(): this is not a wider match, it is a match against the right unit.
+    // A command that happens to run both halves at once matches both and records both.
+    std::vector<std::string> matched;
+    if (name == "shell" && !canon_cmd.empty()) {
+        for (const std::string& check : contract_checks(ctx_.verify_contract())) {
+            if (canon_cmd.find(check) != std::string::npos) {
+                matched.push_back(check);
+            }
+        }
+    }
+    const bool is_the_check = !matched.empty();
+    if (is_the_check) {
         const std::size_t before = ctx_.verifications().size();
-        // Filed under the DECLARED contract, so every spelling of the check accumulates
-        // history on one identity instead of minting a fresh, historyless one.
-        (void)verifier_.run_and_record_as(cmd, policy_.sandbox_tier, canon_contract);
+        // Filed under each atomic check it satisfies, so every spelling accumulates history
+        // on one identity per criterion instead of minting a fresh, historyless one.
+        //
+        // The command runs ONCE and its one result is recorded against each check it
+        // covers. Running it per check would execute the operator's verification n times
+        // for one request, and two readings of the same execution are not two observations.
+        (void)verifier_.run_and_record_as(cmd, policy_.sandbox_tier, matched);
         const context::VerificationRecord& rec = ctx_.verifications().back();
         result = rec.passed ? tools::ToolResult::okay(rec.detail)
                             : tools::ToolResult::error(tools::ErrorClass::Transient, true,
@@ -867,6 +1215,23 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     if (decl != nullptr && decl->mutates_workspace && result.ok()) {
         const std::string path = param_value(params, "path");
         if (!path.empty()) {
+            // EVERY WRITE, with the path as the ledger will key it. Writes are the only
+            // events that change the workspace, and the deliverable list only reports
+            // DISTINCT paths -- so a run editing one file eight times and a run scattering
+            // eight files look the same in every other event.
+            //
+            // `first_touch` is the one that catches the accident this was built for: a run
+            // whose workspace root was already `.../ResMon` wrote to `ResMon/Sources/...`,
+            // creating a second copy of the tree one level down and then reading the
+            // ORIGINAL back and wondering why its edit was missing. Both paths are legal,
+            // both writes succeeded, and nothing in the trace marked the moment a second
+            // tree appeared.
+            const std::string norm = platform::lexically_normal(path);
+            emit("write", {{"path", path},
+                           {"normalised", norm},
+                           {"tool", name},
+                           {"first_touch", run_wrote_.count(norm) == 0 ? "1" : "0"},
+                           {"distinct_files", std::to_string(ctx_.deliverables().size())}});
             ctx_.record_deliverable(path);
             // From here on, a whole-file rewrite of this path is the run editing its own
             // output rather than destroying the operator's data -- which is the difference
@@ -881,12 +1246,9 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         }
     }
 
-    // The read ledger, kept on the SAME success condition as everything above it: a call
-    // that was refused or failed changed nothing and read nothing.
-    if (result.ok()) {
-        invalidate_reads(name, params);
-        note_read(name, params);
-    }
+    // The duplicate collapse, on the SAME success condition as everything above it: a call
+    // that was refused or failed read nothing, so there is nothing to have duplicated.
+    collapse_duplicate_read(name, params, result);
 
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
@@ -968,11 +1330,45 @@ std::size_t Agent::take_steering() {
         // act on. Holding the old count against it would end the run on the strength of
         // turns that happened before anyone spoke to it.
         consecutive_no_progress_ = 0;
+        // The reconcile question was asked about a checklist this instruction predates,
+        // and the waiver was granted over items that are no longer the open ones. Both
+        // are answers to a question about DIFFERENT scope, so they are not carried into
+        // it -- otherwise the first follow-up of a run would inherit a standing permission
+        // to finish over its own open list.
+        reconcile_asked_ = false;
+        checklist_waived_ = false;
     }
     return messages.size();
 }
 
+// How many firings of one corrective against one target before the log says it is not
+// working. Three is the smallest number that cannot be a coincidence: the first is the
+// diagnosis, the second is the model not taking it, and the third means the mechanism has
+// been applied and re-applied to a situation it does not move.
+constexpr std::size_t kIneffectiveAfter = 3;
+
 void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
+    // A CORRECTIVE THAT KEEPS FIRING IS NOT WORKING. Nothing in the harness measured this,
+    // and it is the single loudest signal a bad run produces.
+    //
+    // MEASURED: 66 turns in which BreakRepeat fired thirteen times against `read_file` and
+    // six against `read_slice`, always correctly -- the calls WERE repeats -- while the
+    // suppression window is capped at kMaxSuppressTurns, so the model waited it out and
+    // came straight back. Every individual `corrective` line in that trace looks like the
+    // system working. Only the count says otherwise, and nobody was counting.
+    if (c != Corrective::None) {
+        const std::string target = turn.tool_name.empty() ? std::string("-") : turn.tool_name;
+        const std::string key = std::string(to_string(c)) + ":" + target;
+        const std::size_t hits = ++corrective_hits_[key];
+        if (hits >= kIneffectiveAfter) {
+            emit("corrective_ineffective",
+                 {{"which", std::string(to_string(c))},
+                  {"target", target},
+                  {"fired", std::to_string(hits)},
+                  {"iterations", std::to_string(consecutive_no_progress_)},
+                  {"workspace_writes", std::to_string(ctx_.workspace_writes())}});
+        }
+    }
     // Every branch here CHANGES STATE or CONTROL FLOW. None composes a sentence asking
     // the model to behave -- that is the S9.2 rule, and run_ratchets.py counts the
     // sites that break it.
@@ -1004,20 +1400,32 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
             const int seen =
                 static_cast<int>(repeats_.seen_count(turn.tool_name, turn.tool_params));
             const int window = std::min(std::max(seen - 1, 1), kMaxSuppressTurns);
+            // THE WHOLE FAMILY, not the one name that happened to be at the front of the
+            // turn. Suppressing `read_file` alone hands the next turn `read_slice` on the
+            // same path, which is the same answer bought for one turn of delay -- see
+            // answer_family().
+            const std::vector<std::string> family = answer_family(turn.tool_name);
             emit("corrective", {{"corrective", "break_repeat"},
                                 {"tool", turn.tool_name},
+                                {"family", join_names(family)},
                                 {"seen", std::to_string(seen)},
                                 {"suppressed_turns", std::to_string(window)}});
-            bool updated = false;
-            for (auto& [name, turns_left] : suppressed_tools_) {
-                if (name == turn.tool_name) {
-                    turns_left = window;
-                    updated = true;
-                    break;
+            for (const std::string& held : family) {
+                bool updated = false;
+                for (auto& [name, turns_left] : suppressed_tools_) {
+                    if (name == held) {
+                        // The LONGER of the two, never the newer. A substitute arriving
+                        // with a fresh seen_count would otherwise shorten the window its
+                        // twin had already earned, which is how the ping-pong outlasted
+                        // every suppression aimed at it.
+                        turns_left = std::max(turns_left, window);
+                        updated = true;
+                        break;
+                    }
                 }
-            }
-            if (!updated) {
-                suppressed_tools_.emplace_back(turn.tool_name, window);
+                if (!updated) {
+                    suppressed_tools_.emplace_back(held, window);
+                }
             }
             context::TurnRecord marker;
             marker.tool_name = turn.tool_name;
@@ -1129,6 +1537,49 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
             ctx_.add_turn(std::move(marker));
             return;
         }
+        case Corrective::ReconcileChecklist: {
+            // Mechanism: pin the next turn's grammar to `plan`, and hand the run the two
+            // facts it is being asked to reconcile -- the green it earned, and the items
+            // it is still claiming.
+            //
+            // ONE turn, spent like every other narrowing, and armed once per run. The
+            // observation names both legal answers because they are genuinely different
+            // findings and the run is the only thing that knows which one is true: either
+            // the work is done and the list is stale, or the list is right and the contract
+            // is narrower than the mission. The second is the `rename_across_files` failure
+            // -- declare `pytest -q`, make it pass, stop, leave the rest of the mission
+            // undone -- and it is the reason the ask offers verify_with as an answer rather
+            // than only a checkbox.
+            const std::size_t open = ctx_.open_checklist_items();
+            emit("corrective", {{"corrective", "reconcile_checklist"},
+                                {"open_items", std::to_string(open)},
+                                {"contract", ctx_.verify_contract()}});
+            reconcile_asked_ = true;
+            replan_turns_ = 1;
+            std::string items;
+            for (const context::ChecklistItem& item : ctx_.checklist()) {
+                if (!item.done) {
+                    items += "\n  - " + item.text;
+                }
+            }
+            context::TurnRecord marker;
+            marker.observation =
+                "(`" + ctx_.verify_contract() +
+                "` is green and proven, which is everything this run needs to report the "
+                "mission complete -- except that your own checklist still lists " +
+                std::to_string(open) + " open item(s):" + items +
+                "\n\nThe run cannot finish while its evidence and its checklist disagree, "
+                "so the next turn can only call `plan`. If that work is in fact done, "
+                "restate the checklist with those items ticked and the run completes. If it "
+                "is not done, leave them open and declare a verify_with that would go red "
+                "until it is -- the contract above is passing without covering them, which "
+                "means it is measuring less than the mission.)";
+            marker.observation_is_error = true;
+            marker.first_event_seq = log_.events_written();
+            marker.last_event_seq = marker.first_event_seq;
+            ctx_.add_turn(std::move(marker));
+            return;
+        }
         case Corrective::BudgetNearlyGone: {
             // Mechanism: an observation stating the remaining turn count, injected into
             // the history like any other. Not a request to hurry -- a fact the run cannot
@@ -1193,6 +1644,26 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         const TurnResult turn = step(cancel);
         ++report.iterations;
 
+        // ONE LINE PER TURN, always. The log had every ingredient of a turn and no record
+        // of the turn itself, so reconstructing "what did iteration 41 actually do" meant
+        // correlating four event kinds by sequence number and guessing at the boundaries.
+        //
+        // Everything here is an OBSERVED fact about the turn that just happened, and the
+        // three counters are the ones that answer "is this run healthy": how many turns in
+        // a row produced no action, how many files exist, and how much of the context is
+        // gone. A run that is thrashing shows it in these three before it shows it
+        // anywhere else.
+        emit("turn", {{"n", std::to_string(report.iterations)},
+                      {"outcome", std::string(to_string(turn.outcome))},
+                      {"tool", turn.tool_name.empty() ? "-" : turn.tool_name},
+                      {"batched", std::to_string(turn.extra_calls.size())},
+                      {"ok", turn.tool_result.ok() ? "1" : "0"},
+                      {"no_progress_streak", std::to_string(consecutive_no_progress_)},
+                      {"deliverables", std::to_string(ctx_.deliverables().size())},
+                      {"workspace_writes", std::to_string(ctx_.workspace_writes())},
+                      {"open_items", std::to_string(ctx_.open_checklist_items())},
+                      {"compactions", std::to_string(ctx_.compaction_count())}});
+
         if (turn.outcome == Outcome::BackendError) {
             report.termination_reason = "backend_error";
             break;
@@ -1250,6 +1721,25 @@ RunReport Agent::run(const model::CancelToken& cancel) {
 
         if (turn.outcome == Outcome::ToolCallExecuted) {
             repeats_.record(turn.tool_name, turn.tool_params);
+        }
+        // EVERY CALL THE TURN MADE, not just the one at the front of it.
+        //
+        // This recorded the primary call only, and batching made that a hole big enough to
+        // drive the whole failure through: a turn that reads four files records ONE of
+        // them, so three reads per turn were invisible to the detector no matter how often
+        // they came back. seen_count() for those three never left zero, BreakRepeat could
+        // not fire on them, and the model re-read the same set turn after turn with the
+        // ledger agreeing it had never seen them.
+        //
+        // MEASURED: a 38-turn run whose turns 34, 35 and 37 were each `read_file` plus
+        // three batched reads of the SAME four files. The primary reached seen=2; the other
+        // three sat at 0, and the run was cancelled having written two files.
+        //
+        // A refusal is not an execution (S9.1), so it is not recorded here either.
+        for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
+            if (extra.result.status != tools::Status::Refused) {
+                repeats_.record(extra.tool_name, extra.params);
+            }
         }
         // A refusal is not an execution and not an error, so neither ledger above sees
         // it. Counted here so re-asking has somewhere to register (S9.2).
@@ -1316,18 +1806,32 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             ctx_.verify_contract_source() != context::ContextStore::ContractSource::Operator &&
             disputed_contracts_.find(wrong_contract) == disputed_contracts_.end();
 
+        // Evaluated TWICE, and the two answers are to different questions.
+        //
+        // This one is "what did this turn observe", which is what a corrective is chosen
+        // from. The one below is "where does the run stand now", after any state a
+        // corrective changed -- SynthesizeVerification can run the contract and turn the
+        // ledger green, and computing the verdict before that would spend a whole extra
+        // turn noticing.
+        //
+        // ReconcileChecklist needs the first: it fires on the turn the evidence arrives,
+        // not a turn later.
+        const CompletionVerdict observed = evaluate_completion(ctx_, checklist_waived_);
+        const bool checklist_unreconciled =
+            observed.evidence_complete && observed.open_items > 0 && !reconcile_asked_;
+
         // At most ONE corrective per turn, chosen by rank (S9.2).
         apply_corrective(choose_corrective(turn, repeats_, refusals_, report.iterations,
                                            config_.budget, out_of_time,
                                            !ctx_.verify_contract().empty(),
-                                           contract_unmoved),
+                                           contract_unmoved, checklist_unreconciled),
                          turn);
 
         // Any verification a corrective produced flows to the UI from the ledger --
         // the one choke point, so nothing can report a result that was not recorded.
         emit_verifications(before);
 
-        const CompletionVerdict verdict = evaluate_completion(ctx_);
+        const CompletionVerdict verdict = evaluate_completion(ctx_, checklist_waived_);
         if (verdict.complete) {
             report.completed = true;
             report.self_declared = verdict.self_declared();
@@ -1366,9 +1870,31 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // counter stayed at zero, and the only thing that could end the run was the
         // budget. Twelve turns and 450 seconds of a fixed 600-second wall clock went
         // that way before anything noticed.
+        // A turn that spent every one of its calls re-reading bytes the prompt ALREADY
+        // HELD made no move either, and this is the case that mattered most and was
+        // invisible. Calling a tool was treated as progress by definition, so a run could
+        // re-read the same four files for thirty turns with the streak pinned at zero, and
+        // the only thing left to end it was the budget or the operator.
+        //
+        // The test is byte identity on every read the turn made, so it cannot misfire on
+        // real work: a read after a write returns different bytes, a first read has nothing
+        // to match, and any non-read call in the turn -- a write, a build, a search -- takes
+        // the turn out of this branch entirely.
+        //
+        // MEASURED: turns 34, 35 and 37 of a 38-turn run each read the same four unchanged
+        // files, all twelve reads collapsed as duplicates, and `no_progress_streak` read 0.
+        const bool reread_only_turn = turn.outcome == Outcome::ToolCallExecuted &&
+                                      turn_reads_ > 0 &&
+                                      turn_reads_redundant_ == turn_reads_ &&
+                                      turn_is_reads_only(turn);
         const bool made_no_move = turn.outcome == Outcome::TextOnly ||
-                                  turn.outcome == Outcome::LengthCapped;
+                                  turn.outcome == Outcome::LengthCapped || reread_only_turn;
         consecutive_no_progress_ = made_no_move ? consecutive_no_progress_ + 1 : 0;
+        if (reread_only_turn) {
+            emit("reread_only_turn",
+                 {{"reads", std::to_string(turn_reads_)},
+                  {"streak", std::to_string(consecutive_no_progress_)}});
+        }
 
         const bool stalled_without_plan = turn.outcome == Outcome::TextOnly &&
                                           report.iterations > 1 &&
@@ -1385,6 +1911,32 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             report.steers_received += rescued;
             if (rescued > 0) {
                 continue;
+            }
+            // THE ONE PLACE THE CHECKLIST STOPS GATING. A run that has been asked to
+            // reconcile a green ledger against its own open items, has answered without
+            // clearing them, and has now stopped making any move at all, is not going to
+            // tick them. Ending it `text_only_no_progress` would throw away a proven green
+            // over bookkeeping -- which is the failure that made the seventh pass drop the
+            // checklist from the gate in the first place, and it is worth not rebuilding.
+            //
+            // The waiver costs an ask, and the ask is what makes this honest: the run was
+            // given the turn, the mechanism and both legal answers, and said nothing. The
+            // ending still reports the open items, so the disagreement reaches the human
+            // rather than being resolved silently in the harness's favour.
+            if (reconcile_asked_ && !checklist_waived_ && verdict.evidence_complete) {
+                checklist_waived_ = true;
+                const CompletionVerdict waived = evaluate_completion(ctx_, true);
+                if (waived.complete) {
+                    report.completed = true;
+                    report.self_declared = waived.self_declared();
+                    report.termination_reason = "completed";
+                    emit("completion",
+                         {{"reason", waived.reason},
+                          {"open_items", std::to_string(waived.open_items)},
+                          {"checklist_waived", "1"},
+                          {"self_declared", waived.self_declared() ? "1" : "0"}});
+                    break;
+                }
             }
             // Named for what actually happened: "it narrated" and "it thought until
             // the token cap" are different failures and want different responses.
