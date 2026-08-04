@@ -7,6 +7,7 @@
 
 #include "src/context/context.hpp"
 #include "src/loop/agent.hpp"
+#include "src/loop/token_stream.hpp"
 #include "src/loop/turn.hpp"
 #include "src/loop/verification.hpp"
 
@@ -187,10 +188,56 @@ TEST(at_most_one_corrective_and_budget_outranks_everything) {
     Budget budget;
     budget.max_iterations = 40;
     // Repeat alone -> BreakRepeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BreakRepeat);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+          == Corrective::BreakRepeat);
     // Budget exhausted outranks it; only ONE is returned.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, rl, 1, budget, true, true, false) == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, false)
+          == Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, 1, budget, true, true, false, false)
+          == Corrective::HaltOnBudget);
+}
+
+// ReconcileChecklist outranks every corrective aimed at the WORK, and is outranked by the
+// two that are not. A run whose evidence has landed is one turn from stopping; a repeat, an
+// unmoved contract and a described-but-unmade verification are all diagnoses of a run still
+// grinding, and none of them applies to a run that is about to stop.
+TEST(reconciling_the_checklist_outranks_the_work_correctives_and_not_the_others) {
+    RepeatDetector d;
+    RefusalLedger rl;
+    TurnResult t;
+    t.outcome = Outcome::ToolCallExecuted;
+    t.tool_name = "read_file";
+    t.tool_params = {{"path", "a"}};
+    t.tool_result = tools::ToolResult::okay("ok");
+    d.record("read_file", t.tool_params);
+    d.record("read_file", t.tool_params);
+    Budget budget;
+    budget.max_iterations = 40;
+
+    // Without the flag this turn is a plain repeat.
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) ==
+          Corrective::BreakRepeat);
+    // With it, the question about stopping wins -- and so does the one about the criterion,
+    // which is the same class of question one level down.
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, true) ==
+          Corrective::ReconcileChecklist);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, true, true) ==
+          Corrective::ReconcileChecklist);
+
+    // The budget still outranks it: a run about to be cut off needs to land first.
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, true) ==
+          Corrective::HaltOnBudget);
+    CHECK(choose_corrective(t, d, rl, budget.max_iterations - kBudgetWarningTurns, budget,
+                            false, true, false, true) == Corrective::BudgetNearlyGone);
+    // And so does the operator's second "no" -- that one is a human's decision, not
+    // bookkeeping.
+    TurnResult refused;
+    refused.outcome = Outcome::ToolCallRefused;
+    refused.tool_name = "delete_file";
+    rl.record("delete_file");
+    rl.record("delete_file");
+    CHECK(choose_corrective(refused, d, rl, 1, budget, false, true, false, true) ==
+          Corrective::BlockRefusedTool);
 }
 
 TEST(a_claimed_verification_synthesizes_a_real_one) {
@@ -201,16 +248,17 @@ TEST(a_claimed_verification_synthesizes_a_real_one) {
     t.assistant_text = "I fixed the include. The build should pass now.";
     const Budget budget;
     // Mechanism, not prose: the loop MAKES the call the model only described.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::SynthesizeVerification);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+          == Corrective::SynthesizeVerification);
 
     t.assistant_text = "Here is a summary of the file.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
 
     // With no contract declared there is nothing to synthesize. Before this gate the
     // corrective fired anyway and ran a hardcoded `cmake --build build` -- on a Python
     // workspace, a guaranteed failure filed against a contract nobody declared.
     t.assistant_text = "I fixed the include. The build should pass now.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false) == Corrective::None);
 }
 
 // A refusal is neither an execution nor an error, so before RefusalLedger existed the
@@ -228,21 +276,23 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     // First refusal: the model could not have known. Taking the tool away over one "no"
     // would be the wrong trade.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
 
     // Second: fire.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BlockRefusedTool);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+          == Corrective::BlockRefusedTool);
 
     // Counted by TOOL, not by (tool, params) -- varying the path is not a new question.
     t.tool_params = {{"path", "b"}};
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BlockRefusedTool);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+          == Corrective::BlockRefusedTool);
 
     // Once blocked it must not re-fire: the mechanism already ran, and a corrective that
     // keeps selecting itself would crowd out every other one for the rest of the run.
     rl.block("delete_file");
     CHECK(rl.is_blocked("delete_file"));
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
 
     // Budget still outranks it (S9.2). Expressed against the budget's own limit rather
     // than a literal, so raising the default ceiling cannot quietly turn this into a test
@@ -250,8 +300,54 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     rl.record("shell");
     rl.record("shell");
     t.tool_name = "shell";
-    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true, false) ==
+    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true, false, false) ==
           Corrective::HaltOnBudget);
+}
+
+// --- the loop breaker --------------------------------------------------------
+//
+// MEASURED: a Qwen3.6 4-bit run emitted one 281-character paragraph about fifty times in a
+// single thinking block and stopped only at the 4096-token cap, having produced nothing.
+// The repeated unit was ~70 tokens -- longer than the 64-token repetition-penalty window --
+// so no copy was ever in the window beside its predecessor and the penalty saw nothing to
+// penalise. No window length fixes that: at 1.05 per unique id the penalty cannot outvote a
+// confident model. Detecting the cycle and ending the turn can.
+TEST(a_repeating_cycle_is_cut_and_ordinary_text_is_not) {
+    using lmp::loop::LoopBreaker;
+
+    // A cycle whose period is longer than the detector's window, which is the case the
+    // penalty is structurally blind to.
+    LoopBreaker cycling;
+    const std::size_t period = LoopBreaker::kWindow * 2;
+    bool cut = false;
+    for (std::size_t i = 0; i < period * (LoopBreaker::kMaxRepeats + 2) && !cut; ++i) {
+        cut = cycling.saw(static_cast<lmp::model::TokenId>(100 + (i % period)));
+    }
+    CHECK(cut);
+    CHECK(cycling.repeats() >= LoopBreaker::kMaxRepeats);
+
+    // Text that never repeats a whole window is never cut, however long it runs. This is
+    // the half that matters for a working run: a long legitimate answer must not be
+    // truncated because it reused a phrase.
+    LoopBreaker prose;
+    bool tripped = false;
+    for (std::size_t i = 0; i < 4096; ++i) {
+        tripped = tripped || prose.saw(static_cast<lmp::model::TokenId>(i % 4093));
+    }
+    CHECK(!tripped);
+
+    // ORDER MATTERS. The same tokens rearranged are a different sentence; hashing them as a
+    // bag would cut turns that are merely on-topic.
+    LoopBreaker shuffled;
+    bool shuffled_cut = false;
+    for (std::size_t i = 0; i < 4096 && !shuffled_cut; ++i) {
+        const auto id = static_cast<lmp::model::TokenId>(7 + (i * 31) % 53);
+        shuffled_cut = shuffled.saw(id);
+    }
+    // A 53-token cycle stepping by 31 does eventually repeat exactly -- and it SHOULD be
+    // cut, because that is a cycle. The assertion is that it took a real repeat to do it,
+    // not the first window.
+    CHECK(shuffled.repeats() >= LoopBreaker::kMaxRepeats || !shuffled_cut);
 }
 
 // --- completion gate (S10.4) -------------------------------------------------
@@ -317,10 +413,17 @@ TEST(a_contract_declared_with_a_wrapper_still_matches_its_own_ledger) {
     CHECK(v.complete);
 }
 
-// The gate the seventh pass removed. `completed` is an EVIDENTIAL verdict; a checklist
-// tick is the model's self-report, and requiring the model to agree with the evidence
-// left a run that had demonstrably finished unable to say so (S10.4).
-TEST(an_unticked_checklist_is_reported_not_enforced) {
+// The seventh pass dropped the checklist from the gate entirely and REPORTED the
+// disagreement instead. That reads well until you watch it: two consecutive real runs
+// finished `completed` at 3 of 11 items, and "evidence says done, 8 left unticked" is not
+// a report, it is two contradictory claims printed side by side.
+//
+// An open item is the run's own statement that scope REMAINS, and no ledger can contradict
+// it -- a verification proves one command green, and whether that command covers the
+// mission is written only in the list. So the evidence is separated from the verdict:
+// `evidence_complete` is what the harness watched happen, `complete` additionally needs the
+// run's own list to agree.
+TEST(an_open_checklist_holds_a_green_ledger_until_it_is_reconciled) {
     context::ContextStore ctx("Add a --version flag");
     ctx.set_checklist({{"add flag", true}, {"tell someone about it", false}});
     ctx.set_verify_contract("ctest");
@@ -328,9 +431,66 @@ TEST(an_unticked_checklist_is_reported_not_enforced) {
     ctx.record_verification(observed("ctest", true, true));
 
     const CompletionVerdict v = evaluate_completion(ctx);
-    CHECK(v.complete);
+    // Every EVIDENTIAL gate passed -- that half is unchanged, and the corrective needs it
+    // to tell "the proof is not in yet" from "the proof is in and the list disagrees".
+    CHECK(v.evidence_complete);
+    CHECK(!v.complete);
     CHECK_EQ(v.open_items, 1U);
-    CHECK(v.reason.find("unticked") != std::string::npos);
+    // The reason names BOTH exits, because the run is the only thing that knows which is
+    // true: the list is stale, or the contract is narrower than the mission.
+    CHECK(v.reason.find("checklist") != std::string::npos);
+    CHECK(v.reason.find("verify_with") != std::string::npos);
+}
+
+TEST(ticking_the_list_completes_the_same_ledger) {
+    context::ContextStore ctx("Add a --version flag");
+    ctx.set_checklist({{"add flag", true}, {"tell someone about it", false}});
+    ctx.set_verify_contract("ctest");
+    ctx.record_deliverable("src/main.cpp");
+    ctx.record_verification(observed("ctest", true, true));
+    REQUIRE(!evaluate_completion(ctx).complete);
+
+    // The answer to the ask, in the one call that can give it. Nothing else changed: same
+    // ledger, same deliverable, same green.
+    ctx.set_checklist({{"add flag", true}, {"tell someone about it", true}});
+    const CompletionVerdict v = evaluate_completion(ctx);
+    CHECK(v.complete);
+    CHECK_EQ(v.open_items, 0U);
+}
+
+// The deadlock guard. A stale list must never be able to trap a run that is genuinely
+// done -- that is what made the seventh pass rip the gate out, and rebuilding it without
+// an exit would rebuild the failure with it. The exit is a WAIVER the Agent grants after
+// asking once and getting nothing back; the model cannot reach it.
+TEST(the_waiver_completes_over_an_open_list_and_says_it_asked) {
+    context::ContextStore ctx("Add a --version flag");
+    ctx.set_checklist({{"add flag", true}, {"tell someone about it", false}});
+    ctx.set_verify_contract("ctest");
+    ctx.record_deliverable("src/main.cpp");
+    ctx.record_verification(observed("ctest", true, true));
+
+    const CompletionVerdict v = evaluate_completion(ctx, /*checklist_waived=*/true);
+    CHECK(v.complete);
+    // Still REPORTED. A completion nobody but the harness agreed with is a real ending and
+    // a human is owed the disagreement.
+    CHECK_EQ(v.open_items, 1U);
+    CHECK(v.reason.find("asked to reconcile") != std::string::npos);
+}
+
+// The waiver is about the CHECKLIST and nothing else. Handing it to a run whose evidence
+// is missing would turn it into "finish anyway", which is the one thing the gate exists to
+// refuse.
+TEST(the_waiver_does_not_excuse_missing_evidence) {
+    context::ContextStore ctx("Add a --version flag");
+    ctx.set_checklist({{"add flag", false}});
+    ctx.set_verify_contract("ctest");
+    ctx.record_deliverable("src/main.cpp");
+    ctx.record_verification(observed("ctest", true, false)); // green, never proven red
+
+    const CompletionVerdict v = evaluate_completion(ctx, /*checklist_waived=*/true);
+    CHECK(!v.complete);
+    CHECK(!v.evidence_complete);
+    CHECK(v.reason.find("never been seen to fail") != std::string::npos);
 }
 
 // The baseline check records a deliberate red at declaration time -- that red IS the
@@ -506,7 +666,7 @@ TEST(a_run_is_warned_before_the_budget_ends_it) {
     const RefusalLedger refusals;
 
     const auto at = [&](int used) {
-        return choose_corrective(turn, repeats, refusals, used, budget, false, true, false);
+        return choose_corrective(turn, repeats, refusals, used, budget, false, true, false, false);
     };
 
     const int warn_at = budget.max_iterations - kBudgetWarningTurns;
@@ -515,7 +675,7 @@ TEST(a_run_is_warned_before_the_budget_ends_it) {
     CHECK(at(warn_at + 1) == Corrective::None);
     // The halt still outranks it, and still ends the run.
     CHECK(at(budget.max_iterations) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true, false) ==
+    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true, false, false) ==
           Corrective::HaltOnBudget);
 }
 
@@ -679,10 +839,11 @@ TEST(a_repeated_unrecoverable_failure_breaks_the_repeat) {
     t.tool_result = tools::ToolResult::error(tools::ErrorClass::Conflict, false,
                                              "old_text matches more than one site");
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
 
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::BreakRepeat);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+          == Corrective::BreakRepeat);
 }
 
 // A TRANSIENT failure is still legitimate retry -- a flaky build or a timeout deserves a
@@ -699,7 +860,7 @@ TEST(a_repeated_transient_failure_is_still_a_retry) {
     t.tool_result = tools::ToolResult::error(tools::ErrorClass::Transient, true, "[exit 1]");
     d.record(t.tool_name, t.tool_params);
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
 }
 
 // --- whose criterion was met (S10.4) -----------------------------------------
@@ -885,7 +1046,7 @@ TEST(a_past_tense_claim_of_success_synthesizes_the_verification_too) {
 
     const auto verdict = [&](const char* text) {
         t.assistant_text = text;
-        return choose_corrective(t, d, rl, 1, budget, false, true, false);
+        return choose_corrective(t, d, rl, 1, budget, false, true, false, false);
     };
 
     // The forward-looking half, which always worked and must keep working.
@@ -905,5 +1066,5 @@ TEST(a_past_tense_claim_of_success_synthesizes_the_verification_too) {
     CHECK(verdict("Reading the test file to see what it expects.") == Corrective::None);
     // And with no contract declared there is nothing to synthesize.
     t.assistant_text = "All tests pass.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false) == Corrective::None);
 }

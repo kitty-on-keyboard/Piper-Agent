@@ -172,12 +172,16 @@
         },
         "lmPipe.maxIterations": {
           "type": "number",
-          "default": 80,
-          "description": "Turns a run may take before it is cut off. Measured: a full build-and-test mission declared completion on turn 41, and shorter ceilings ended runs mid-work. Raise wallClockSeconds with this -- at ~13s a turn the two must not disagree about which one stops the run."
+          "default": 200,
+          "minimum": 1,
+          "maximum": 2000,
+          "description": "Turns a run may take before it is cut off. A ceiling on a runaway, not a target. Measured: a build-and-test mission finished on turn 41, and a five-file macOS app was still writing source when 80 turns ran out. Raise wallClockSeconds with this -- at ~13s a turn the two must not disagree about which one stops the run. Also on the sidebar drawer, which shows which limit fires first."
         },
         "lmPipe.wallClockSeconds": {
           "type": "number",
-          "default": 1800,
+          "default": 4800,
+          "minimum": 1,
+          "maximum": 43200,
           "description": "Seconds a run may take. A ceiling on a hung run, not a target: keep it comfortably above maxIterations x the per-turn time, or it ends healthy runs on time before they end on turns."
         },
         "lmPipe.contextBudgetTokens": {

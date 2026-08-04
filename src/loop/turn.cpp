@@ -29,6 +29,28 @@ std::string_view to_string(Outcome o) noexcept {
     return "BackendError";
 }
 
+std::string_view to_string(Corrective c) noexcept {
+    switch (c) {
+        case Corrective::None:
+            return "none";
+        case Corrective::BreakRepeat:
+            return "break_repeat";
+        case Corrective::SynthesizeVerification:
+            return "synthesize_verification";
+        case Corrective::BlockRefusedTool:
+            return "block_refused_tool";
+        case Corrective::RederiveContract:
+            return "rederive_contract";
+        case Corrective::ReconcileChecklist:
+            return "reconcile_checklist";
+        case Corrective::BudgetNearlyGone:
+            return "budget_nearly_gone";
+        case Corrective::HaltOnBudget:
+            return "halt_on_budget";
+    }
+    return "none";
+}
+
 ModePolicy ModePolicy::for_mode(Mode m) noexcept {
     switch (m) {
         case Mode::Plan:
@@ -200,7 +222,8 @@ std::vector<parsephony::ToolSpec> without_blocked(
 Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repeats,
                              const RefusalLedger& refusals, int iterations_used,
                              const Budget& budget, bool wall_clock_exhausted,
-                             bool have_verify_contract, bool contract_unmoved) {
+                             bool have_verify_contract, bool contract_unmoved,
+                             bool checklist_unreconciled) {
     // Ranked; the highest applicable one wins, and only one is returned (S9.2).
     if (wall_clock_exhausted || iterations_used >= budget.max_iterations) {
         return Corrective::HaltOnBudget;
@@ -222,6 +245,17 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
     if (turn.outcome == Outcome::ToolCallRefused &&
         refusals.refused_count(turn.tool_name) >= 2 && !refusals.is_blocked(turn.tool_name)) {
         return Corrective::BlockRefusedTool;
+    }
+    // Above every corrective aimed at the WORK, because this run is one turn from stopping
+    // and none of them apply to a run that is about to stop. A repeat, an unmoved contract,
+    // a described-but-unmade verification are all diagnoses of a run still grinding; this
+    // one is the last question asked of a run whose grinding is over.
+    //
+    // Below the budget arms and below BlockRefusedTool for the same reasons everything else
+    // is: a run about to be cut off, and an operator who has said no twice, both outrank a
+    // bookkeeping disagreement.
+    if (checklist_unreconciled) {
+        return Corrective::ReconcileChecklist;
     }
     // ABOVE BreakRepeat, and above everything else a working run can trigger.
     //
@@ -256,6 +290,26 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
         (turn.tool_result.ok() || unrecoverable_repeat) &&
         repeats.seen_count(turn.tool_name, turn.tool_params) > 1) {
         return Corrective::BreakRepeat;
+    }
+    // ANY CALL IN THE TURN, not only the one at the front of it.
+    //
+    // A turn may batch several calls, and this looked at the primary alone -- so a turn
+    // that re-read four files was judged entirely on the first of them. Vary that one and
+    // the other three repeat forever, unexamined.
+    //
+    // MEASURED: turns 34, 35 and 37 of a cancelled 38-turn run each re-read the same four
+    // unchanged files. BreakRepeat could only ever see one quarter of what those turns did.
+    //
+    // The primary keeps its own test above because it carries the turn's outcome and its
+    // error class; a batched call has a result but no outcome, so `ok()` is the whole
+    // condition available for it, and a failed batched call is left to the retry it may
+    // legitimately be.
+    if (turn.outcome == Outcome::ToolCallExecuted) {
+        for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
+            if (extra.result.ok() && repeats.seen_count(extra.tool_name, extra.params) > 1) {
+                return Corrective::BreakRepeat;
+            }
+        }
     }
     // The model described a verification but did not make one. Synthesizing the call is
     // a mechanism; asking it to please run the build would be prose.
@@ -312,26 +366,15 @@ std::string param_value(const std::vector<tools::ToolParamValue>& params,
     return {};
 }
 
-CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
+CompletionVerdict evaluate_completion(const context::ContextStore& ctx,
+                                      bool checklist_waived) {
     // COMPLETION IS EVIDENTIAL (S10.4). Every gate below is an observed fact: a file the
     // harness watched get written, and a command the harness watched go red and then
     // green. None of them is the model's own account of how it went.
     //
-    // The model used to have a vote here, in the form of "every checklist item ticked".
-    // It no longer does, for two reasons.
-    //
-    // First, a tick is a SELF-REPORT -- the same prose-trust this design refuses
-    // everywhere else. A run that fixed the bug, proved the fix, and then narrated its
-    // success instead of restating the list ended `text_only_no_progress` on work that
-    // was demonstrably finished; the evidence was complete and the gate was waiting on
-    // the model to agree with it.
-    //
-    // Second, the industry line is drawn elsewhere: the agent decides when to STOP, the
-    // harness decides whether it SUCCEEDED, and benchmarks score the transition of the
-    // tests rather than the agent's claim. One boolean was doing both jobs.
-    //
-    // So an unticked list no longer blocks -- it is reported (`open_items`, and
-    // `unfinished_items` on the wire) so a human can see the disagreement.
+    // Those gates decide `evidence_complete`, and they are the whole of it. The checklist
+    // is applied afterwards, once, and it decides something different -- see below and see
+    // CompletionVerdict.
     const std::size_t open = ctx.open_checklist_items();
 
     if (ctx.checklist().empty()) {
@@ -368,24 +411,51 @@ CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
     // `| tail -20` -- and the failure is silent, because every individual reading in the
     // ledger looks correct.
     const std::string declared = canonicalize_check(ctx.verify_contract());
+    // EVERY ATOMIC CHECK, each judged on its own latest reading.
+    //
+    // A contract is a set of criteria, not one string (see contract_checks). This used to
+    // look up the whole declared string as a single ledger key, so `swift test && swift
+    // build` matched only a command containing that exact text -- which is not what running
+    // a two-part contract looks like. The run below satisfied both halves repeatedly and
+    // the gate reported "has not run" the entire time.
+    //
+    // ALL of them, because `&&` means all of them. One green half does not finish a run,
+    // and each half carries its own falsifiability proof.
+    const std::vector<std::string> checks = contract_checks(ctx.verify_contract());
     const context::VerificationRecord* latest = nullptr;
-    for (const context::VerificationRecord& v : vs) {
-        if (!v.ran) {
-            continue; // a refusal never ran, so it is not evidence either way (S6.2)
+    for (const std::string& check : checks) {
+        const context::VerificationRecord* newest = nullptr;
+        for (const context::VerificationRecord& v : vs) {
+            if (!v.ran) {
+                continue; // a refusal never ran, so it is not evidence either way (S6.2)
+            }
+            if (!check.empty() && v.contract != check) {
+                continue;
+            }
+            newest = &v; // append-ordered, so the last match is the current one
         }
-        if (!declared.empty() && v.contract != declared) {
-            continue;
+        if (newest == nullptr) {
+            return {false,
+                    check.empty() ? "no verification has actually run"
+                                  : "the declared contract '" + check + "' has not run",
+                    open};
         }
-        latest = &v; // the ledger is append-ordered, so the last match is the current one
+        if (!newest->passed) {
+            return {false, "verification still failing: " + newest->contract, open};
+        }
+        // The one reported by the gates below is the WEAKEST link: an unproven check is
+        // what stops the run, so naming a proven one instead would send it to fix the
+        // wrong criterion. Falsifiability is the only test left, so the first unproven
+        // check wins and an all-proven set falls through on the last.
+        if (latest == nullptr || !newest->falsifiable) {
+            latest = newest;
+        }
     }
     if (latest == nullptr) {
         return {false,
                 declared.empty() ? "no verification has actually run"
                                  : "the declared contract '" + declared + "' has not run",
                 open};
-    }
-    if (!latest->passed) {
-        return {false, "verification still failing: " + latest->contract, open};
     }
     // A green counts only if that exact check has been proven capable of red (S10.2).
     // An unproven green does not complete a run.
@@ -412,6 +482,35 @@ CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
                 open};
     }
     const auto source = ctx.verify_contract_source();
+
+    // Every evidential gate has passed. From here on the question is no longer "did this
+    // work happen" -- the harness watched it happen -- but "was this work the whole
+    // mission", and the ledgers cannot answer that. A verification proves one command
+    // green. Whether that command covers what was asked for is written in exactly one
+    // place: the run's own checklist.
+    //
+    // An open item is therefore not a missing tick. It is the run stating that scope
+    // remains, and completing over it publishes a claim the run itself contradicts. The
+    // seventh pass reported that contradiction and finished anyway; two consecutive real
+    // runs finished at 3 of 11 items and read as having given up (see
+    // Corrective::ReconcileChecklist for the trace).
+    //
+    // It is still not enforced FOREVER -- that was the deleted `must_reconcile` deadlock,
+    // and a stale list must never be able to trap a run that is genuinely done. It is
+    // enforced until the run has been ASKED, once, by a mechanism. `checklist_waived` is
+    // the Agent reporting that it asked and got nothing back.
+    if (open != 0 && !checklist_waived) {
+        CompletionVerdict v;
+        v.evidence_complete = true;
+        v.open_items = open;
+        v.contract_source = source;
+        v.reason = "the evidence is green, but " + std::to_string(open) +
+                   " item(s) on the run's own checklist are still open -- restate the "
+                   "checklist to tick what is done, or declare a verify_with that covers "
+                   "what is not";
+        return v;
+    }
+
     std::string why = "deliverables recorded and the ";
     // The word that was missing. "The declared contract passes" reads identically whether
     // the operator set the criterion or the model picked one it could satisfy, and those
@@ -421,9 +520,19 @@ CompletionVerdict evaluate_completion(const context::ContextStore& ctx) {
                : "contract the MODEL chose passes provably (nobody else vouched for it "
                  "as the mission's criterion)";
     if (open != 0) {
-        why += ", though " + std::to_string(open) + " checklist item(s) are still unticked";
+        // Only reachable through the waiver, so this is not "the model forgot to tick" --
+        // it is "the model was asked and did not answer". Reported, because a human
+        // reading `completed` deserves to know it was not unanimous.
+        why += ", though " + std::to_string(open) +
+               " checklist item(s) were left open after the run was asked to reconcile them";
     }
-    return {true, why, open, source};
+    CompletionVerdict v;
+    v.complete = true;
+    v.evidence_complete = true;
+    v.reason = std::move(why);
+    v.open_items = open;
+    v.contract_source = source;
+    return v;
 }
 
 } // namespace lmp::loop

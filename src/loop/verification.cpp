@@ -203,6 +203,99 @@ std::string canonicalize_check(std::string_view command) {
     return collapse_spaces_for_identity(executable_form(command));
 }
 
+namespace {
+
+// Top-level `&&` positions -- outside quotes, and outside $(...) / `...` substitution.
+//
+// A naive find() splits `sh -c "a && b"` into two checks, neither of which is a command,
+// and files two ledger identities that can never run. The quoting rules here are the shell's
+// own, kept to the three forms that actually appear in a verification contract.
+std::vector<std::size_t> top_level_and_positions(std::string_view s) {
+    std::vector<std::size_t> out;
+    char quote = '\0';
+    int depth = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (quote != '\0') {
+            if (c == '\\' && quote == '"' && i + 1 < s.size()) {
+                ++i;
+            } else if (c == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (c == '\'' || c == '"' || c == '`') {
+            quote = c;
+            continue;
+        }
+        if (c == '$' && i + 1 < s.size() && s[i + 1] == '(') {
+            ++depth;
+            ++i;
+            continue;
+        }
+        if (c == ')' && depth > 0) {
+            --depth;
+            continue;
+        }
+        if (depth == 0 && c == '&' && i + 1 < s.size() && s[i + 1] == '&') {
+            out.push_back(i);
+            ++i;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<std::string> contract_checks(std::string_view contract) {
+    const std::vector<std::size_t> ands = top_level_and_positions(contract);
+    if (ands.empty()) {
+        std::string one = canonicalize_check(contract);
+        if (one.empty()) {
+            return {};
+        }
+        return {std::move(one)};
+    }
+
+    std::vector<std::string> checks;
+    std::size_t at = 0;
+    const auto take = [&](std::size_t from, std::size_t to) {
+        const std::string_view seg = contract.substr(from, to - from);
+        // A segment that names no program asserts nothing: `cd build`, `export CC=clang`.
+        // check_program() already knows how to see past both, and it is the same function
+        // the near-miss finding uses -- so "is this a command?" has one answer here.
+        if (check_program(seg).empty()) {
+            return;
+        }
+        std::string canon = canonicalize_check(seg);
+        if (canon.empty()) {
+            return;
+        }
+        // Deduplicated: a contract that names the same check twice is one criterion, and
+        // two entries would demand two independent falsifiability proofs of one command.
+        if (std::find(checks.begin(), checks.end(), canon) == checks.end()) {
+            checks.push_back(std::move(canon));
+        }
+    };
+    for (const std::size_t pos : ands) {
+        take(at, pos);
+        at = pos + 2;
+    }
+    take(at, contract.size());
+
+    // Everything was navigation or nothing parsed: fall back to the whole string, so a
+    // contract this cannot decompose behaves exactly as it did before decomposition existed
+    // rather than silently becoming no criterion at all.
+    if (checks.empty()) {
+        std::string one = canonicalize_check(contract);
+        if (one.empty()) {
+            return {};
+        }
+        return {std::move(one)};
+    }
+    return checks;
+}
+
 std::string failure_signature(std::string_view detail) {
     std::string out;
     out.reserve(detail.size());
@@ -328,6 +421,15 @@ bool is_near_miss(std::string_view command, std::string_view contract) {
     if (canon_cmd.find(canon_contract) != std::string::npos) {
         return false;
     }
+    // Nor is a command that IS one of the contract's atomic checks. dispatch_call routes
+    // per check now, so running `swift test` against `swift test && swift build` is
+    // recorded evidence, not a miss -- and reporting it as one told a run that its correct
+    // move was not being counted while the ledger was in fact counting it.
+    for (const std::string& check : contract_checks(contract)) {
+        if (!check.empty() && canon_cmd.find(check) != std::string::npos) {
+            return false;
+        }
+    }
     const std::string_view program = check_program(canon_contract);
     return !program.empty() && check_program(canon_cmd) == program;
 }
@@ -389,6 +491,15 @@ bool Verifier::run_and_record(const std::string& command, int approved_tier) {
 
 bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
                                  const std::string& contract_id) {
+    return run_and_record_as(command, approved_tier,
+                             std::vector<std::string>{contract_id});
+}
+
+bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
+                                 const std::vector<std::string>& contract_ids) {
+    if (contract_ids.empty()) {
+        return false;
+    }
     // What RUNS has the status-swallowing wrappers removed and nothing else changed.
     // A contract came to be recorded green on the strength of `tail`'s exit status; this
     // is the fix. It cannot run something weaker than what was asked for -- it removes
@@ -396,39 +507,44 @@ bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
     // which also collapses whitespace: that is right for a ledger key and wrong for a
     // command line.
     const std::string to_run = executable_form(command);
+    // ONCE, above the loop. See the header: n ids are n readings of ONE execution.
     const tools::ToolResult r =
         registry_.execute("shell", {{"command", to_run}}, approved_tier);
 
-    context::VerificationRecord rec;
-    rec.contract = contract_id;
-    // Refused is NOT failed (S6.2): the command never ran, so it is not evidence in
-    // either direction, and recording it as a failure would send the agent off fixing
-    // a build that was never attempted.
-    //
-    // A command the shell could not execute is the same case wearing a different exit
-    // code -- see ToolResult::never_executed(). `python: command not found` is not the
-    // test suite failing, and counting it as a red would hand the run a falsifiability
-    // proof for a check that has never once been executed.
-    rec.passed = r.status == tools::Status::Ok;
-    rec.ran = r.status != tools::Status::Refused && !r.never_executed();
-    // Stamped at the moment of the reading, because the question it answers is "how much
-    // work had happened when this was observed" -- a number read later would be the run's
-    // final total and every record would carry the same one.
-    rec.workspace_writes = ctx_.workspace_writes();
-    rec.detail = r.status == tools::Status::Refused ? "REFUSED (never ran): " + r.summary
-                 : r.never_executed()
-                     ? "NEVER RAN (the command could not be executed, so this is not "
-                       "evidence either way): " + r.summary
-                     : r.summary;
-    // Asked with this record VISIBLE but not eligible to be the proof. Both halves matter
-    // and they pull in opposite directions: a check still must not prove itself (S10.2),
-    // and an unmoved pair is only visible once both of its readings exist -- so asking
-    // against the ledger as it stands would let the second identical red be certified by
-    // the first, which is precisely the run this was built from. `detail` is therefore set
-    // ABOVE this line: the signature is computed from it.
-    rec.falsifiable = proven_by(contract_id, rec);
-    ctx_.record_verification(rec);
-    return rec.passed;
+    bool passed = false;
+    for (const std::string& contract_id : contract_ids) {
+        context::VerificationRecord rec;
+        rec.contract = contract_id;
+        // Refused is NOT failed (S6.2): the command never ran, so it is not evidence in
+        // either direction, and recording it as a failure would send the agent off fixing
+        // a build that was never attempted.
+        //
+        // A command the shell could not execute is the same case wearing a different exit
+        // code -- see ToolResult::never_executed(). `python: command not found` is not the
+        // test suite failing, and counting it as a red would hand the run a falsifiability
+        // proof for a check that has never once been executed.
+        rec.passed = r.status == tools::Status::Ok;
+        rec.ran = r.status != tools::Status::Refused && !r.never_executed();
+        // Stamped at the moment of the reading, because the question it answers is "how much
+        // work had happened when this was observed" -- a number read later would be the run's
+        // final total and every record would carry the same one.
+        rec.workspace_writes = ctx_.workspace_writes();
+        rec.detail = r.status == tools::Status::Refused ? "REFUSED (never ran): " + r.summary
+                     : r.never_executed()
+                         ? "NEVER RAN (the command could not be executed, so this is not "
+                           "evidence either way): " + r.summary
+                         : r.summary;
+        // Asked with this record VISIBLE but not eligible to be the proof. Both halves matter
+        // and they pull in opposite directions: a check still must not prove itself (S10.2),
+        // and an unmoved pair is only visible once both of its readings exist -- so asking
+        // against the ledger as it stands would let the second identical red be certified by
+        // the first, which is precisely the run this was built from. `detail` is therefore set
+        // ABOVE this line: the signature is computed from it.
+        rec.falsifiable = proven_by(contract_id, rec);
+        passed = rec.passed;
+        ctx_.record_verification(rec);
+    }
+    return passed;
 }
 
 bool Verifier::prove_falsifiable(const std::string& command, int approved_tier,
