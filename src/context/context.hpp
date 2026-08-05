@@ -201,6 +201,19 @@ class ContextStore {
 
     void set_persona(std::string text) { persona_ = std::move(text); }
 
+    // WHAT THIS MODE IS, in the model's own prompt. A separate channel from the persona
+    // for one reason: the persona is the operator's to replace and this is not.
+    //
+    // `prompts.<mode>` in the editor sets the persona, defaults to empty, and REPLACES the
+    // built-in wholesale -- so for as long as mode existed, the only channel that could
+    // have told the model it was in plan mode was a setting nobody had filled in, and
+    // every mode sent the identical text. The model was never told. It was simply given a
+    // tool list it could not use and left to discover the refusals one turn at a time.
+    //
+    // Rendered after the persona and before the tools, because it qualifies the persona --
+    // which tells every run to go and run its tests, advice that is unfollowable at T0.
+    void set_mode_brief(std::string text) { mode_brief_ = std::move(text); }
+
     // The absolute path the run is rooted at. Stated in the prompt because the model
     // otherwise has to GUESS it, and a wrong guess is not cheap: every path tool resolves
     // against this root and refuses anything outside it, so the guess costs a refusal per
@@ -391,6 +404,7 @@ class ContextStore {
     // that arrived later. front() is therefore always valid.
     std::vector<std::string> user_turns_;
     std::string persona_;
+    std::string mode_brief_;
     std::string workspace_root_;
     std::string project_instructions_;
     std::string project_memory_;

@@ -131,10 +131,21 @@ struct ExecOutcome {
 // contract is `swift test` had a check that could never pass at T1 no matter what the
 // model fixed. A note the model reads cannot repair that; this can.
 //
-// Confined to `swift build|test|run`, the three that take the flag and matter for
-// builds. `swift package` and `xcodebuild` are deliberately left alone: xcodebuild writes
-// its result bundle to the per-user temp root and cannot be talked out of it, so it needs
-// T3, not a flag.
+// Confined to `swift build|test|run|package`, the four SwiftPM verbs that sandbox a
+// manifest compile and accept the flag. `swift package` was previously excluded as out of
+// scope and is not: `swift package resolve` compiles Package.swift exactly as `build` does,
+// dies at T1 exactly as `build` does, and resolution is part of building.
+//
+// `xcodebuild` is still left alone, and no flag can help it: it writes its result bundle to
+// the per-user temp root and cannot be talked out of it, so it needs T3. That is a TIER
+// decision, which this function is forbidden to make -- see nested_sandbox_note() in
+// registry.cpp for where xcodebuild is told what it actually needs.
+//
+// FINDS THE PROGRAM, rather than matching a bare word at a command position. `xcrun swift
+// build` is a swift build; so are `env swift build`, `arch -arm64 swift build` and
+// `xcrun -sdk macosx swift test`. The old positional rule declined every one of them, and
+// `xcrun` is how Apple's own documentation spells a toolchain invocation -- so the rewrite
+// existed, was tested, and never fired on real input. See the launcher table in the .cpp.
 [[nodiscard]] std::string t1_compat_rewrite(const std::string& command);
 
 // Runs `command` via /bin/sh -c inside the granted tier. T0 refuses (that is its

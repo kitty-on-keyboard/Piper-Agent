@@ -61,7 +61,15 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // 15 -> 16: `remember`, the only tool whose effect outlives the run. Reviewed as
     // surface area on the same terms as the rest: it takes no path, writing to one fixed
     // file, so it adds a durable prompt input without adding a way to reach the disk.
-    CHECK_EQ(reg.decls().size(), std::size_t{16});
+    //
+    // 16 -> 18: `ask_user` and `exit_plan_mode`. Both are declared here for the grammar and
+    // the guidance and EXECUTED by the loop, exactly as `plan` is, because what they do is
+    // end the run and the registry cannot do that. They are the only way a conversational
+    // mode can stop and hand back: before them, a plan-mode run that asked a question was
+    // scored as a turn that made no move, and three of those ended it as a stall.
+    CHECK_EQ(reg.decls().size(), std::size_t{18});
+    CHECK(reg.find("ask_user") != nullptr);
+    CHECK(reg.find("exit_plan_mode") != nullptr);
     CHECK(reg.find("git_diff") != nullptr);
     CHECK(reg.find("plan") != nullptr);
     CHECK(reg.find("read_file") != nullptr);
@@ -577,4 +585,168 @@ TEST(a_keyed_note_supersedes_the_earlier_note_under_that_key) {
           std::string::npos);
     // An unkeyed note is untouched by any of it.
     CHECK(f.bytes.find("- an unrelated standalone note") != std::string::npos);
+}
+
+// A WRITE THAT CHANGES NOTHING IS NOT A WRITE, and until this it reported as one.
+//
+// MEASURED, and it is the whole reason the write door reads before it writes: a 73-turn
+// run cancelled with 6/6 items open made 39 workspace writes, 13 of which re-sent bytes
+// already on disk -- 5327 bytes to one file four times, 5437 four times, 5818 three times.
+// Every one came back "wrote N bytes to ...", so the model believed it had just fixed
+// something and the harness counted a deliverable.
+TEST(rewriting_a_file_with_its_own_bytes_is_reported_as_no_change) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    const std::string body = "int x = 1;\nint y = 2;\n";
+    const ToolResult first =
+        reg.execute("write_file", args({{"path", "a.cpp"}, {"content", body}}), 1);
+    REQUIRE(first.ok());
+    CHECK(!first.mutation_was_noop);
+    CHECK(first.summary.find("wrote") != std::string::npos);
+
+    const ToolResult again =
+        reg.execute("write_file", args({{"path", "a.cpp"}, {"content", body}}), 1);
+    // Ok, because the file IS what was asked for and nothing failed. The flag is what
+    // separates "the work is already done" from "work happened", and the loop reads the
+    // flag, never the sentence.
+    CHECK(again.ok());
+    CHECK(again.mutation_was_noop);
+    CHECK(again.summary.find("already contained") != std::string::npos);
+    // And it says what to do instead, because "nothing changed" does not imply a next move.
+    CHECK(again.summary.find("verification") != std::string::npos);
+
+    // One byte of difference and it is a real write again -- the test is byte identity,
+    // not similarity, so nothing here can swallow an edit.
+    const ToolResult changed = reg.execute(
+        "write_file", args({{"path", "a.cpp"}, {"content", body + "int z = 3;\n"}}), 1);
+    CHECK(changed.ok());
+    CHECK(!changed.mutation_was_noop);
+}
+
+// graft matched, so old_text was there -- and the file came out identical, which means
+// new_text equals it. "replaced one occurrence" for an edit that replaced text with itself
+// is the same lie one tool over.
+TEST(replacing_text_with_itself_is_reported_as_no_change) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "a.cpp"}, {"content", "int x = 1;\n"}}), 1)
+                .ok());
+
+    const ToolResult same = reg.execute("replace_in_file",
+                                        args({{"path", "a.cpp"},
+                                              {"old_text", "int x = 1;"},
+                                              {"new_text", "int x = 1;"}}),
+                                        1);
+    CHECK(same.ok());
+    CHECK(same.mutation_was_noop);
+    CHECK(same.summary.find("identical") != std::string::npos);
+
+    const ToolResult real = reg.execute("replace_in_file",
+                                        args({{"path", "a.cpp"},
+                                              {"old_text", "int x = 1;"},
+                                              {"new_text", "int x = 42;"}}),
+                                        1);
+    CHECK(real.ok());
+    CHECK(!real.mutation_was_noop);
+}
+
+// The no-op check runs BEFORE the sink, so an empty edit never reaches the editor. Routing
+// one through would put an undo step in the operator's history for a change that does not
+// exist -- and the sidecar cannot tell the difference afterwards.
+TEST(a_no_op_write_never_reaches_the_edit_sink) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "x.py"}, {"content", "print(1)\n"}}), 1)
+                .ok());
+
+    int sink_calls = 0;
+    reg.set_edit_sink([&](const std::string&, const std::string&) {
+        ++sink_calls;
+        return EditOutcome{true, {}};
+    });
+
+    const ToolResult again =
+        reg.execute("write_file", args({{"path", "x.py"}, {"content", "print(1)\n"}}), 1);
+    CHECK(again.ok());
+    CHECK(again.mutation_was_noop);
+    CHECK_EQ(sink_calls, 0);
+
+    // A real change still goes through it.
+    CHECK(reg.execute("write_file", args({{"path", "x.py"}, {"content", "print(2)\n"}}), 1)
+              .ok());
+    CHECK_EQ(sink_calls, 1);
+}
+
+// --- what a mode is allowed to SEE ------------------------------------------
+//
+// Mode policy used to be one boolean checked at dispatch time, so a plan-mode model was
+// shown write_file, reached for it, and was refused -- one wasted turn per discovery, and
+// after two refusals of the same tool BlockRefusedTool dropped it from the grammar and
+// recorded it in the trace as though the OPERATOR had denied it. The filtered overload is
+// what stops the model being offered a tool the gate would refuse.
+//
+// Asserted through the same predicate shape the Agent uses -- properties, never a list of
+// tool names -- so a tool added later is covered by what it declares.
+TEST(tools_json_can_be_filtered_to_what_a_mode_permits) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    const std::string all = reg.tools_json();
+    CHECK(all.find("\"write_file\"") != std::string::npos);
+    CHECK(all.find("\"shell\"") != std::string::npos);
+    CHECK(all.find("\"delete_file\"") != std::string::npos);
+
+    // Plan mode: no writes, no execution, no remote tools.
+    const std::string plan = reg.tools_json([](const ToolDecl& d) {
+        return !d.mutates_workspace && !d.needs_execution && !d.remote && !d.irreversible;
+    });
+    CHECK(plan.find("\"write_file\"") == std::string::npos);
+    CHECK(plan.find("\"replace_in_file\"") == std::string::npos);
+    CHECK(plan.find("\"delete_file\"") == std::string::npos);
+    CHECK(plan.find("\"remember\"") == std::string::npos);
+    CHECK(plan.find("\"shell\"") == std::string::npos);
+    // The git tools shell out through run_git, so they are needs_execution too -- they were
+    // the case that nearly slipped through, because they carry no `command` param and so
+    // could not be declared executes_commands without handing the command gate an empty
+    // string to classify.
+    CHECK(plan.find("\"git_diff\"") == std::string::npos);
+    CHECK(plan.find("\"git_log\"") == std::string::npos);
+    // Reading is the whole of what plan mode does, and it keeps all of it.
+    CHECK(plan.find("\"read_file\"") != std::string::npos);
+    CHECK(plan.find("\"search\"") != std::string::npos);
+    CHECK(plan.find("\"locate_symbol\"") != std::string::npos);
+
+    // Debug mode: writes and execution, but nothing irreversible.
+    const std::string debug =
+        reg.tools_json([](const ToolDecl& d) { return !d.irreversible; });
+    CHECK(debug.find("\"write_file\"") != std::string::npos);
+    CHECK(debug.find("\"shell\"") != std::string::npos);
+    CHECK(debug.find("\"delete_file\"") == std::string::npos);
+}
+
+// `shell` is both; the git tools are only the second. Conflating them would have sent a
+// git call into the blast-radius classifier with no command string to read.
+TEST(execution_and_command_classification_are_separate_declarations) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    const ToolDecl* shell = reg.find("shell");
+    REQUIRE(shell != nullptr);
+    CHECK(shell->executes_commands);
+    CHECK(shell->needs_execution);
+
+    for (const char* name : {"git_status", "git_diff", "git_log"}) {
+        const ToolDecl* d = reg.find(name);
+        REQUIRE(d != nullptr);
+        CHECK(d->needs_execution);
+        CHECK(!d->executes_commands);
+    }
+
+    // Nothing declared locally is remote; that flag exists for MCP and must not drift.
+    for (const ToolDecl& d : reg.decls()) {
+        CHECK(!d.remote);
+    }
 }

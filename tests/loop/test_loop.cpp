@@ -71,13 +71,25 @@ TEST(plan_mode_cannot_execute_or_write) {
     const ModePolicy plan = ModePolicy::for_mode(Mode::Plan);
     CHECK_EQ(plan.sandbox_tier, 0);
     CHECK(!plan.allow_workspace_writes);
+    CHECK(!plan.allow_execution);
+    CHECK(!plan.allow_destructive);
+    CHECK(plan.conversational); // it talks; it is the only mode that does
 
+    // DEBUG WRITES NOW, and this assertion is the record of the change rather than a
+    // relaxation of it. It could not write, which made it useless for the one thing it is
+    // named after: no log line, no saved reproduction, no applying the fix it just proved.
+    // What it still cannot do is destroy -- instrumenting a bug never needs a file gone.
     const ModePolicy debug = ModePolicy::for_mode(Mode::Debug);
     CHECK_EQ(debug.sandbox_tier, 1);
-    CHECK(!debug.allow_workspace_writes); // can run, cannot mutate
+    CHECK(debug.allow_workspace_writes);
+    CHECK(debug.allow_execution);
+    CHECK(!debug.allow_destructive);
+    CHECK(!debug.conversational);
 
     const ModePolicy agent = ModePolicy::for_mode(Mode::Agent);
     CHECK(agent.allow_workspace_writes);
+    CHECK(agent.allow_destructive);
+    CHECK(!agent.conversational);
 }
 
 // --- exactly one repeat detector --------------------------------------------
@@ -116,6 +128,40 @@ TEST(a_cosmetic_path_difference_is_not_a_different_call) {
     RepeatDetector c;
     c.record("shell", {{"command", "ls x"}});
     CHECK_EQ(c.seen_count("shell", {{"command", "ls x/"}}), std::size_t{0});
+}
+
+// What decides whether `replace_in_file` can do anything is the path and `old_text`. If
+// old_text is not in the file the call fails for EVERY new_text; if it is, the first call
+// consumed it. So varying only the replacement mints a fresh key for a call that cannot
+// behave any differently, and the detector loses sight of a model editing in circles.
+TEST(replace_in_file_repeats_on_its_target_not_its_replacement) {
+    RepeatDetector d;
+    const std::vector<tools::ToolParamValue> first = {
+        {"path", "a.cpp"}, {"old_text", "int x = 1;"}, {"new_text", "int x = 2;"}};
+    const std::vector<tools::ToolParamValue> reworded = {
+        {"path", "a.cpp"}, {"old_text", "int x = 1;"}, {"new_text", "int x = 3; // try"}};
+
+    d.record("replace_in_file", first);
+    CHECK_EQ(d.seen_count("replace_in_file", reworded), std::size_t{1});
+    d.record("replace_in_file", reworded);
+    // Enough to trip the mutation-repeat gate, which is the whole point.
+    CHECK_EQ(d.seen_count("replace_in_file", first), std::size_t{2});
+
+    // A different TARGET is still a different call -- this drops one parameter, it does
+    // not collapse the tool onto its path.
+    const std::vector<tools::ToolParamValue> elsewhere = {
+        {"path", "a.cpp"}, {"old_text", "int y = 9;"}, {"new_text", "int y = 8;"}};
+    CHECK_EQ(d.seen_count("replace_in_file", elsewhere), std::size_t{0});
+
+    // And `write_file` keeps its content in the key: two different contents genuinely are
+    // two different calls. The identical-content case is caught by the write door instead,
+    // which costs less and tells the model something a repeat count cannot.
+    RepeatDetector w;
+    w.record("write_file", {{"path", "a.cpp"}, {"content", "one"}});
+    CHECK_EQ(w.seen_count("write_file", {{"path", "a.cpp"}, {"content", "two"}}),
+             std::size_t{0});
+    CHECK_EQ(w.seen_count("write_file", {{"path", "a.cpp"}, {"content", "one"}}),
+             std::size_t{1});
 }
 
 // BreakRepeat's declared mechanism is "force a different tool by narrowing the grammar's
@@ -188,12 +234,12 @@ TEST(at_most_one_corrective_and_budget_outranks_everything) {
     Budget budget;
     budget.max_iterations = 40;
     // Repeat alone -> BreakRepeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
           == Corrective::BreakRepeat);
     // Budget exhausted outranks it; only ONE is returned.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, false, false)
           == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, rl, 1, budget, true, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 1, budget, true, true, false, false, false)
           == Corrective::HaltOnBudget);
 }
 
@@ -215,20 +261,20 @@ TEST(reconciling_the_checklist_outranks_the_work_correctives_and_not_the_others)
     budget.max_iterations = 40;
 
     // Without the flag this turn is a plain repeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) ==
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) ==
           Corrective::BreakRepeat);
     // With it, the question about stopping wins -- and so does the one about the criterion,
     // which is the same class of question one level down.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, true) ==
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, true, false) ==
           Corrective::ReconcileChecklist);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, true, true) ==
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, true, true, false) ==
           Corrective::ReconcileChecklist);
 
     // The budget still outranks it: a run about to be cut off needs to land first.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, true) ==
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, true, false) ==
           Corrective::HaltOnBudget);
     CHECK(choose_corrective(t, d, rl, budget.max_iterations - kBudgetWarningTurns, budget,
-                            false, true, false, true) == Corrective::BudgetNearlyGone);
+                            false, true, false, true, false) == Corrective::BudgetNearlyGone);
     // And so does the operator's second "no" -- that one is a human's decision, not
     // bookkeeping.
     TurnResult refused;
@@ -236,8 +282,52 @@ TEST(reconciling_the_checklist_outranks_the_work_correctives_and_not_the_others)
     refused.tool_name = "delete_file";
     rl.record("delete_file");
     rl.record("delete_file");
-    CHECK(choose_corrective(refused, d, rl, 1, budget, false, true, false, true) ==
+    CHECK(choose_corrective(refused, d, rl, 1, budget, false, true, false, true, false) ==
           Corrective::BlockRefusedTool);
+}
+
+// A run whose edits have outrun its checks is GUESSING: every write after the last
+// verification is derived from the same stale output as the one before it. Nothing else in
+// the harness could see it, because the run is calling tools and mutating the workspace,
+// so every other progress signal reads healthy.
+//
+// MEASURED: a 73-turn run cancelled with 6/6 items open ran its contract seven times and
+// made 39 writes, with FIFTEEN consecutive writes between two of those runs.
+TEST(unverified_edits_outrank_the_repeat_they_cause) {
+    RepeatDetector d;
+    RefusalLedger rl;
+    TurnResult t;
+    t.outcome = Outcome::ToolCallExecuted;
+    t.tool_name = "write_file";
+    t.tool_params = {{"path", "a.cpp"}, {"content", "x"}};
+    t.tool_result = tools::ToolResult::okay("wrote 1 bytes to a.cpp");
+    d.record("write_file", t.tool_params);
+    d.record("write_file", t.tool_params);
+    Budget budget;
+    budget.max_iterations = 40;
+
+    // Without the flag this is a plain repeat and the tool gets held.
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) ==
+          Corrective::BreakRepeat);
+    // With it, the run gets ground truth instead. ABOVE BreakRepeat on purpose: taking the
+    // editor away from a model with stale evidence leaves it with the same guess and one
+    // fewer way to act on it.
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, true) ==
+          Corrective::ForceVerification);
+
+    // BELOW RederiveContract: forcing a run of a contract no work can move just buys
+    // another copy of a failure the run has been shown twice.
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, true, false, true) ==
+          Corrective::RederiveContract);
+    // And below both budget arms and the operator's second "no", like everything else
+    // aimed at the work.
+    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, false, true) ==
+          Corrective::HaltOnBudget);
+
+    // With no contract there is no mechanism, and a corrective with no mechanism is what
+    // this enum exists to forbid -- so it falls back to the repeat.
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false, true) ==
+          Corrective::BreakRepeat);
 }
 
 TEST(a_claimed_verification_synthesizes_a_real_one) {
@@ -248,17 +338,17 @@ TEST(a_claimed_verification_synthesizes_a_real_one) {
     t.assistant_text = "I fixed the include. The build should pass now.";
     const Budget budget;
     // Mechanism, not prose: the loop MAKES the call the model only described.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
           == Corrective::SynthesizeVerification);
 
     t.assistant_text = "Here is a summary of the file.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
 
     // With no contract declared there is nothing to synthesize. Before this gate the
     // corrective fired anyway and ran a hardcoded `cmake --build build` -- on a Python
     // workspace, a guaranteed failure filed against a contract nobody declared.
     t.assistant_text = "I fixed the include. The build should pass now.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false, false) == Corrective::None);
 }
 
 // A refusal is neither an execution nor an error, so before RefusalLedger existed the
@@ -276,23 +366,23 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     // First refusal: the model could not have known. Taking the tool away over one "no"
     // would be the wrong trade.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
 
     // Second: fire.
     rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
           == Corrective::BlockRefusedTool);
 
     // Counted by TOOL, not by (tool, params) -- varying the path is not a new question.
     t.tool_params = {{"path", "b"}};
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
           == Corrective::BlockRefusedTool);
 
     // Once blocked it must not re-fire: the mechanism already ran, and a corrective that
     // keeps selecting itself would crowd out every other one for the rest of the run.
     rl.block("delete_file");
     CHECK(rl.is_blocked("delete_file"));
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
 
     // Budget still outranks it (S9.2). Expressed against the budget's own limit rather
     // than a literal, so raising the default ceiling cannot quietly turn this into a test
@@ -300,7 +390,7 @@ TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
     rl.record("shell");
     rl.record("shell");
     t.tool_name = "shell";
-    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true, false, false) ==
+    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true, false, false, false) ==
           Corrective::HaltOnBudget);
 }
 
@@ -666,7 +756,7 @@ TEST(a_run_is_warned_before_the_budget_ends_it) {
     const RefusalLedger refusals;
 
     const auto at = [&](int used) {
-        return choose_corrective(turn, repeats, refusals, used, budget, false, true, false, false);
+        return choose_corrective(turn, repeats, refusals, used, budget, false, true, false, false, false);
     };
 
     const int warn_at = budget.max_iterations - kBudgetWarningTurns;
@@ -675,7 +765,7 @@ TEST(a_run_is_warned_before_the_budget_ends_it) {
     CHECK(at(warn_at + 1) == Corrective::None);
     // The halt still outranks it, and still ends the run.
     CHECK(at(budget.max_iterations) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true, false, false) ==
+    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true, false, false, false) ==
           Corrective::HaltOnBudget);
 }
 
@@ -839,10 +929,10 @@ TEST(a_repeated_unrecoverable_failure_breaks_the_repeat) {
     t.tool_result = tools::ToolResult::error(tools::ErrorClass::Conflict, false,
                                              "old_text matches more than one site");
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
 
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false)
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
           == Corrective::BreakRepeat);
 }
 
@@ -860,7 +950,7 @@ TEST(a_repeated_transient_failure_is_still_a_retry) {
     t.tool_result = tools::ToolResult::error(tools::ErrorClass::Transient, true, "[exit 1]");
     d.record(t.tool_name, t.tool_params);
     d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
 }
 
 // --- whose criterion was met (S10.4) -----------------------------------------
@@ -1046,7 +1136,7 @@ TEST(a_past_tense_claim_of_success_synthesizes_the_verification_too) {
 
     const auto verdict = [&](const char* text) {
         t.assistant_text = text;
-        return choose_corrective(t, d, rl, 1, budget, false, true, false, false);
+        return choose_corrective(t, d, rl, 1, budget, false, true, false, false, false);
     };
 
     // The forward-looking half, which always worked and must keep working.
@@ -1066,5 +1156,5 @@ TEST(a_past_tense_claim_of_success_synthesizes_the_verification_too) {
     CHECK(verdict("Reading the test file to see what it expects.") == Corrective::None);
     // And with no contract declared there is nothing to synthesize.
     t.assistant_text = "All tests pass.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false) == Corrective::None);
+    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false, false) == Corrective::None);
 }

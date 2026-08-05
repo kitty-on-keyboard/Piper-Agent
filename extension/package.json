@@ -93,10 +93,15 @@
             "agent"
           ],
           "enumDescriptions": [
-            "T0: no execution, no writes.",
-            "T1 sandbox: may run commands, may not mutate the workspace.",
+            "T0: reads only. Discusses the approach with you and hands over a plan; cannot write or run anything.",
+            "T1 sandbox: may run commands and edit files, but never deletes, and always asks before overwriting a file it did not write.",
             "T1 sandbox: may run commands and mutate the workspace."
           ]
+        },
+        "lmPipe.showThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep reasoning transcripts open in the chat. Off, each turn's reasoning arrives collapsed and you open the ones you want; on, every turn's stays open until you turn this off again."
         },
         "lmPipe.sandboxTier": {
           "type": "number",

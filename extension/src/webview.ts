@@ -82,6 +82,14 @@ body {
   margin-top: 6px; font-size: 11px; color: var(--dim);
   min-height: 16px;
 }
+/* The mode the RUN IN FLIGHT was started with. Not the segmented control's value, which
+   is what the next run will use -- a mode changed mid-run would otherwise show the new
+   word over the old behaviour, and the whole point of the word is to be trusted. */
+#modeNow:not(:empty) {
+  padding: 0 6px; border: 1px solid var(--line); border-radius: 9px;
+  font-size: 10px; line-height: 15px; color: var(--faint); text-transform: uppercase;
+  letter-spacing: .04em;
+}
 
 /* --- the activity orb ---------------------------------------------------- */
 /* A raymarched glass bead, in orb.ts. It replaced a 14px conic spinner: a spinner can
@@ -93,7 +101,7 @@ ${orbStyles()}
 
 /* The label shimmers while busy -- the Gemini/Siri trick: a bright band swept across
    the text by animating a clipped gradient. */
-body.busy #statusText {
+body.busy #statusText, body.busy #liveLabel {
   background: linear-gradient(90deg, var(--dim) 30%, var(--fg) 50%, var(--dim) 70%);
   background-size: 200% 100%;
   -webkit-background-clip: text; background-clip: text;
@@ -103,7 +111,9 @@ body.busy #statusText {
 @keyframes sweep { 0% { background-position: 120% 0; } 100% { background-position: -20% 0; } }
 
 @media (prefers-reduced-motion: reduce) {
-  body.busy #statusText { animation: none; -webkit-text-fill-color: var(--fg); }
+  body.busy #statusText, body.busy #liveLabel {
+    animation: none; -webkit-text-fill-color: var(--fg);
+  }
 }
 
 /* --- the model bar -------------------------------------------------------- */
@@ -499,12 +509,34 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
   border: 1px solid var(--line); border-radius: 20px; padding: 4px 4px 4px 8px;
   transition: border-color .18s var(--ease), box-shadow .18s var(--ease);
 }
-/* The orb sits at the head of the composer, where every other assistant puts its activity
-   indicator: next to the thing you are typing into, not in a header you scroll past. */
-#composer #orb {
-  --orb-size: 22px;
-  align-self: center; margin-bottom: 1px;
+/* --- the live row --------------------------------------------------------- */
+/* The orb and the status word, INLINE AT THE TAIL OF THE TRANSCRIPT, which is where
+   Claude and Gemini put theirs and where the eye already is: reading the last line of the
+   answer. The orb used to sit in the composer and the word in the header, so the two
+   halves of one signal were at opposite ends of the panel and the reader had to look away
+   from the text to find out what was happening to it.
+
+   A permanent last child of #feed rather than something appended and removed. It has to
+   be permanent because the canvas holds a WebGL2 context: taking the row out of the DOM
+   would lose it, and re-creating a context per run is both slow and a way to hit the
+   browser's live-context cap. So the row stays and only its contents come and go. */
+#live {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 0 6px; min-height: 22px;
+  font-size: 11px; color: var(--dim);
 }
+#live #orb { --orb-size: 18px; }
+#live.idle #liveOrb, #live.idle #liveLabel { display: none; }
+/* The toggle is the one part that stays visible at rest -- it is a preference, not a
+   status, and hiding it between runs would mean it could only be found mid-run. */
+#thinkToggle {
+  margin-left: auto; flex: none;
+  background: transparent; border: 1px solid var(--line); border-radius: 11px;
+  padding: 1px 9px; font-size: 10px; line-height: 16px; color: var(--faint);
+  cursor: pointer; transition: color .15s var(--ease), border-color .15s var(--ease);
+}
+#thinkToggle:hover { color: var(--dim); border-color: var(--dim); }
+#thinkToggle.on { color: var(--accent); border-color: var(--accent); }
 #composer:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
@@ -550,7 +582,7 @@ function markup(): string {
   <div id="headRow">
     <div id="headText">
       <div id="mission"></div>
-      <div id="status"><span id="statusText">Idle</span></div>
+      <div id="status"><span id="statusText">Idle</span><span id="modeNow"></span></div>
     </div>
   </div>
   <div id="modeBar">
@@ -594,7 +626,7 @@ function markup(): string {
   </div>
 </div>
 <div id="plan"></div>
-<div id="feed"></div>
+<div id="feed"><div id="live"><span id="liveOrb">${orbMarkup()}</span><span id="liveLabel"></span><button id="thinkToggle" title="Keep reasoning open in the chat">Thinking</button></div></div>
 <div id="foot">
   <div id="ctx" class="idle">
     <div id="ctxTrack"><div id="ctxFill"></div></div>
@@ -603,7 +635,6 @@ function markup(): string {
   </div>
   <div id="perf"></div>
   <div id="composer">
-    ${orbMarkup()}
     <textarea id="say" rows="1" placeholder="Message the agent…"></textarea>
     <button id="stop" title="Stop this run"></button>
     <button id="send" title="Send">↑</button>
@@ -1015,6 +1046,13 @@ ${orbScript()}
 const api = acquireVsCodeApi();
 const $ = (id) => document.getElementById(id);
 const feed = $('feed');
+// The permanent last child of the feed. Everything add() puts in the transcript goes
+// BEFORE it, so the live status always trails the history it is reporting on.
+const live = $('live');
+// Whether reasoning disclosures open as they arrive. Mirrors lmPipe.showThinking, which
+// is where it lives so that hiding the panel -- which destroys this webview -- does not
+// forget it.
+let showThinking = false;
 
 let inFlight = false;
 let bubble = null;          // the assistant bubble currently being typed into
@@ -1022,54 +1060,115 @@ let caret = null;
 let mdCtx = null;           // the markdown parser + DOM cursor for that bubble
 
 // --- typewriter -----------------------------------------------------------
-// The sidecar now streams token by token, so this is no longer turning a slab into
-// something readable -- it is smoothing arrival jitter. Keep it: the drain rate scales
-// with how far behind it is, so a burst that lands after a stall still catches up rather
-// than typing out at a leisurely pace, and a paused-then-resumed reader does not crawl.
+//
+// ONE QUEUE, AND EVERYTHING GOES THROUGH IT. Text, markdown structure, tool rows,
+// verification rows, approval cards, the run footer -- all of it. That is what makes the
+// transcript's order a property of arrival order instead of a race, and it is the fix for
+// the reordering.
+//
+// The bug it replaces: blocks were appended to the feed SYNCHRONOUSLY, on arrival, while
+// text drained from this queue at a fixed trickle. The comment here used to claim the
+// drain rate "scales with how far behind it is". It did not. rate was computed from the
+// length of the CURRENT JOB, and once the sidecar began streaming token by token every job
+// held about one token -- four characters -- so Math.max(2, ceil(4/28)) pinned the rate
+// at the floor of 2 characters per frame. Roughly 120 characters a second against a decode
+// rate several times that. The queue fell behind at a rate proportional to how much the
+// model had to say, and never caught up within a run, so a tool row raised at token 400
+// appeared on screen while the reader was still watching sentence two arrive.
+//
+// The rate now comes from the WHOLE BACKLOG and is spent across as many jobs as it takes,
+// so lag is bounded by a couple of frames no matter how long the answer is.
 const queue = [];
 let typing = false;
+// Characters queued and not yet on screen, maintained incrementally -- the one number the
+// old rate was missing. Walking the queue for it every frame would be O(queue) per frame
+// on exactly the runs where the queue is longest.
+let pending = 0;
+
+// Above this, smoothing is a lie: the reader is watching a stale transcript, not a
+// typewriter. A webview that was hidden, a burst after a stall, or a replayed slab all
+// land here, and the honest response is to put it on screen at once.
+const MAX_PENDING = 4000;
 
 function pump() { if (!typing) { typing = true; requestAnimationFrame(step); } }
 
-function typeInto(node, text) { queue.push({ node, text, at: 0 }); pump(); }
+function typeInto(node, text) { queue.push({ node, text, at: 0 }); pending += text.length; pump(); }
 
-// A structural job -- create a code block, open a list item. It runs from the SAME queue
-// as the text rather than being applied on arrival, because the element a later Text event
-// belongs in may not exist yet when that event is queued. Applying structure eagerly and
-// text lazily puts the code block above the paragraph that introduced it.
+// A structural job -- create a code block, open a list item, append a tool row. It runs
+// from the SAME queue as the text rather than being applied on arrival, because the
+// element a later Text event belongs in may not exist yet when that event is queued.
+// Applying structure eagerly and text lazily puts the code block above the paragraph that
+// introduced it -- and puts the whole tool row above the sentence that introduced IT.
 function queueOp(fn) { queue.push({ op: fn }); pump(); }
 
 // Markdown text resolves its destination at DRAIN time via ctx.target(), for the same
 // reason: the container is whatever the structural jobs ahead of it have built.
-function typeMd(ctx, text, trimLead) { queue.push({ ctx, text, at: 0, trimLead }); pump(); }
+function typeMd(ctx, text, trimLead) {
+  queue.push({ ctx, text, at: 0, trimLead });
+  pending += text.length;
+  pump();
+}
+
+// Empties the queue to the screen in one go. For the boundaries where a partly-typed
+// transcript would be wrong rather than merely slow: the user has just sent a message, or
+// the run has ended and the footer is about to land.
+function flushQueue() {
+  let guard = 0;
+  // Bounded rather than while (queue.length): a job whose op throws would otherwise spin
+  // the tab forever, and a render bug should degrade to a jumpy transcript, not a hang.
+  while (queue.length && ++guard < 10000) drain(Number.MAX_SAFE_INTEGER);
+  // typing is deliberately NOT cleared here. A frame may already be scheduled, and
+  // clearing it would let the next pump() schedule a second one -- two step() chains
+  // draining one queue, each granting itself a full budget. The pending frame will find
+  // the queue empty and stand itself down, which is the same thing one tick later.
+  feed.scrollTop = feed.scrollHeight;
+}
+
+// Spends budget characters across as many jobs as it takes. Returns what it did not
+// spend, so a frame that runs out of queue does not busy-wait on the remainder.
+function drain(budget) {
+  while (queue.length && budget > 0) {
+    const job = queue[0];
+
+    if (job.op) { job.op(); queue.shift(); continue; }
+
+    // One newline is dropped where prose resumes after a block element, so a code block or
+    // heading does not leave a blank line behind it in the pre-wrap flow.
+    if (job.ctx && job.at === 0 && job.trimLead && job.ctx.afterBlock) {
+      job.ctx.afterBlock = false;
+      if (job.text[0] === '\\n') { job.text = job.text.slice(1); pending -= 1; }
+      if (!job.text.length) { queue.shift(); continue; }
+    }
+
+    const target = job.ctx ? job.ctx.target() : job.node;
+    const left = job.text.length - job.at;
+    const take = Math.min(left, budget);
+    const chunk = job.text.slice(job.at, job.at + take);
+    job.at += take;
+    budget -= take;
+    pending -= take;
+    if (caret && caret.parentNode === target) {
+      target.insertBefore(document.createTextNode(chunk), caret);
+    } else {
+      target.appendChild(document.createTextNode(chunk));
+    }
+    if (job.at >= job.text.length) queue.shift();
+  }
+  return budget;
+}
 
 function step() {
-  const job = queue[0];
-  if (!job) { typing = false; return; }
+  if (!queue.length) { typing = false; return; }
 
-  if (job.op) { job.op(); queue.shift(); requestAnimationFrame(step); return; }
+  // The floor keeps a short answer from arriving instantly -- the smoothing is still worth
+  // having when there is nothing to catch up on. The divisor is what makes it catch up:
+  // a backlog of 600 characters clears in about six frames rather than five seconds.
+  const budget = pending > MAX_PENDING ? Number.MAX_SAFE_INTEGER
+                                       : Math.max(24, Math.ceil(pending / 6));
+  drain(budget);
 
-  // One newline is dropped where prose resumes after a block element, so a code block or
-  // heading does not leave a blank line behind it in the pre-wrap flow.
-  if (job.ctx && job.at === 0 && job.trimLead && job.ctx.afterBlock) {
-    job.ctx.afterBlock = false;
-    if (job.text[0] === '\\n') job.text = job.text.slice(1);
-    if (!job.text.length) { queue.shift(); requestAnimationFrame(step); return; }
-  }
-
-  const target = job.ctx ? job.ctx.target() : job.node;
-  const left = job.text.length - job.at;
-  const rate = Math.max(2, Math.ceil(left / 28));
-  const chunk = job.text.slice(job.at, job.at + rate);
-  job.at += rate;
-  if (caret && caret.parentNode === target) {
-    target.insertBefore(document.createTextNode(chunk), caret);
-  } else {
-    target.appendChild(document.createTextNode(chunk));
-  }
   const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   if (pinned) feed.scrollTop = feed.scrollHeight;
-  if (job.at >= job.text.length) queue.shift();
   requestAnimationFrame(step);
 }
 
@@ -1147,7 +1246,16 @@ function applyMd(ctx, e) {
     if (ctx.afterBlock) ctx.afterBlock = false;
     else ctx.bubble.appendChild(document.createTextNode('\\n'));
   }
-  if (caret) ctx.target().appendChild(caret);
+  // ONLY for the context the caret actually belongs to.
+  //
+  // There is one caret and it is a module global, so this used to drag it into whatever
+  // context happened to be draining. closeThought() queues the thought's tail-flush and
+  // the answer path then synchronously opens a new bubble with a new caret -- and when
+  // those queued thought ops drained, this line moved the ANSWER's caret into the thought
+  // body, which is collapsed. Text still landed correctly (step() falls back to append
+  // when the caret is elsewhere), so the only symptom was the blinking cursor vanishing
+  // from the answer, which reads as the stream having stalled.
+  if (caret && ctx === mdCtx) ctx.target().appendChild(caret);
 }
 
 function renderMd(ctx, events) {
@@ -1164,6 +1272,11 @@ function busy(on, label, state) {
   inFlight = on;
   document.body.classList.toggle('busy', on);
   $('statusText').textContent = label;
+  // The same word, in the transcript, next to the orb. Set from the SAME call as the hue
+  // for the reason the header status was: two places that describe one thing drift, and
+  // the one nobody is looking at is the one that goes stale.
+  $('liveLabel').textContent = label;
+  live.classList.toggle('idle', !on);
   if (state && window.__orb) window.__orb.state(state);
   $('hint').textContent = on
     ? 'Your message reaches the run at the next turn boundary'
@@ -1195,11 +1308,25 @@ function goIdle() {
 // feed as a bare .msg, so none of that CSS had ever applied to anything -- the thought
 // disclosure had no marker and no body panel, and a tool row had no border. The styles
 // were written, reviewed and shipped, and were dead on arrival at this line.
+// QUEUED, not appended. This is the other half of the ordering fix.
+//
+// Every caller here -- the tool row, the verification row, the approval card, the error
+// block, the user's echo, the reasoning disclosure -- used to land in the feed the instant
+// its message arrived, while the answer that preceded it was still trickling out of the
+// typewriter. The elements were in the right ORDER; the earlier one was still filling in
+// after the later one was on screen, which is the same thing to read.
+//
+// Going through the queue means a block cannot overtake text that arrived before it, by
+// construction rather than by the typewriter happening to keep up.
 function add(el, cls) {
   el.classList.add('msg');
   if (cls) el.classList.add(cls);
-  feed.append(el);
-  feed.scrollTop = feed.scrollHeight;
+  queueOp(() => {
+    // Before the live row, never after it: #live is a permanent last child, and appending
+    // past it would put the transcript underneath the thing that reports on it.
+    feed.insertBefore(el, live);
+    feed.scrollTop = feed.scrollHeight;
+  });
   return el;
 }
 
@@ -1271,7 +1398,7 @@ function openThought() {
   closeBubble();  // before the fields below are set: closeBubble() clears them
   const d = document.createElement('details');
   d.className = 'thought';
-  d.open = false;
+  d.open = showThinking;
   thoughtSummary = document.createElement('summary');
   thoughtSummary.textContent = 'Thinking…';
   const b = document.createElement('div');
@@ -1479,6 +1606,27 @@ function sw(id, key) {
 sw('swExec', 'autoApproveExec');
 sw('swWrite', 'autoApproveWrites');
 
+// --- the thinking toggle --------------------------------------------------
+// Applied to the disclosures ALREADY IN THE FEED as well as the ones still to come, which
+// is the whole difference between a toggle and a default.
+//
+// Before this, every turn's reasoning arrived in a fresh <details open=false>. You opened
+// one, read it, and the next turn produced another shut one -- with its summary already
+// rewritten to "Thought for 1.7s", so there was not even a "Thinking…" to notice. Wanting
+// to watch the reasoning meant re-opening a disclosure on every single turn, and the
+// setting that would have said "yes, always" did not exist.
+function setThinking(on) {
+  showThinking = on;
+  $('thinkToggle').classList.toggle('on', on);
+  for (const d of feed.querySelectorAll('details.thought')) d.open = on;
+}
+$('thinkToggle').onclick = () => {
+  setThinking(!showThinking);
+  // Through settings, not a local flag: the webview is destroyed whenever the panel is
+  // hidden, and a preference that resets every time you look away is not a preference.
+  put('showThinking', showThinking);
+};
+
 // --- the two budgets ------------------------------------------------------
 // Both, on one panel, with the consequence spelled out. A turn limit alone is a trap:
 // raise it without the clock and the run stops at the same wall it always did, for a
@@ -1589,7 +1737,11 @@ function paint() {
 window.addEventListener('message', (e) => {
   const { kind, payload } = e.data;
 
-  if (kind === 'settings') { settings = payload; paint(); }
+  if (kind === 'settings') {
+    settings = payload;
+    setThinking(payload.showThinking === true);
+    paint();
+  }
 
   if (kind === 'model') {
     paintModel(payload);
@@ -1626,14 +1778,25 @@ window.addEventListener('message', (e) => {
     // composer the user's message is already on screen, and wiping it to announce the
     // run it started would delete the thing they just typed.
     if (payload.reset) {
-      feed.textContent = ''; $('plan').textContent = ''; $('perf').textContent = '';
+      // The .msg children only. feed.textContent = '' would take the live row with them
+      // -- and with it the orb's WebGL context, which does not come back.
+      for (const el of [...feed.querySelectorAll('.msg')]) el.remove();
+      $('plan').textContent = ''; $('perf').textContent = '';
     }
     closeBubble();
+    // What this run may actually do, from the run itself rather than from the segmented
+    // control -- the control describes the NEXT run, and the two diverge exactly when it
+    // matters most, which is when someone has just changed it.
+    $('modeNow').textContent = payload.mode || '';
     busy(true, 'Thinking', 'THINKING');
   }
 
   if (kind === 'said') {
+    // The user has just typed. Whatever the agent was still saying is now the PAST, and
+    // letting it trickle in under a message the human has already sent reads as the reply
+    // arriving before the question.
     closeBubble();
+    flushQueue();
     const d = document.createElement('div');
     const who = document.createElement('div');
     who.className = 'who';
@@ -1843,13 +2006,67 @@ window.addEventListener('message', (e) => {
     paintContext(s.context_used, s.context_max, s.compactions);
   }
 
+  // The plan handoff. Rendered through the SAME markdown pipeline as an answer, because
+  // it is the same kind of thing to read and a plan shown as preformatted text is a plan
+  // nobody reads. Not routed through the HITL approver: that gate answers "may this call
+  // run", and this is not a call -- it is a decision about what to do next.
+  if (kind === 'plan_ready') {
+    closeBubble();
+    const d = document.createElement('div');
+    d.className = 'card';
+    const h = document.createElement('h4');
+    h.textContent = 'Plan ready';
+    const body = document.createElement('div');
+    body.className = 'assistant';
+    d.append(h, body);
+    const row = document.createElement('div');
+    row.className = 'row';
+    const go = document.createElement('button');
+    go.className = 'primary';
+    go.textContent = 'Start implementing';
+    const stay = document.createElement('button');
+    stay.className = 'ghost';
+    stay.textContent = 'Keep planning';
+    const decide = (start) => {
+      go.disabled = true;
+      stay.disabled = true;
+      // No payload. The extension host is holding the plan text the sidecar sent it, and
+      // a mission is not a thing to accept back from a view.
+      api.postMessage({ kind: start ? 'start_implementing' : 'keep_planning' });
+    };
+    go.onclick = () => decide(true);
+    stay.onclick = () => decide(false);
+    row.append(go, stay);
+    d.append(row);
+    add(d, '');
+    // Fed whole rather than streamed: it arrived whole, and a plan that types itself out
+    // while its own buttons sit underneath it is theatre.
+    const ctx = newMdCtx(body);
+    renderMd(ctx, ctx.stream.feed(payload.plan));
+    renderMd(ctx, ctx.stream.finish());
+    flushQueue();
+  }
+
   if (kind === 'history') paintHistory(payload.runs);
 
   if (kind === 'run_end') {
     closeBubble();
+    // A CONVERSATION THAT HANDED BACK IS NOT A RUN THAT STOPPED.
+    //
+    // 'completed' is evidential and a planning session can never earn it -- it declares no
+    // contract and writes no code -- so both of these would otherwise print "Stopped",
+    // which is the same word this UI uses for a run that ran out of budget mid-edit. The
+    // two endings are the mode working, and they say so.
+    const yielded = payload.termination_reason === 'awaiting_user' ||
+                    payload.termination_reason === 'plan_ready';
     const d = document.createElement('div');
     d.className = 'ended';
     let t = 'Ended: ' + payload.termination_reason + ' · ' + payload.iterations + ' turn(s)';
+    if (yielded) {
+      t = payload.termination_reason === 'plan_ready'
+        ? 'the plan is above — approve it, or keep talking to change it'
+        : 'answer in the box below and the conversation continues';
+    }
     // completed is EVIDENTIAL -- a recorded deliverable plus a falsifiable passing
     // verification -- and it now also requires the run's own checklist to agree, or to
     // have been asked once and not answered. This line is that second case, and it says
@@ -1866,16 +2083,25 @@ window.addEventListener('message', (e) => {
     if (payload.completed && payload.self_declared) {
       t += ' · against a check the model chose for itself';
     }
-    const label = payload.completed
-      ? (payload.self_declared ? 'Complete (self-checked)' : 'Complete')
-      : 'Stopped';
+    const label = yielded
+      ? 'Your turn'
+      : payload.completed
+        ? (payload.self_declared ? 'Complete (self-checked)' : 'Complete')
+        : 'Stopped';
     d.innerHTML = '<b>' + label + '</b> — ';
     d.append(document.createTextNode(t));
-    feed.append(d);
-    feed.scrollTop = feed.scrollHeight;
+    // Through add(), like every other block. Appending directly is what let the footer
+    // land while the last paragraph of the answer was still being typed above it.
+    add(d, '');
+    // The run is over: nothing more is coming, so there is nothing left for the typewriter
+    // to smooth. Holding text back now is not pacing, it is a transcript that disagrees
+    // with the "Ended" line sitting under it.
+    flushQueue();
     // Green only for an ending that is actually complete. "Stopped" covers the wall clock,
-    // the iteration cap and a cancel, and none of those are a success (S14).
-    finish(label, payload.completed ? 'DONE' : 'FAILED');
+    // the iteration cap and a cancel, and none of those are a success (S14). A yield is
+    // neither: nothing failed and nothing finished, the run is waiting on a person, and
+    // WAITING is the hue the orb already has for exactly that.
+    finish(label, yielded ? 'WAITING' : payload.completed ? 'DONE' : 'FAILED');
     // The button is hidden by the busy class again, but a disabled control that comes
     // back disabled is how the next run ends up unstoppable.
     $('stop').disabled = false;

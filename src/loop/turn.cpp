@@ -37,6 +37,8 @@ std::string_view to_string(Corrective c) noexcept {
             return "break_repeat";
         case Corrective::SynthesizeVerification:
             return "synthesize_verification";
+        case Corrective::ForceVerification:
+            return "force_verification";
         case Corrective::BlockRefusedTool:
             return "block_refused_tool";
         case Corrective::RederiveContract:
@@ -53,14 +55,79 @@ std::string_view to_string(Corrective c) noexcept {
 
 ModePolicy ModePolicy::for_mode(Mode m) noexcept {
     switch (m) {
+        // T0: no execution, no writes, and it TALKS. The first three fields were the
+        // whole of plan mode for a long time, and they are the half that never mattered:
+        // a mode the model is not told it is in, whose write tools are still advertised
+        // to it, spends its turns discovering the refusals one at a time.
         case Mode::Plan:
-            return {0, false}; // T0: no execution, no writes
+            return {0, false, false, false, true};
+        // Debug WRITES. It could not, which made it useless for the one thing it is named
+        // after -- you cannot add a log line, cannot save a reproduction, cannot apply the
+        // fix you just proved. What it still cannot do is destroy: instrumenting a bug
+        // never requires deleting a file, so the power is not granted.
         case Mode::Debug:
-            return {1, false}; // T1 sandbox, read and run, but no workspace mutation
+            return {1, true, false, true, false};
         case Mode::Agent:
-            return {1, true};
+            return {1, true, true, true, false};
     }
-    return {0, false}; // an unknown mode is the most restrictive, never the least
+    // An unknown mode is the most restrictive, never the least -- and note that the most
+    // restrictive is NOT conversational: a mode nobody declared has no operator waiting on
+    // it, and yielding to a human who is not there is a hang, not a safety property.
+    return {0, false, false, false, false};
+}
+
+// Written as what the mode IS and what it is FOR, not as a list of prohibitions. The
+// prohibitions are already enforced twice -- the tool is not advertised and the gate would
+// refuse it -- so spending prompt on them would be telling the model not to do something
+// it has no way to do. What it cannot get anywhere else is the purpose.
+std::string_view mode_brief(Mode m) noexcept {
+    switch (m) {
+        case Mode::Plan:
+            return "# Plan mode\n"
+                   "\n"
+                   "You are planning, not building. Nothing you do here changes a file or "
+                   "runs a command -- the tools for that are not loaded, so do not reach "
+                   "for them and do not write as though you had used them. Say what you "
+                   "would do, never what you did.\n"
+                   "\n"
+                   "- Read first. Go and look at the code the request touches; a plan "
+                   "written from assumptions is worth less than no plan, because it reads "
+                   "as though someone checked.\n"
+                   "- Name what you found, including anything that makes the request "
+                   "harder or different than it sounds. That is the part the human cannot "
+                   "get anywhere else.\n"
+                   "- When something is genuinely undecided and the answer would change "
+                   "the design, ask with `ask_user` -- one question, the load-bearing one, "
+                   "and say what each answer would change. Do not ask to confirm what you "
+                   "already believe, and do not ask for permission to continue.\n"
+                   "- When the approach is settled, call `exit_plan_mode` with the whole "
+                   "plan. It becomes the mission of the run that implements it, so "
+                   "anything you leave out is something that run will not know.\n"
+                   "\n"
+                   "The persona above tells you to run your tests. You cannot, here. Say "
+                   "which command WOULD prove the work correct and leave it for the run "
+                   "that can execute it.\n";
+        case Mode::Debug:
+            return "# Debug mode\n"
+                   "\n"
+                   "You are finding out why something is wrong, and the answer has to be "
+                   "observed rather than argued. You can read, run and edit; you cannot "
+                   "delete.\n"
+                   "\n"
+                   "- Reproduce it first. A failure you have watched happen is worth more "
+                   "than any amount of reading, and until you have one you are guessing "
+                   "about which of several stories is true.\n"
+                   "- Instrument rather than theorise. Add the log line, print the value, "
+                   "run the command -- and then READ what came back. A hypothesis you did "
+                   "not test is not evidence, however well it fits.\n"
+                   "- Narrow before you fix. Get to the smallest thing that still fails; "
+                   "a fix applied to the whole area is a fix you cannot prove.\n"
+                   "- Then fix it, and run the same reproduction again. Ending on 'that "
+                   "should do it' is how a bug survives being fixed.\n";
+        case Mode::Agent:
+            return "";
+    }
+    return "";
 }
 
 Outcome classify_turn(const model::GenResult& gen, const model::TurnGrammar& grammar,
@@ -101,10 +168,27 @@ Outcome classify_turn(const model::GenResult& gen, const model::TurnGrammar& gra
 //
 // Only path-shaped parameters are normalised. A `command` or a `content` argument is raw
 // text where a trailing slash is a real difference.
+//
+// And one parameter is dropped from the key entirely: `replace_in_file`'s `new_text`.
+//
+// What decides whether that call can do anything is the path and `old_text` -- the text
+// being searched for. If old_text is not in the file the call fails for EVERY new_text, and
+// if it is, the first call consumed it. So (path, old_text) is the whole identity of the
+// call, and including new_text meant a model could vary the replacement by one character
+// and mint a fresh key for a call that cannot behave any differently.
+//
+// This is a claim about the tool's contract, not a similarity threshold. `write_file`'s
+// `content` stays in the key, because two different contents genuinely are two different
+// calls -- the identical-content case is caught upstream now, by the write door refusing
+// to write bytes the file already holds (tools::CommitOutcome::unchanged), which both
+// costs less and tells the model something a repeat count cannot.
 std::string RepeatDetector::key(const std::string& tool,
                                 const std::vector<tools::ToolParamValue>& params) {
     std::string k = tool;
     for (const tools::ToolParamValue& p : params) {
+        if (tool == "replace_in_file" && p.name == "new_text") {
+            continue;
+        }
         k += '\x1f';
         k += p.name;
         k += '\x1e';
@@ -223,7 +307,7 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
                              const RefusalLedger& refusals, int iterations_used,
                              const Budget& budget, bool wall_clock_exhausted,
                              bool have_verify_contract, bool contract_unmoved,
-                             bool checklist_unreconciled) {
+                             bool checklist_unreconciled, bool writes_unverified) {
     // Ranked; the highest applicable one wins, and only one is returned (S9.2).
     if (wall_clock_exhausted || iterations_used >= budget.max_iterations) {
         return Corrective::HaltOnBudget;
@@ -270,6 +354,20 @@ Corrective choose_corrective(const TurnResult& turn, const RepeatDetector& repea
     // criterion.
     if (contract_unmoved) {
         return Corrective::RederiveContract;
+    }
+    // ABOVE BreakRepeat, because a run editing without checking is the DISEASE and the
+    // repeated call is the symptom. Suppressing the tool first answers "you sent that
+    // twice" when the run's actual problem is that it has no idea whether the first one
+    // worked -- and a model with no new evidence, denied its editor for a turn, comes back
+    // and sends the same guess with the tool it has left.
+    //
+    // BELOW RederiveContract, because forcing a run of a contract that no work can move
+    // buys another copy of a failure the run has already been shown twice.
+    //
+    // Only when there is a contract to run. Without one this has no mechanism, and a
+    // corrective with no mechanism is the thing this enum exists to forbid.
+    if (have_verify_contract && writes_unverified) {
+        return Corrective::ForceVerification;
     }
     // A repeat is a repeat whether it SUCCEEDED or failed unrecoverably.
     //
