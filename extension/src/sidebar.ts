@@ -22,6 +22,7 @@ import {
   EditNotification,
   PerfNotification,
   ModelStatusNotification,
+  PlanReadyNotification,
   RunEndNotification,
 } from "./protocol.generated";
 
@@ -95,6 +96,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  a human recognises. run_end carries the outcome and not the ask. */
   private missionInFlight = "";
 
+  /** The plan a conversational run handed over, waiting on the operator's decision.
+   *
+   *  Cleared when a new run starts, so an approval can never start the run that a
+   *  previous, unrelated plan asked for. */
+  private planReady: string | undefined;
+
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly client: SidecarClient,
@@ -113,6 +120,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.observe(n.run_id, "verification", n)
     );
     this.client.on("perf", (n: PerfNotification) => this.observe(n.run_id, "perf", n));
+    this.client.on("plan_ready", (n: PlanReadyNotification) => {
+      // Held here as well as posted. The card's button comes back as a webview message
+      // carrying nothing but "yes", because the plan is several kilobytes of markdown and
+      // round-tripping it through an untrusted sender to use as a MISSION is not a thing
+      // to do -- what starts the run has to be the text the sidecar sent us.
+      this.planReady = n.plan;
+      this.observe(n.run_id, "plan_ready", n);
+    });
     this.client.on("approval_request", (n: ApprovalRequestNotification) =>
       this.observe(n.run_id, "approval", n)
     );
@@ -243,7 +258,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   beginRun(mission: string, reset = true): void {
     this.runInFlight = true;
     this.missionInFlight = mission;
-    this.post("run_start", { mission, reset });
+    // A new run retires any plan still waiting on a decision. Left set, the Start button
+    // on a card scrolled off the top of a long transcript would begin implementing a plan
+    // from a conversation two missions ago.
+    this.planReady = undefined;
+    this.post("run_start", {
+      mission,
+      reset,
+      // What this run is ALLOWED to do, as opposed to what the segmented control says the
+      // NEXT one will be. Those are different facts, and they diverge exactly when it
+      // matters -- the control is set before a run and read at lmp/start, so a mode
+      // changed mid-run shows the new word over the old behaviour.
+      mode: vscode.workspace.getConfiguration("lmPipe").get<string>("mode", "agent"),
+    });
+  }
+
+  /** The plan handoff: approve, and the plan becomes the mission of a fresh agent run.
+   *
+   *  `lmp/start` rebuilds the context store by design, and that is right here -- the plan
+   *  IS the handoff artifact, and the exploratory reading behind it should not be
+   *  inherited. What must not be inherited is plan mode itself, so the mode is written
+   *  before the settings are read rather than overridden after. */
+  private async startImplementing(): Promise<void> {
+    const plan = this.planReady;
+    if (plan === undefined) return;
+    this.planReady = undefined;
+
+    await this.updateSetting("mode", "agent");
+    if (!(await this.ready())) return;
+    const settings = this.host.settings();
+    const problems = this.host.problems(settings);
+    if (problems.length > 0) return this.fail(problems.join("\n"));
+    if (!(await this.host.confirmContainment(settings))) {
+      this.fail("Cancelled: the run needs a containment choice.");
+      return;
+    }
+    // A fresh run, not a follow-up. Clearing the id is what makes the composer's next
+    // message continue the IMPLEMENTATION rather than the planning conversation whose
+    // session this would otherwise still be pointing at.
+    this.currentRunId = undefined;
+    this.beginRun(plan, false);
+    const reply = await this.client.start_run(plan, settings);
+    if (reply.error) this.fail(reply.error);
   }
 
   /** An explicit start: the mission comes from the palette, not the composer. */
@@ -323,10 +379,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     void this.view?.webview.postMessage({ kind, payload });
   }
 
+  /** Writes a setting to the scope it is ALREADY defined in, falling back to global.
+   *
+   *  This used to write Global unconditionally, while settingsFromConfig() reads with
+   *  normal resolution -- workspace before global. So a repo carrying `lmPipe.mode` in its
+   *  .vscode/settings.json silently won every time: the segmented control moved, the write
+   *  landed in a scope nothing read, and the run used the workspace's mode. The control
+   *  was decoration, and the failure is invisible from the UI -- you set Plan, the header
+   *  says Plan, and the run writes files.
+   *
+   *  Whether that is what happened to any particular run cannot be established after the
+   *  fact, which is the other half of the problem: nothing anywhere recorded which scope
+   *  the effective value came from. */
+  private async updateSetting(key: string, value: unknown): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("lmPipe");
+    const scope = cfg.inspect(key);
+    const target =
+      scope?.workspaceFolderValue !== undefined
+        ? vscode.ConfigurationTarget.WorkspaceFolder
+        : scope?.workspaceValue !== undefined
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+    await cfg.update(key, value, target);
+  }
+
   /** Keys the drawer can read and write. Everything else stays in the Settings UI --
    *  this is the set worth changing between one run and the next. */
   private static readonly LIVE_KEYS = [
     "mode",
+    // Not a run setting -- it never reaches the sidecar. It rides this path because the
+    // drawer's settings channel is what already survives a webview rebuild, and a view
+    // preference that forgets itself every time the panel is hidden is the bug, not the
+    // feature.
+    "showThinking",
     "sandboxTier",
     "autoApproveExec",
     "autoApproveWrites",
@@ -412,10 +497,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // "write whatever key it names into the user's settings" is not a thing to
           // offer on trust.
           if (!SidebarProvider.LIVE_KEYS.includes(msg.key)) return;
-          void vscode.workspace
-            .getConfiguration("lmPipe")
-            .update(msg.key, msg.value, vscode.ConfigurationTarget.Global);
+          void this.updateSetting(msg.key, msg.value);
         }
+        // The plan handoff. Carries no payload on purpose -- see `planReady`.
+        if (msg.kind === "start_implementing") void this.startImplementing();
+        if (msg.kind === "keep_planning") this.planReady = undefined;
       }
     );
     // No replay here: it waits for the view's "ready" message. Posting now races the

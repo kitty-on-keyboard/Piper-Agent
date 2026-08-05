@@ -161,6 +161,11 @@ export interface ChecklistNotification {
   items_json: string;
 }
 
+export interface PlanReadyNotification {
+  run_id: string;
+  plan: string;
+}
+
 export interface VerificationNotification {
   run_id: string;
   contract: string;
@@ -214,6 +219,7 @@ export const METHODS = [
   "lmp/token",
   "lmp/turn",
   "lmp/checklist",
+  "lmp/plan_ready",
   "lmp/verification",
   "lmp/approval_request",
   "lmp/edit",

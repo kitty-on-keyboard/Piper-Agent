@@ -126,6 +126,14 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // because everything ahead of a change is what stays cached.
     std::string system;
     system += persona_.empty() ? kPersona : persona_.c_str();
+    // Immediately after the persona and before the tools, because it QUALIFIES the persona
+    // -- and does so even when the operator has replaced it. A plan-mode run told "you
+    // test whenever it is possible, and you run the test rather than assert that it would
+    // pass" cannot do either, and reaching for the shell to try is the first thing it did.
+    if (!mode_brief_.empty()) {
+        system += "\n\n";
+        system += mode_brief_;
+    }
     system += "\n\n";
     system += std::string(tool_guidance);
     // Immediately after the tools, because it is the one fact every path argument to

@@ -193,6 +193,41 @@ std::string collapse_spaces_for_identity(const std::string& s) {
     return out;
 }
 
+// The harness's own T1 compatibility flag, removed for IDENTITY ONLY.
+//
+// `xcrun swift build` and `xcrun swift build --disable-sandbox` are the SAME CHECK. The flag
+// asserts nothing about the code: it stops SwiftPM starting a second sandbox inside ours, and
+// at T1 the harness adds it whether the model typed it or not (tools::t1_compat_rewrite), so
+// which spelling reaches the ledger is not even the model's choice.
+//
+// MEASURED: a run declared `xcrun swift build` and took nine readings of it. It then
+// corrected itself to `xcrun swift build --disable-sandbox`, which minted a SECOND contract
+// with an empty history -- `falsifiable` dropped back to 0, a second baseline_check ran, and
+// failure_is_unmoved (which requires two readings to share a contract string) went blind
+// across the fork at the exact moment the model started getting the command right. Twelve
+// readings of one build, split into two ledgers, neither able to see the other.
+//
+// DELIBERATELY NOT in executable_form(): that form is what runs, and taking the flag off it
+// would hand the nesting EPERM straight back.
+std::string strip_compat_flag(std::string s) {
+    static constexpr std::string_view kFlag = "--disable-sandbox";
+    std::size_t at = 0;
+    while ((at = s.find(kFlag, at)) != std::string::npos) {
+        const std::size_t end = at + kFlag.size();
+        // A whole token, so a longer flag that merely starts with these bytes survives.
+        const bool bounded_left =
+            at == 0 || std::isspace(static_cast<unsigned char>(s[at - 1])) != 0;
+        const bool bounded_right =
+            end >= s.size() || std::isspace(static_cast<unsigned char>(s[end])) != 0;
+        if (!bounded_left || !bounded_right) {
+            at = end;
+            continue;
+        }
+        s.erase(at, kFlag.size());
+    }
+    return s;
+}
+
 } // namespace
 
 // IDENTITY, not something to run. The whitespace collapse is exactly why this and
@@ -200,7 +235,9 @@ std::string collapse_spaces_for_identity(const std::string& s) {
 // single-spaced spelling and must share one ledger entry, but it is NOT the same command,
 // and running this form would silently rewrite the model's own quoted arguments.
 std::string canonicalize_check(std::string_view command) {
-    return collapse_spaces_for_identity(executable_form(command));
+    // Flag stripped BEFORE the collapse, so the space it leaves behind is cleaned up here
+    // rather than becoming part of the identity.
+    return collapse_spaces_for_identity(strip_compat_flag(executable_form(command)));
 }
 
 namespace {
@@ -507,6 +544,30 @@ bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
     // which also collapses whitespace: that is right for a ledger key and wrong for a
     // command line.
     const std::string to_run = executable_form(command);
+    // AN INVERTED EXIT STATUS IS NOT EVIDENCE, IN EITHER DIRECTION.
+    //
+    // unfalsifiable_reason() has always known that a check ending in `grep` reports whether
+    // the PATTERN WAS FOUND rather than whether the work succeeded. It was only ever asked at
+    // DECLARATION time, about the contract as declared -- never about the command actually
+    // being recorded against it. dispatch_call routes by containment, so
+    // `swift build 2>&1 | grep "error:" | head -30` contains the declared `swift build` and
+    // was accepted as a reading of it; executable_form() strips the `| head` formatter and
+    // leaves `| grep`, whose status is the pipeline's; and grep exits 0 when it FINDS errors.
+    //
+    // MEASURED, and this is the run this whole pass came from: three records with
+    // `passed: 1, falsifiable: 1` against `xcrun swift build` on a tree the same command was
+    // printing sixteen compiler errors from. Every `| tail` spelling in that trace is a FAIL
+    // and every `| grep` spelling is a PASS, on the same broken workspace. The model then
+    // said "the build has been passing consistently (12 successful runs)" and began marking
+    // tasks complete -- which was not a hallucination, it was an accurate reading of the
+    // ledger it had been handed.
+    //
+    // The command still RUNS: `swift build 2>&1 | grep error:` is a perfectly reasonable way
+    // to read a build's errors, and refusing it would take a normal move away. What it must
+    // not do is become a VERDICT. So this is recorded exactly as a refusal and an
+    // unexecutable command are -- ran=false, passed=false, not evidence either way (S6.2) --
+    // and the model is told which part of its own command line destroyed the answer.
+    const std::string_view inverted = unfalsifiable_reason(to_run);
     // ONCE, above the loop. See the header: n ids are n readings of ONE execution.
     const tools::ToolResult r =
         registry_.execute("shell", {{"command", to_run}}, approved_tier);
@@ -523,17 +584,24 @@ bool Verifier::run_and_record_as(const std::string& command, int approved_tier,
         // code -- see ToolResult::never_executed(). `python: command not found` is not the
         // test suite failing, and counting it as a red would hand the run a falsifiability
         // proof for a check that has never once been executed.
-        rec.passed = r.status == tools::Status::Ok;
-        rec.ran = r.status != tools::Status::Refused && !r.never_executed();
+        rec.passed = r.status == tools::Status::Ok && inverted.empty();
+        rec.ran = r.status != tools::Status::Refused && !r.never_executed() &&
+                  inverted.empty();
         // Stamped at the moment of the reading, because the question it answers is "how much
         // work had happened when this was observed" -- a number read later would be the run's
         // final total and every record would carry the same one.
         rec.workspace_writes = ctx_.workspace_writes();
-        rec.detail = r.status == tools::Status::Refused ? "REFUSED (never ran): " + r.summary
-                     : r.never_executed()
-                         ? "NEVER RAN (the command could not be executed, so this is not "
-                           "evidence either way): " + r.summary
-                         : r.summary;
+        rec.detail =
+            r.status == tools::Status::Refused ? "REFUSED (never ran): " + r.summary
+            : r.never_executed()
+                ? "NEVER RAN (the command could not be executed, so this is not "
+                  "evidence either way): " + r.summary
+            : !inverted.empty()
+                ? "NOT A VERDICT (the command ran, but " + std::string(inverted) +
+                      "). Its output is below and is still worth reading; what it cannot do "
+                      "is say whether the check passed. Run the check itself, with nothing "
+                      "piped after it, to get an answer.\n" + r.summary
+                : r.summary;
         // Asked with this record VISIBLE but not eligible to be the proof. Both halves matter
         // and they pull in opposite directions: a check still must not prove itself (S10.2),
         // and an unmoved pair is only visible once both of its readings exist -- so asking
