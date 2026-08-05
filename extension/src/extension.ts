@@ -51,6 +51,9 @@ function settingsFromConfig(): RunSettings {
     allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
     max_new_tokens: cfg.get<number>("maxNewTokens", 4096),
+    // The operator's check: run after any turn that writes, exit 0 = pass, output fed
+    // to the model. Empty disables. Operator-owned -- the model cannot set or change it.
+    verify_contract: cfg.get<string>("verifyContract", ""),
     // We can apply edits ourselves, so the sidecar routes writes back through
     // lmp/edit and VS Code's WorkspaceEdit API applies them -- undo, dirty buffers
     // and diff review all work (S12.4). A headless client leaves this false and the

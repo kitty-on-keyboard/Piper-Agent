@@ -142,6 +142,7 @@ struct RunSettings {
     std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
     std::int64_t max_new_tokens = 0;
+    std::string verify_contract;
     std::vector<McpServerSettings> mcp_servers;
 };
 inline void append_value(std::string& out, const RunSettings& v) {
@@ -190,6 +191,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"max_new_tokens\":";
     append_value(out, v.max_new_tokens);
+    out += ",";
+    out += "\"verify_contract\":";
+    append_value(out, v.verify_contract);
     out += ",";
     out += "\"mcp_servers\":";
     append_value(out, v.mcp_servers);
@@ -466,8 +470,8 @@ struct PlanReadyNotification {
 struct VerificationNotification {
     std::string run_id;
     std::string contract;
+    bool ran = false;
     bool passed = false;
-    bool falsifiable = false;
     std::string detail;
     static constexpr const char* kMethod = "lmp/verification";
 };
@@ -479,11 +483,11 @@ struct VerificationNotification {
     out += "\"contract\":";
     append_value(out, n.contract);
     out += ",";
+    out += "\"ran\":";
+    append_value(out, n.ran);
+    out += ",";
     out += "\"passed\":";
     append_value(out, n.passed);
-    out += ",";
-    out += "\"falsifiable\":";
-    append_value(out, n.falsifiable);
     out += ",";
     out += "\"detail\":";
     append_value(out, n.detail);
@@ -581,7 +585,6 @@ struct RunEndNotification {
     std::int64_t iterations = 0;
     bool completed = false;
     std::int64_t unfinished_items = 0;
-    bool self_declared = false;
     static constexpr const char* kMethod = "lmp/run_end";
 };
 [[nodiscard]] inline std::string to_json(const RunEndNotification& n) {
@@ -600,9 +603,6 @@ struct RunEndNotification {
     out += ",";
     out += "\"unfinished_items\":";
     append_value(out, n.unfinished_items);
-    out += ",";
-    out += "\"self_declared\":";
-    append_value(out, n.self_declared);
     out += "}";
     return out;
 }

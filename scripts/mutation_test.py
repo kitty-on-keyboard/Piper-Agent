@@ -100,20 +100,23 @@ MUTATIONS = [
         "expect": "killed",
     },
     {
-        "name": "verifier_refusal_counts_as_a_run",
-        "file": "src/loop/verification.cpp",
-        "old": "    rec.ran = r.status != tools::Status::Refused;",
-        "new": "    rec.ran = true;",
-        "note": "S6.2: a refused command never ran, so recording it as a run sends the "
-                "agent off fixing a build that was never attempted",
+        "name": "operator_check_everything_passes",
+        "file": "src/loop/agent.cpp",
+        "old": "    check.passed = r.ok();",
+        "new": "    check.passed = true;",
+        "note": "every operator check passes -- a failing build reports completed=true, "
+                "which is the one lie the hook exists to make impossible (killed by "
+                "the_operator_check_runs_after_a_write_turn_...)",
         "expect": "killed",
     },
     {
-        "name": "verifier_everything_passes",
-        "file": "src/loop/verification.cpp",
-        "old": "    rec.passed = r.status == tools::Status::Ok;",
-        "new": "    rec.passed = true;",
-        "note": "every verification passes -- the completion claim becomes unfalsifiable",
+        "name": "repeat_cache_survives_a_write",
+        "file": "src/loop/turn.cpp",
+        "old": "        if (call.last_ok && call.writes_at == writes_now) {",
+        "new": "        if (call.last_ok && call.writes_at <= writes_now) {",
+        "note": "the cache serves stale bytes after a write -- manufactured stale "
+                "evidence, the exact class of harness-corrupted feedback the rewrite "
+                "removed (killed by a_repeat_after_a_workspace_write_executes_for_real)",
         "expect": "killed",
     },
     {

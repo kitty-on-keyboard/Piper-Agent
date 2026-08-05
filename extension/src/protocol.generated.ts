@@ -43,6 +43,7 @@ export interface RunSettings {
   allowed_commands: string;
   context_budget_tokens: number;
   max_new_tokens: number;
+  verify_contract: string;
   mcp_servers: McpServerSettings[];
 }
 
@@ -169,8 +170,8 @@ export interface PlanReadyNotification {
 export interface VerificationNotification {
   run_id: string;
   contract: string;
+  ran: boolean;
   passed: boolean;
-  falsifiable: boolean;
   detail: string;
 }
 
@@ -203,7 +204,6 @@ export interface RunEndNotification {
   iterations: number;
   completed: boolean;
   unfinished_items: number;
-  self_declared: boolean;
 }
 
 export const METHODS = [

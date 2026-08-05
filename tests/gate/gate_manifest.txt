@@ -9,7 +9,7 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 42
+count 41
 
 test_agent_step
 test_arena
@@ -52,7 +52,6 @@ test_syntax_check
 test_ratchets_falsifiable
 test_spsc_channel
 test_transport
-test_verifier
 
 # Real-model tests are labelled `realmodel` and excluded from the gate (S11.6). They also
 # must never run in parallel: concurrent large model loads exhaust unified memory and take

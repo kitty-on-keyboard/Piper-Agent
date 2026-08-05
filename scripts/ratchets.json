@@ -57,12 +57,15 @@
     "tool_honesty": {
       "live": true,
       "min_subjects": 5
-    },
-    "prose_correctives": {
-      "live": true,
-      "min_subjects": 3
     }
   },
+  "_prose_correctives_removed": [
+    "prose_correctives was removed 2026-08-05 along with the corrective machinery it",
+    "policed: the loop no longer steers the model, so Agent::apply_corrective and its",
+    "case arms do not exist and a live gate over zero subjects fails min_subjects by",
+    "design. If steering ever returns, the gate must return with it -- prose-only",
+    "correctives are how v1 got 11 of 34."
+  ],
   "_layers_comment": [
     "The dependency graph, low to high. A file may include its own level and any",
     "level below it, never one above. A file under src/ that is absent from this",

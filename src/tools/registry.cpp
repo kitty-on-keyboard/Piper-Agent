@@ -25,9 +25,9 @@ namespace fsx = lmp::platform;
 using parsephony::ParamSpec;
 using parsephony::ParamType;
 
-// A failed write, classified by WHY -- because `retryable` is what decides whether the
-// loop's BreakRepeat corrective may fire (see choose_corrective: an unrecoverable repeat
-// is `!ok() && !retryable`).
+// A failed write, classified by WHY -- because `retryable` tells the model (and any
+// consumer of the result) whether re-sending the identical bytes can ever come back
+// different.
 //
 // Every write failure used to be reported as Transient AND retryable, which told the loop
 // that re-sending the identical bytes was worth a turn. It is not, for any of these
@@ -589,19 +589,14 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             }
             // NAMES THE NON-EVENT. "wrote 5327 bytes" for a write that did not happen is
             // the sentence that let a model believe it had just fixed something; the model
-            // reads this result and nothing else about what its edit did.
-            //
-            // It also says what to do instead, because the useful next move is not obvious
-            // from "nothing changed": the file is already what you wanted, so whatever is
-            // still failing is failing somewhere else, and the way to find out is to run
-            // the check rather than send these bytes a third time.
+            // reads this result and nothing else about what its edit did. The fact and
+            // nothing more -- what to do about an edit that already exists is the model's
+            // call, and an instruction bolted onto every no-op is prompt noise.
             if (w.unchanged) {
                 return ToolResult::no_change(
                     *get(p, "path") + " already contained exactly these " +
                     std::to_string(get(p, "content")->size()) +
-                    " bytes -- nothing was written and the file is unchanged. This edit "
-                    "has already been made; run your verification to see what is actually "
-                    "failing before writing this file again.");
+                    " bytes; nothing was written and the file is unchanged.");
             }
             return ToolResult::okay("wrote " +
                                     std::to_string(get(p, "content")->size()) +
@@ -673,9 +668,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             if (w.unchanged) {
                 return ToolResult::no_change(
                     "old_text matched in " + *get(p, "path") +
-                    " but new_text is identical to it, so the file is unchanged. Nothing "
-                    "about this file has moved; run your verification to see what is "
-                    "actually failing.");
+                    " but new_text is identical to it, so the file is unchanged.");
             }
             return ToolResult::okay("replaced one occurrence in " + *get(p, "path"));
         });
@@ -954,25 +947,15 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
     {
         ToolDecl d;
         d.name = "plan";
-        // Says BOTH halves of the completion rule, because the model acts on this
-        // description and it used to state only one of them. A run told that finishing
-        // means "the command passes" has no reason to keep its ticks current -- and two
-        // real runs duly finished at 3 of 11 items with a green check, having last touched
-        // their lists forty turns earlier. The list is now part of the gate; the tool that
-        // writes it has to say so.
+        // A progress display, not a gate. Nothing in the harness reads the list to
+        // decide anything; it feeds the operator's sidebar panel and the run report.
         d.description =
-            "State or restate the checklist for this mission: one item per line, each "
-            "prefixed '[ ] ' for open or '[x] ' for done. Call it first, before doing "
-            "the work, and call it again to tick items off as you finish them -- "
-            "restating replaces the whole list, so ticking one item means sending them "
-            "all. Give `verify_with` the exact shell command that proves the mission is "
-            "complete (a test or build command). A run finishes when that command has "
-            "been seen to pass AND no item is still open, so keep the list honest in "
-            "both directions: an item left open says work remains and will hold the run "
-            "back, and an item ticked early claims work that was never done.";
+            "Optional: share your task list with the operator. One item per line, "
+            "prefixed '[ ] ' for open or '[x] ' for done. Restating replaces the whole "
+            "list, so ticking one item means sending them all. Useful on multi-step "
+            "missions so the operator can see where you are; skip it for small tasks.";
         d.spec.name = d.name;
-        d.spec.params = {param("items", ParamType::Text, true),
-                         param("verify_with", ParamType::Text, false)};
+        d.spec.params = {param("items", ParamType::Text, true)};
         declare(d, [](const std::vector<ToolParamValue>&, int) {
             return ToolResult::error(ErrorClass::Malformed, false,
                                      "internal: 'plan' must be handled by the loop");
@@ -982,9 +965,9 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
     //
     // Declared here for the grammar and the guidance, EXECUTED by the loop, exactly as
     // `plan` is -- what it does is end the turn loop, and the registry has no way to do
-    // that. A conversational mode had no way to stop and listen: it produced text, the
-    // loop scored the turn as making no move, and after three of those the run ended
-    // `text_only_no_progress`. Asking a question was indistinguishable from failing.
+    // that. The explicit tool matters in a conversational mode because it tells the
+    // surface a QUESTION is waiting rather than a statement -- the two render
+    // differently, and only one of them asks the operator to reply.
     {
         ToolDecl d;
         d.name = "ask_user";

@@ -41,14 +41,18 @@ machine down. `ctest --preset realmodel` pins `jobs: 1` for that reason.
 ./scripts/run_ratchets.py --root . --self-test  # prove each one can go red
 ```
 
-Five gates, configured in [scripts/ratchets.json](scripts/ratchets.json): layer include
-direction, dead code, protocol drift (§4.4), tool honesty (§6.3), prose correctives (§9.2).
+Four gates, configured in [scripts/ratchets.json](scripts/ratchets.json): layer include
+direction, dead code, protocol drift (§4.4), tool honesty (§6.3).
 
 Every one checks a **property** — the dependency graph points one way, a declared symbol
 is used, both sides of the protocol come from one schema, a tool description names tools
-that exist, a corrective changes state rather than composing a sentence. A gate here has
-to be a thing that is true or false of the code, whose false case a reviewer would call a
-defect on its own.
+that exist. A gate here has to be a thing that is true or false of the code, whose false
+case a reviewer would call a defect on its own.
+
+There was a fifth, prose correctives (§9.2), which required every corrective arm in the
+loop to contain a mechanism rather than a composed sentence. It went with the corrective
+machinery itself on 2026-08-05 — the loop no longer steers the model at all, so there are
+no arms to inspect. If steering ever returns, the gate must return with it.
 
 There was a sixth that counted lines — 800 per file, 80 per function, nesting 3. It was
 removed on 2026-08-02 and **is not coming back in any form**. What it produced was code
@@ -108,7 +112,7 @@ src/platform/   L0  arenas, event log, SPSC channel, clock, fs
 src/model/      L1  tokenizer, vocab, KV cache, sampler, grammar mask, MLX backends
 src/tools/      L2  registry, schemas, structured results, sandbox, capability classifier
 src/context/    L3  event store, tiering, compaction, prompt assembly
-src/loop/       L4  turn machine, classifier, steering, verification, completion gate
+src/loop/       L4  the loop: classifier, repeat cache, HITL gate, steering, operator check
 src/surface/    L5  JSON-RPC protocol, extension, webview UI, settings
 ```
 
