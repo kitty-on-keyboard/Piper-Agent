@@ -9,12 +9,13 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 41
+count 42
 
 test_agent_step
 test_arena
 test_bakeoff_pins
 test_extension_typecheck
+test_transcript_order
 test_backend_seam
 test_speculative
 test_assertions_enabled

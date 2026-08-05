@@ -262,6 +262,12 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
             // not participate: per the MCP spec they are hints from an untrusted peer and
             // must not drive a security decision.
             decl.irreversible = !trusted;
+            // Regardless of trust. The three flags above answer "does this call need a
+            // human", and trust is a real answer to that; this one answers "can a mode
+            // that permits no writes permit this call", and the honest answer never
+            // depends on how the operator feels about the server. Plan mode was letting
+            // trusted MCP tools straight through the one gate it has.
+            decl.remote = true;
 
             const std::string remote_name = tool.name;
             Registry::Handler handler =

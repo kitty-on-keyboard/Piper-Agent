@@ -104,6 +104,37 @@ std::string preview_of(const std::string& tool,
     return s + ")";
 }
 
+// Stated as the properties that make a call impossible, never as a list of tool names, so
+// a tool added later is filtered by what it declares rather than by whether someone
+// remembered to update a list here.
+bool Agent::tool_allowed(const tools::ToolDecl& decl) const {
+    if (decl.mutates_workspace && !policy_.allow_workspace_writes) {
+        return false;
+    }
+    if (decl.remote && !policy_.allow_workspace_writes) {
+        return false;
+    }
+    if (decl.irreversible && !policy_.allow_destructive) {
+        return false;
+    }
+    // A mode that does not execute can only ever answer these with "T0: this mode does not
+    // execute commands". Advertising them is how plan mode came to spend its turns on
+    // builds that never ran -- with a persona telling it, in the same prompt, to run the
+    // test rather than assert that it would pass.
+    //
+    // Keyed on the MODE, not on the effective tier. An operator who sets tier 0 on an
+    // agent run has not changed what the mode is, and reading the tier here would also
+    // have silently disarmed the tests that drive `rm -rf` into the approval gate at tier
+    // 0 on purpose.
+    if (decl.needs_execution && !policy_.allow_execution) {
+        return false;
+    }
+    if (decl.conversational_only && !policy_.conversational) {
+        return false;
+    }
+    return true;
+}
+
 // The HITL gate, moved here from dispatch_call so agent.cpp stays about the loop and the
 // approval policy sits next to the pure functions that decide it (S9.3: mode policy is
 // applied in ONE place). Returns the refusal when the call must not run, and nothing when
@@ -114,6 +145,28 @@ std::optional<tools::ToolResult> Agent::gate_call(
     if (decl != nullptr && decl->mutates_workspace && !policy_.allow_workspace_writes) {
         emit("tool_refused", {{"tool", name}, {"why", "mode policy"}});
         return tools::ToolResult::refused("this mode does not permit workspace writes");
+    }
+    // A tool that runs in another process is not covered by anything above it. A trusted
+    // MCP server's tools are declared with mutates_workspace false -- trust is a statement
+    // about the SANDBOX, "this may run outside Seatbelt without a card for every call",
+    // and it was being read here as a statement about mode policy. So a trusted server
+    // carrying a write-equivalent tool was fully live in plan mode, through a gate whose
+    // entire job is that writes do not happen. We cannot see what a remote tool touches,
+    // and a mode that permits no writes cannot permit a call whose effects it cannot know.
+    if (decl != nullptr && decl->remote && !policy_.allow_workspace_writes) {
+        emit("tool_refused", {{"tool", name}, {"why", "mode policy: remote"}});
+        return tools::ToolResult::refused(
+            "this mode does not permit tools that run outside it");
+    }
+    // DESTRUCTION IS ITS OWN POWER. `irreversible` already meant "this destroys data that
+    // the workspace cannot give back" and was used only to decide whether to raise a card;
+    // a mode that is trusted to edit is not thereby trusted to delete, and until this
+    // existed there was no way to say so. Debug mode is the whole reason: it needs to
+    // write and has no business deleting.
+    if (decl != nullptr && decl->irreversible && !policy_.allow_destructive) {
+        emit("tool_refused", {{"tool", name}, {"why", "mode policy: destructive"}});
+        return tools::ToolResult::refused(
+            "this mode does not permit tools that destroy data");
     }
 
     // --- HITL: writes -------------------------------------------------------
@@ -162,6 +215,10 @@ std::optional<tools::ToolResult> Agent::gate_call(
     const bool irreversible_tool =
         (decl != nullptr && decl->irreversible) || overwrites_content;
     const bool write_gate = decl != nullptr && decl->mutates_workspace;
+    // `irreversible_tool` already overrides the blanket switch, which is what covers the
+    // one destructive act that can still reach a mode without allow_destructive: a
+    // whole-file write over content the run did not itself produce. A tool DECLARED
+    // irreversible was refused outright above and never arrives here.
     const bool ask_for_write =
         write_gate && (!config_.auto_approve_writes || irreversible_tool);
 

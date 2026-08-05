@@ -330,6 +330,53 @@ TEST(t1_makes_swiftpm_runnable_without_touching_the_tier) {
           "/usr/bin/swift build --disable-sandbox -v");
 }
 
+TEST(t1_sees_past_launcher_prefixes_to_the_program) {
+    // THE 85-TURN BUG. `xcrun` is how Apple's documentation spells a toolchain invocation
+    // and therefore how every model spells it. The old rule required the character before
+    // `swift` to be start-of-string or one of `;&|(`; in `xcrun swift build` it is the `n`
+    // of `xcrun`, so `swift` read as an argument and the rewrite declined.
+    //
+    // MEASURED: a run whose declared contract was `xcrun swift build`, at T1, on a tree
+    // whose only real defect was a few Mach API type errors. The rewrite fired zero times,
+    // every verification it ever took was the nesting EPERM, and the model rewrote correct
+    // code for 85 turns chasing a failure the harness was causing.
+    CHECK(t1_compat_rewrite("xcrun swift build") == "xcrun swift build --disable-sandbox");
+    CHECK(t1_compat_rewrite("xcrun swift test") == "xcrun swift test --disable-sandbox");
+    CHECK(t1_compat_rewrite("cd /w/ResMon && xcrun swift build") ==
+          "cd /w/ResMon && xcrun swift build --disable-sandbox");
+    CHECK(t1_compat_rewrite("/usr/bin/xcrun swift build") ==
+          "/usr/bin/xcrun swift build --disable-sandbox");
+    // A launcher flag that takes a SEPARATE value token: stopping at `macosx` would find no
+    // program and decline, which is the same silent miss one level in.
+    CHECK(t1_compat_rewrite("xcrun -sdk macosx swift build") ==
+          "xcrun -sdk macosx swift build --disable-sandbox");
+    CHECK(t1_compat_rewrite("arch -arm64 swift test") ==
+          "arch -arm64 swift test --disable-sandbox");
+    CHECK(t1_compat_rewrite("env FOO=1 swift build") ==
+          "env FOO=1 swift build --disable-sandbox");
+    CHECK(t1_compat_rewrite("nice -n 10 xcrun swift build") ==
+          "nice -n 10 xcrun swift build --disable-sandbox");
+    // An assignment with no launcher in front of it.
+    CHECK(t1_compat_rewrite("FOO=1 swift build") == "FOO=1 swift build --disable-sandbox");
+}
+
+TEST(t1_covers_swift_package_and_decides_per_segment) {
+    // `swift package resolve` compiles Package.swift exactly as `build` does and dies at T1
+    // exactly as `build` does. Excluding it as "out of scope" left dependency resolution --
+    // part of every build -- unrunnable at T1.
+    CHECK(t1_compat_rewrite("swift package resolve") ==
+          "swift package --disable-sandbox resolve");
+    CHECK(t1_compat_rewrite("xcrun swift package update") ==
+          "xcrun swift package --disable-sandbox update");
+
+    // PER SEGMENT. A whole-string check for the flag let one half of an `&&` opt the other
+    // half out of being fixed, which is the silent half of the original miss.
+    CHECK(t1_compat_rewrite("swift build --disable-sandbox && swift test") ==
+          "swift build --disable-sandbox && swift test --disable-sandbox");
+    CHECK(t1_compat_rewrite("swift build && xcrun swift test") ==
+          "swift build --disable-sandbox && xcrun swift test --disable-sandbox");
+}
+
 TEST(t1_leaves_alone_everything_that_is_not_a_swiftpm_build) {
     // Empty means "unchanged", and the quiet cases matter as much as the loud one: a
     // rewrite that fires on the wrong command line is a command the operator did not
@@ -337,12 +384,17 @@ TEST(t1_leaves_alone_everything_that_is_not_a_swiftpm_build) {
     CHECK(t1_compat_rewrite("swift build --disable-sandbox").empty()); // already asked
     CHECK(t1_compat_rewrite("swiftc main.swift").empty());             // different program
     CHECK(t1_compat_rewrite("swift --version").empty());               // rejects the flag
-    CHECK(t1_compat_rewrite("swift package describe").empty());        // out of scope
     CHECK(t1_compat_rewrite("xcodebuild test").empty());  // needs T3, not a flag
+    CHECK(t1_compat_rewrite("xcodebuild -scheme App build").empty());
     CHECK(t1_compat_rewrite("cmake --build build").empty());
-    // The word appearing is not the command running.
+    // The word appearing is not the command running. Looking for the PROGRAM rather than a
+    // word at a command position is more permissive about POSITION and no more permissive
+    // about IDENTITY: an unrelated program shadows everything after it, so these still find
+    // `echo`, `grep` and `rg` and stop there.
     CHECK(t1_compat_rewrite("echo swift build").empty());
     CHECK(t1_compat_rewrite("grep -r 'swift test' .").empty());
+    CHECK(t1_compat_rewrite("echo \"swift build is how you build it\"").empty());
+    CHECK(t1_compat_rewrite("rg 'swift build' src/").empty());
 }
 
 TEST(only_t1_rewrites_because_only_t1_nests) {

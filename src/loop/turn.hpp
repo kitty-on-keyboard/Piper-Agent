@@ -76,9 +76,32 @@ enum class Mode : std::uint8_t { Plan, Debug, Agent };
 struct ModePolicy {
     int sandbox_tier = 0;
     bool allow_workspace_writes = false;
+    // May this mode destroy something the workspace cannot get back? Separate from the
+    // write bit because "fix this bug" and "delete this file" are different powers, and a
+    // mode that needs the first has no need of the second. Debug mode is the case that
+    // forced the split: it is useless without writes and has no business deleting.
+    bool allow_destructive = false;
+    // Does this mode run commands at all? Distinct from `sandbox_tier == 0`, which is
+    // where this lived at first and is the wrong thing to read: the tier is an operator
+    // setting and can be moved, and mode policy must not be a function of a knob. It also
+    // made the HITL gate untestable, because the tests that pin the real, measured
+    // approval bugs set tier 0 precisely so `rm -rf Sources` reaches the gate and never
+    // the shell.
+    bool allow_execution = false;
+    // This mode YIELDS rather than loops. The checklist gate, the completion verdict and
+    // the stall detectors all assume the loop is driving itself toward a verifiable
+    // contract; a mode whose deliverable is agreement with a human satisfies none of them
+    // and must not be judged by them. Plan mode ended `text_only_no_plan` -- a stall
+    // reason -- every single time it did exactly what it was asked to do.
+    bool conversational = false;
 
     [[nodiscard]] static ModePolicy for_mode(Mode m) noexcept;
 };
+
+// What this mode is, in words the model reads. Empty for Agent: the persona already
+// describes an agent, and a paragraph restating it would cost tokens on every prompt to
+// say nothing new.
+[[nodiscard]] std::string_view mode_brief(Mode m) noexcept;
 
 // --- mechanism steering -----------------------------------------------------
 //
@@ -93,6 +116,22 @@ enum class Corrective : std::uint8_t {
     // Mechanism: synthesize the verification tool call the model keeps describing but
     // not making.
     SynthesizeVerification,
+    // Mechanism: run the declared contract NOW, because the run's edits have outrun its
+    // evidence. Same mechanism as SynthesizeVerification and deliberately a different
+    // finding -- that one is "the model said it verified and did not", this one is "the
+    // model has stopped asking".
+    //
+    // A model editing without building is not being lazy, it is GUESSING, and every guess
+    // after the first is derived from the same stale compiler output as the one before it.
+    // Nothing else in the harness could see this: the run is calling tools, mutating the
+    // workspace and filing deliverables, so every progress signal reads healthy.
+    //
+    // MEASURED: a 73-turn run cancelled with 6/6 items open ran its contract seven times
+    // and made 39 writes, with FIFTEEN consecutive writes between two of those runs. It
+    // was rewriting the same Mach pointer cast from the same red output for twenty turns.
+    // The forced run is self-clearing -- running the contract is what resets the count --
+    // so it costs one check per kMaxUnverifiedWrites edits and cannot latch.
+    ForceVerification,
     // Mechanism: make a tool the operator has refused twice UNSAMPLABLE for the rest of
     // the run, by dropping it from the grammar's spec list. Asking again is then not
     // discouraged, it is impossible.
@@ -312,6 +351,9 @@ inline constexpr int kBudgetWarningTurns = 8;
 // `checklist_unreconciled` gates ReconcileChecklist, and carries the once-per-run policy
 // for the same reason: the Agent knows whether it has already asked, and this function has
 // no memory to know it with.
+// `writes_unverified` gates ForceVerification. A bool for the same reason the two above
+// are: the threshold and the write-versus-verification arithmetic are the Agent's, and
+// this function stays a pure ranking (S11.2).
 [[nodiscard]] Corrective choose_corrective(const TurnResult& turn,
                                            const RepeatDetector& repeats,
                                            const RefusalLedger& refusals,
@@ -319,7 +361,8 @@ inline constexpr int kBudgetWarningTurns = 8;
                                            bool wall_clock_exhausted,
                                            bool have_verify_contract,
                                            bool contract_unmoved,
-                                           bool checklist_unreconciled);
+                                           bool checklist_unreconciled,
+                                           bool writes_unverified);
 
 // --- classification ---------------------------------------------------------
 

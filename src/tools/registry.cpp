@@ -78,17 +78,45 @@ ToolResult write_failure(const fsx::WriteResult& w) {
 constexpr std::string_view kSandboxExecPrefix = "sandbox-exec: ";
 constexpr std::string_view kNotPermitted = "Operation not permitted";
 
-[[nodiscard]] std::string nested_sandbox_note(std::string_view output) {
+[[nodiscard]] std::string nested_sandbox_note(std::string_view output,
+                                              std::string_view command) {
     if (output.find(kSandboxExecPrefix) == std::string_view::npos ||
         output.find(kNotPermitted) == std::string_view::npos) {
         return {};
     }
-    return "\n[sandbox] That failed because the command tried to start a sandbox of its "
-           "own inside this one, and macOS refuses to nest them -- it is not a problem "
-           "with your code, your caches or your build directory, and no amount of "
-           "cleaning or reconfiguring will change it. Swift Package Manager does this to "
-           "compile Package.swift. Re-run the same command with `--disable-sandbox` "
-           "(`swift build --disable-sandbox`, `swift test --disable-sandbox`); this "
+    const std::string_view lead =
+        "\n[sandbox] That failed because the command tried to start a sandbox of its own "
+        "inside this one, and macOS refuses to nest them -- it is not a problem with your "
+        "code, your caches or your build directory, and no amount of cleaning or "
+        "reconfiguring will change it. ";
+    // XCODEBUILD IS THE CASE NO FLAG FIXES, and telling it to pass `--disable-sandbox` --
+    // which is what this note used to say to everyone -- sends it after an option that does
+    // not exist. It writes its result bundle to the per-user temp root and cannot be talked
+    // out of it, so the answer is a TIER, not an argument.
+    //
+    // Named here rather than acted on: raising the tier for a command the operator granted
+    // at T1 would be a privilege escalation nobody asked for (S7), and t1_compat_rewrite is
+    // forbidden from touching the tier for the same reason. So the run is told precisely
+    // what it needs and left to ask for it.
+    if (command.find("xcodebuild") != std::string_view::npos) {
+        return std::string(lead) +
+               "`xcodebuild` is doing it, and unlike SwiftPM it has no flag that turns it "
+               "off: it writes its result bundle under the per-user temp root and cannot be "
+               "configured out of it. There is nothing to fix in the command. It needs "
+               "sandbox tier 3, which runs it on the host with the workspace jail still "
+               "around it -- ask for that tier, or verify with `swift build` / `swift test` "
+               "instead, which do run here.";
+    }
+    // SwiftPM: still spelled out, but this should now be rare -- t1_compat_rewrite adds the
+    // flag for `swift build|test|run|package` before the command ever runs, including
+    // through `xcrun` and the other launcher prefixes. Reaching this text means something
+    // the rewrite does not cover started a sandbox, so it says how to spell the fix rather
+    // than assuming SwiftPM.
+    return std::string(lead) +
+           "Swift Package Manager does this to compile Package.swift, and the harness "
+           "normally adds `--disable-sandbox` for `swift build`, `swift test`, `swift run` "
+           "and `swift package` automatically. If the program here is a wrapper or a script "
+           "that runs one of those itself, pass `--disable-sandbox` through to it; the "
            "workspace jail stays in force around it either way.";
 }
 
@@ -241,8 +269,15 @@ ToolResult Registry::execute(const std::string& name,
 }
 
 std::string Registry::tools_json() const {
+    return tools_json([](const ToolDecl&) { return true; });
+}
+
+std::string Registry::tools_json(const std::function<bool(const ToolDecl&)>& include) const {
     std::string out;
     for (const ToolDecl& d : decls_) {
+        if (!include(d)) {
+            continue;
+        }
         out += "\n{\"type\": \"function\", \"function\": {\"name\": \"" + d.name +
                "\", \"description\": \"";
         append_json_escaped(out, d.description);
@@ -548,9 +583,25 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             if (abs.empty()) {
                 return refused_path(*get(p, "path"));
             }
-            const fsx::WriteResult w = commit_write(abs, *get(p, "content"));
+            const CommitOutcome w = commit_write(abs, *get(p, "content"));
             if (!w.ok()) {
-                return write_failure(w);
+                return write_failure(w.write);
+            }
+            // NAMES THE NON-EVENT. "wrote 5327 bytes" for a write that did not happen is
+            // the sentence that let a model believe it had just fixed something; the model
+            // reads this result and nothing else about what its edit did.
+            //
+            // It also says what to do instead, because the useful next move is not obvious
+            // from "nothing changed": the file is already what you wanted, so whatever is
+            // still failing is failing somewhere else, and the way to find out is to run
+            // the check rather than send these bytes a third time.
+            if (w.unchanged) {
+                return ToolResult::no_change(
+                    *get(p, "path") + " already contained exactly these " +
+                    std::to_string(get(p, "content")->size()) +
+                    " bytes -- nothing was written and the file is unchanged. This edit "
+                    "has already been made; run your verification to see what is actually "
+                    "failing before writing this file again.");
             }
             return ToolResult::okay("wrote " +
                                     std::to_string(get(p, "content")->size()) +
@@ -611,9 +662,20 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                          "old_text matches more than one site (lines " +
                                              sites + "); include more context");
             }
-            const fsx::WriteResult w = commit_write(abs, g.result);
+            const CommitOutcome w = commit_write(abs, g.result);
             if (!w.ok()) {
-                return write_failure(w);
+                return write_failure(w.write);
+            }
+            // graft matched, so old_text was there -- and the file still came out
+            // identical, which means new_text equals old_text. The model has sent an edit
+            // that says "replace this with itself", and reporting it as a replacement is
+            // how a run spends four turns re-applying it.
+            if (w.unchanged) {
+                return ToolResult::no_change(
+                    "old_text matched in " + *get(p, "path") +
+                    " but new_text is identical to it, so the file is unchanged. Nothing "
+                    "about this file has moved; run your verification to see what is "
+                    "actually failing.");
             }
             return ToolResult::okay("replaced one occurrence in " + *get(p, "path"));
         });
@@ -638,9 +700,17 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             if (!f.ok() && f.status != fsx::FsStatus::NotFound) {
                 return ToolResult::error(ErrorClass::Malformed, false, f.error);
             }
-            const fsx::WriteResult w = commit_write(abs, content);
+            const CommitOutcome w = commit_write(abs, content);
             if (!w.ok()) {
-                return write_failure(w);
+                return write_failure(w.write);
+            }
+            // Appending nothing. Reachable only with empty content, which is the shape a
+            // degenerating model produces (see commit_write's own MEASURED note about a
+            // run that fell into sending empty writes), so it is worth naming rather than
+            // reporting as "appended 0 bytes".
+            if (w.unchanged) {
+                return ToolResult::no_change(*get(p, "path") +
+                                             " is unchanged: there was nothing to append.");
             }
             return ToolResult::okay("appended " +
                                     std::to_string(get(p, "content")->size()) +
@@ -690,6 +760,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.spec.name = d.name;
         d.spec.params = {param("command", ParamType::Text, true)};
         d.executes_commands = true;
+        d.needs_execution = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
             const std::string& cmd = *get(p, "command");
             const ExecutionGrant grant = grant_execution(tier_for(approved_tier));
@@ -741,7 +812,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             // signature is one line inside a manifest dump that log_triage may well have
             // elided. After the spool decision, so appending it cannot make the summary
             // look long enough to skip spooling the output it is explaining.
-            r.summary += nested_sandbox_note(o.output);
+            r.summary += nested_sandbox_note(o.output, cmd);
             // What actually ran, when it was not what was asked for. Said even on
             // SUCCESS: a command that quietly ran differently is how a model comes to
             // believe something about its environment that is not true, and the next
@@ -802,6 +873,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                         "untracked. Read-only.";
         d.spec.name = d.name;
         d.spec.params = {};
+        d.needs_execution = true; // run_git shells out; at T0 it can only refuse
         declare(d, [this](const std::vector<ToolParamValue>&, int approved_tier) {
             return run_git("status --short --branch", approved_tier);
         });
@@ -814,6 +886,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                         "edits before claiming they are correct.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, false)};
+        d.needs_execution = true; // run_git shells out; at T0 it can only refuse
         declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
             const std::string* path = get(p, "path");
             if (path == nullptr || path->empty()) {
@@ -832,6 +905,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                         "it to match the repository's conventions before writing code.";
         d.spec.name = d.name;
         d.spec.params = {param("count", ParamType::Text, false)};
+        d.needs_execution = true; // run_git shells out; at T0 it can only refuse
         declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
             const std::string* raw = get(p, "count");
             int n = 15;
@@ -902,6 +976,52 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         declare(d, [](const std::vector<ToolParamValue>&, int) {
             return ToolResult::error(ErrorClass::Malformed, false,
                                      "internal: 'plan' must be handled by the loop");
+        });
+    }
+    // --- ask_user -----------------------------------------------------------
+    //
+    // Declared here for the grammar and the guidance, EXECUTED by the loop, exactly as
+    // `plan` is -- what it does is end the turn loop, and the registry has no way to do
+    // that. A conversational mode had no way to stop and listen: it produced text, the
+    // loop scored the turn as making no move, and after three of those the run ended
+    // `text_only_no_progress`. Asking a question was indistinguishable from failing.
+    {
+        ToolDecl d;
+        d.name = "ask_user";
+        d.description =
+            "Put one question to the human and stop, so they can answer. Use it when the "
+            "answer would genuinely change the design and you cannot settle it by reading "
+            "the code -- not to confirm something you already believe, and not to ask "
+            "permission to continue. Ask ONE question, the most load-bearing one, and say "
+            "what each answer would change. The run ends here; their reply continues this "
+            "same conversation with everything you have read still in context.";
+        d.spec.name = d.name;
+        d.spec.params = {param("question", ParamType::Text, true)};
+        d.conversational_only = true;
+        declare(d, [](const std::vector<ToolParamValue>&, int) {
+            return ToolResult::error(ErrorClass::Malformed, false,
+                                     "internal: 'ask_user' must be handled by the loop");
+        });
+    }
+    // --- exit_plan_mode -----------------------------------------------------
+    {
+        ToolDecl d;
+        d.name = "exit_plan_mode";
+        d.description =
+            "Present the finished plan and ask to start implementing it. Call this only "
+            "when the approach is settled and you would not change it based on anything "
+            "else you could read. Give `plan` the whole plan as markdown: what is being "
+            "changed and why, which files, and how the result will be verified -- it "
+            "becomes the mission of the run that implements it, so anything you leave out "
+            "is something that run will not know. The human approves or keeps talking; "
+            "you do not switch modes yourself.";
+        d.spec.name = d.name;
+        d.spec.params = {param("plan", ParamType::Text, true)};
+        d.conversational_only = true;
+        declare(d, [](const std::vector<ToolParamValue>&, int) {
+            return ToolResult::error(
+                ErrorClass::Malformed, false,
+                "internal: 'exit_plan_mode' must be handled by the loop");
         });
     }
 }

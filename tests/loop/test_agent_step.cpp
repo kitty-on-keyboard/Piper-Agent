@@ -1520,3 +1520,441 @@ TEST(a_command_covering_both_halves_runs_once_and_is_recorded_twice) {
     REQUIRE(hits.ok());
     CHECK_EQ(std::count(hits.bytes.begin(), hits.bytes.end(), '\n'), std::ptrdiff_t{1});
 }
+
+// THE LOOP THIS PASS EXISTS FOR. A model that alternates reading a file and rewriting it
+// was inert on every turn and stalled on none of them: the re-read stall test required the
+// turn to be reads-ONLY, so one write anywhere in it handed the turn a pass, and a
+// successful write was progress by definition however little it changed.
+//
+// MEASURED: 73 turns, cancelled with 6/6 items open, 39 workspace writes, 13 of them
+// re-sending bytes already on disk, the build red throughout, and `no_progress_streak` at 0
+// on 68 of those turns against a cap of 3. Not one stall was detectable.
+TEST(rewriting_a_file_with_its_own_bytes_is_a_stall) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_noop_write_stall_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\na.swift\n</parameter>\n"
+        "<parameter=content>\nlet x = 1\n</parameter>\n</function>\n";
+
+    // The same call, five times. The first one is real work; every one after it asks the
+    // file to become what it already is.
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 5; ++i) {
+        backend.enqueue_response(call_turn(tok, write_body));
+    }
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write it");
+    ctx.set_checklist({{"write it", false}});
+    platform::EventLogWriter log;
+    const std::string trace_path = root + "/events.jsonl";
+    platform::EventLogOptions opts;
+    opts.path = trace_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+    log.flush();
+
+    // ONE write happened. The ledger used to read five.
+    CHECK_EQ(ctx.workspace_writes(), std::size_t{1});
+    CHECK_EQ(ctx.deliverables().size(), std::size_t{1});
+
+    const platform::FileContents tf = platform::read_file_whole(trace_path, 1U << 22);
+    REQUIRE(tf.ok());
+    const std::string& trace = tf.bytes;
+    // The turns that changed nothing say so, and say which flavour of nothing.
+    CHECK(trace.find("\"kind\":\"inert_turn\"") != std::string::npos);
+    CHECK(trace.find("\"unchanged_writes\":\"1\"") != std::string::npos);
+    // The write event separates the two cases it used to conflate.
+    CHECK(trace.find("\"changed\":\"1\"") != std::string::npos);
+    CHECK(trace.find("\"changed\":\"0\"") != std::string::npos);
+    // And the streak actually moves, which is the whole point -- it was pinned at 0.
+    CHECK(trace.find("\"streak\":\"3\"") != std::string::npos);
+    // Ended on the stall rather than burning the budget, and NAMED for what happened: this
+    // run never narrated, so `text_only_no_progress` would send a reader hunting for
+    // narration that is not in the trace.
+    CHECK_EQ(report.termination_reason, std::string("inert_calls_no_progress"));
+}
+
+// Suppressing `write_file` hands the next turn `replace_in_file` on the same file, which is
+// the same edit bought for one turn of delay.
+//
+// MEASURED, in the trace that prompted this pass: seq 111 suppressed `write_file`, seq 117
+// was a `replace_in_file` on the same file, seq 144 suppressed `replace_in_file`, seq 151
+// was a `write_file`. Four events, two suppressions, zero turns of delay bought.
+// THE EDITOR IS NEVER WHAT GETS TAKEN AWAY. This test asserted the opposite until the run
+// below was measured, and the assertion was the bug: `break_repeat` held
+// `write_file,replace_in_file` as a family, exactly as it holds the two read tools.
+//
+// MEASURED, over 85 turns: the write family was unsamplable on at least 34 of them, and on
+// at least 15 `shell` was gone too -- so the model was asked to fix a build with no way to
+// change a file. It found the only route left and wrote its Swift sources through `shell`
+// heredocs, which records no path, runs no syntax check, cannot report a no-op mutation, and
+// never increments workspace_writes() -- which is the one input failure_is_unmoved() needs,
+// so the detector that would have said "this red has not moved" was switched off as well.
+//
+// A repeated READ is a run going in circles and the tool is not the deliverable, so holding
+// it forces a different move at no cost to the work. A repeated WRITE is the run short of
+// EVIDENCE, not of tools, and it has its own better corrective -- see
+// edits_that_outrun_the_check_force_the_check.
+TEST(break_repeat_never_holds_the_editor) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_edit_family_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\na.swift\n</parameter>\n"
+        "<parameter=content>\nlet x = 1\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, write_body));
+    backend.enqueue_response(call_turn(tok, write_body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write it");
+    ctx.set_checklist({{"write it", false}});
+    platform::EventLogWriter log;
+    const std::string trace_path = root + "/events.jsonl";
+    platform::EventLogOptions opts;
+    opts.path = trace_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    log.flush();
+
+    const platform::FileContents tf = platform::read_file_whole(trace_path, 1U << 22);
+    REQUIRE(tf.ok());
+    const std::string& trace = tf.bytes;
+    // The repeat is still SEEN and still reported -- only the mechanism changed.
+    CHECK(trace.find("\"corrective\":\"break_repeat\"") != std::string::npos);
+    // And neither editor is ever withheld, by this corrective or any other narrowing.
+    CHECK(trace.find("\"family\":\"write_file,replace_in_file\"") == std::string::npos);
+    CHECK(trace.find("\"withheld\":\"write_file") == std::string::npos);
+    CHECK(trace.find("replace_in_file\"") == std::string::npos ||
+          trace.find("\"withheld\"") == std::string::npos);
+}
+
+// A run whose edits outrun its checks is guessing: every write after the last verification
+// is derived from the same stale output as the one before it. The corrective RUNS the
+// check and hands back its output -- it does not take the editor away, because a model with
+// stale evidence and one fewer tool comes back with the same guess.
+//
+// MEASURED: the run this comes from put FIFTEEN writes between two builds, and spent
+// twenty turns rewriting one Mach pointer cast against a compiler error it had not re-read.
+TEST(edits_that_outrun_the_check_force_the_check) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_force_verification_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    // Red, and loudly enough that the forced run has something to hand back.
+    const std::string check = "echo 'error: cannot find HostStatsService' >&2; exit 1";
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] fix it\n</parameter>\n"
+        "<parameter=verify_with>\n" + check + "\n</parameter>\n</function>\n";
+
+    // Three DIFFERENT writes, so nothing here is a repeat and nothing is a no-op: this is
+    // a run doing real, plausible work and simply never checking it.
+    const auto write_body = [](const char* content) {
+        return std::string("<function=write_file>\n<parameter=path>\na.swift\n"
+                           "</parameter>\n<parameter=content>\n") +
+               content + "\n</parameter>\n</function>\n";
+    };
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_body));
+    backend.enqueue_response(call_turn(tok, write_body("let x = 1")));
+    backend.enqueue_response(call_turn(tok, write_body("let x = 2")));
+    backend.enqueue_response(call_turn(tok, write_body("let x = 3")));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("fix it");
+    platform::EventLogWriter log;
+    const std::string trace_path = root + "/events.jsonl";
+    platform::EventLogOptions opts;
+    opts.path = trace_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    log.flush();
+
+    const platform::FileContents tf = platform::read_file_whole(trace_path, 1U << 22);
+    REQUIRE(tf.ok());
+    const std::string& trace = tf.bytes;
+    CHECK(trace.find("\"corrective\":\"force_verification\"") != std::string::npos);
+    CHECK(trace.find("\"why\":\"writes_unverified\"") != std::string::npos);
+
+    // The check actually ran -- the corrective is a mechanism, not a sentence about one.
+    // Baseline plus the forced run, at minimum.
+    CHECK(ctx.verifications().size() >= 2);
+    // And the run never got more than kMaxUnverifiedWrites ahead of its evidence, which is
+    // the property the whole corrective exists to hold.
+    std::size_t worst = 0;
+    std::size_t at_last = 0;
+    for (const context::VerificationRecord& v : ctx.verifications()) {
+        worst = std::max(worst, v.workspace_writes - at_last);
+        at_last = v.workspace_writes;
+    }
+    CHECK(worst <= 3);
+}
+
+// A CORRECTIVE THAT KEEPS FIRING IS NOT WORKING, and until this pass the harness counted
+// that and did nothing with it: `corrective_ineffective` emitted, then fell through to the
+// same switch and re-applied the identical mechanism.
+//
+// MEASURED: seventeen `corrective_ineffective` lines in one run, every one followed by a
+// byte-identical `corrective` line, `break_repeat` reaching ten firings against `read_file`
+// with `suppressed_turns` stuck at the cap of 4 for the last five of them.
+//
+// The ladder here runs in the harder direction: forcing the check is the RIGHT answer to a
+// run editing blind, so when three forced checks have not changed what the model writes,
+// more of them is the thing this ladder exists to stop.
+TEST(a_corrective_that_keeps_firing_escalates_instead_of_repeating) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_escalation_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    // A red whose OUTPUT never repeats, which is what isolates this test to one finding.
+    // A contract that fails the same way across a changed workspace is a different defect
+    // -- the criterion is not measuring the code -- and it has its own corrective ranked
+    // above this one. Left in, RederiveContract takes the turn and the ladder never runs.
+    // No command substitution and no arithmetic: the output grows by one line per run, so
+    // no two readings are alike, and the whole thing survives being passed through as one
+    // string. An earlier version of this fixture used `$(...)` and `$((...))`, failed to
+    // parse, and made the test pass for the wrong reason -- the check was red because it
+    // was malformed, not because the workspace was.
+    const std::string check = "echo run >> n.txt; cat n.txt >&2; exit 1";
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] fix it\n</parameter>\n"
+        "<parameter=verify_with>\n" + check + "\n</parameter>\n</function>\n";
+    const auto write_body = [](int n) {
+        return std::string("<function=write_file>\n<parameter=path>\na.swift\n"
+                           "</parameter>\n<parameter=content>\nlet x = ") +
+               std::to_string(n) + "\n</parameter>\n</function>\n";
+    };
+
+    // Real, distinct edits and never a check. Every third one puts the run
+    // kMaxUnverifiedWrites ahead of its evidence, so ForceVerification fires three times
+    // against `write_file` -- correctly each time, and without changing anything the model
+    // does, which is the whole definition of ineffective.
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_body));
+    for (int i = 1; i <= 12; ++i) {
+        backend.enqueue_response(call_turn(tok, write_body(i)));
+    }
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("fix it");
+    platform::EventLogWriter log;
+    const std::string trace_path = root + "/events.jsonl";
+    platform::EventLogOptions opts;
+    opts.path = trace_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    log.flush();
+
+    const platform::FileContents tf = platform::read_file_whole(trace_path, 1U << 22);
+    REQUIRE(tf.ok());
+    const std::string& trace = tf.bytes;
+    // The measurement still happens...
+    CHECK(trace.find("\"kind\":\"corrective_ineffective\"") != std::string::npos);
+    // ...and now something happens BECAUSE of it, naming which corrective it escalates so
+    // the trace says why the turn changed shape.
+    CHECK(trace.find("\"corrective\":\"escalated_replan\"") != std::string::npos);
+    CHECK(trace.find("\"after\":\"force_verification\"") != std::string::npos);
+
+    // AND IT IS A REPLAN, NOT AN EDITOR BAN. This asserted the opposite -- the whole edit
+    // family held for 12 turns -- and that assertion was the most destructive thing the
+    // harness did to a real run.
+    //
+    // MEASURED over 85 turns: `escalated_hold` withheld `write_file,replace_in_file` for 12
+    // turns and `read_file,read_slice` for 20. The write family was unsamplable on at least
+    // 34 turns and on at least 15 of those `shell` was gone with it, so the model was asked
+    // to fix a build with no way to change a file. It wrote its sources through `shell`
+    // heredocs instead: no path recorded, no syntax check, no no-op detection, and no
+    // increment to workspace_writes(), which is what failure_is_unmoved() reads -- so the
+    // detector that would have caught the loop went blind at the same time.
+    //
+    // It was also self-sustaining: no editor meant no progress, no progress re-fired the
+    // corrective, and the corrective widened the hold.
+    //
+    // The replan is a real state change (the next turn's grammar is plan-only), lasts exactly
+    // one turn, and asks for what is actually missing -- a different approach. It cannot
+    // strand the run, because restating the checklist is what clears it.
+    CHECK(trace.find("\"corrective\":\"escalated_hold\"") == std::string::npos);
+    CHECK(trace.find("\"family\":\"write_file,replace_in_file\"") == std::string::npos);
+    // The floor holds throughout: no turn in this run was left without a way to edit.
+    CHECK(trace.find("\"withheld\":\"write_file,replace_in_file\"") == std::string::npos);
+}
+
+// --- conversational modes yield instead of stalling --------------------------
+//
+// A plan-mode run that asked a question was scored exactly like a run that had given up:
+// the turn called nothing, `made_no_move` counted it, and three of them ended the run
+// `text_only_no_progress`. So the mode's own output was indistinguishable from its
+// failure, and the reason a human saw at the end of a perfectly good planning session was
+// a stall.
+TEST(plan_mode_yields_on_a_text_only_turn_instead_of_stalling) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "considering", "Here is what I would do."));
+    // A SECOND turn is queued deliberately. If the loop does not stop, it takes this one
+    // and the iteration count says so -- an assertion on the termination reason alone
+    // would pass just as well against a run that ended for the wrong reason.
+    backend.enqueue_response(text_turn(tok, "again", "And more."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
+    CHECK_EQ(report.iterations, 1);
+}
+
+// The same turn in agent mode must NOT end the run: one text-only turn there is a run
+// that has not started working yet, and ending on it would be the opposite bug.
+TEST(agent_mode_does_not_yield_on_a_text_only_turn) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "considering", "Here is what I would do."));
+    backend.enqueue_response(text_turn(tok, "again", "And more."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK(report.termination_reason != std::string("awaiting_user"));
+    CHECK(report.iterations > 1);
+}
+
+// --- plan mode cannot reach the disk, and is not offered the chance ----------
+//
+// The report that prompted this was "plan mode just started writing to files". Every write
+// path was in fact gated, but the mode was invisible from the model's side: the tools block
+// advertised write_file, the grammar made it samplable, and the transcript filled with
+// attempts. This drives the real Agent in plan mode and asserts BOTH halves -- the tool is
+// not offered, and if something offers it anyway the gate still refuses.
+TEST(plan_mode_neither_offers_nor_permits_a_write) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=write_file>\n<parameter=path>\nnotes.md\n</parameter>\n"
+        "<parameter=content>\nhello\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+
+    const std::string root = "/tmp/lmp_plan_mode_probe";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("plan it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+
+    // NOT ADVERTISED. This is the half that was missing, and it is the half the model
+    // actually reads -- the gate below only ever spoke after a turn had been spent.
+    CHECK(agent.tools_guidance().find("\"write_file\"") == std::string::npos);
+    CHECK(agent.tools_guidance().find("\"shell\"") == std::string::npos);
+    CHECK(agent.tools_guidance().find("\"delete_file\"") == std::string::npos);
+    // And what plan mode is FOR is still there.
+    CHECK(agent.tools_guidance().find("\"read_file\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"ask_user\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"exit_plan_mode\"") != std::string::npos);
+
+    // The file does not exist, whatever the model emitted.
+    CHECK(!lmp::platform::read_file_whole(root + "/notes.md", 4096).ok());
+    CHECK(turn.outcome != loop::Outcome::ToolCallExecuted);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+// Debug mode is the inverse: it writes, and it still will not delete.
+TEST(debug_mode_offers_writes_but_never_delete_file) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "x", "y"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("debug it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Debug;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    CHECK(agent.tools_guidance().find("\"write_file\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"replace_in_file\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"shell\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"delete_file\"") == std::string::npos);
+    // ask_user belongs to a mode that yields, and debug does not.
+    CHECK(agent.tools_guidance().find("\"ask_user\"") == std::string::npos);
+}

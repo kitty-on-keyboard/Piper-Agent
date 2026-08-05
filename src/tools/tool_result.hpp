@@ -51,6 +51,25 @@ struct ToolResult {
     // forbids to inspect strings -- and one of them decides whether a run may complete.
     int exit_code = -1;
 
+    // A mutating tool that SUCCEEDED and changed nothing: the bytes on disk were already
+    // the bytes it was asked to write.
+    //
+    // Status stays Ok, because it is: the file is in the state the model asked for, and
+    // nothing failed. What is not Ok is counting it as work. Every progress signal in the
+    // loop keyed off "a mutating tool returned Ok", so re-writing a file verbatim was
+    // indistinguishable from fixing it -- and that is not a corner case, it is what a
+    // stuck model actually does.
+    //
+    // MEASURED: a 73-turn run cancelled with 6/6 items open made 39 workspace writes, 13
+    // of which re-wrote a byte-length already on disk (5327 four times, 5437 four times,
+    // 5818 three times). `workspace_writes` climbed to 39, `no_progress_streak` never
+    // passed 1 against a cap of 3, and the build stayed red the whole way.
+    //
+    // A FIELD, not a summary the loop greps: this header's first paragraph forbids string
+    // inspection, and the caller that reads this decides whether the run is making
+    // progress.
+    bool mutation_was_noop = false;
+
     // Whether the shell could not execute the command AT ALL: 127 is "not found", 126 is
     // "found but not executable", and both are also what the sandbox's own child returns
     // when it cannot chdir or exec.
@@ -70,6 +89,14 @@ struct ToolResult {
         ToolResult r;
         r.status = Status::Ok;
         r.summary = std::move(summary_text);
+        return r;
+    }
+    // A successful mutation that moved nothing. Separate factory rather than a flag the
+    // handlers set by hand, so a tool cannot report "wrote 5327 bytes" for a write that
+    // did not happen -- the summary and the flag are chosen together or not at all.
+    static ToolResult no_change(std::string summary_text) {
+        ToolResult r = okay(std::move(summary_text));
+        r.mutation_was_noop = true;
         return r;
     }
     static ToolResult error(ErrorClass ec, bool retryable_flag, std::string summary_text) {
