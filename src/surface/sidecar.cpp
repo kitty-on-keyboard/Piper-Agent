@@ -111,12 +111,12 @@ loop::Observer make_observer(const std::string& id) {
         n.duration_ms = duration_ms;
         notify(n);
     };
-    obs.on_verification = [id](const context::VerificationRecord& v) {
+    obs.on_verification = [id](const context::CheckResult& v) {
         protocol::VerificationNotification n;
         n.run_id = id;
-        n.contract = v.contract;
+        n.contract = v.command;
+        n.ran = v.ran;
         n.passed = v.passed;
-        n.falsifiable = v.falsifiable;
         n.detail = v.detail;
         notify(n);
     };
@@ -492,6 +492,12 @@ class RunInbox {
     config.budget.wall_clock_seconds = static_cast<int>(surface::double_field(
         message, "wall_clock_seconds", config.budget.wall_clock_seconds));
 
+    // The operator's check -- the only verification the harness runs. Absent keeps the
+    // config default (empty: no check), same rule as every field above.
+    if (surface::has_field(message, "verify_contract")) {
+        config.operator_verify_contract = surface::string_field(message, "verify_contract");
+    }
+
     return apply_autonomy(id, message, config);
 }
 
@@ -627,7 +633,6 @@ bool run_loop(const std::string& run_id, surface::Session& session,
     end.iterations = report.iterations;
     end.completed = report.completed;
     end.unfinished_items = static_cast<std::int64_t>(report.unfinished_items);
-    end.self_declared = report.self_declared;
     notify(end);
     return run_inbox.shutdown_requested();
 }

@@ -1,5 +1,4 @@
 lmp_add_test(test_loop SOURCES test_loop.cpp LABELS gate LINK lmp_loop)
-lmp_add_test(test_verifier SOURCES test_verifier.cpp LABELS gate LINK lmp_loop TIMEOUT 120)
 
 # Agent::step end to end IN THE GATE, on the miniature vocabulary. PHASES.md named
 # agent.cpp:168 and :287 as surviving mutants with one shared blocker -- "not driven

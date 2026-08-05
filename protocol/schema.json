@@ -165,6 +165,11 @@
         "type": "int"
       },
       {
+        "_comment": "THE OPERATOR'S CHECK -- the only verification the harness runs. When non-empty, the command runs verbatim after any turn that wrote a file, its output and exit status become an observation the model reads, and the run's final `completed` requires its last reading to have passed. Exit 0 is pass. Empty means no check: the run ends when the model answers. Operator-owned; the model cannot set or replace it.",
+        "name": "verify_contract",
+        "type": "string"
+      },
+      {
         "_comment": "MCP servers to connect at run start. Each is spawned over stdio, initialized and asked for its tool list; a server that fails to start or answer leaves its tools ABSENT and the run continues, because a broken server must not be able to stall a turn.",
         "name": "mcp_servers",
         "type": "McpServerSettings",
@@ -536,11 +541,13 @@
         "type": "string"
       },
       {
-        "name": "passed",
+        "_comment": "Whether the command EXECUTED at all. false means the reading says nothing about the workspace -- the command was refused by the sandbox or does not exist here (exit 126/127) -- and the UI must render that as a fact about the check, not as a failure of the work.",
+        "name": "ran",
         "type": "bool"
       },
       {
-        "name": "falsifiable",
+        "_comment": "The command's exit status, verbatim. A report, never a verdict: the harness runs the operator's check and says what it did.",
+        "name": "passed",
         "type": "bool"
       },
       {
@@ -631,14 +638,9 @@
         "type": "bool"
       },
       {
-        "_comment": "Checklist items still open when the run ended. `completed` is an EVIDENTIAL verdict -- a recorded deliverable plus a falsifiable passing verification of the declared contract -- so it no longer waits on the model agreeing that it is done. This field reports the disagreement instead of hiding it: completed=true with unfinished_items>0 means the evidence says the mission is met and the model's own list says otherwise, and a human should look.",
+        "_comment": "Checklist items still open when the run ended. The checklist is the model's own progress display and holds no authority over the ending; this field reports what it said, so completed=true with unfinished_items>0 is visible to the human rather than resolved silently.",
         "name": "unfinished_items",
         "type": "int"
-      },
-      {
-        "_comment": "True when `completed` rests on a contract the MODEL chose rather than one the operator set. Both were previously reported with the same word, and rename_across_files ended completed=yes verified=yes against a mission it had not met. Not a failure -- most runs have no operator contract -- but the UI must not present the two as the same claim.",
-        "name": "self_declared",
-        "type": "bool"
       }
     ]
   }

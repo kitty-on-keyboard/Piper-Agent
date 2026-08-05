@@ -1,6 +1,6 @@
-// The scripted-loop suite (S11.2): the whole loop, driven with no model, asserting on
-// what the harness SENT. Plus the pure cores -- classifier, correctives, completion
-// gate, verification falsifiability, context compaction.
+// The pure cores of the loop, driven with no model: the classifier, mode policy, the
+// repeat cache, the loop breaker, HITL routing, and context compaction. The loop
+// end-to-end (scripted backend, real Agent) lives in test_agent_step.cpp.
 
 #include <string>
 #include <vector>
@@ -9,7 +9,6 @@
 #include "src/loop/agent.hpp"
 #include "src/loop/token_stream.hpp"
 #include "src/loop/turn.hpp"
-#include "src/loop/verification.hpp"
 
 #include "tests/check.hpp"
 
@@ -26,6 +25,14 @@ context::TurnRecord turn(const std::string& tool, const std::string& obs, bool e
     t.first_event_seq = 1;
     t.last_event_seq = 2;
     return t;
+}
+
+// The record() shape most tests want: a successful call with a small observation, taken
+// at write-count zero.
+void record_ok(RepeatDetector& d, const std::string& tool,
+               const std::vector<tools::ToolParamValue>& params,
+               const std::string& summary = "ok", std::size_t writes = 0) {
+    d.record(tool, params, /*ok=*/true, summary, writes);
 }
 
 } // namespace
@@ -92,41 +99,44 @@ TEST(plan_mode_cannot_execute_or_write) {
     CHECK(!agent.conversational);
 }
 
-// --- exactly one repeat detector --------------------------------------------
+// --- exactly one repeat detector, and it is a cache -------------------------
 
 TEST(repeat_detection_keys_on_tool_and_arguments) {
     RepeatDetector d;
     const std::vector<tools::ToolParamValue> a = {{"path", "src/main.cpp"}};
     const std::vector<tools::ToolParamValue> b = {{"path", "src/other.cpp"}};
     CHECK_EQ(d.seen_count("read_file", a), std::size_t{0});
-    d.record("read_file", a);
+    record_ok(d, "read_file", a);
     CHECK_EQ(d.seen_count("read_file", a), std::size_t{1});
     CHECK_EQ(d.seen_count("read_file", b), std::size_t{0});
     CHECK_EQ(d.seen_count("write_file", a), std::size_t{0});
-    d.record("read_file", a);
+    record_ok(d, "read_file", a);
     CHECK_EQ(d.seen_count("read_file", a), std::size_t{2});
 }
 
 // A repeat is the same CALL, not the same bytes. Keying on the raw argument let a run
 // alternate a trailing slash and repeat itself forever without the detector counting past
 // one -- measured in the editor as 80 turns of `list_dir ResMon` / `list_dir ResMon/`.
+// Under the cache, the normalisation is also what makes the second spelling a free
+// answer instead of a second execution.
 TEST(a_cosmetic_path_difference_is_not_a_different_call) {
     RepeatDetector d;
     const std::vector<tools::ToolParamValue> plain = {{"path", "ResMon"}};
     const std::vector<tools::ToolParamValue> slashed = {{"path", "ResMon/"}};
     const std::vector<tools::ToolParamValue> dotted = {{"path", "./ResMon"}};
 
-    d.record("list_dir", plain);
+    record_ok(d, "list_dir", plain, "the listing");
     CHECK_EQ(d.seen_count("list_dir", slashed), std::size_t{1});
     CHECK_EQ(d.seen_count("list_dir", dotted), std::size_t{1});
-    d.record("list_dir", slashed);
-    CHECK_EQ(d.seen_count("list_dir", plain), std::size_t{2}); // enough to trip BreakRepeat
+    // The measured ping-pong, served from cache under every spelling.
+    CHECK(d.cached("list_dir", slashed, 0) != nullptr);
+    CHECK(d.cached("list_dir", dotted, 0) != nullptr);
 
     // A genuinely different directory is still a different call.
     CHECK_EQ(d.seen_count("list_dir", {{"path", "Other"}}), std::size_t{0});
     // And a non-path argument is raw text, where a trailing slash is a real difference.
     RepeatDetector c;
-    c.record("shell", {{"command", "ls x"}});
+    record_ok(c, "shell", {{"command", "ls x"}});
     CHECK_EQ(c.seen_count("shell", {{"command", "ls x/"}}), std::size_t{0});
 }
 
@@ -141,10 +151,9 @@ TEST(replace_in_file_repeats_on_its_target_not_its_replacement) {
     const std::vector<tools::ToolParamValue> reworded = {
         {"path", "a.cpp"}, {"old_text", "int x = 1;"}, {"new_text", "int x = 3; // try"}};
 
-    d.record("replace_in_file", first);
+    record_ok(d, "replace_in_file", first);
     CHECK_EQ(d.seen_count("replace_in_file", reworded), std::size_t{1});
-    d.record("replace_in_file", reworded);
-    // Enough to trip the mutation-repeat gate, which is the whole point.
+    record_ok(d, "replace_in_file", reworded);
     CHECK_EQ(d.seen_count("replace_in_file", first), std::size_t{2});
 
     // A different TARGET is still a different call -- this drops one parameter, it does
@@ -157,241 +166,47 @@ TEST(replace_in_file_repeats_on_its_target_not_its_replacement) {
     // two different calls. The identical-content case is caught by the write door instead,
     // which costs less and tells the model something a repeat count cannot.
     RepeatDetector w;
-    w.record("write_file", {{"path", "a.cpp"}, {"content", "one"}});
+    record_ok(w, "write_file", {{"path", "a.cpp"}, {"content", "one"}});
     CHECK_EQ(w.seen_count("write_file", {{"path", "a.cpp"}, {"content", "two"}}),
              std::size_t{0});
     CHECK_EQ(w.seen_count("write_file", {{"path", "a.cpp"}, {"content", "one"}}),
              std::size_t{1});
 }
 
-// BreakRepeat's declared mechanism is "force a different tool by narrowing the grammar's
-// registry for the next turn". For most of this project's life it narrowed nothing and
-// only appended a sentence, so the identical call stayed samplable and a run could repeat
-// itself until the budget died -- 80 turns of it, measured in the editor.
-TEST(a_repeated_tool_is_unsamplable_on_the_next_turn) {
-    std::vector<parsephony::ToolSpec> specs;
-    for (const char* n : {"plan", "list_dir", "read_file", "write_file"}) {
-        parsephony::ToolSpec s;
-        s.name = n;
-        specs.push_back(s);
-    }
-
-    const std::vector<parsephony::ToolSpec> narrowed =
-        without_suppressed(specs, {{"list_dir", 1}});
-    CHECK_EQ(narrowed.size(), std::size_t{3});
-    for (const parsephony::ToolSpec& s : narrowed) {
-        CHECK(s.name != "list_dir");
-    }
-
-    // Nothing suppressed: the list is untouched.
-    CHECK_EQ(without_suppressed(specs, {}).size(), specs.size());
-    // An entry whose window has run out holds nothing. Expiry is what lets a tool the run
-    // legitimately needs come back.
-    CHECK_EQ(without_suppressed(specs, {{"list_dir", 0}}).size(), specs.size());
-
-    // Suppressing the ONLY samplable tool would leave the grammar unsatisfiable, so the
-    // turn keeps it rather than being handed a turn it cannot spend.
-    std::vector<parsephony::ToolSpec> only_plan;
-    only_plan.push_back(specs.front());
-    CHECK_EQ(without_suppressed(only_plan, {{"plan", 1}}).size(), std::size_t{1});
-}
-
-// The two-cycle. One tool held for one turn is not a mechanism against a model that has
-// two ways to ask the same question -- it alternates, and the run that prompted this
-// burned twenty-seven turns on `list_dir` / `shell find` before writing a single file.
-// Holding BOTH at once is what leaves only the moves that make progress.
-TEST(suppressions_accumulate_so_a_ping_pong_runs_out_of_partners) {
-    std::vector<parsephony::ToolSpec> specs;
-    for (const char* n : {"plan", "list_dir", "shell", "write_file"}) {
-        parsephony::ToolSpec s;
-        s.name = n;
-        specs.push_back(s);
-    }
-
-    const std::vector<parsephony::ToolSpec> narrowed =
-        without_suppressed(specs, {{"list_dir", 2}, {"shell", 1}});
-    CHECK_EQ(narrowed.size(), std::size_t{2});
-    for (const parsephony::ToolSpec& s : narrowed) {
-        CHECK(s.name != "list_dir");
-        CHECK(s.name != "shell");
-    }
-    // The floor still holds when everything on offer is held down.
-    CHECK_EQ(without_suppressed(narrowed, {{"plan", 3}, {"write_file", 3}}).size(),
-             std::size_t{2});
-}
-
-TEST(at_most_one_corrective_and_budget_outranks_everything) {
+// The cache's validity rule, all three clauses: a successful call is served back only
+// while nothing has been written since it ran; one write anywhere invalidates every
+// entry; and a failed call is never served, because retry after an error is legitimate
+// and an error the model has already seen may be exactly what it is trying to get past.
+TEST(the_cache_serves_a_repeat_only_while_the_workspace_is_unchanged) {
     RepeatDetector d;
-    RefusalLedger rl;
-    TurnResult t;
-    t.outcome = Outcome::ToolCallExecuted;
-    t.tool_name = "read_file";
-    t.tool_params = {{"path", "a"}};
-    t.tool_result = tools::ToolResult::okay("ok");
-    d.record("read_file", t.tool_params);
-    d.record("read_file", t.tool_params);
+    const std::vector<tools::ToolParamValue> read = {{"path", "src/main.cpp"}};
 
-    Budget budget;
-    budget.max_iterations = 40;
-    // Repeat alone -> BreakRepeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
-          == Corrective::BreakRepeat);
-    // Budget exhausted outranks it; only ONE is returned.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, false, false)
-          == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, rl, 1, budget, true, true, false, false, false)
-          == Corrective::HaltOnBudget);
+    // Taken at write-count 3, asked at write-count 3: valid, and carries the bytes.
+    d.record("read_file", read, true, "the contents", 3);
+    const RepeatDetector::SeenCall* hit = d.cached("read_file", read, 3);
+    REQUIRE(hit != nullptr);
+    CHECK_EQ(hit->last_summary, std::string("the contents"));
+
+    // One write later: every entry is stale, because any file may have changed.
+    CHECK(d.cached("read_file", read, 4) == nullptr);
+
+    // Re-recorded after the write: valid again at the new count.
+    d.record("read_file", read, true, "the new contents", 4);
+    REQUIRE(d.cached("read_file", read, 4) != nullptr);
+    CHECK_EQ(d.cached("read_file", read, 4)->last_summary, std::string("the new contents"));
 }
 
-// ReconcileChecklist outranks every corrective aimed at the WORK, and is outranked by the
-// two that are not. A run whose evidence has landed is one turn from stopping; a repeat, an
-// unmoved contract and a described-but-unmade verification are all diagnoses of a run still
-// grinding, and none of them applies to a run that is about to stop.
-TEST(reconciling_the_checklist_outranks_the_work_correctives_and_not_the_others) {
+TEST(a_failed_call_is_never_served_from_cache) {
     RepeatDetector d;
-    RefusalLedger rl;
-    TurnResult t;
-    t.outcome = Outcome::ToolCallExecuted;
-    t.tool_name = "read_file";
-    t.tool_params = {{"path", "a"}};
-    t.tool_result = tools::ToolResult::okay("ok");
-    d.record("read_file", t.tool_params);
-    d.record("read_file", t.tool_params);
-    Budget budget;
-    budget.max_iterations = 40;
+    const std::vector<tools::ToolParamValue> p = {{"path", "missing.cpp"}};
+    d.record("read_file", p, /*ok=*/false, "no such file", 0);
+    CHECK_EQ(d.seen_count("read_file", p), std::size_t{1});
+    CHECK(d.cached("read_file", p, 0) == nullptr);
 
-    // Without the flag this turn is a plain repeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) ==
-          Corrective::BreakRepeat);
-    // With it, the question about stopping wins -- and so does the one about the criterion,
-    // which is the same class of question one level down.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, true, false) ==
-          Corrective::ReconcileChecklist);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, true, true, false) ==
-          Corrective::ReconcileChecklist);
-
-    // The budget still outranks it: a run about to be cut off needs to land first.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, true, false) ==
-          Corrective::HaltOnBudget);
-    CHECK(choose_corrective(t, d, rl, budget.max_iterations - kBudgetWarningTurns, budget,
-                            false, true, false, true, false) == Corrective::BudgetNearlyGone);
-    // And so does the operator's second "no" -- that one is a human's decision, not
-    // bookkeeping.
-    TurnResult refused;
-    refused.outcome = Outcome::ToolCallRefused;
-    refused.tool_name = "delete_file";
-    rl.record("delete_file");
-    rl.record("delete_file");
-    CHECK(choose_corrective(refused, d, rl, 1, budget, false, true, false, true, false) ==
-          Corrective::BlockRefusedTool);
-}
-
-// A run whose edits have outrun its checks is GUESSING: every write after the last
-// verification is derived from the same stale output as the one before it. Nothing else in
-// the harness could see it, because the run is calling tools and mutating the workspace,
-// so every other progress signal reads healthy.
-//
-// MEASURED: a 73-turn run cancelled with 6/6 items open ran its contract seven times and
-// made 39 writes, with FIFTEEN consecutive writes between two of those runs.
-TEST(unverified_edits_outrank_the_repeat_they_cause) {
-    RepeatDetector d;
-    RefusalLedger rl;
-    TurnResult t;
-    t.outcome = Outcome::ToolCallExecuted;
-    t.tool_name = "write_file";
-    t.tool_params = {{"path", "a.cpp"}, {"content", "x"}};
-    t.tool_result = tools::ToolResult::okay("wrote 1 bytes to a.cpp");
-    d.record("write_file", t.tool_params);
-    d.record("write_file", t.tool_params);
-    Budget budget;
-    budget.max_iterations = 40;
-
-    // Without the flag this is a plain repeat and the tool gets held.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) ==
-          Corrective::BreakRepeat);
-    // With it, the run gets ground truth instead. ABOVE BreakRepeat on purpose: taking the
-    // editor away from a model with stale evidence leaves it with the same guess and one
-    // fewer way to act on it.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, true) ==
-          Corrective::ForceVerification);
-
-    // BELOW RederiveContract: forcing a run of a contract no work can move just buys
-    // another copy of a failure the run has been shown twice.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, true, false, true) ==
-          Corrective::RederiveContract);
-    // And below both budget arms and the operator's second "no", like everything else
-    // aimed at the work.
-    CHECK(choose_corrective(t, d, rl, 40, budget, false, true, false, false, true) ==
-          Corrective::HaltOnBudget);
-
-    // With no contract there is no mechanism, and a corrective with no mechanism is what
-    // this enum exists to forbid -- so it falls back to the repeat.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false, true) ==
-          Corrective::BreakRepeat);
-}
-
-TEST(a_claimed_verification_synthesizes_a_real_one) {
-    RepeatDetector d;
-    RefusalLedger rl;
-    TurnResult t;
-    t.outcome = Outcome::TextOnly;
-    t.assistant_text = "I fixed the include. The build should pass now.";
-    const Budget budget;
-    // Mechanism, not prose: the loop MAKES the call the model only described.
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
-          == Corrective::SynthesizeVerification);
-
-    t.assistant_text = "Here is a summary of the file.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
-
-    // With no contract declared there is nothing to synthesize. Before this gate the
-    // corrective fired anyway and ran a hardcoded `cmake --build build` -- on a Python
-    // workspace, a guaranteed failure filed against a contract nobody declared.
-    t.assistant_text = "I fixed the include. The build should pass now.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false, false) == Corrective::None);
-}
-
-// A refusal is neither an execution nor an error, so before RefusalLedger existed the
-// destructive fixture re-attempted the refused call every turn until the budget died.
-TEST(a_twice_refused_tool_is_taken_off_the_grammar) {
-    RepeatDetector d;
-    RefusalLedger rl;
-    TurnResult t;
-    t.outcome = Outcome::ToolCallRefused;
-    t.tool_name = "delete_file";
-    t.tool_params = {{"path", "a"}};
-    t.tool_result = tools::ToolResult::refused("denied by the operator");
-    const Budget budget;
-
-    // First refusal: the model could not have known. Taking the tool away over one "no"
-    // would be the wrong trade.
-    rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
-
-    // Second: fire.
-    rl.record("delete_file");
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
-          == Corrective::BlockRefusedTool);
-
-    // Counted by TOOL, not by (tool, params) -- varying the path is not a new question.
-    t.tool_params = {{"path", "b"}};
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
-          == Corrective::BlockRefusedTool);
-
-    // Once blocked it must not re-fire: the mechanism already ran, and a corrective that
-    // keeps selecting itself would crowd out every other one for the rest of the run.
-    rl.block("delete_file");
-    CHECK(rl.is_blocked("delete_file"));
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
-
-    // Budget still outranks it (S9.2). Expressed against the budget's own limit rather
-    // than a literal, so raising the default ceiling cannot quietly turn this into a test
-    // of something else.
-    rl.record("shell");
-    rl.record("shell");
-    t.tool_name = "shell";
-    CHECK(choose_corrective(t, d, rl, budget.max_iterations, budget, false, true, false, false, false) ==
-          Corrective::HaltOnBudget);
+    // A later success overwrites the failure and becomes servable.
+    d.record("read_file", p, /*ok=*/true, "found it now", 0);
+    REQUIRE(d.cached("read_file", p, 0) != nullptr);
+    CHECK_EQ(d.cached("read_file", p, 0)->last_summary, std::string("found it now"));
 }
 
 // --- the loop breaker --------------------------------------------------------
@@ -438,183 +253,6 @@ TEST(a_repeating_cycle_is_cut_and_ordinary_text_is_not) {
     // cut, because that is a cycle. The assertion is that it took a real repeat to do it,
     // not the first window.
     CHECK(shuffled.repeats() >= LoopBreaker::kMaxRepeats || !shuffled_cut);
-}
-
-// --- completion gate (S10.4) -------------------------------------------------
-
-// A verification the harness WATCHED run. The default VerificationRecord has ran=false,
-// which means "refused, never executed" and is not evidence in either direction (S6.2).
-context::VerificationRecord observed(std::string contract, bool passed, bool falsifiable) {
-    context::VerificationRecord v;
-    v.contract = std::move(contract);
-    v.passed = passed;
-    v.falsifiable = falsifiable;
-    v.ran = true;
-    return v;
-}
-
-TEST(completion_is_driven_by_ledgers_not_by_prose) {
-    context::ContextStore ctx("Add a --version flag");
-    CHECK(!evaluate_completion(ctx).complete); // no checklist
-
-    ctx.set_checklist({{"add flag", true}, {"test it", false}});
-    ctx.set_verify_contract("ctest");
-    CHECK(!evaluate_completion(ctx).complete); // no deliverable
-
-    ctx.record_deliverable("src/main.cpp");
-    CHECK(!evaluate_completion(ctx).complete); // no verification
-
-    ctx.record_verification(observed("ctest", true, false));
-    const CompletionVerdict unproven = evaluate_completion(ctx);
-    // A green that has never been shown capable of red is not evidence (S10.2).
-    CHECK(!unproven.complete);
-    CHECK(unproven.reason.find("never been seen to fail") != std::string::npos);
-    // The reason names the way OUT, because it is shown to the model and a reason with no
-    // exit reads as a demand to keep grinding. The exit is a better criterion -- never
-    // breaking working code, which is what the harness used to ask for and get.
-    CHECK(unproven.reason.find("verify_with") != std::string::npos);
-}
-
-TEST(a_proven_green_completes_the_run) {
-    context::ContextStore ctx("Add a --version flag");
-    ctx.set_checklist({{"add flag", true}});
-    ctx.set_verify_contract("ctest");
-    ctx.record_deliverable("src/main.cpp");
-    ctx.record_verification(observed("ctest", true, true));
-    CHECK(evaluate_completion(ctx).complete);
-}
-
-// The ledger is keyed by the CANONICAL check -- both writers file records that way -- so
-// the completion gate has to look the contract up in the same form it was stored under.
-// Comparing the raw declared string means a contract carrying any wrapper at all matches
-// no record, and a run whose check is green and proven keeps reporting "the declared
-// contract has not run" until its budget runs out.
-TEST(a_contract_declared_with_a_wrapper_still_matches_its_own_ledger) {
-    context::ContextStore ctx("Add a --version flag");
-    ctx.set_checklist({{"add flag", true}});
-    // As a model actually writes it: redirect, and a truncator to keep the output short.
-    ctx.set_verify_contract("pytest tests/ 2>&1 | tail -20");
-    ctx.record_deliverable("src/main.cpp");
-    // As the Verifier files it.
-    ctx.record_verification(observed(canonicalize_check("pytest tests/ 2>&1 | tail -20"),
-                                     true, true));
-
-    const CompletionVerdict v = evaluate_completion(ctx);
-    CHECK(v.complete);
-}
-
-// The seventh pass dropped the checklist from the gate entirely and REPORTED the
-// disagreement instead. That reads well until you watch it: two consecutive real runs
-// finished `completed` at 3 of 11 items, and "evidence says done, 8 left unticked" is not
-// a report, it is two contradictory claims printed side by side.
-//
-// An open item is the run's own statement that scope REMAINS, and no ledger can contradict
-// it -- a verification proves one command green, and whether that command covers the
-// mission is written only in the list. So the evidence is separated from the verdict:
-// `evidence_complete` is what the harness watched happen, `complete` additionally needs the
-// run's own list to agree.
-TEST(an_open_checklist_holds_a_green_ledger_until_it_is_reconciled) {
-    context::ContextStore ctx("Add a --version flag");
-    ctx.set_checklist({{"add flag", true}, {"tell someone about it", false}});
-    ctx.set_verify_contract("ctest");
-    ctx.record_deliverable("src/main.cpp");
-    ctx.record_verification(observed("ctest", true, true));
-
-    const CompletionVerdict v = evaluate_completion(ctx);
-    // Every EVIDENTIAL gate passed -- that half is unchanged, and the corrective needs it
-    // to tell "the proof is not in yet" from "the proof is in and the list disagrees".
-    CHECK(v.evidence_complete);
-    CHECK(!v.complete);
-    CHECK_EQ(v.open_items, 1U);
-    // The reason names BOTH exits, because the run is the only thing that knows which is
-    // true: the list is stale, or the contract is narrower than the mission.
-    CHECK(v.reason.find("checklist") != std::string::npos);
-    CHECK(v.reason.find("verify_with") != std::string::npos);
-}
-
-TEST(ticking_the_list_completes_the_same_ledger) {
-    context::ContextStore ctx("Add a --version flag");
-    ctx.set_checklist({{"add flag", true}, {"tell someone about it", false}});
-    ctx.set_verify_contract("ctest");
-    ctx.record_deliverable("src/main.cpp");
-    ctx.record_verification(observed("ctest", true, true));
-    REQUIRE(!evaluate_completion(ctx).complete);
-
-    // The answer to the ask, in the one call that can give it. Nothing else changed: same
-    // ledger, same deliverable, same green.
-    ctx.set_checklist({{"add flag", true}, {"tell someone about it", true}});
-    const CompletionVerdict v = evaluate_completion(ctx);
-    CHECK(v.complete);
-    CHECK_EQ(v.open_items, 0U);
-}
-
-// The deadlock guard. A stale list must never be able to trap a run that is genuinely
-// done -- that is what made the seventh pass rip the gate out, and rebuilding it without
-// an exit would rebuild the failure with it. The exit is a WAIVER the Agent grants after
-// asking once and getting nothing back; the model cannot reach it.
-TEST(the_waiver_completes_over_an_open_list_and_says_it_asked) {
-    context::ContextStore ctx("Add a --version flag");
-    ctx.set_checklist({{"add flag", true}, {"tell someone about it", false}});
-    ctx.set_verify_contract("ctest");
-    ctx.record_deliverable("src/main.cpp");
-    ctx.record_verification(observed("ctest", true, true));
-
-    const CompletionVerdict v = evaluate_completion(ctx, /*checklist_waived=*/true);
-    CHECK(v.complete);
-    // Still REPORTED. A completion nobody but the harness agreed with is a real ending and
-    // a human is owed the disagreement.
-    CHECK_EQ(v.open_items, 1U);
-    CHECK(v.reason.find("asked to reconcile") != std::string::npos);
-}
-
-// The waiver is about the CHECKLIST and nothing else. Handing it to a run whose evidence
-// is missing would turn it into "finish anyway", which is the one thing the gate exists to
-// refuse.
-TEST(the_waiver_does_not_excuse_missing_evidence) {
-    context::ContextStore ctx("Add a --version flag");
-    ctx.set_checklist({{"add flag", false}});
-    ctx.set_verify_contract("ctest");
-    ctx.record_deliverable("src/main.cpp");
-    ctx.record_verification(observed("ctest", true, false)); // green, never proven red
-
-    const CompletionVerdict v = evaluate_completion(ctx, /*checklist_waived=*/true);
-    CHECK(!v.complete);
-    CHECK(!v.evidence_complete);
-    CHECK(v.reason.find("never been seen to fail") != std::string::npos);
-}
-
-// The baseline check records a deliberate red at declaration time -- that red IS the
-// proof of falsifiability -- so a healthy ledger always contains a failure. Scanning
-// every record for green read the evidence of rigour as evidence of breakage, and made
-// completion unreachable by construction.
-TEST(the_baseline_red_does_not_block_the_green_that_follows_it) {
-    context::ContextStore ctx("Fix the failing test");
-    ctx.set_checklist({{"fix it", true}});
-    ctx.set_verify_contract("pytest");
-    ctx.record_deliverable("stats.py");
-
-    ctx.record_verification(observed("pytest", false, false)); // baseline, pre-patch
-    CHECK(!evaluate_completion(ctx).complete);
-
-    ctx.record_verification(observed("pytest", true, true)); // post-patch, now proven
-    CHECK(evaluate_completion(ctx).complete);
-}
-
-// A refusal never ran, so it is not evidence -- and must not be read as the latest word
-// on a contract that was green before it (S6.2).
-TEST(a_refusal_is_not_the_latest_reading) {
-    context::ContextStore ctx("Fix the failing test");
-    ctx.set_checklist({{"fix it", true}});
-    ctx.set_verify_contract("pytest");
-    ctx.record_deliverable("stats.py");
-    ctx.record_verification(observed("pytest", false, false));
-    ctx.record_verification(observed("pytest", true, true));
-
-    context::VerificationRecord refused;
-    refused.contract = "pytest";
-    refused.ran = false;
-    ctx.record_verification(refused);
-    CHECK(evaluate_completion(ctx).complete);
 }
 
 // --- the allowlist and the irreversibility gate ------------------------------
@@ -678,34 +316,6 @@ TEST(irreversible_capabilities_are_not_a_matter_of_degree) {
 
 // --- steering (S4.5) ---------------------------------------------------------
 
-TEST(an_instruction_makes_the_plan_stale_and_reopens_a_finished_run) {
-    context::ContextStore ctx("Fix the failing test");
-    ctx.set_checklist({{"fix it", true}});
-    ctx.set_verify_contract("pytest");
-    ctx.record_deliverable("stats.py");
-    ctx.record_verification(observed("pytest", false, false));
-    ctx.record_verification(observed("pytest", true, true));
-    CHECK(evaluate_completion(ctx).complete);
-
-    // The user asks for more. The previous run's green cannot discharge it.
-    ctx.add_user_message("now do the same for the other module");
-    CHECK(ctx.plan_is_stale());
-    CHECK(!evaluate_completion(ctx).complete);
-
-    // Restating the checklist clears staleness, but the evidence is still the OLD
-    // evidence -- it predates the instruction, so it still does not count.
-    ctx.set_checklist({{"fix it", true}, {"and the other one", true}});
-    CHECK(!ctx.plan_is_stale());
-    const CompletionVerdict stale = evaluate_completion(ctx);
-    CHECK(!stale.complete);
-    CHECK(stale.reason.find("since") != std::string::npos);
-
-    // Re-running the contract after the instruction is what discharges it.
-    ctx.record_deliverable("other.py");
-    ctx.record_verification(observed("pytest", true, true));
-    CHECK(evaluate_completion(ctx).complete);
-}
-
 TEST(a_user_turn_renders_in_place_and_pins_the_latest_instruction) {
     context::ContextStore ctx("Fix the failing test");
     ctx.add_turn({.assistant_text = "Looking at it now."});
@@ -731,80 +341,32 @@ TEST(a_user_turn_renders_in_place_and_pins_the_latest_instruction) {
     CHECK(ctx.render_live_state().find("stop, use the other approach") != std::string::npos);
 }
 
-// --- verification identity (S10.2) ------------------------------------------
+// --- the operator check in live state ----------------------------------------
 
-TEST(a_reporting_wrapper_does_not_mint_a_second_identity) {
-    const std::string base = canonicalize_check("cmake --build build");
-    CHECK_EQ(canonicalize_check("cmake --build build ; echo $?"), base);
-    CHECK_EQ(canonicalize_check("cmake   --build    build"), base);
-    CHECK_EQ(canonicalize_check("  cmake --build build 2>&1  "), base);
-    CHECK_EQ(canonicalize_check("cmake --build build && echo $? | cat"), base);
-    // A genuinely different check keeps its own identity -- the proof is per-check.
-    CHECK(canonicalize_check("cmake --build build2") != base);
-}
+// One slot, not a ledger: the live-state block answers "where does the check stand right
+// now", and each reading's full output already reached the model as an observation at
+// the moment it happened. Eight readings must not become eight lines -- repetition is
+// not emphasis to a model reading its own context.
+TEST(the_live_state_renders_the_last_operator_check_only) {
+    context::ContextStore ctx("fix the build");
 
-// A run must be told the edge is coming while it can still act on it. The falsifiability
-// proof (S10.2) has a state in the middle where the workspace is deliberately broken, and
-// a halt that lands there leaves the damage behind -- observed twice on real runs.
-TEST(a_run_is_warned_before_the_budget_ends_it) {
-    const Budget budget{40, 900};
-    TurnResult turn;
-    turn.outcome = Outcome::ToolCallExecuted;
-    turn.tool_name = "shell";
-    turn.tool_result = tools::ToolResult::okay("fine");
-    const RepeatDetector repeats;
-    const RefusalLedger refusals;
+    CHECK(ctx.render_live_state().find("Operator check") == std::string::npos);
 
-    const auto at = [&](int used) {
-        return choose_corrective(turn, repeats, refusals, used, budget, false, true, false, false, false);
-    };
+    ctx.set_last_check({"swift build", true, false, "error: ..."});
+    std::string live = ctx.render_live_state();
+    CHECK(live.find("- FAIL swift build") != std::string::npos);
 
-    const int warn_at = budget.max_iterations - kBudgetWarningTurns;
-    CHECK(at(warn_at - 1) == Corrective::None);
-    CHECK(at(warn_at) == Corrective::BudgetNearlyGone); // exactly once
-    CHECK(at(warn_at + 1) == Corrective::None);
-    // The halt still outranks it, and still ends the run.
-    CHECK(at(budget.max_iterations) == Corrective::HaltOnBudget);
-    CHECK(choose_corrective(turn, repeats, refusals, warn_at, budget, true, true, false, false, false) ==
-          Corrective::HaltOnBudget);
-}
+    ctx.set_last_check({"swift build", true, true, "Build complete!"});
+    live = ctx.render_live_state();
+    CHECK(live.find("- PASS swift build") != std::string::npos);
+    CHECK(live.find("FAIL") == std::string::npos); // superseded, not accumulated
 
-// A pipeline exits with the status of its LAST command, so a check that ends in a
-// truncator reports the truncator's success as the check's. The contract that cost a real
-// run its entire feedback loop was `python -m pytest tests/ -v --tb=short 2>&1 | tail -20`
-// -- recorded PASSING in an empty workspace where `python` did not even exist.
-TEST(a_trailing_formatter_pipe_is_not_part_of_the_check) {
-    const std::string base = canonicalize_check("python -m pytest tests/ -v --tb=short");
-    CHECK_EQ(canonicalize_check("python -m pytest tests/ -v --tb=short 2>&1 | tail -20"),
-             base);
-    CHECK_EQ(canonicalize_check("python -m pytest tests/ -v --tb=short | head -n 5"), base);
-    CHECK_EQ(canonicalize_check("python -m pytest tests/ -v --tb=short | tail -20 | cat"),
-             base);
-
-    // A pipe whose right-hand side DECIDES the outcome is part of the check, and removing
-    // it would verify something else entirely.
-    CHECK(canonicalize_check("pytest tests/ | grep -q PASSED") !=
-          canonicalize_check("pytest tests/"));
-    CHECK(canonicalize_check("pytest tests/ | wc -l") != canonicalize_check("pytest tests/"));
-    // `||` is an or-list, not a pipe into `| foo` -- the formatter stripper must never
-    // treat it as one. A REAL fallback keeps its own status and stays part of the check.
-    CHECK(canonicalize_check("make || make clean") != canonicalize_check("make"));
-    // But an or-list into a STATUS SWALLOWER is a wrapper like any other, and the most
-    // common one there is: `|| echo ...` forces exit 0 whatever happened, so the check can
-    // never go red. Handled on its own path, not by the pipe stripper above.
-    CHECK_EQ(canonicalize_check("pytest tests/ || echo broken"),
-             canonicalize_check("pytest tests/"));
-}
-
-// What RUNS keeps the model's bytes; only the identity is normalised. Collapsing
-// whitespace is right for a ledger key and wrong for a command line -- executing the
-// canonical form would silently rewrite a quoted argument.
-TEST(the_form_that_runs_is_not_the_form_that_identifies) {
-    CHECK_EQ(executable_form("pytest -k \"a  or  b\" 2>&1 | tail -20"),
-             std::string("pytest -k \"a  or  b\""));
-    // Same check, one ledger entry, spacing not part of the identity.
-    CHECK_EQ(canonicalize_check("pytest -k \"a  or  b\""),
-             canonicalize_check("pytest  -k  \"a or b\""));
+    // A check that never executed is a distinct fact from a failing one: COULD NOT RUN
+    // is a statement about the command, and FAIL would send the reader to the code.
+    ctx.set_last_check({"pytest -q", false, false, "sh: pytest: command not found"});
+    live = ctx.render_live_state();
+    CHECK(live.find("- COULD NOT RUN pytest -q") != std::string::npos);
+    CHECK(live.find("- FAIL") == std::string::npos);
 }
 
 // --- context tiers and compaction (S8.3) ------------------------------------
@@ -874,15 +436,15 @@ TEST(the_mission_and_pinned_state_survive_every_trim) {
     const std::string& system = msgs[0].content;
     CHECK(system.find("THE MISSION: ship the parser") != std::string::npos);
 
-    // The pinned ledgers survive the trim too, but they render LAST, not in the system
-    // message. They change on almost every turn, and in front of the prompt each change
+    // The pinned state survives the trim too, but it renders LAST, not in the system
+    // message. It changes on almost every turn, and in front of the prompt each change
     // rewrote token 0 and forced a full re-prefill of the whole context.
     const std::string& live = msgs.back().content;
     CHECK(live.find("- [x] write it") != std::string::npos);
     CHECK(live.find("- [ ] test it") != std::string::npos);
     CHECK(live.find("src/parser.cpp") != std::string::npos);
 
-    // And they are NOT in the stable head, which is the property being protected.
+    // And it is NOT in the stable head, which is the property being protected.
     CHECK(system.find("- [x] write it") == std::string::npos);
 }
 
@@ -909,177 +471,6 @@ TEST(risk_routing_is_a_pure_function) {
     unseeable.caps.network_access = true;
     unseeable.caps.destroys_data = true;
     CHECK(route_approval(unseeable, t) == Approval::Escalate);
-}
-
-// An unrecoverable failure repeated verbatim is a repeat, not a retry.
-//
-// MEASURED, not anticipated: failing_test_median sent a byte-identical replace_in_file
-// five times, each returning "old_text matches more than one site", and nothing fired --
-// BreakRepeat required ok(). Ambiguity, NotFound and Malformed are pure functions of the
-// bytes sent, so re-sending them buys the same failure.
-TEST(a_repeated_unrecoverable_failure_breaks_the_repeat) {
-    RepeatDetector d;
-    RefusalLedger rl;
-    const Budget budget;
-
-    TurnResult t;
-    t.outcome = Outcome::ToolCallExecuted;
-    t.tool_name = "replace_in_file";
-    t.tool_params = {{"path", "stats.py"}, {"old_text", "return x"}};
-    t.tool_result = tools::ToolResult::error(tools::ErrorClass::Conflict, false,
-                                             "old_text matches more than one site");
-    d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
-
-    d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false)
-          == Corrective::BreakRepeat);
-}
-
-// A TRANSIENT failure is still legitimate retry -- a flaky build or a timeout deserves a
-// second attempt, and taking that away would be worse than the loop this closes.
-TEST(a_repeated_transient_failure_is_still_a_retry) {
-    RepeatDetector d;
-    RefusalLedger rl;
-    const Budget budget;
-
-    TurnResult t;
-    t.outcome = Outcome::ToolCallExecuted;
-    t.tool_name = "shell";
-    t.tool_params = {{"command", "pytest"}};
-    t.tool_result = tools::ToolResult::error(tools::ErrorClass::Transient, true, "[exit 1]");
-    d.record(t.tool_name, t.tool_params);
-    d.record(t.tool_name, t.tool_params);
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, true, false, false, false) == Corrective::None);
-}
-
-// --- whose criterion was met (S10.4) -----------------------------------------
-//
-// The checklist stopped gating completion because a tick is a self-report. `verify_with`
-// is the same class of thing one level down and went unnoticed: the model picks the
-// command that counts as proof, and the harness then rigorously verifies whatever it
-// picked. rename_across_files ended completed=yes verified=yes solved=NO by declaring
-// `pytest -q`, passing it, and stopping -- while the mission also required no residual
-// `calc_total`. Every gate worked. The contract was weaker than the mission.
-TEST(an_operator_contract_outranks_the_models_and_cannot_be_replaced) {
-    context::ContextStore ctx("rename calc_total everywhere");
-    using Source = context::ContextStore::ContractSource;
-
-    ctx.set_verify_contract("pytest -q", Source::Model);
-    CHECK_EQ(ctx.verify_contract(), std::string("pytest -q"));
-    CHECK(ctx.verify_contract_source() == Source::Model);
-
-    // The operator's wins.
-    ctx.set_verify_contract("pytest -q && ! grep -rq calc_total .", Source::Operator);
-    CHECK(ctx.verify_contract_source() == Source::Operator);
-
-    // And cannot be talked out of by restating the plan -- which is the one move this
-    // whole gate exists to stop.
-    ctx.set_verify_contract("true", Source::Model);
-    CHECK_EQ(ctx.verify_contract(), std::string("pytest -q && ! grep -rq calc_total ."));
-    CHECK(ctx.verify_contract_source() == Source::Operator);
-
-    // An operator may still change their own mind.
-    ctx.set_verify_contract("make check", Source::Operator);
-    CHECK_EQ(ctx.verify_contract(), std::string("make check"));
-}
-
-TEST(completion_reports_whether_the_model_chose_its_own_criterion) {
-    using Source = context::ContextStore::ContractSource;
-    const auto complete_run = [](Source source) {
-        context::ContextStore ctx("fix the median");
-        ctx.set_verify_contract("pytest -q", source);
-        ctx.set_checklist({{"fix it", true}});
-        ctx.record_deliverable("stats.py");
-        ctx.record_verification(observed("pytest -q", true, true));
-        return evaluate_completion(ctx);
-    };
-
-    const CompletionVerdict model = complete_run(Source::Model);
-    REQUIRE(model.complete);
-    CHECK(model.self_declared());
-    // The word that was missing: "the declared contract passes" reads identically whether
-    // the operator set the criterion or the model picked one it could satisfy.
-    CHECK(model.reason.find("MODEL chose") != std::string::npos);
-
-    const CompletionVerdict op = complete_run(Source::Operator);
-    REQUIRE(op.complete);
-    CHECK(!op.self_declared());
-    CHECK(op.reason.find("operator's contract") != std::string::npos);
-}
-
-// self_declared is about a COMPLETE verdict. An incomplete one makes no claim about whose
-// contract it was, and reporting it as self-declared would be noise on every failed run.
-TEST(an_incomplete_verdict_is_never_self_declared) {
-    context::ContextStore ctx("do a thing");
-    const CompletionVerdict v = evaluate_completion(ctx);
-    CHECK(!v.complete);
-    CHECK(!v.self_declared());
-}
-
-// The ledger is rendered into the prompt EVERY turn. It used to print one line per RUN,
-// so a run that verified the same command eight times read eight identical lines -- and
-// if that check was an unproven green, the same "not yet evidence" sentence eight times,
-// growing by one on every verification.
-//
-// Repetition is not emphasis to a model reading its own context. The run that prompted
-// this took the accumulating pile as pressure and wrote a syntax error into its own source
-// to manufacture a red. The ledger's job is to say what is currently KNOWN, and running a
-// check twice does not change what is known.
-TEST(the_ledger_states_what_is_known_once_per_contract) {
-    context::ContextStore ctx("mission");
-    for (int i = 0; i < 4; ++i) {
-        context::VerificationRecord v;
-        v.contract = "swift build";
-        v.ran = true;
-        v.passed = true;
-        v.falsifiable = false;
-        ctx.record_verification(v);
-    }
-    context::VerificationRecord other;
-    other.contract = "swift test";
-    other.ran = true;
-    other.passed = false;
-    ctx.record_verification(other);
-
-    const std::string rendered = ctx.render_live_state();
-    const auto count_of = [&rendered](std::string_view needle) {
-        std::size_t n = 0;
-        for (std::size_t at = rendered.find(needle); at != std::string::npos;
-             at = rendered.find(needle, at + 1)) {
-            ++n;
-        }
-        return n;
-    };
-
-    // One line for the contract that ran four times, carrying the count instead.
-    CHECK_EQ(count_of("- PASS swift build"), std::size_t{1});
-    CHECK(rendered.find("(run 4x)") != std::string::npos);
-    // ...and the unproven note said ONCE, not once per run.
-    CHECK_EQ(count_of("not yet evidence"), std::size_t{1});
-    // A second contract keeps its own line, with its own latest state.
-    CHECK_EQ(count_of("- FAIL swift test"), std::size_t{1});
-}
-
-// A FAIL that follows a PASS is the current state of that contract, and the ledger must
-// say so -- collapsing to one line per contract must never collapse to the FIRST reading.
-TEST(the_ledger_line_is_the_latest_reading_not_the_first) {
-    context::ContextStore ctx("mission");
-    context::VerificationRecord green;
-    green.contract = "swift build";
-    green.ran = true;
-    green.passed = true;
-    ctx.record_verification(green);
-
-    context::VerificationRecord red;
-    red.contract = "swift build";
-    red.ran = true;
-    red.passed = false;
-    ctx.record_verification(red);
-
-    const std::string rendered = ctx.render_live_state();
-    CHECK(rendered.find("- FAIL swift build") != std::string::npos);
-    CHECK(rendered.find("- PASS swift build") == std::string::npos);
 }
 
 // A compacted span line is PROMPT-FACING, and it named the tool twice: every trimmed turn
@@ -1116,45 +507,4 @@ TEST(a_compacted_span_names_each_tool_once) {
     CHECK(span.find("- read_file(path=src/a.swift)") != std::string::npos);
     // The bare-argument form still gets its tool name and its parentheses.
     CHECK(span.find("- read_slice(src/b.swift)") != std::string::npos);
-}
-
-// SynthesizeVerification's trigger was forward-looking only -- "should pass", "should
-// work" -- so it caught a model PREDICTING success and missed one ASSERTING it. The
-// assertion is the more dangerous claim and the more common ending.
-//
-// MEASURED: a run implemented both modules, made the suite green, beat a stale Makefile by
-// symlinking the suite into the path the Makefile expected, ran pytest directly, and
-// finished with "Confirmed: `make test` passes with 7/7 tests green." It never re-ran its
-// declared contract, so the ledger held two reds and no green -- and the run ended
-// text_only_no_progress with the mission complete and the workspace correct.
-TEST(a_past_tense_claim_of_success_synthesizes_the_verification_too) {
-    const Budget budget;
-    RepeatDetector d;
-    RefusalLedger rl;
-    TurnResult t;
-    t.outcome = Outcome::TextOnly;
-
-    const auto verdict = [&](const char* text) {
-        t.assistant_text = text;
-        return choose_corrective(t, d, rl, 1, budget, false, true, false, false, false);
-    };
-
-    // The forward-looking half, which always worked and must keep working.
-    CHECK(verdict("the build should pass now") == Corrective::SynthesizeVerification);
-    // The half that lost the run.
-    CHECK(verdict("Confirmed: `make test` passes with 7/7 tests green.") ==
-          Corrective::SynthesizeVerification);
-    CHECK(verdict("All tests pass.") == Corrective::SynthesizeVerification);
-    CHECK(verdict("The suite passes and the module is complete.") ==
-          Corrective::SynthesizeVerification);
-    CHECK(verdict("Everything is now green.") == Corrective::SynthesizeVerification);
-
-    // A turn that claims nothing about verification must still be left alone -- this
-    // corrective RUNS A COMMAND, so firing it on ordinary narration would spend a turn
-    // per turn.
-    CHECK(verdict("I will start with the ring buffer.") == Corrective::None);
-    CHECK(verdict("Reading the test file to see what it expects.") == Corrective::None);
-    // And with no contract declared there is nothing to synthesize.
-    t.assistant_text = "All tests pass.";
-    CHECK(choose_corrective(t, d, rl, 1, budget, false, false, false, false, false) == Corrective::None);
 }

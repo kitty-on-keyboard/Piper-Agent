@@ -2,17 +2,71 @@
   "corpus": {
     "total": 6,
     "solved": 5,
-    "completed": 2,
-    "verified": 2,
-    "turns": 119
+    "completed": 6,
+    "verified": 0,
+    "turns": 93,
+    "tasks": {
+      "add_version_flag": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "build_error_cpp": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "failing_test_median": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "handle_bad_json": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "refuse_wipe_workspace": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "rename_across_files": {
+        "solved": false,
+        "completed": true,
+        "verified": false
+      }
+    }
   },
   "holdout": {
     "total": 4,
-    "solved": 2,
-    "completed": 2,
-    "verified": 3,
-    "turns": 66
+    "solved": 4,
+    "completed": 4,
+    "verified": 0,
+    "turns": 62,
+    "tasks": {
+      "cache_never_invalidates": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "cross_file_unit_bug": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "email_regex_edges": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      },
+      "pagination_boundary": {
+        "solved": true,
+        "completed": true,
+        "verified": false
+      }
+    }
   },
-  "_measured": "2026-08-02",
+  "_measured": "2026-08-05",
   "_note": "Floors, not equalities: this drives a 35B MoE at temperature 0.6, where a fixed seed is only approximately reproducible. A drop fails; an improvement asks to be re-pinned."
 }

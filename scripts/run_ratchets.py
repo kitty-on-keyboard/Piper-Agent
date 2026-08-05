@@ -234,10 +234,6 @@ TOOL_MENTION_RE = re.compile(r"\b([a-z]+_[a-z_]+)\b")
 TOOL_MENTION_STOPLIST = {
     "wall_clock", "old_text", "new_text", "start_line", "end_line", "workspace_root",
     "max_result_bytes", "tool_name", "error_class", "exit_code",
-    # `plan`'s parameter naming the command that proves the mission complete. A
-    # parameter, not a tool -- the gate is here to catch descriptions that promise tools
-    # which do not exist, and this promises nothing.
-    "verify_with",
     # blast-radius capability flags: model-facing vocabulary from the S7 contract,
     # deliberately shown to the model by job_status's advisory output.
     "write_out", "read_out",
@@ -299,66 +295,19 @@ def gate_tool_honesty(root, cfg):
     return len(declared), findings
 
 
-# A corrective site is a case arm of Agent::apply_corrective. Each must change state,
-# synthesize a call, or alter control flow -- these are the shapes that count as
-# mechanism.
-MECHANISM_RE = re.compile(
-    r"\b(ctx_\.|registry_\.|repeats_\.|halted_\s*=|policy_\.|log_\.|"
-    r"verifier\.|\.run_and_record|\.add_turn|\.set_checklist|\.record_|"
-    r"return;|break;|continue;)")
-
-
-def gate_prose_correctives(root, cfg):
-    """S9.2: the count of prose-only corrective sites must be 0.
-
-    v1 had 11 of 34, including one named ForceWrite that forced nothing while logging
-    that it was forcing something. The check does not count injection SITES -- that
-    number is gameable by moving branches into one function -- it checks that every
-    corrective arm contains a mechanism and not merely a composed sentence."""
-    path = os.path.join(root, "src", "loop", "agent.cpp")
-    if not os.path.exists(path):
-        return 0, []
-    with open(path, encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-
-    # `current` stays None until the first `case`, so the preamble between the
-    # function header and the switch is not mistaken for an arm.
-    body, arms, current, start = None, [], None, 0
-    for idx, line in enumerate(lines, start=1):
-        if "void Agent::apply_corrective" in line:
-            body = True
-            continue
-        if body and line.startswith("}"):
-            break
-        if not body:
-            continue
-        if re.match(r"\s*case Corrective::", line):
-            if current is not None:
-                arms.append((start, current))
-            current, start = [], idx
-        elif current is not None:
-            current.append(line)
-    if current is not None:
-        arms.append((start, current))
-
-    findings = []
-    for lineno, arm in arms:
-        text = "\n".join(arm)
-        code = "\n".join(l for l in arm if not l.strip().startswith("//"))
-        if not MECHANISM_RE.search(code):
-            findings.append(Finding(
-                "prose_correctives", "src/loop/agent.cpp", lineno,
-                "corrective arm changes no state and alters no control flow -- it is "
-                "prose-only, which S9.2 forbids"))
-    return len(arms), findings
-
+# WHAT USED TO BE HERE: gate_prose_correctives, which parsed the case arms of
+# Agent::apply_corrective and required every one to contain a mechanism rather than a
+# composed sentence. The corrective machinery it policed was deleted 2026-08-05 -- the
+# loop no longer steers the model at all, so there are no corrective arms to inspect,
+# and a live gate over zero subjects fails min_subjects by design. The gate goes with
+# the mechanism it guarded; if steering ever comes back, so must a gate that keeps it
+# honest, because prose-only correctives are how v1 got 11 of 34.
 
 GATES = {
     "layers": gate_layers,
     "dead_code": gate_dead_code,
     "protocol": gate_protocol,
     "tool_honesty": gate_tool_honesty,
-    "prose_correctives": gate_prose_correctives,
 }
 
 
