@@ -445,6 +445,23 @@ struct ChecklistNotification {
     return out;
 }
 
+// notification "lmp/plan_ready"
+struct PlanReadyNotification {
+    std::string run_id;
+    std::string plan;
+    static constexpr const char* kMethod = "lmp/plan_ready";
+};
+[[nodiscard]] inline std::string to_json(const PlanReadyNotification& n) {
+    std::string out = "{";
+    out += "\"run_id\":";
+    append_value(out, n.run_id);
+    out += ",";
+    out += "\"plan\":";
+    append_value(out, n.plan);
+    out += "}";
+    return out;
+}
+
 // notification "lmp/verification"
 struct VerificationNotification {
     std::string run_id;

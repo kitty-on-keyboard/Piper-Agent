@@ -41,3 +41,18 @@ if(LMP_NPX AND EXISTS "${PROJECT_SOURCE_DIR}/extension/node_modules")
 else()
   message(STATUS "extension typecheck skipped: run `npm install` in extension/")
 endif()
+
+# The transcript's ordering invariant. Type-checking cannot see this: the view script is a
+# TypeScript template literal, so tsc reads the whole thing as a string, and the bug it
+# pins -- a tool row on screen before the text that introduced it -- typechecked perfectly
+# for as long as it existed. Needs only node, not node_modules, because it reads
+# src/webview.ts directly and slices the block under test out of it.
+find_program(LMP_NODE node)
+if(LMP_NODE)
+  lmp_add_script_test(test_transcript_order
+    COMMAND "${LMP_NODE}"
+            "${PROJECT_SOURCE_DIR}/extension/scripts/verify-transcript-order.js"
+    LABELS gate)
+else()
+  message(STATUS "transcript order check skipped: node not found")
+endif()

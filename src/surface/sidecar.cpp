@@ -132,6 +132,12 @@ loop::Observer make_observer(const std::string& id) {
         n.items_json += "]";
         notify(n);
     };
+    obs.on_plan_ready = [id](const std::string& plan) {
+        protocol::PlanReadyNotification n;
+        n.run_id = id;
+        n.plan = plan;
+        notify(n);
+    };
     obs.on_perf = [id](const model::GenResult& g, std::size_t used, std::size_t max,
                        std::size_t compactions) {
         protocol::PerfNotification n;

@@ -187,12 +187,36 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     : tok_(tok), backend_(backend), registry_(registry), ctx_(ctx), log_(log),
       clock_(clock), config_(config), policy_(ModePolicy::for_mode(config.mode)),
       verifier_(registry, ctx) {
-    tools_guidance_ = registry_.tools_json();
-
     // The operator's tier, when they named one. Plan mode is exempt in the one direction
     // that matters: it pins T0, so "no execution" cannot be undone by a settings field.
     if (config_.sandbox_tier_override >= 0 && config_.mode != Mode::Plan) {
         policy_.sandbox_tier = config_.sandbox_tier_override;
+    }
+    tools_guidance_ =
+        registry_.tools_json([this](const tools::ToolDecl& d) { return tool_allowed(d); });
+    std::string withheld_by_mode;
+    for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
+        const tools::ToolDecl* d = registry_.find(s.name);
+        if (d != nullptr && !tool_allowed(*d)) {
+            withheld_by_mode += withheld_by_mode.empty() ? "" : ",";
+            withheld_by_mode += s.name;
+            continue;
+        }
+        mode_specs_.push_back(s);
+    }
+    // In the Agent rather than in the sidecar, so every client gets it -- the eval harness
+    // and scripts/drive.py send a mode too, and a brief only the editor's runs received
+    // would make the two disagree about what plan mode even is.
+    ctx_.set_mode_brief(std::string(mode_brief(config_.mode)));
+
+    // WHAT THIS MODE TOOK AWAY, once, at the top of the run. The per-turn `grammar` event
+    // measures against this set rather than the registry's, so the two answer different
+    // questions and neither drowns the other: this one is "what can this run never do",
+    // that one is "what could this TURN not do".
+    if (!withheld_by_mode.empty()) {
+        emit("mode_tools", {{"withheld", withheld_by_mode},
+                            {"samplable", std::to_string(mode_specs_.size())},
+                            {"of", std::to_string(registry_.guard_specs().size())}});
     }
     if (!config_.operator_verify_contract.empty()) {
         ctx_.set_verify_contract(config_.operator_verify_contract,
@@ -525,6 +549,8 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // rewrites the earlier copy immediately afterwards.
     turn_reads_ = 0;
     turn_reads_redundant_ = 0;
+    turn_calls_ = 0;
+    turn_inert_calls_ = 0;
 
     // --- prompt assembly ---------------------------------------------------
     const model::ChatTemplate tmpl(tok_);
@@ -595,15 +621,24 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // deadlocks.
     const bool must_replan = ctx_.plan_is_stale() || replan_turns_ > 0;
 
+    // NOT IN A CONVERSATIONAL MODE. The checklist gate exists to stop a working run from
+    // doing work before it has said what it is doing; plan mode's deliverable is agreement
+    // with a human, and it owes no checklist. The condition as it stood narrowed the
+    // grammar to `plan` and nothing else whenever the checklist was empty -- which is
+    // every plan-mode run, on turn 1 -- so a mode whose entire job is to go and read the
+    // code could not call read_file until it had first filed a checklist for a mission it
+    // had not been allowed to look at yet.
+    const bool plan_only =
+        (ctx_.checklist().empty() || must_replan) && !policy_.conversational;
     std::vector<parsephony::ToolSpec> specs;
-    if (ctx_.checklist().empty() || must_replan) {
-        for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
+    if (plan_only) {
+        for (const parsephony::ToolSpec& s : mode_specs()) {
             if (s.name == "plan") {
                 specs.push_back(s);
             }
         }
     } else {
-        specs = registry_.guard_specs();
+        specs = mode_specs();
     }
     specs = without_blocked(specs, refusals_, registry_.guard_specs());
     // The one-turn narrowing BreakRepeat asked for. Taken (and cleared) here rather than
@@ -625,6 +660,47 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     }
     std::erase_if(suppressed_tools_,
                   [](const auto& e) { return e.second <= 0; });
+    // THE FLOOR. A turn that is meant to do work must have SOME way to change a file.
+    //
+    // Nothing above intends to take every writer away -- the holds are built to exclude
+    // mutators now -- and this is here because the run that motivated it lost its editor to a
+    // mechanism whose author did not think it could. Four separate narrowings feed this
+    // grammar and they compose without any of them knowing about the others; the cheapest
+    // durable answer is one invariant checked where the final set is known.
+    //
+    // NOT in plan-only mode: a replan turn is deliberately `plan` and nothing else, and it
+    // lasts one turn. Restoring writers there would defeat the one escalation that replaced
+    // the editor bans.
+    //
+    // AND NOT IN A MODE THAT GRANTS NO WRITES, which is the trap this floor sets for any
+    // attempt to take the writers away on purpose. It restores every mutating tool the
+    // moment none is samplable -- so mode filtering, which removes exactly those tools,
+    // would have been undone on the first turn of every plan-mode run, with a single
+    // `write_floor_restored` event as the only trace. A floor whose whole premise is "a
+    // turn meant to do work must be able to change a file" has nothing to say about a turn
+    // that is not meant to change files.
+    if (!plan_only && policy_.allow_workspace_writes) {
+        bool have_writer = false;
+        for (const parsephony::ToolSpec& s : specs) {
+            have_writer = have_writer || mutates_workspace(s.name);
+        }
+        if (!have_writer) {
+            for (const parsephony::ToolSpec& s : mode_specs()) {
+                // Restored only if the operator has not refused it: a refusal is the
+                // operator's decision and outranks any floor the harness sets for itself.
+                if (mutates_workspace(s.name) && !refusals_.is_blocked(s.name)) {
+                    specs.push_back(s);
+                }
+            }
+            for (auto& [name, turns_left] : suppressed_tools_) {
+                if (mutates_workspace(name)) {
+                    turns_left = 0;
+                }
+            }
+            emit("corrective", {{"corrective", "write_floor_restored"},
+                                {"why", "no_samplable_mutation_tool"}});
+        }
+    }
     // WHAT THIS TURN WAS ALLOWED TO DO. Emitted only when something was withheld, so a
     // healthy turn costs nothing and a constrained one is impossible to miss.
     //
@@ -634,9 +710,14 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // RederiveContract, BreakRepeat's suppressions and BlockRefusedTool -- and none of
     // them said so in the log. A run measured at 66 turns had `read_file` suppressed
     // thirteen separate times and the trace showed only that it kept calling `read_slice`.
-    if (specs.size() != registry_.guard_specs().size()) {
+    //
+    // Against the MODE's set, not the registry's. What the mode withholds is a constant of
+    // the run, emitted once as `mode_tools` at construction; repeating it on every turn
+    // would bury the per-turn narrowings this event exists to make visible under a list
+    // that never changes.
+    if (specs.size() != mode_specs().size()) {
         std::string withheld;
-        for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
+        for (const parsephony::ToolSpec& s : mode_specs()) {
             bool present = false;
             for (const parsephony::ToolSpec& kept : specs) {
                 if (kept.name == s.name) {
@@ -943,22 +1024,34 @@ std::vector<std::string> answer_family(const std::string& tool) {
     if (is_content_read(tool)) {
         return {"read_file", "read_slice"};
     }
+    // The same argument, one tool class over, and it went unmade because the read
+    // ping-pong was the one in front of us at the time.
+    //
+    // `write_file` and `replace_in_file` are interchangeable ANSWERS to "make this file say
+    // that": anything one can express the other can, and the model picks between them on
+    // taste. So holding one hands the next turn the other, on the same path, immediately.
+    //
+    // MEASURED, in the trace that prompted this: seq 111 suppressed `write_file`, seq 117
+    // was a `replace_in_file` on the same file, seq 144 suppressed `replace_in_file`, seq
+    // 151 was a `write_file`. Four events, two suppressions, zero turns of delay bought.
+    //
+    // `append_file` is NOT in this family and the omission is deliberate. It cannot remove
+    // or correct anything already in the file, so it does not answer the same question --
+    // and a family is a claim of interchangeability, not a grouping by subsystem.
+    if (tool == "write_file" || tool == "replace_in_file") {
+        return {"write_file", "replace_in_file"};
+    }
     return {tool};
 }
 
-// Whether a turn did nothing but read file content -- primary call and every batched one.
+// WHAT USED TO BE HERE: `turn_is_reads_only`, the guard on the re-read stall test -- one
+// write, one build, one search anywhere in the turn and the turn counted as work.
 //
-// The guard on the re-read stall test: one write, one build, one search anywhere in the
-// turn and the turn is work, whatever else it also did.
-bool turn_is_reads_only(const TurnResult& turn) {
-    if (!is_content_read(turn.tool_name)) {
-        return false;
-    }
-    return std::all_of(turn.extra_calls.begin(), turn.extra_calls.end(),
-                       [](const TurnResult::ExtraCall& e) {
-                           return is_content_read(e.tool_name);
-                       });
-}
+// It was the reason the stall test could only ever see a pure read loop, and a model that
+// alternates reading with rewriting is not a pure read loop. The test now counts inert
+// CALLS instead of classifying the turn by tool name (turn_inert_calls_), which needs no
+// predicate at all: a call that added nothing is counted where it happens, and a call that
+// might have added something simply is not.
 
 std::string join_names(const std::vector<std::string>& names) {
     std::string out;
@@ -975,6 +1068,11 @@ std::string join_names(const std::vector<std::string>& names) {
 //
 // Not "is currently green": one green ever is enough to say the criterion measures
 // something reachable, which is the only question the near-miss finding turns on.
+bool Agent::mutates_workspace(const std::string& tool) const {
+    const tools::ToolDecl* d = registry_.find(tool);
+    return d != nullptr && d->mutates_workspace;
+}
+
 bool Agent::contract_has_passed() const {
     const std::string declared = canonicalize_check(ctx_.verify_contract());
     for (const context::VerificationRecord& v : ctx_.verifications()) {
@@ -983,6 +1081,65 @@ bool Agent::contract_has_passed() const {
         }
     }
     return false;
+}
+
+// Workspace-changing writes since the last verification of any kind ran.
+//
+// Subtraction against a number the ledger already keeps, rather than a counter of its own.
+// VerificationRecord stores workspace_writes at the moment it ran (verification.cpp), and
+// ctx_.workspace_writes() only advances on writes that actually changed a file, so the
+// difference is exactly "edits this run has not checked". Nothing to reset and nothing to
+// forget to reset.
+//
+// No verifications yet means every write so far is unverified, which is the honest reading
+// and also the one that gets a fresh run its first build early instead of late.
+std::size_t Agent::writes_since_verification() const {
+    const std::vector<context::VerificationRecord>& v = ctx_.verifications();
+    // THE LAST READING THAT ACTUALLY RAN, not simply the last one filed.
+    //
+    // A refusal, a command the shell could not execute, and a command whose exit status
+    // cannot mean pass-or-fail are all "not evidence either way" (S6.2) -- and a record that
+    // checked nothing must not be able to reset the count of edits that nothing has checked.
+    // Reading `v.back()` let it: one `| grep`-terminated build filed a ran=false record,
+    // this returned 0, and ForceVerification stopped asking. The run would then have been
+    // free to edit forever without ever taking a reading, which is the opposite of what the
+    // inverted-verdict guard is for.
+    std::size_t at_last = 0;
+    for (const context::VerificationRecord& r : v) {
+        if (r.ran) {
+            at_last = r.workspace_writes;
+        }
+    }
+    const std::size_t now = ctx_.workspace_writes();
+    return now > at_last ? now - at_last : 0;
+}
+
+// Whether this turn re-sent a workspace mutation the run had already made.
+//
+// Asked of every call in the turn, because a turn that batches four edits behind one
+// primary is the shape this misses otherwise -- the same hole batching opened in the
+// repeat detector itself.
+//
+// Read by run() into the ForceVerification gate. The corrective this feeds runs the check
+// rather than withholding the editor, and that choice is the finding: a model that has
+// just re-sent an edit is not short of tools, it is short of evidence.
+bool Agent::turn_repeated_a_mutation(const TurnResult& turn) const {
+    const auto repeated = [this](const std::string& name,
+                                 const std::vector<tools::ToolParamValue>& params) {
+        const tools::ToolDecl* d = registry_.find(name);
+        return d != nullptr && d->mutates_workspace &&
+               repeats_.seen_count(name, params) > 1;
+    };
+    if (turn.outcome != Outcome::ToolCallExecuted) {
+        return false;
+    }
+    if (repeated(turn.tool_name, turn.tool_params)) {
+        return true;
+    }
+    return std::any_of(turn.extra_calls.begin(), turn.extra_calls.end(),
+                       [&repeated](const TurnResult::ExtraCall& e) {
+                           return repeated(e.tool_name, e.params);
+                       });
 }
 
 // A RE-READ IS ANSWERED, ALWAYS. What it costs is charged to the context, not to the model.
@@ -1029,6 +1186,12 @@ void Agent::collapse_duplicate_read(const std::string& name,
     ++turn_reads_;
     if (ctx_.has_observation(result.summary)) {
         ++turn_reads_redundant_;
+        // The same fact, in the units the widened no-progress test counts in. Kept as two
+        // counters rather than one because the log reports the breakdown -- "three
+        // redundant reads" and "three no-op writes" are different findings about a run,
+        // and collapsing them into "three inert calls" would lose the one that names the
+        // bug.
+        ++turn_inert_calls_;
     }
 
     // ONLY UNDER CONTEXT PRESSURE -- because this rewrites HISTORY, and rewritten history
@@ -1100,6 +1263,52 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         executed = r.ok;
         return r.ok ? tools::ToolResult::okay(r.detail)
                     : tools::ToolResult::error(tools::ErrorClass::Malformed, true, r.detail);
+    }
+
+    // The two that END THE RUN. Same reason `plan` is here -- the registry cannot stop the
+    // loop -- and they set the halt directly rather than returning a status the loop would
+    // have to interpret, because every other way of ending a run is already a named
+    // termination_reason and these are two more of them.
+    //
+    // Both are refused rather than silently ignored outside a conversational mode. They
+    // are filtered out of the grammar there, so this is unreachable by sampling; it is
+    // reachable by a synthesized call or a future corrective, and "the loop quietly
+    // stopped" is not an outcome worth leaving a path to.
+    if (name == "ask_user" || name == "exit_plan_mode") {
+        if (!policy_.conversational) {
+            return tools::ToolResult::refused(
+                "'" + name + "' is only available in a mode that yields to the operator");
+        }
+        const std::string body =
+            param_value(params, name == "ask_user" ? "question" : "plan");
+        if (body.empty()) {
+            return tools::ToolResult::error(
+                tools::ErrorClass::Malformed, true,
+                "'" + name + "' needs a non-empty " +
+                    (name == "ask_user" ? "'question'" : "'plan'"));
+        }
+        executed = true;
+        halted_ = true;
+        if (name == "ask_user") {
+            halt_reason_ = "awaiting_user";
+            emit("ask_user", {{"question", body}});
+            // Down the ANSWER channel rather than a notification of its own. The question
+            // is prose the model wrote for a human to read, and the surface already knows
+            // how to render that -- a second path would be a second thing to keep in step
+            // for no difference on screen. Safe here: the token streamer was joined before
+            // the turn's text was read, so this is single-threaded and lands ahead of the
+            // tool row, which still names `ask_user` and keeps the trace honest.
+            if (observer_.on_token) {
+                observer_.on_token("answer", body);
+            }
+            return tools::ToolResult::okay("asked the operator; the run stops here");
+        }
+        halt_reason_ = "plan_ready";
+        emit("plan_ready", {{"chars", std::to_string(body.size())}});
+        if (observer_.on_plan_ready) {
+            observer_.on_plan_ready(body);
+        }
+        return tools::ToolResult::okay("presented the plan; the run stops here");
     }
 
     const tools::ToolDecl* decl = registry_.find(name);
@@ -1176,12 +1385,29 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         // change. Nothing here fixes it FOR the model -- the criterion is the model's to
         // set -- but "this is unrunnable, restate it" is an observation it can act on.
         if (!rec.ran) {
+            // TWO CAUSES, ONE FLAG, AND OPPOSITE FIXES. `ran == false` means "not evidence",
+            // and until now it always got the "your contract is unrunnable, re-declare it"
+            // message. That is right when the command could not execute and actively
+            // misleading when it executed fine and merely reported the wrong thing: the
+            // contract may be perfect, and the fix is to the pipeline the model appended to
+            // it, not to `verify_with`. Sending a run off to re-declare a contract that was
+            // never the problem is how it loses turns to the harness's own advice.
+            const std::string_view inverted =
+                unfalsifiable_reason(executable_form(param_value(params, "command")));
             result.summary +=
-                "\n[contract] This is the run's declared verification contract, and it "
-                "could not be executed at all -- so it can never pass, and the run cannot "
-                "finish while it stands. Fix the command itself and re-declare it with "
-                "plan(verify_with=...): use a command you have already watched run in "
-                "this workspace.";
+                inverted.empty()
+                    ? std::string(
+                          "\n[contract] This is the run's declared verification contract, "
+                          "and it could not be executed at all -- so it can never pass, and "
+                          "the run cannot finish while it stands. Fix the command itself and "
+                          "re-declare it with plan(verify_with=...): use a command you have "
+                          "already watched run in this workspace.")
+                    : "\n[contract] That ran, and it is not a reading of the contract: " +
+                          std::string(inverted) +
+                          ". Nothing is wrong with the contract and nothing needs "
+                          "re-declaring -- the output above is still worth reading, but to "
+                          "get a verdict run the check on its own, with nothing piped after "
+                          "it. Its own exit status is the answer.";
             result.retryable = false;
         }
         emit_verifications(before);
@@ -1210,6 +1436,20 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // Refused means the tool NEVER RAN, so it is not an execution (S9.1).
     executed = result.status != tools::Status::Refused;
 
+    // The denominator of the no-progress test, counted at the only place that sees every
+    // call the turn makes -- primary and batched alike, since both come through here.
+    //
+    // A no-op mutation is inert by the same standard a redundant read is: it succeeded, and
+    // the state of the world after it is byte-for-byte the state before. A FAILED call is
+    // not inert -- an error the model has not seen yet is information, and if it sees the
+    // same one twice that is BreakRepeat's finding, not this one.
+    if (executed) {
+        ++turn_calls_;
+        if (result.ok() && result.mutation_was_noop) {
+            ++turn_inert_calls_;
+        }
+    }
+
     // A successful write IS the deliverable. Nothing recorded these before, so the
     // completion check's "no deliverable was recorded" gate could never be satisfied.
     if (decl != nullptr && decl->mutates_workspace && result.ok()) {
@@ -1227,18 +1467,29 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
             // both writes succeeded, and nothing in the trace marked the moment a second
             // tree appeared.
             const std::string norm = platform::lexically_normal(path);
+            // `changed` separates the two things this event used to conflate: a call that
+            // moved the workspace, and a call that asked to and found the move already
+            // made. Both were logged identically, so the trace of a run rewriting one file
+            // twenty times was indistinguishable from a run building twenty files.
             emit("write", {{"path", path},
                            {"normalised", norm},
                            {"tool", name},
+                           {"changed", result.mutation_was_noop ? "0" : "1"},
                            {"first_touch", run_wrote_.count(norm) == 0 ? "1" : "0"},
                            {"distinct_files", std::to_string(ctx_.deliverables().size())}});
-            ctx_.record_deliverable(path);
-            // From here on, a whole-file rewrite of this path is the run editing its own
-            // output rather than destroying the operator's data -- which is the difference
-            // the write gate needs and did not have. Recorded only on SUCCESS: a write
-            // that was refused or failed left the file as the operator had it. Normalised
-            // to match the gate's lookup key.
-            run_wrote_.insert(platform::lexically_normal(path));
+            if (!result.mutation_was_noop) {
+                ctx_.record_deliverable(path);
+                // From here on, a whole-file rewrite of this path is the run editing its
+                // own output rather than destroying the operator's data -- which is the
+                // difference the write gate needs and did not have. Recorded only on
+                // SUCCESS: a write that was refused or failed left the file as the operator
+                // had it. Normalised to match the gate's lookup key.
+                //
+                // A no-op does not claim the path either, and that direction is the safe
+                // one: nothing was written, so nothing of the operator's was replaced, and
+                // the next rewrite of this file should still stop for a human.
+                run_wrote_.insert(norm);
+            }
             // The post-edit check goes on the SAME observation rather than becoming a
             // turn of its own: it is a consequence of this edit, not a separate action,
             // and a turn would violate one-turn-one-outcome (S9.1) and burn an iteration.
@@ -1347,6 +1598,194 @@ std::size_t Agent::take_steering() {
 // been applied and re-applied to a situation it does not move.
 constexpr std::size_t kIneffectiveAfter = 3;
 
+void Agent::run_contract_now(const char* why) {
+    const std::string contract = ctx_.verify_contract();
+    const std::size_t unverified = writes_since_verification();
+    emit("corrective", {{"corrective", "force_verification"},
+                        {"contract", contract},
+                        {"why", why},
+                        {"unverified_writes", std::to_string(unverified)}});
+    const std::size_t before = ctx_.verifications().size();
+    // Through verifier_, for the reasons SynthesizeVerification lists: proven_ is the
+    // falsifiability cache and a fresh Verifier starts empty, and filing under the
+    // canonical contract keeps every spelling of the check on one identity (S10.1).
+    (void)verifier_.run_and_record_as(contract, policy_.sandbox_tier,
+                                      canonicalize_check(contract));
+
+    // THE LEDGER RENDERS A VERDICT AND NOTHING ELSE -- one `- FAIL swift build` line, no
+    // output (ContextStore::render). A run handed that has been told what it already
+    // assumed. What changes the next edit is the compiler's actual complaint, and this
+    // record is the only route it has into the prompt.
+    //
+    // Same reasoning as RederiveContract carrying `stuck.failure` rather than pointing at
+    // the ledger, and the same rule: the sentence describes a state change that HAS
+    // happened -- a command ran, a record was filed -- which is what separates a mechanism
+    // from the prose S9.2 forbids.
+    std::string detail;
+    bool passed = false;
+    if (ctx_.verifications().size() > before) {
+        const context::VerificationRecord& v = ctx_.verifications().back();
+        detail = v.detail;
+        passed = v.passed;
+    }
+    const std::string edits = std::to_string(unverified) +
+                              (unverified == 1 ? " edit" : " edits");
+    context::TurnRecord marker;
+    marker.tool_name = "verify";
+    marker.tool_args_summary = contract;
+    marker.observation =
+        passed ? ("(" + edits + " had gone unchecked, so `" + contract +
+                  "` was run for you, and it PASSES. Whatever you were about to change in "
+                  "that file does not need changing -- go to your open checklist items.)")
+               : ("(" + edits + " had gone unchecked, so `" + contract +
+                  "` was run for you. It still fails, and what follows is the CURRENT "
+                  "output, with every edit you have made since the last run in it:\n\n" +
+                  detail +
+                  "\n\nThis, not your last guess, is what your edits did. Read it before "
+                  "writing that file again.)");
+    marker.observation_is_error = !passed;
+    ctx_.add_turn(std::move(marker));
+}
+
+bool Agent::escalate_ineffective(Corrective c, const std::string& target,
+                                 std::size_t hits) {
+    // RUNG ONE: GET THE RUN NEW EVIDENCE.
+    //
+    // A corrective that keeps firing is a run going round a loop, and a loop is held in
+    // place by a fixed input. The model keeps re-deriving the same move because nothing it
+    // has done since has been measured -- so the escalation is to measure it. This is the
+    // only rung with anything to offer a READ loop too: fresh compiler output changes which
+    // file is worth opening, which is the decision the loop is stuck on.
+    //
+    // Gated on there being unchecked edits. Re-running a check across zero writes returns
+    // the same bytes and teaches nothing, and the case where the CONTRACT is the problem
+    // belongs to RederiveContract, which outranks everything here.
+    //
+    // AND NOT WHEN RUNNING THE CHECK IS ALREADY THE MECHANISM THAT FAILED. A ladder whose
+    // first rung is the corrective being escalated is not a ladder, it is the tally this
+    // pass replaced -- and a run that has been handed three fresh readings of its build
+    // and re-sent the same edit each time is not short of evidence, it is not using it.
+    const bool already_verifying = c == Corrective::ForceVerification ||
+                                   c == Corrective::SynthesizeVerification;
+    if (!already_verifying && !ctx_.verify_contract().empty() &&
+        writes_since_verification() > 0) {
+        run_contract_now("corrective_ineffective");
+        return true;
+    }
+    // RUNG TWO, WHEN THE REPEATED TOOL IS NOT HOW THE WORK GETS DONE.
+    //
+    // kMaxSuppressTurns is capped because a repeated tool is usually the RIGHT tool with
+    // wrong arguments, and holding `read_file` down for a dozen turns would end a healthy
+    // run. Three ineffective firings against this one target is that assumption being
+    // falsified for THIS run by THIS run, so the cap loosens -- for this target only,
+    // scaled by the evidence, and now still bounded, see kMaxEscalatedSuppressTurns.
+    //
+    // MEASURED: `break_repeat` against `read_file` reported `suppressed_turns` of 4 on its
+    // sixth, seventh, eighth, ninth and tenth firings. The window had stopped growing five
+    // firings before anybody looked.
+    //
+    // WHAT USED TO BE HERE, AND WHY IT IS GONE: ForceVerification escalated into this branch
+    // too, on the reasoning that taking the editor away is "the right last answer for a run
+    // that has been given three fresh builds and written the same thing anyway".
+    //
+    // MEASURED, on the run this pass came from: it was the single most destructive thing the
+    // harness did. `escalated_hold` withheld `write_file,replace_in_file` for 12 turns and
+    // `read_file,read_slice` for 20. Across 85 turns the write family was unsamplable on at
+    // least 34, and on at least 15 of those `shell` was gone with it -- so the model was
+    // asked to fix a build with no way to change a file. It did the only thing left and
+    // wrote its files through `shell` heredocs, which are worse in every way that matters:
+    // no path is recorded, no syntax check runs, `mutation_was_noop` cannot fire, and
+    // because `shell` is not `mutates_workspace` those writes never reach
+    // ctx_.workspace_writes() -- which is the input failure_is_unmoved() needs, so the one
+    // detector that would have said "this red has not moved" went blind as well.
+    //
+    // And it was self-sustaining. Withholding the editor made progress impossible, the
+    // absence of progress re-fired the corrective, and the corrective widened the hold:
+    // 14 `corrective_ineffective` events in that run, 41 across the log.
+    //
+    // The premise was also false. The run had NOT been given three fresh builds -- it had
+    // been given three false greens off a `| grep`-terminated command (see
+    // Verifier::run_and_record_as). It was not ignoring evidence; it was acting on evidence
+    // the harness had corrupted.
+    //
+    // So a run that keeps editing blind is escalated by being made to REPLAN, below. That is
+    // a real state change, it lasts one turn, and it asks for the thing that is actually
+    // missing.
+    const bool holds_a_tool = c == Corrective::BreakRepeat && !mutates_workspace(target);
+    if (holds_a_tool && !target.empty() && target != "-") {
+        const int window =
+            std::min(static_cast<int>(hits) * kMaxSuppressTurns, kMaxEscalatedSuppressTurns);
+        for (const std::string& held : answer_family(target)) {
+            bool updated = false;
+            for (auto& [name, turns_left] : suppressed_tools_) {
+                if (name == held) {
+                    turns_left = std::max(turns_left, window);
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated) {
+                suppressed_tools_.emplace_back(held, window);
+            }
+        }
+        emit("corrective", {{"corrective", "escalated_hold"},
+                            {"after", std::string(to_string(c))},
+                            {"tool", target},
+                            {"family", join_names(answer_family(target))},
+                            {"fired", std::to_string(hits)},
+                            {"suppressed_turns", std::to_string(window)}});
+        context::TurnRecord marker;
+        marker.tool_name = target;
+        marker.observation =
+            "(`" + target + "` and everything that answers the same question are held for " +
+            std::to_string(window) + " turns. This run has been through " +
+            std::to_string(hits) +
+            " rounds of the same correction against this same call and has come straight "
+            "back to it every time. Repeating it will not produce a different result -- "
+            "take a different action, or stop and say what is blocking you.)";
+        marker.observation_is_error = true;
+        ctx_.add_turn(std::move(marker));
+        return true;
+    }
+
+    // RUNG TWO FOR EVERYTHING THAT EDITS: MAKE IT REPLAN, DO NOT TAKE THE EDITOR AWAY.
+    //
+    // The state change is real (the next turn's grammar is plan-only, so S9.2 is satisfied by
+    // a mechanism rather than a sentence), it lasts exactly one turn, and it cannot strand the
+    // run -- restating the checklist is what clears it. Compare the twelve- and twenty-turn
+    // holds this replaced: those removed the only tools that can finish the work and left the
+    // model to discover `shell` heredocs.
+    //
+    // It asks for the thing that is actually missing. A run that has re-sent the same edit
+    // three times after three fresh readings does not need fewer tools; its plan is wrong,
+    // and `plan` is the one call that can say so.
+    const bool edits = c == Corrective::ForceVerification ||
+                       (c == Corrective::BreakRepeat && mutates_workspace(target));
+    if (edits) {
+        replan_turns_ = 1;
+        emit("corrective", {{"corrective", "escalated_replan"},
+                            {"after", std::string(to_string(c))},
+                            {"tool", target},
+                            {"fired", std::to_string(hits)}});
+        context::TurnRecord marker;
+        marker.tool_name = target;
+        marker.observation =
+            "(This run has been through " + std::to_string(hits) +
+            " rounds of the same correction against `" + target +
+            "` and has come straight back to it every time, so the next turn is a REPLAN: "
+            "only `plan` can be called, and restating your checklist is what releases it. "
+            "Your editing tools are untouched and will be back immediately afterwards. What "
+            "is being asked for is a different approach, not a smaller one -- say what you "
+            "now believe is wrong, which checklist items that changes, and what you will do "
+            "instead. If something is blocking you that you cannot get past, say that "
+            "instead of restating the same plan.)";
+        marker.observation_is_error = true;
+        ctx_.add_turn(std::move(marker));
+        return true;
+    }
+    return false;
+}
+
 void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
     // A CORRECTIVE THAT KEEPS FIRING IS NOT WORKING. Nothing in the harness measured this,
     // and it is the single loudest signal a bad run produces.
@@ -1356,6 +1795,19 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
     // suppression window is capped at kMaxSuppressTurns, so the model waited it out and
     // came straight back. Every individual `corrective` line in that trace looks like the
     // system working. Only the count says otherwise, and nobody was counting.
+    //
+    // AND THEN NOTHING HAPPENED. The measurement landed and the response did not: this
+    // block emitted its event and fell straight through into the same switch, which
+    // re-applied the identical mechanism. The seventeen `corrective_ineffective` lines in
+    // the run that prompted this pass were followed, every one of them, by a
+    // byte-identical `corrective` line. Counting a failure and repeating it is worse than
+    // not counting it, because the log now says the harness noticed.
+    //
+    // So the count is a LADDER, not a tally. Below the rung, apply the mechanism as
+    // chosen. At or above it, the mechanism has been given three chances against this
+    // exact target and has not moved the run, and the correct move is a different
+    // mechanism -- see escalate_ineffective() for which one and why.
+    bool escalated = false;
     if (c != Corrective::None) {
         const std::string target = turn.tool_name.empty() ? std::string("-") : turn.tool_name;
         const std::string key = std::string(to_string(c)) + ":" + target;
@@ -1367,7 +1819,11 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
                   {"fired", std::to_string(hits)},
                   {"iterations", std::to_string(consecutive_no_progress_)},
                   {"workspace_writes", std::to_string(ctx_.workspace_writes())}});
+            escalated = escalate_ineffective(c, target, hits);
         }
+    }
+    if (escalated) {
+        return;
     }
     // Every branch here CHANGES STATE or CONTROL FLOW. None composes a sentence asking
     // the model to behave -- that is the S9.2 rule, and run_ratchets.py counts the
@@ -1404,7 +1860,27 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
             // turn. Suppressing `read_file` alone hands the next turn `read_slice` on the
             // same path, which is the same answer bought for one turn of delay -- see
             // answer_family().
-            const std::vector<std::string> family = answer_family(turn.tool_name);
+            //
+            // MINUS ANYTHING THAT WRITES. This is the suppression floor, applied at the point
+            // the hold is built rather than filtered out of the grammar later, so
+            // `suppressed_tools_` never contains an entry that would not be honoured.
+            //
+            // A repeated READ is a run going in circles and the tool is not the deliverable,
+            // so holding it forces a different move at no cost to the work. A repeated WRITE
+            // is a different animal: the tool is exactly how the work gets done, and the
+            // model is short of EVIDENCE, not of tools. That case already has its own and
+            // better corrective -- turn_repeated_a_mutation() feeds ForceVerification, which
+            // runs the check and hands back the compiler's current complaint.
+            //
+            // MEASURED: holding the write family produced 34 of 85 turns on which the model
+            // could not edit a file, and it responded by writing its sources through `shell`
+            // heredocs -- untracked, unchecked, and invisible to workspace_writes().
+            std::vector<std::string> family;
+            for (const std::string& name : answer_family(turn.tool_name)) {
+                if (!mutates_workspace(name)) {
+                    family.push_back(name);
+                }
+            }
             emit("corrective", {{"corrective", "break_repeat"},
                                 {"tool", turn.tool_name},
                                 {"family", join_names(family)},
@@ -1465,6 +1941,17 @@ void Agent::apply_corrective(Corrective c, const TurnResult& turn) {
             emit("corrective", {{"corrective", "synthesize_verification"}, {"contract", contract}});
             (void)verifier_.run_and_record_as(contract, policy_.sandbox_tier,
                                               canonicalize_check(contract));
+            return;
+        }
+        case Corrective::ForceVerification: {
+            // Mechanism: run the contract, and hand back its output.
+            //
+            // Note what this deliberately does NOT do: it does not take the editor away.
+            // The run is not editing too much, it is editing without looking, and a model
+            // denied `write_file` for a turn comes back with the same guess and the other
+            // tool. Giving it the compiler's current answer is the only move that changes
+            // what it writes next.
+            run_contract_now("writes_unverified");
             return;
         }
         case Corrective::BlockRefusedTool: {
@@ -1773,6 +2260,26 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             }
         }
 
+        // A RUN THAT HAS ENDED ITSELF IS NOT A RUN TO CORRECT.
+        //
+        // `halted_` is only tested at the top of the while, so a turn that sets it during
+        // dispatch still falls through everything below it -- the corrective, the
+        // completion verdict and the stall detectors. That is right for the budget halt,
+        // which is chosen down there and wants the full accounting first. It is wrong for
+        // ask_user and exit_plan_mode: that turn produced no deliverable, ticked no
+        // checklist item and ran no contract, so the verdict reads incomplete and the
+        // streak reads no-progress, and a run that did precisely what it was asked would
+        // be handed a corrective on its way out and filed under a stall reason it had
+        // nothing to do with.
+        //
+        // Placed AFTER every record above and before the first judgement below: the turn
+        // and its batched calls are in the context the operator's reply continues from,
+        // and nothing gets to grade them.
+        if (halted_) {
+            report.termination_reason = halt_reason_;
+            break;
+        }
+
         // Compaction, not eviction (S8.3) -- and only when the BUDGET says so.
         //
         // This used to run unconditionally every turn against a turn-count limit, so a
@@ -1820,16 +2327,68 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         const bool checklist_unreconciled =
             observed.evidence_complete && observed.open_items > 0 && !reconcile_asked_;
 
+        // TWO WAYS a run's edits get ahead of its evidence, one corrective.
+        //
+        // The first is arithmetic: enough writes have piled up since the last check that
+        // the next edit cannot be informed by anything observed. The second is a repeat --
+        // the run has re-sent an edit it already made, which is the same condition arriving
+        // early and loudly. Both mean the model is working from stale output, and both are
+        // answered by running the check rather than by narrowing its tools, which is why
+        // the repeated mutation is routed HERE and not into BreakRepeat.
+        const bool writes_unverified =
+            writes_since_verification() >=
+                static_cast<std::size_t>(kMaxUnverifiedWrites) ||
+            turn_repeated_a_mutation(turn);
+
         // At most ONE corrective per turn, chosen by rank (S9.2).
         apply_corrective(choose_corrective(turn, repeats_, refusals_, report.iterations,
                                            config_.budget, out_of_time,
                                            !ctx_.verify_contract().empty(),
-                                           contract_unmoved, checklist_unreconciled),
+                                           contract_unmoved, checklist_unreconciled,
+                                           writes_unverified),
                          turn);
 
         // Any verification a corrective produced flows to the UI from the ledger --
         // the one choke point, so nothing can report a result that was not recorded.
         emit_verifications(before);
+
+        // NOT IN A CONVERSATIONAL MODE, for either of the two judgements below.
+        //
+        // Completion here means "the declared command has been seen to pass and no item is
+        // open". A plan-mode run declares no command and writes no code, so it can never
+        // satisfy that -- and it should not have to: it is finished when the human says the
+        // plan is right, which is what exit_plan_mode is for. Left in, the verdict spends a
+        // `not_complete` event every turn saying the run has no contract, which is true and
+        // is not news.
+        //
+        // The stall detectors below are the half that actually broke it. A conversational
+        // turn produces text and calls nothing, which is `made_no_move` by definition, so
+        // three of them in a row ended the run `text_only_no_progress` -- a stall reason,
+        // for a mode whose entire output is text. That is what plan mode looked like from
+        // the outside: it talked, and the harness scored talking as failing.
+        if (policy_.conversational) {
+            // AND A TURN THAT CALLED NOTHING HAS SAID ITS PIECE.
+            //
+            // Removing the stall detectors removes the only bound this loop had, and a
+            // mode that never stalls and never completes would run to the budget narrating
+            // -- 200 turns of it. But the ending is not a stall, it is the shape of a
+            // conversation: the model read what it needed, wrote an answer and made no
+            // call, and there is nobody but the operator who can say what happens next.
+            //
+            // This is also what makes the mode work without the model having learned
+            // `ask_user`. That tool is worth having -- it is explicit, and it tells the
+            // surface a question is waiting rather than a statement -- but a mode that
+            // depends on the model reaching for a new tool to avoid spinning is a mode
+            // that spins.
+            if (turn.outcome == Outcome::TextOnly) {
+                halted_ = true;
+                halt_reason_ = "awaiting_user";
+                report.termination_reason = halt_reason_;
+                emit("yielded", {{"why", "text_only_turn"}});
+                break;
+            }
+            continue;
+        }
 
         const CompletionVerdict verdict = evaluate_completion(ctx_, checklist_waived_);
         if (verdict.complete) {
@@ -1883,16 +2442,37 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         //
         // MEASURED: turns 34, 35 and 37 of a 38-turn run each read the same four unchanged
         // files, all twelve reads collapsed as duplicates, and `no_progress_streak` read 0.
-        const bool reread_only_turn = turn.outcome == Outcome::ToolCallExecuted &&
-                                      turn_reads_ > 0 &&
-                                      turn_reads_redundant_ == turn_reads_ &&
-                                      turn_is_reads_only(turn);
+        //
+        // AND A WRITE STILL CANCELLED IT, which is how the same failure came back wearing
+        // different tools. The test above asks whether every READ was redundant and hands
+        // the turn a pass the moment it also writes -- so a model that alternates read and
+        // rewrite is inert on every turn and stalled on none of them. That is not a corner
+        // case; it is what the read suppression pushed the next run into.
+        //
+        // MEASURED, the run that prompted this pass: 73 turns, 39 writes, 13 of them
+        // rewriting bytes already on disk, build red throughout, `no_progress_streak` at 0
+        // on 68 turns and never past 1 against a cap of 3. Not one stall was detectable.
+        //
+        // So the question widens from "were all the reads redundant" to "did ANY call this
+        // turn add something" -- counted over every call, with a write the file did not
+        // need counting exactly as a read the prompt already held. It cannot misfire on
+        // real work: a changing write, a build, a search, a listing, or a failed call all
+        // increment the denominator and never the numerator, so one of them anywhere in the
+        // turn takes it out of this branch, exactly as before.
+        const bool inert_turn = turn.outcome == Outcome::ToolCallExecuted &&
+                                turn_calls_ > 0 && turn_inert_calls_ == turn_calls_;
         const bool made_no_move = turn.outcome == Outcome::TextOnly ||
-                                  turn.outcome == Outcome::LengthCapped || reread_only_turn;
+                                  turn.outcome == Outcome::LengthCapped || inert_turn;
         consecutive_no_progress_ = made_no_move ? consecutive_no_progress_ + 1 : 0;
-        if (reread_only_turn) {
-            emit("reread_only_turn",
-                 {{"reads", std::to_string(turn_reads_)},
+        if (inert_turn) {
+            // The breakdown, not just the verdict: "four redundant reads" and "two writes
+            // that changed nothing" are different bugs with the same streak, and the
+            // triage that reads this log needs to tell them apart.
+            emit("inert_turn",
+                 {{"calls", std::to_string(turn_calls_)},
+                  {"redundant_reads", std::to_string(turn_reads_redundant_)},
+                  {"unchanged_writes",
+                   std::to_string(turn_inert_calls_ - turn_reads_redundant_)},
                   {"streak", std::to_string(consecutive_no_progress_)}});
         }
 
@@ -1940,11 +2520,18 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             }
             // Named for what actually happened: "it narrated" and "it thought until
             // the token cap" are different failures and want different responses.
+            //
+            // And so is the third one, which is why it gets its own name rather than
+            // borrowing the narration one. A run that called tools on every turn and
+            // changed nothing is not a run that stopped working -- it is a run that kept
+            // working on nothing, and reporting it as `text_only_no_progress` sends the
+            // reader looking for narration that is not in the trace. The same mistake
+            // `budget_exhausted` made when it meant two different limits.
             report.termination_reason =
-                stalled_without_plan
-                    ? "text_only_no_plan"
-                    : (turn.outcome == Outcome::LengthCapped ? "length_capped_no_progress"
-                                                             : "text_only_no_progress");
+                stalled_without_plan ? "text_only_no_plan"
+                : turn.outcome == Outcome::LengthCapped ? "length_capped_no_progress"
+                : inert_turn                            ? "inert_calls_no_progress"
+                                                        : "text_only_no_progress";
             break;
         }
     }

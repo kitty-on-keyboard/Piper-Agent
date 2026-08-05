@@ -16,6 +16,8 @@
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <utility>
+#include <vector>
 
 extern char** environ;
 
@@ -163,85 +165,235 @@ namespace {
 
 constexpr std::string_view kDisableSandbox = "--disable-sandbox";
 
-bool is_word_char(char c) {
-    return (std::isalnum(static_cast<unsigned char>(c)) != 0) || c == '_' || c == '-' ||
-           c == '.';
+// WHAT USED TO BE HERE: `at_command_position`, which asked whether the character before a
+// `swift` token was start-of-string or one of `;&|(`.
+//
+// It was the whole bug. In `xcrun swift build` the preceding character is the `n` of
+// `xcrun`, so `swift` read as an ARGUMENT and the rewrite declined -- and `xcrun` is how
+// every model on a Mac spells a toolchain invocation, because it is how Apple's own docs
+// spell it.
+//
+// MEASURED: an 85-turn run whose declared contract was `xcrun swift build`, at T1, on a
+// tree whose only real problem was a handful of Mach API type errors. The rewrite fired
+// ZERO times. Its first verification was the nesting EPERM, so was every one after it, and
+// the model spent the budget rewriting correct code to chase a failure the harness was
+// causing. `xcrun` appeared nowhere in this file.
+//
+// The replacement asks the right question -- "what program does this segment RUN?" -- and
+// answers it by skipping the things that stand in front of a program without being one.
+// That is strictly more permissive about position and no more permissive about identity:
+// `echo swift build` and `grep -r 'swift test' .` still find `echo` and `grep` and are
+// still left alone.
+
+// A program whose only job is to run ANOTHER program, so the rewrite must look past it.
+struct Launcher {
+    std::string_view name;
+    // Flags taking a SEPARATE value token, which has to be skipped along with the flag.
+    // Space-delimited. Without this, `xcrun -sdk macosx swift build` stops at `macosx`,
+    // concludes the program is `macosx`, and declines to rewrite a plain swift build.
+    std::string_view value_flags;
+};
+
+constexpr Launcher kLaunchers[] = {
+    {"xcrun", "-sdk --sdk -toolchain --toolchain -find --find -run"},
+    {"env", "-u --unset -S --split-string"},
+    {"arch", "-arch"},
+    {"nice", "-n"},
+    {"stdbuf", "-i -o -e --input --output --error"},
+    {"caffeinate", "-t -w"},
+    {"time", "-o -f --output --format"},
+    {"command", ""},
+    {"exec", ""},
+    {"setsid", ""},
+};
+
+// The basename of a token: `/usr/bin/swift` and `swift` are the same program.
+std::string_view basename_of(std::string_view tok) {
+    const std::size_t slash = tok.find_last_of('/');
+    return slash == std::string_view::npos ? tok : tok.substr(slash + 1);
 }
 
-// True when the token starting at `start` is where a COMMAND goes, rather than an
-// argument to one. Without this, `echo "swift build is how you build it"` would be
-// rewritten -- the match has to be the program being run, not the word appearing.
-bool at_command_position(const std::string& s, std::size_t start) {
-    // Back over the program's own path: /usr/bin/swift is the same command as swift.
-    while (start > 0 && (is_word_char(s[start - 1]) || s[start - 1] == '/')) {
-        --start;
+const Launcher* launcher_for(std::string_view name) {
+    for (const Launcher& l : kLaunchers) {
+        if (l.name == name) {
+            return &l;
+        }
     }
-    while (start > 0 && (std::isspace(static_cast<unsigned char>(s[start - 1])) != 0)) {
-        --start;
-    }
-    if (start == 0) {
-        return true;
-    }
-    const char prev = s[start - 1];
-    return prev == ';' || prev == '&' || prev == '|' || prev == '(' || prev == '\n';
+    return nullptr;
 }
 
-// The next whitespace-delimited word after `pos`, and where it ends.
-std::string_view next_word(const std::string& s, std::size_t pos, std::size_t& end) {
-    while (pos < s.size() && (std::isspace(static_cast<unsigned char>(s[pos])) != 0)) {
+bool takes_value(std::string_view value_flags, std::string_view tok) {
+    std::size_t at = 0;
+    while (at < value_flags.size()) {
+        const std::size_t end = value_flags.find(' ', at);
+        const std::size_t stop = end == std::string_view::npos ? value_flags.size() : end;
+        if (value_flags.substr(at, stop - at) == tok) {
+            return true;
+        }
+        at = stop + 1;
+    }
+    return false;
+}
+
+// The next whitespace-delimited token in [pos, end), and where it ends. Tokens are runs of
+// non-whitespace: a program can be `/usr/bin/swift` and a flag can be `--sdk=macosx`, and
+// neither is a run of `is_word_char`.
+std::string_view next_token(const std::string& s, std::size_t pos, std::size_t end,
+                            std::size_t& tok_end) {
+    while (pos < end && (std::isspace(static_cast<unsigned char>(s[pos])) != 0)) {
         ++pos;
     }
     const std::size_t begin = pos;
-    while (pos < s.size() && is_word_char(s[pos])) {
+    while (pos < end && (std::isspace(static_cast<unsigned char>(s[pos])) == 0)) {
         ++pos;
     }
-    end = pos;
+    tok_end = pos;
     return std::string_view(s).substr(begin, pos - begin);
+}
+
+// The program a segment invokes, and where its token ends. Skips what precedes a program
+// without being one: `VAR=value` assignments, `cd DIR`, and launcher prefixes with their
+// flags. Stops at the first token that is none of those, so an unrelated program shadows
+// anything after it -- which is what keeps `echo swift build` and `grep 'swift test'` out.
+std::string_view segment_program(const std::string& s, std::size_t begin, std::size_t end,
+                                 std::size_t& program_end) {
+    std::size_t at = begin;
+    while (at < end) {
+        std::size_t tok_end = 0;
+        const std::string_view tok = next_token(s, at, end, tok_end);
+        if (tok.empty()) {
+            return {};
+        }
+        const std::string_view name = basename_of(tok);
+        // An inline assignment: `FOO=1 swift build`. A leading dash means it is a flag
+        // like `--sdk=macosx`, not an assignment.
+        if (!tok.empty() && tok.front() != '-' &&
+            tok.find('=') != std::string_view::npos) {
+            at = tok_end;
+            continue;
+        }
+        if (name == "cd") {
+            at = tok_end;
+            std::size_t dir_end = 0;
+            (void)next_token(s, at, end, dir_end);
+            at = dir_end;
+            continue;
+        }
+        if (const Launcher* l = launcher_for(name); l != nullptr) {
+            at = tok_end;
+            // The launcher's own flags, and the value token of any flag that takes one.
+            while (at < end) {
+                std::size_t flag_end = 0;
+                const std::string_view flag = next_token(s, at, end, flag_end);
+                if (flag.empty() || flag.front() != '-') {
+                    break;
+                }
+                at = flag_end;
+                if (takes_value(l->value_flags, flag)) {
+                    std::size_t val_end = 0;
+                    (void)next_token(s, at, end, val_end);
+                    at = val_end;
+                }
+            }
+            continue;
+        }
+        program_end = tok_end;
+        return name;
+    }
+    return {};
+}
+
+// Top-level segment bounds: the string split on `; | & \n (` outside quotes and outside
+// `$(...)`. One rewrite decision is made PER SEGMENT, because `swift build | tee log` and
+// `echo hi && swift test` each contain exactly one program that matters, in a different
+// place. Empty segments (from the second `&` of an `&&`) yield no program and are skipped.
+std::vector<std::pair<std::size_t, std::size_t>> segments(const std::string& s) {
+    std::vector<std::pair<std::size_t, std::size_t>> out;
+    std::size_t begin = 0;
+    char quote = '\0';
+    int depth = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (quote != '\0') {
+            if (c == '\\' && quote == '"' && i + 1 < s.size()) {
+                ++i;
+            } else if (c == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (c == '\'' || c == '"' || c == '`') {
+            quote = c;
+            continue;
+        }
+        if (c == '$' && i + 1 < s.size() && s[i + 1] == '(') {
+            ++depth;
+            ++i;
+            continue;
+        }
+        if (c == ')' && depth > 0) {
+            --depth;
+            continue;
+        }
+        if (depth == 0 && (c == ';' || c == '|' || c == '&' || c == '\n' || c == '(')) {
+            out.emplace_back(begin, i);
+            begin = i + 1;
+        }
+    }
+    out.emplace_back(begin, s.size());
+    return out;
 }
 
 } // namespace
 
 std::string t1_compat_rewrite(const std::string& command) {
-    // Already asked for by hand -- leave it exactly as written. A second copy of the flag
-    // is harmless to swift and confusing to read, and the model that typed it does not
-    // need to be told the harness agrees.
-    if (command.find(kDisableSandbox) != std::string::npos) {
-        return {};
-    }
-
-    std::string out;
-    std::size_t scan = 0;
-    bool changed = false;
-    while (true) {
-        const std::size_t at = command.find("swift", scan);
-        if (at == std::string::npos) {
-            break;
+    // Where to splice ` --disable-sandbox`, in ascending order.
+    std::vector<std::size_t> insert_at;
+    for (const auto& [begin, end] : segments(command)) {
+        // Already asked for by hand -- leave this segment exactly as written. A second copy
+        // of the flag is harmless to swift and confusing to read, and the model that typed
+        // it does not need to be told the harness agrees.
+        //
+        // PER SEGMENT, not per command: `swift build --disable-sandbox && swift test` has
+        // one half already handled and one half that still nests, and a whole-string check
+        // silently declined to fix the second.
+        const std::string_view seg = std::string_view(command).substr(begin, end - begin);
+        if (seg.find(kDisableSandbox) != std::string_view::npos) {
+            continue;
         }
-        const std::size_t after = at + 5;
-        // Whole word on the right, so `swiftc` and `swift-format` are not this command.
-        const bool whole_word = after >= command.size() || !is_word_char(command[after]);
-        if (!whole_word || !at_command_position(command, at)) {
-            out.append(command, scan, after - scan);
-            scan = after;
+        std::size_t program_end = 0;
+        // Whole basename, so `swiftc` and `swift-format` are not this program.
+        if (segment_program(command, begin, end, program_end) != "swift") {
             continue;
         }
         std::size_t sub_end = 0;
-        const std::string_view sub = next_word(command, after, sub_end);
-        if (sub != "build" && sub != "test" && sub != "run") {
-            out.append(command, scan, sub_end - scan);
-            scan = sub_end;
+        const std::string_view sub = next_token(command, program_end, end, sub_end);
+        // The four SwiftPM verbs that sandbox a manifest compile and accept the flag.
+        //
+        // `package` was previously excluded on the grounds that it was out of scope. It is
+        // not: `swift package resolve` and `swift package update` compile Package.swift the
+        // same way `build` does and die at T1 the same way, and dependency resolution is
+        // part of building. Both flag positions were checked against SwiftPM 6 on the host
+        // -- `swift package --disable-sandbox describe` and `swift package describe
+        // --disable-sandbox` are both accepted -- so this keeps the single uniform rule:
+        // immediately after the subcommand.
+        if (sub != "build" && sub != "test" && sub != "run" && sub != "package") {
             continue;
         }
         // After the subcommand, where swift-argument-parser takes it and where it stays
         // out of the way of anything the caller appended (`2>&1 | tee ...`).
-        out.append(command, scan, sub_end - scan);
+        insert_at.push_back(sub_end);
+    }
+    if (insert_at.empty()) {
+        return {};
+    }
+    std::string out;
+    std::size_t scan = 0;
+    for (const std::size_t at : insert_at) {
+        out.append(command, scan, at - scan);
         out += ' ';
         out += kDisableSandbox;
-        scan = sub_end;
-        changed = true;
-    }
-    if (!changed) {
-        return {};
+        scan = at;
     }
     out.append(command, scan, std::string::npos);
     return out;

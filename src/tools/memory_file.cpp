@@ -29,8 +29,38 @@ bool would_overwrite_existing(const std::string& root, const std::string& rel) {
     return !(f.ok() && f.bytes.empty());
 }
 
-platform::WriteResult Registry::commit_write(const std::string& abs_path,
-                                             std::string_view content) {
+// The bytes on disk are already the bytes asked for.
+//
+// Read-based rather than a hash or a size compare, and it takes the SAME door
+// would_overwrite_existing takes. A size compare is the tempting cheap version and it is
+// wrong in the direction that matters: the run this was built for wrote 5327 bytes to one
+// file four times, and the interesting question is never "is it the same length".
+//
+// A file too large to read is not unchanged as far as this can prove, so it is written.
+// Being wrong here costs one redundant write; being wrong the other way silently drops an
+// edit, which is the one outcome a write tool may never have.
+static bool already_holds(const std::string& abs_path, std::string_view content,
+                          std::size_t max_bytes) {
+    const fsx::FileContents f = fsx::read_file_whole(abs_path, max_bytes);
+    return f.ok() && f.bytes.size() == content.size() && f.bytes == content;
+}
+
+CommitOutcome Registry::commit_write(const std::string& abs_path,
+                                     std::string_view content) {
+    CommitOutcome out;
+    // BEFORE the sink and before the directory is made, because neither is worth doing for
+    // a write that is not going to happen -- and routing an empty edit through the editor
+    // would put an undo step in the operator's history for a change that does not exist.
+    //
+    // Deliberately NOT conditioned on the file being one this run wrote. A model that
+    // re-writes the operator's file verbatim has made exactly as little progress as one
+    // that re-writes its own, and the write gate upstream has already had its say about
+    // whether the call was allowed to run at all.
+    if (already_holds(abs_path, content, ctx_.max_read_bytes)) {
+        out.write.status = platform::FsStatus::Ok;
+        out.unchanged = true;
+        return out;
+    }
     if (!edit_sink_) {
         // The parent directory is MADE, not required to exist. Writing `src/store.py`
         // into an empty workspace is the most ordinary thing an agent does, and without
@@ -56,13 +86,14 @@ platform::WriteResult Registry::commit_write(const std::string& abs_path,
             // sentence. create_directories also sets ec for "already exists" on some
             // implementations, and that is not an error.
         }
-        return fsx::write_file_atomic(abs_path, content);
+        out.write = fsx::write_file_atomic(abs_path, content);
+        return out;
     }
     const EditOutcome o = edit_sink_(abs_path, std::string(content));
-    platform::WriteResult w;
-    w.status = o.applied ? platform::FsStatus::Ok : platform::FsStatus::IoError;
-    w.error = o.applied ? std::string() : ("the editor did not apply the edit: " + o.error);
-    return w;
+    out.write.status = o.applied ? platform::FsStatus::Ok : platform::FsStatus::IoError;
+    out.write.error =
+        o.applied ? std::string() : ("the editor did not apply the edit: " + o.error);
+    return out;
 }
 
 namespace {

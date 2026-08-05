@@ -92,6 +92,57 @@ TEST(a_command_that_could_not_run_is_not_a_red) {
     CHECK(v.is_proven("false"));
 }
 
+// THE FALSE GREEN, END TO END, AGAINST A REAL SHELL.
+//
+// `fail.sh` prints an error and exits 1 -- a broken build. Piping it into `grep error:`
+// inverts the verdict, because a pipeline exits with its LAST stage's status and grep
+// succeeds precisely when it FINDS the errors. Before the guard in run_and_record_as, this
+// recorded `passed: 1`.
+//
+// MEASURED, and it is the run this whole pass came from: three records with
+// `passed: 1, falsifiable: 1` against `xcrun swift build` on a tree the same command was
+// printing sixteen compiler errors from. Every `| tail` spelling in that trace is a FAIL and
+// every `| grep` spelling is a PASS, on one unchanged broken workspace. The model then said
+// "the build has been passing consistently (12 successful runs)" and began closing tasks --
+// not a hallucination, an accurate reading of the ledger it had been handed.
+TEST(a_grep_terminated_reading_of_the_contract_is_not_a_green) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(::system(("printf 'echo error: boom\\nexit 1\\n' > " + root + "/fail.sh").c_str()) ==
+            0);
+    tools::Registry reg = make_registry(root);
+    context::ContextStore ctx("m");
+    loop::Verifier v(reg, ctx);
+
+    const std::string contract = "sh fail.sh";
+    // Sanity: on its own the check is a real red, so the ledger has something honest to hold.
+    CHECK(!v.run_and_record(contract, 1));
+    REQUIRE(ctx.verifications().size() == 1);
+    CHECK(ctx.verifications()[0].ran);
+
+    // The pipeline a model reaches for to READ the errors. Its shell status is 0 -- grep
+    // found them -- and it is filed against the same contract, because dispatch_call routes
+    // by containment and this contains `sh fail.sh`.
+    const std::string grepped = "sh fail.sh 2>&1 | grep error:";
+    CHECK(!v.run_and_record_as(grepped, 1, contract));
+    REQUIRE(ctx.verifications().size() == 2);
+    const context::VerificationRecord& rec = ctx.verifications()[1];
+    // Not a pass. This is the assertion the run was lost for want of.
+    CHECK(!rec.passed);
+    // And not a red either: an inverted status is not evidence in EITHER direction, exactly
+    // as a refusal and an unexecutable command are not (S6.2). Recording it as a red would
+    // hand the contract a falsifiability proof off a reading that measured nothing.
+    CHECK(!rec.ran);
+    CHECK(rec.detail.find("NOT A VERDICT") == 0);
+    // It is filed under the declared contract, so the ledger still shows the run took a
+    // reading -- what it does not do is call it an answer.
+    CHECK_EQ(rec.contract, lmp::loop::canonicalize_check(contract));
+
+    // The output is still handed back: reading a build's errors this way is a normal move
+    // and the guard must not take it away, only refuse to call it a verdict.
+    CHECK(rec.detail.find("error: boom") != std::string::npos);
+}
+
 TEST(an_unproven_check_is_recorded_as_unproven) {
     const std::string root = temp_dir();
     REQUIRE(!root.empty());
@@ -204,6 +255,72 @@ TEST(a_trailing_grep_is_reported_as_a_broken_criterion_not_a_broken_build) {
     CHECK(lmp::loop::unfalsifiable_reason("swift test --filter HostStatsServiceTests").empty());
     // A pipeline whose last stage is a real command still decides its own status.
     CHECK(lmp::loop::unfalsifiable_reason("swift test | ./summarize").empty());
+}
+
+// KNOWING IS NOT THE SAME AS ACTING ON IT. unfalsifiable_reason() was only ever asked at
+// DECLARATION time, about the contract as declared -- never about the command actually being
+// recorded against it. dispatch_call routes by containment, so
+// `xcrun swift build 2>&1 | grep "error:" | head -30` contains the declared `xcrun swift
+// build` and was accepted as a reading of it. executable_form() strips the `| head` and
+// leaves the `| grep`, whose status is the pipeline's, and grep exits 0 when it FINDS errors.
+//
+// MEASURED, and this is the run the whole pass came from: three records with
+// `passed: 1, falsifiable: 1` against `xcrun swift build` on a tree that same command was
+// printing sixteen compiler errors from. In that trace every `| tail` spelling is a FAIL and
+// every `| grep` spelling is a PASS, on one unchanged broken workspace. The model then said
+// "the build has been passing consistently (12 successful runs)" and started closing tasks --
+// an accurate reading of the ledger it had been handed.
+TEST(an_inverted_exit_status_is_never_recorded_as_a_reading) {
+    // The two spellings the model actually alternated between, on one broken build.
+    const std::string grepped =
+        "xcrun swift build --disable-sandbox 2>&1 | grep \"error:\" | head -30";
+    const std::string tailed = "xcrun swift build --disable-sandbox 2>&1 | tail -5";
+
+    // The formatter comes off both. What is left of the grepped one is a pipeline whose
+    // verdict belongs to grep -- which is exactly what must not become a verdict.
+    CHECK_EQ(lmp::loop::executable_form(grepped),
+             std::string("xcrun swift build --disable-sandbox 2>&1 | grep \"error:\""));
+    CHECK(!lmp::loop::unfalsifiable_reason(lmp::loop::executable_form(grepped)).empty());
+    // The tailed spelling is fine once the formatter is stripped: swift's own status decides.
+    CHECK(lmp::loop::unfalsifiable_reason(lmp::loop::executable_form(tailed)).empty());
+
+    // AND THIS IS HOW IT REACHED THE CONTRACT AT ALL. The grepped form is NOT the same
+    // identity as the bare check -- the `| grep` is load-bearing and correctly survives
+    // canonicalisation -- but dispatch_call routes by CONTAINMENT, and the grepped command
+    // contains the declared one. So it is accepted as a reading of the contract while
+    // carrying grep's exit status, which is the entire defect in one line.
+    CHECK(lmp::loop::canonicalize_check(grepped).find(
+              lmp::loop::canonicalize_check("xcrun swift build")) != std::string::npos);
+    CHECK(lmp::loop::canonicalize_check(grepped) !=
+          lmp::loop::canonicalize_check("xcrun swift build"));
+}
+
+// THE COMPAT FLAG IS NOT PART OF THE CRITERION. At T1 the harness adds `--disable-sandbox`
+// itself (tools::t1_compat_rewrite), so which spelling reaches the ledger is not even the
+// model's choice -- and two spellings of one check must not be two contracts.
+//
+// MEASURED: a run declared `xcrun swift build` and took nine readings of it, then corrected
+// itself to `xcrun swift build --disable-sandbox`. That minted a SECOND contract with an
+// empty history: `falsifiable` dropped back to 0, a second baseline ran, and
+// failure_is_unmoved -- which requires two readings to share a contract string -- went blind
+// across the fork at the exact moment the model started getting the command right.
+TEST(the_sandbox_compat_flag_does_not_fork_the_contract_identity) {
+    CHECK_EQ(lmp::loop::canonicalize_check("xcrun swift build --disable-sandbox"),
+             lmp::loop::canonicalize_check("xcrun swift build"));
+    CHECK_EQ(lmp::loop::canonicalize_check("swift test --disable-sandbox 2>&1 | tail -20"),
+             lmp::loop::canonicalize_check("swift test"));
+    // One identity, and it is the readable one.
+    CHECK_EQ(lmp::loop::canonicalize_check("xcrun swift build --disable-sandbox"),
+             std::string("xcrun swift build"));
+
+    // BUT WHAT RUNS KEEPS THE FLAG. Stripping it from the executable form would hand the
+    // nesting EPERM straight back, which is the failure this flag exists to prevent.
+    CHECK_EQ(lmp::loop::executable_form("xcrun swift build --disable-sandbox"),
+             std::string("xcrun swift build --disable-sandbox"));
+
+    // A flag that merely starts with the same bytes is a different flag and survives.
+    CHECK_EQ(lmp::loop::canonicalize_check("swift build --disable-sandboxing"),
+             std::string("swift build --disable-sandboxing"));
 }
 
 // --- unmoved failures (Gap 1, Gap 2) ----------------------------------------

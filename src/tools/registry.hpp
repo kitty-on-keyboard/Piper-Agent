@@ -73,6 +73,26 @@ struct ToolDecl {
     //
     // A tool knows what it does at declaration time. It does not need to be guessed at.
     bool irreversible = false;
+    // This tool's work happens in a process this binary does not control, so none of the
+    // three flags above is a claim we can stand behind -- they describe what the peer
+    // SAYS it does. Declared separately because trust already meant something else here:
+    // a trusted MCP server's tools set mutates_workspace, executes_commands and
+    // irreversible all false, which is the right answer to "does this need a card" and
+    // the wrong answer to "may a read-only mode call it". Mode policy reads this.
+    bool remote = false;
+    // This tool does no work without an execution grant: at T0 it can only refuse.
+    //
+    // Distinct from executes_commands, which means "carries an operator-visible command
+    // string that the blast-radius classifier must read". `shell` is both. The three git
+    // tools are only this -- they run a subprocess through run_git but take no `command`
+    // param, so declaring them executes_commands would send them into a command gate with
+    // an empty string to classify. Mode filtering needs the first fact and the approval
+    // routing needs the second, and they are not the same fact.
+    bool needs_execution = false;
+    // This tool only means anything in a mode that YIELDS to a human. Asking a question is
+    // not a tool call in a run nobody is watching -- it is a turn spent producing text
+    // that will be read by the loop and thrown away.
+    bool conversational_only = false;
 };
 
 // Everything a tool invocation may touch. Paths are resolved against `root` and
@@ -122,6 +142,23 @@ struct EditOutcome {
 using EditSink =
     std::function<EditOutcome(const std::string& abs_path, const std::string& new_content)>;
 
+// What one trip through the write door did, including the case where it did not need to
+// open. `unchanged` is a separate answer from `ok()`: nothing failed, and nothing moved.
+//
+// Not a flag on platform::WriteResult, because that struct is the filesystem's answer to
+// "did these bytes land" and this is the harness's answer to "was there anything to
+// land" -- a policy question the filesystem has no opinion about.
+struct CommitOutcome {
+    platform::WriteResult write;
+    // The file already held exactly these bytes, so no write was attempted at all. The
+    // read that proves it is the same read replace_in_file already does; write_file pays
+    // one extra whole-file read per call, which is the cost of being able to tell an edit
+    // from an echo.
+    bool unchanged = false;
+
+    [[nodiscard]] bool ok() const noexcept { return write.ok(); }
+};
+
 class Registry {
   public:
     explicit Registry(WorkspaceContext ctx);
@@ -136,7 +173,16 @@ class Registry {
     [[nodiscard]] const ToolDecl* find(const std::string& name) const;
 
     // The <tools> block for the system prompt: JSON schemas, one per tool.
+    //
+    // The filtered overload exists so a mode can advertise only what it will actually
+    // honour. The registry itself stays run-constant and mode-blind, which S6.4 requires
+    // -- the tool set is baked into the KV prefix -- and that still holds, because the
+    // mode is fixed at lmp/start and so the filtered set is constant for the run too.
+    // Filtering here is not the enforcement; Agent::gate_call is. This is so the model is
+    // never shown a tool that would be refused, and does not spend turns finding out.
     [[nodiscard]] std::string tools_json() const;
+    [[nodiscard]] std::string tools_json(
+        const std::function<bool(const ToolDecl&)>& include) const;
 
     // Executes a call that already passed the grammar (so `name` is registered and
     // required params are present -- the guard enforced it). `approved_tier` is the
@@ -221,8 +267,11 @@ class Registry {
     // atomically to disk when none is. Every mutating tool goes through here, so the
     // extension handover cannot be half-wired -- a tool that forgot would be writing
     // behind the editor's back and nothing would say so.
-    [[nodiscard]] platform::WriteResult commit_write(const std::string& abs_path,
-                                                     std::string_view content);
+    //
+    // The unchanged check lives HERE for the same reason the door does. Putting it in
+    // each handler means three copies of it and a fourth tool added later with none.
+    [[nodiscard]] CommitOutcome commit_write(const std::string& abs_path,
+                                             std::string_view content);
 
     // Runs `git <args>` in the workspace under the same sandbox as any other command.
     // `args` is composed by the registry, never supplied by the model.

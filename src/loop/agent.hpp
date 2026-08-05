@@ -165,6 +165,11 @@ struct Observer {
     // sidebar had a Checklist panel and nothing ever filled it: `lmp/checklist` was
     // declared in the schema, generated on both sides, and emitted by nobody.
     std::function<void(const std::vector<context::ChecklistItem>&)> on_checklist;
+    // The plan a conversational run is handing over, once, as the run ends. Its own
+    // callback and not the answer channel, because unlike a question this is not prose to
+    // read and reply to -- the surface has to offer a decision on it, and the text becomes
+    // the mission of the run that implements it.
+    std::function<void(const std::string& plan)> on_plan_ready;
 };
 
 struct RunReport {
@@ -200,6 +205,16 @@ class Agent {
     // One iteration, exposed so the scripted-loop suite can assert per-turn (S11.2).
     [[nodiscard]] TurnResult step(const model::CancelToken& cancel);
 
+    // The <tools> block this run will actually send, AFTER the mode has filtered it.
+    //
+    // Exposed for the gate: "plan mode does not permit a write" is testable through the
+    // refusal, but "plan mode never OFFERS a write" is the half that decides whether the
+    // model wastes turns discovering it, and it is unobservable from the outside without
+    // this. The two are asserted together in tests/loop/test_agent_step.cpp.
+    [[nodiscard]] const std::string& tools_guidance() const noexcept {
+        return tools_guidance_;
+    }
+
   private:
     // Never trim below this many verbatim turns, whatever the budget says: a run that
     // cannot see its own last few observations cannot make a next move.
@@ -234,6 +249,29 @@ class Agent {
     // arguments, and taking `read_file` away for a dozen turns would end the run.
     static constexpr int kMaxSuppressTurns = 4;
 
+    // The ceiling on the ESCALATED window, once three ineffective firings have falsified
+    // the assumption above for this run. The escalation used to be uncapped
+    // (`hits * kMaxSuppressTurns`, with `hits` unbounded), which is how a real run came to
+    // have `read_file` held for 20 consecutive turns and `list_dir` for 12.
+    //
+    // A hold long enough to outlast the work is not a corrective, it is an ending. Eight
+    // turns is long enough that waiting it out is not a strategy and short enough that a run
+    // which genuinely needs the tool is not finished off by it.
+    static constexpr int kMaxEscalatedSuppressTurns = 8;
+
+    // How many workspace-changing writes may pile up before the run is made to check its
+    // own work. See Corrective::ForceVerification.
+    //
+    // Three, because two is a model fixing two errors it read off one compiler run -- the
+    // ordinary shape of debugging, and taking a build from it would be pure tax -- while
+    // the third edit is the first one that cannot have been informed by anything the run
+    // has actually observed. The forced check clears the count, so the steady state of a
+    // healthy run is one verification per three edits, which is roughly what a careful
+    // human does anyway.
+    //
+    // MEASURED: the run this comes from put FIFTEEN writes between two builds.
+    static constexpr int kMaxUnverifiedWrites = 3;
+
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
     // Logs and surfaces every ledger entry added since `before`. The one place a
     // verification reaches either the log or the UI, so the two cannot disagree.
@@ -244,6 +282,23 @@ class Agent {
     [[nodiscard]] std::optional<tools::ToolResult> gate_call(
         const tools::ToolDecl* decl, const std::string& name,
         const std::vector<tools::ToolParamValue>& params);
+    // May this mode call this tool AT ALL? Asked TWICE, deliberately: here, to decide what
+    // the model is told it has, and again inside gate_call, to decide what it may do.
+    //
+    // The gate alone was the whole of mode policy and it is not enough. A model shown
+    // write_file in plan mode reaches for it, is refused, and has spent a turn learning
+    // something the prompt could have told it for nothing -- and after two such refusals
+    // BlockRefusedTool drops the tool from the grammar and attributes it in the trace as
+    // if the OPERATOR had denied it. Filtering is not defence in depth for its own sake;
+    // it is the difference between a mode and a series of accidents.
+    [[nodiscard]] bool tool_allowed(const tools::ToolDecl& decl) const;
+    // The registry's spec set minus what this mode withholds -- the BASE the per-turn
+    // narrowings start from. Computed once in the constructor because the mode is fixed at
+    // lmp/start and so this is a run constant, which is also what keeps the KV prefix
+    // stable (S6.4).
+    [[nodiscard]] const std::vector<parsephony::ToolSpec>& mode_specs() const noexcept {
+        return mode_specs_;
+    }
     // Appends the post-edit syntax verdict to `result`'s summary. Empty when there is no
     // contract for the path, when the check could not run, or when it came back clean --
     // silence is the default, because a per-turn "no checker for .md" is prompt noise.
@@ -257,6 +312,38 @@ class Agent {
     [[nodiscard]] TurnResult::PlanOutcome apply_plan(
         const std::vector<tools::ToolParamValue>& params);
     [[nodiscard]] std::string baseline_check();
+    // Workspace-changing writes made since the last verification of any kind ran.
+    //
+    // DERIVED, never counted. Every VerificationRecord already stores the write total at
+    // the moment it ran, so this is one subtraction against state that cannot drift out of
+    // step with itself -- and a second counter that had to be reset from four call sites
+    // is exactly the kind of bookkeeping that ends up reset from three.
+    [[nodiscard]] std::size_t writes_since_verification() const;
+    // Whether any call in this turn was a workspace mutation the run had already made.
+    //
+    // Routed into ForceVerification rather than BreakRepeat, and the distinction is the
+    // point: taking the editor away from a model that has just re-sent an edit leaves it
+    // with the same stale evidence and one fewer way to act on it. What it is missing is
+    // not a different tool, it is a fresh reading of the code.
+    [[nodiscard]] bool turn_repeated_a_mutation(const TurnResult& turn) const;
+    // Runs the declared contract now and puts its OUTPUT, not just its verdict, in front
+    // of the model. The mechanism behind Corrective::ForceVerification and behind the
+    // first rung of the ineffectiveness ladder -- one implementation, so the two cannot
+    // drift into verifying different things or reporting them differently.
+    void run_contract_now(const char* why);
+    // What to do when one corrective has been applied kIneffectiveAfter times against one
+    // target and the run has not moved. Returns whether it took the turn's action; false
+    // means no better lever exists here and the chosen mechanism should apply as normal.
+    [[nodiscard]] bool escalate_ineffective(Corrective c, const std::string& target,
+                                            std::size_t hits);
+    // Whether `tool` is how the run changes the workspace -- asked of the registry rather
+    // than matched against a name list, so a tool added later is covered by construction.
+    //
+    // Load-bearing for the suppression floor: a mutating tool is never withheld from the
+    // grammar, because withholding all of them asks the run to fix a build with no way to
+    // change a file. Measured cost of not having this: 34 of 85 turns with the write family
+    // unsamplable, and a model driven into writing its source files through shell heredocs.
+    [[nodiscard]] bool mutates_workspace(const std::string& tool) const;
     [[nodiscard]] tools::ToolResult dispatch_call(
         const std::string& name, const std::vector<tools::ToolParamValue>& params,
         bool& executed);
@@ -284,6 +371,7 @@ class Agent {
     const platform::Clock& clock_;
     AgentConfig config_;
     ModePolicy policy_;
+    std::vector<parsephony::ToolSpec> mode_specs_;
     RepeatDetector repeats_;
     RefusalLedger refusals_;
     Approver approver_;
@@ -310,6 +398,21 @@ class Agent {
     // both call a tool and both come back ToolCallExecuted.
     std::size_t turn_reads_ = 0;
     std::size_t turn_reads_redundant_ = 0;
+    // The same question asked about EVERY call in the turn rather than only the reads:
+    // how many executed, and how many of those provably added nothing -- a read whose
+    // bytes were already in the prompt, or a write the file did not need.
+    //
+    // This is what the no-progress test reads now, and the widening is the whole point.
+    // The old test could only see a turn made entirely of redundant reads, so ONE write
+    // anywhere in the turn took it out of the branch entirely -- and a stuck model writes
+    // on almost every turn. A 73-turn run cancelled with nothing built held
+    // `no_progress_streak` at 0 for 68 of those turns for exactly that reason.
+    //
+    // Counted rather than inferred from tool names: a shell call, a search, a list_dir
+    // increment `turn_calls_` and never `turn_inert_calls_`, so their presence takes the
+    // turn out of the test without anything here having to know what they are.
+    std::size_t turn_calls_ = 0;
+    std::size_t turn_inert_calls_ = 0;
     // Tokens in the prompt step() actually sent this turn. Set during prompt assembly,
     // where the tokenizer has just produced it; read by the duplicate collapse, which pays
     // a full re-prefill and so must know whether the context is short of room first.

@@ -516,6 +516,16 @@
         "type": "string"
       }
     ],
+    "lmp/plan_ready": [
+      {
+        "name": "run_id",
+        "type": "string"
+      },
+      {
+        "name": "plan",
+        "type": "string"
+      }
+    ],
     "lmp/verification": [
       {
         "name": "run_id",
