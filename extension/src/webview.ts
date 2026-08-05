@@ -299,13 +299,6 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 1em; color: var(--dim); }
   font-family: var(--vscode-editor-font-family); font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
 }
-/* A green never shown capable of red is labelled UNPROVEN in the UI as well as in the
-   ledger (S10.2) -- the user sees the same distinction the loop enforces. */
-.unproven {
-  color: var(--warn); font-size: 11px; width: 100%;
-  border-top: 1px dashed color-mix(in srgb, var(--warn) 40%, transparent); padding-top: 5px;
-}
-
 /* --- approval cards ------------------------------------------------------ */
 .card {
   border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
@@ -421,6 +414,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 #promptBox {
   width: 100%; min-height: 66px; max-height: 200px; resize: vertical;
   background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px;
+  font-family: var(--vscode-editor-font-family); font-size: 11px; outline: none;
+}
+#checkBox {
+  width: 100%; background: var(--vscode-input-background); color: var(--vscode-input-foreground);
   border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px;
   font-family: var(--vscode-editor-font-family); font-size: 11px; outline: none;
 }
@@ -611,6 +609,11 @@ function markup(): string {
     </div>
     <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec"></div></div>
     <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite"></div></div>
+    <div class="set">
+      <label>Check command <b id="checkState"></b></label>
+      <input type="text" id="checkBox" placeholder="e.g. swift build — empty for no check">
+      <div class="warnbox" id="checkWarn"></div>
+    </div>
     <div class="set">
       <label>Turn limit <b id="turnVal"></b></label>
       <input type="range" id="turnRange" min="20" max="600" step="10">
@@ -1664,6 +1667,27 @@ $('promptBox').addEventListener('change', () => {
   put('prompts.' + (settings.mode || 'agent'), $('promptBox').value);
 });
 
+// --- the operator's check -------------------------------------------------
+// The ONLY verification the harness runs, and the only one it can run: it is the
+// operator's command, executed verbatim after any turn that writes, with its output put
+// in front of the model. Empty means the run ends purely on the model's own say-so, so
+// the drawer says which of the two claims "Complete" is about to make.
+$('checkBox').addEventListener('change', () => {
+  put('verifyContract', $('checkBox').value.trim());
+  paint();
+});
+
+function paintCheck() {
+  const cmd = (settings.verifyContract || '').trim();
+  $('checkBox').value = cmd;
+  $('checkState').textContent = cmd ? '· on' : '· off';
+  const warn = $('checkWarn');
+  warn.className = cmd ? 'warnbox calm' : 'warnbox';
+  warn.textContent = cmd
+    ? 'Runs after any turn that writes a file. Its output goes to the agent, and "Complete" means this passed.'
+    : 'No check: the run ends when the agent says it is done, and nothing verifies that. Set a build or test command.';
+}
+
 function buildSliders() {
   const host = $('sliders');
   host.innerHTML = '';
@@ -1728,6 +1752,8 @@ function paint() {
   const seconds = budget('clockRange', 'wallClockSeconds', 4800, 14400,
     { id: 'clockVal', text: (v) => Math.round(v / 60) + ' min' });
   paintBudget(turns, seconds);
+
+  paintCheck();
 
   $('promptMode').textContent = '· ' + (settings.mode || 'agent');
   $('promptBox').value = settings['prompts.' + (settings.mode || 'agent')] || '';
@@ -1879,22 +1905,17 @@ window.addEventListener('message', (e) => {
     const d = document.createElement('div');
     d.className = 'verify';
     const p = document.createElement('span');
-    p.className = 'pill ' + (payload.passed ? 'ok' : 'fail');
-    p.textContent = payload.passed ? 'PASS' : 'FAIL';
+    // A check that never EXECUTED said nothing about the workspace, and rendering it as
+    // FAIL sends the reader to the code when the broken thing is the command.
+    const ran = payload.ran !== false;
+    p.className = 'pill ' + (!ran ? 'fail' : payload.passed ? 'ok' : 'fail');
+    p.textContent = !ran ? 'COULD NOT RUN' : payload.passed ? 'PASS' : 'FAIL';
     const c = document.createElement('code');
     c.textContent = payload.contract;
     d.append(p, c);
-    if (payload.passed && !payload.falsifiable) {
-      const u = document.createElement('div');
-      u.className = 'unproven';
-      u.textContent = 'UNPROVEN — this check has never been shown capable of failing, so it is not evidence yet.';
-      d.append(u);
-    }
     add(d, '');
-    // A pass that has never been shown capable of failing is not evidence, and the orb does
-    // not celebrate one: UNPROVEN gets the same amber the tool call got, not the green.
-    busy(true, payload.passed ? 'Verified' : 'Verification failed',
-         payload.passed ? (payload.falsifiable ? 'DONE' : 'TOOL') : 'FAILED');
+    busy(true, payload.passed ? 'Check passed' : 'Check failed',
+         payload.passed ? 'DONE' : 'FAILED');
   }
 
   if (kind === 'approval') {
@@ -2067,26 +2088,16 @@ window.addEventListener('message', (e) => {
         ? 'the plan is above — approve it, or keep talking to change it'
         : 'answer in the box below and the conversation continues';
     }
-    // completed is EVIDENTIAL -- a recorded deliverable plus a falsifiable passing
-    // verification -- and it now also requires the run's own checklist to agree, or to
-    // have been asked once and not answered. This line is that second case, and it says
-    // so: "left unticked" read like the run forgot, when what happened is it was asked
-    // point-blank and did not reply (S10.4).
+    // The checklist is the model's own progress display and holds no authority over the
+    // ending -- but "done, with items still open on its own list" is worth a human's
+    // glance, so the disagreement is printed rather than resolved silently.
     if (payload.completed && payload.unfinished_items > 0) {
-      t += ' · ' + payload.unfinished_items +
-           ' item(s) left open after the run was asked to reconcile them';
-    }
-    // WHOSE criterion was met. "Complete" against a contract the model chose for itself
-    // is a weaker claim than "Complete" against one you set, and both used to print the
-    // same word -- a run once reported completed=yes on a mission it had not finished,
-    // because the check it picked passed.
-    if (payload.completed && payload.self_declared) {
-      t += ' · against a check the model chose for itself';
+      t += ' · ' + payload.unfinished_items + ' item(s) still open on its own checklist';
     }
     const label = yielded
       ? 'Your turn'
       : payload.completed
-        ? (payload.self_declared ? 'Complete (self-checked)' : 'Complete')
+        ? 'Complete'
         : 'Stopped';
     d.innerHTML = '<b>' + label + '</b> — ';
     d.append(document.createTextNode(t));

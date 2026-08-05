@@ -613,8 +613,9 @@ TEST(rewriting_a_file_with_its_own_bytes_is_reported_as_no_change) {
     CHECK(again.ok());
     CHECK(again.mutation_was_noop);
     CHECK(again.summary.find("already contained") != std::string::npos);
-    // And it says what to do instead, because "nothing changed" does not imply a next move.
-    CHECK(again.summary.find("verification") != std::string::npos);
+    // The fact and nothing more: what to do about an edit that already exists is the
+    // model's call, and an instruction bolted onto every no-op is prompt noise.
+    CHECK(again.summary.find("run your verification") == std::string::npos);
 
     // One byte of difference and it is a real write again -- the test is byte identity,
     // not similarity, so nothing here can swallow an edit.

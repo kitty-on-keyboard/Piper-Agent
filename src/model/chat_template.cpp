@@ -33,9 +33,13 @@ constexpr std::string_view kToolsSuffix =
     "- Function calls MUST follow the specified format: an inner <function=...></function> "
     "block must be nested within <tool_call></tool_call> XML tags\n"
     "- Required parameters MUST be specified\n"
-    "- Put exactly ONE tool call per turn\n"
+    "- Independent read-only calls (reading several files, say) may be batched into one "
+    "turn, each in its own <tool_call> block; anything that writes or runs goes one call "
+    "per turn so you see its result before the next move\n"
     "- You may provide optional reasoning for your function call in natural language BEFORE "
     "the function call, but NOT after\n"
+    "- Answering in plain text with no tool call ends the run as your final answer, so do "
+    "that only when the work is finished (or, in plan mode, when it is the operator's turn)\n"
     "</IMPORTANT>";
 
 void append(std::vector<TokenId>& out, const std::vector<TokenId>& ids) {

@@ -206,11 +206,7 @@ std::string ContextStore::render_live_state() const {
     if (user_turns_.size() > 1) {
         s += "# Standing instruction (most recent; supersedes the mission where they "
              "conflict)\n\n" +
-             user_turns_.back() + "\n";
-        if (plan_stale_) {
-            s += "\nThe checklist below predates it.\n";
-        }
-        s += "\n";
+             user_turns_.back() + "\n\n";
     }
     if (!checklist_.empty()) {
         s += "# Checklist\n\n";
@@ -224,48 +220,16 @@ std::string ContextStore::render_live_state() const {
             s += "- " + d + "\n";
         }
     }
-    if (!verifications_.empty()) {
-        s += "\n# Verification ledger\n\n";
-        // ONE LINE PER CONTRACT -- its LATEST state, not every run of it.
-        //
-        // This used to print every record. A run that checks the same command eight times
-        // got eight lines, and if that check was an unproven green it got the same
-        // "(UNPROVEN...)" sentence eight times, growing by one every time it verified.
-        // Repetition is not emphasis to a model reading its own context; it is evidence
-        // that something is escalating, and the run reads the pile as pressure to act on.
-        // The ledger's job is to say what is currently known, and running the same check
-        // twice does not change what is known -- so the count goes in the line instead.
-        std::vector<std::pair<std::string, const VerificationRecord*>> latest;
-        std::vector<std::size_t> runs;
-        for (const VerificationRecord& v : verifications_) {
-            bool seen = false;
-            for (std::size_t i = 0; i < latest.size(); ++i) {
-                if (latest[i].first == v.contract) {
-                    latest[i].second = &v;
-                    ++runs[i];
-                    seen = true;
-                    break;
-                }
-            }
-            if (!seen) {
-                latest.emplace_back(v.contract, &v);
-                runs.push_back(1);
-            }
-        }
-        for (std::size_t i = 0; i < latest.size(); ++i) {
-            const VerificationRecord& v = *latest[i].second;
-            s += std::string(v.passed ? "- PASS " : "- FAIL ") + v.contract;
-            if (runs[i] > 1) {
-                s += " (run " + std::to_string(runs[i]) + "x)";
-            }
-            // A green that has not been proven capable of red is reported as unproven,
-            // to the model as well as the UI (S10.2). Said ONCE, and said as a fact about
-            // the check rather than as a demand -- what to do about it belongs to the
-            // baseline finding, which says it once, at the point the criterion is set.
-            s += v.passed && !v.falsifiable ? "  (not yet evidence: this check has not been"
-                                              " seen to fail)\n"
-                                            : "\n";
-        }
+    // The operator check's CURRENT state, one line. Its full output already reached the
+    // model as an observation at the moment each reading was taken; this line is the
+    // pinned answer to "where does the check stand right now", which is the one fact a
+    // long run must not lose to a trim. One line, stated once: repetition is not
+    // emphasis to a model reading its own context.
+    if (last_check_.has_value()) {
+        const CheckResult& v = *last_check_;
+        s += "\n# Operator check\n\n- ";
+        s += !v.ran ? "COULD NOT RUN " : v.passed ? "PASS " : "FAIL ";
+        s += v.command + "\n";
     }
     return s;
 }

@@ -74,11 +74,11 @@ struct ToolResult {
     // "found but not executable", and both are also what the sandbox's own child returns
     // when it cannot chdir or exec.
     //
-    // This is not a failing check, it is an ABSENT one, and the difference decides whether
-    // a red counts as evidence. A run declared `python -m pytest ...` on a host with no
-    // `python`; the baseline came back red, and a red baseline is what proves a check
-    // capable of failing (S10.2). It proved nothing of the sort -- pytest never ran -- but
-    // the contract was marked falsifiable on the strength of it.
+    // This is not a failing check, it is an ABSENT one, and the difference decides what
+    // the reader is told. A run once declared `python -m pytest ...` on a host with only
+    // `python3`: the command came back red every time, and every consumer read the red as
+    // a statement about the workspace when pytest had never run at all. The operator
+    // check reports this case as COULD NOT RUN rather than FAIL for exactly that reason.
     [[nodiscard]] bool never_executed() const noexcept {
         return exit_code == 126 || exit_code == 127;
     }
