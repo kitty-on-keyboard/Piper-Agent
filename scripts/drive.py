@@ -57,6 +57,9 @@ ap.add_argument("--max-new-tokens", type=int, default=4096,
                      "plan can stall a run on it.")
 ap.add_argument("--sandbox-tier", type=int, default=1)
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--verify-contract", default="",
+                help="operator check: run after any writing turn, exit 0 = pass; "
+                     "empty disables")
 ap.add_argument("--auto", action="store_true",
                 help="send the autonomy flags the eval harness sends (risk-routed "
                      "approvals) instead of require_approval, so a hand-run and a "
@@ -159,6 +162,7 @@ for raw in proc.stdout:
                 "system_prompt": "",
                 "context_budget_tokens": 96000,
                 "max_new_tokens": args.max_new_tokens,
+                "verify_contract": args.verify_contract,
             },
         }})
     elif method == "lmp/token":
@@ -193,8 +197,9 @@ for raw in proc.stdout:
         send({"jsonrpc": "2.0", "id": new_id(), "method": "lmp/approve",
               "params": {"request_id": params.get("request_id"), "approved": approved}})
     elif method == "lmp/verification":
-        print(f"{T()} VERIFY {'PASS' if params.get('passed') else 'FAIL'} "
-              f"falsifiable={params.get('falsifiable')} {params.get('contract')!r}", flush=True)
+        verdict = ("PASS" if params.get("passed")
+                   else "FAIL" if params.get("ran", True) else "COULD NOT RUN")
+        print(f"{T()} CHECK {verdict} {params.get('contract')!r}", flush=True)
     elif method == "lmp/perf":
         s = params.get("sample") or {}
         print(f"{T()} perf ttft={s.get('ttft_ms', 0):.0f}ms "

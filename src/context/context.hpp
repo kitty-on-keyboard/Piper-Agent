@@ -8,7 +8,7 @@
 //
 // TIERS
 //   T0  Mission. Immutable, always present, THE ONLY THING THAT NAMES THE DELIVERABLE.
-//   T1  Pinned state: checklist, deliverable ledger, verification ledger, artifacts.
+//   T1  Pinned state: checklist, deliverable ledger, the operator check's last reading.
 //   T2  Recent turns, verbatim.
 //   T3  Compacted spans: a summary plus a provenance pointer to the full event range.
 //
@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -59,29 +60,15 @@ struct TurnRecord {
     std::uint64_t last_event_seq = 0;
 };
 
-struct VerificationRecord {
-    std::string contract;   // the canonical check, e.g. "cmake --build build"
-    bool passed = false;
-    bool falsifiable = false; // this exact check has been PROVEN capable of red
-    // Whether the command actually EXECUTED. A refusal is not evidence in either
-    // direction (S6.2), so it must never be mistaken for the red that proves a check
-    // capable of failing.
+// One reading of the OPERATOR's check command -- the only verification in the harness.
+// A report of what a command did, never a verdict about the work: `ran` says whether it
+// executed at all (a refusal is not evidence either way), `passed` reports its exit
+// status, and `detail` is its output, which is the part the model actually acts on.
+struct CheckResult {
+    std::string command;
     bool ran = false;
+    bool passed = false;
     std::string detail;
-    // Where this reading sits in the conversation. Evidence gathered BEFORE the user's
-    // latest instruction cannot discharge that instruction, and without a position on
-    // the timeline there is no way to tell the two apart: a follow-up would complete
-    // instantly on the previous run's green.
-    std::size_t seq = 0;
-    // How many successful workspace writes the run had made when this reading was taken.
-    //
-    // The one input that separates "this check fails because the code is not finished"
-    // from "this check fails for a reason no amount of code will change". Two readings
-    // reporting the SAME failure with writes in between say the work did not touch what
-    // the check is looking at -- which is a fact about the CHECK. Without this number the
-    // two readings are indistinguishable, and the run spends its budget fixing code that
-    // was never the problem (see loop/verification.hpp, failure_is_unmoved).
-    std::size_t workspace_writes = 0;
 };
 
 class ContextStore {
@@ -94,9 +81,13 @@ class ContextStore {
     explicit ContextStore(std::string mission) { user_turns_.push_back(std::move(mission)); }
 
     // --- T1 pinned ---------------------------------------------------------
+    //
+    // The checklist is the model's own progress display: it feeds the sidebar panel and
+    // the run report's unfinished_items, and nothing reads it to decide anything. The
+    // eighth pass removed its gate along with the verification ledger's -- a tick is a
+    // self-report, and a harness that enforces self-reports is adjudicating.
     void set_checklist(std::vector<ChecklistItem> items) {
         checklist_ = std::move(items);
-        plan_stale_ = false;
     }
     [[nodiscard]] const std::vector<ChecklistItem>& checklist() const noexcept {
         return checklist_;
@@ -106,55 +97,13 @@ class ContextStore {
             checklist_.begin(), checklist_.end(), [](const ChecklistItem& c) { return !c.done; }));
     }
 
-    // WHO CHOSE THE PROOF (S10.4).
-    //
-    // The checklist stopped gating completion because a tick is a self-report. The verify
-    // contract is the same class of thing one level down, and it was never noticed: the
-    // model picks the command that counts as proof, and the harness then rigorously
-    // verifies whatever the model picked. `rename_across_files` ended
-    // completed=yes verified=yes solved=NO by declaring `pytest -q`, making it pass, and
-    // stopping -- while the mission also required no residual `calc_total`. Every gate
-    // worked. The contract was weaker than the mission and nothing said so.
-    //
-    // This cannot be fixed by inspecting the contract: whether a command covers a mission
-    // is not decidable from either string. What CAN be fixed is the pretence that the two
-    // kinds of contract are the same. An operator contract is evidence about the mission;
-    // a model contract is evidence about what the model decided to check.
-    enum class ContractSource : std::uint8_t { Model, Operator };
-
-    // Operator contracts WIN and are permanent: `plan` may not replace one. Otherwise a
-    // run could talk its way out of the criterion it was given by restating the plan.
-    void set_verify_contract(std::string c, ContractSource source = ContractSource::Model) {
-        if (contract_source_ == ContractSource::Operator && source != ContractSource::Operator) {
-            return;
-        }
-        verify_contract_ = std::move(c);
-        contract_source_ = source;
-    }
-    [[nodiscard]] const std::string& verify_contract() const noexcept {
-        return verify_contract_;
-    }
-    [[nodiscard]] ContractSource verify_contract_source() const noexcept {
-        return contract_source_;
-    }
-
-    // True when an instruction has landed that the current checklist predates. Cleared
-    // only by restating the checklist. The loop turns this into a MECHANISM -- `plan`
-    // becomes the sole callable tool -- so a steering message cannot be received and
-    // then quietly ignored (S9.2).
-    [[nodiscard]] bool plan_is_stale() const noexcept { return plan_stale_; }
-
-    void record_verification(VerificationRecord v) {
-        // Takes its OWN position on the timeline rather than borrowing the current
-        // turn's. A verification runs mid-turn, before that turn is recorded, so
-        // reusing the turn counter would stamp evidence with the position of the last
-        // COMPLETED turn -- and a check run immediately after an instruction would tie
-        // with it instead of postdating it.
-        v.seq = ++seq_;
-        verifications_.push_back(std::move(v));
-    }
-    [[nodiscard]] const std::vector<VerificationRecord>& verifications() const noexcept {
-        return verifications_;
+    // The operator check's latest reading. One slot, not a ledger: the live-state block
+    // renders the current state of the check, and the model reads each reading's full
+    // output as an observation at the moment it happens -- history lives in the turn
+    // stream, where history lives for everything else.
+    void set_last_check(CheckResult r) { last_check_ = std::move(r); }
+    [[nodiscard]] const std::optional<CheckResult>& last_check() const noexcept {
+        return last_check_;
     }
     // Deduplicated: editing one file four times produces one deliverable, not four.
     void record_deliverable(std::string path) {
@@ -244,7 +193,6 @@ class ContextStore {
             t.observation.resize(observation_budget_);
             t.observation += "\n[truncated at the observation budget]\n";
         }
-        ++seq_;
         recent_.push_back(std::move(t));
         // Durable BEFORE anything can drop it. See set_turn_sink().
         if (turn_sink_) {
@@ -308,23 +256,14 @@ class ContextStore {
     // instruction is an observed fact about this session, in the same sense a tool
     // result is (S8.4). What stays forbidden is text nobody said -- an inferred
     // workspace description or a guessed deliverable name.
-    //
-    // Two things follow from an instruction landing, and both are mechanisms:
-    // the plan goes stale, and the position is remembered so evidence gathered
-    // beforehand cannot be mistaken for evidence that discharges it.
     void add_user_message(std::string text) {
         user_turns_.push_back(text);
         TurnRecord t;
         t.user_text = std::move(text);
         add_turn(std::move(t));
-        last_directive_seq_ = seq_;
-        plan_stale_ = true;
     }
     [[nodiscard]] const std::vector<std::string>& user_turns() const noexcept {
         return user_turns_;
-    }
-    [[nodiscard]] std::size_t last_directive_seq() const noexcept {
-        return last_directive_seq_;
     }
 
     // --- T3 compacted -------------------------------------------------------
@@ -408,10 +347,8 @@ class ContextStore {
     std::string workspace_root_;
     std::string project_instructions_;
     std::string project_memory_;
-    std::string verify_contract_;
-    ContractSource contract_source_ = ContractSource::Model;
     std::vector<ChecklistItem> checklist_;
-    std::vector<VerificationRecord> verifications_;
+    std::optional<CheckResult> last_check_;
     std::vector<std::string> deliverables_;
     std::vector<TurnRecord> recent_;
     std::vector<std::string> spans_;
@@ -420,14 +357,9 @@ class ContextStore {
     std::size_t compactions_ = 0;
     // Every successful write, not every distinct path. See record_deliverable().
     std::size_t workspace_writes_ = 0;
-    // Monotonic position in the conversation. Never reset -- compaction moves turns into
-    // spans but must not renumber the timeline, or evidence would appear to move.
-    std::size_t seq_ = 0;
-    std::size_t last_directive_seq_ = 0;
     // Generous by default so a caller that never sets it keeps today's behaviour; the
     // sidecar sets the real one from the workspace's budgets.
     std::size_t observation_budget_ = 1U << 20;
-    bool plan_stale_ = false;
 };
 
 } // namespace lmp::context

@@ -198,6 +198,11 @@
           "default": 4096,
           "markdownDescription": "Generation cap for one turn. A turn that hits the cap makes no tool call and leaves nothing behind, so a mission needing a long first plan can stall on it; raise this rather than the turn budget."
         },
+        "lmPipe.verifyContract": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Shell command the harness runs after any turn that writes a file — its output is shown to the model and exit 0 counts as pass. A run's final `Complete` requires the last reading to have passed. Empty disables the check. Example: `cd /path/to/project && swift build`."
+        },
         "lmPipe.egressPolicy": {
           "type": "string",
           "default": "deny",

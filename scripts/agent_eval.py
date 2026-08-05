@@ -18,10 +18,11 @@ WHAT IS SCORED. The ground truth is a shell command run in the workspace AFTER t
 has finished, and it never asks the agent anything:
 
   solved      the task's `check` exits 0. This is the score.
-  completed   the agent's own evidential verdict. Reported beside `solved` precisely so
-              the two can DISAGREE -- completed-but-not-solved is the interesting cell,
-              and it is invisible if you only record one of them.
-  verified    a falsifiable passing verification was observed on the wire.
+  completed   the run's own ending: the model answered, and any operator check's last
+              reading passed. Reported beside `solved` precisely so the two can
+              DISAGREE -- completed-but-not-solved is the interesting cell, and it is
+              invisible if you only record one of them.
+  verified    a passing verification reading was observed on the wire.
   turns       iterations used.
   intact      files listed in `protect` are byte-identical afterwards. A run that "fixes"
               a failing test by editing the test has not fixed anything.
@@ -152,7 +153,9 @@ def run_one(meta, model_dir, verbose):
                   "params": {"request_id": params.get("request_id"), "approved": approved}})
             ids[0] += 1
         elif method == "lmp/verification":
-            if params.get("passed") and params.get("falsifiable"):
+            # The operator/last check passed on the wire. The falsifiability ledger is
+            # gone -- the harness reports the check's exit status and judges nothing.
+            if params.get("passed"):
                 state["verified"] = True
         elif method == "lmp/run_end":
             state["completed"] = bool(params.get("completed"))

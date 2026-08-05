@@ -166,8 +166,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   /** One line of history per finished run.
    *
-   *  `completed` is the EVIDENTIAL verdict, not the model's opinion, so the dot in the
-   *  list means the same thing it means everywhere else in this UI (S10.4).
+   *  `completed` means the model answered and, when an operator check is configured,
+   *  that check's last reading passed -- the same claim the dot makes everywhere else
+   *  in this UI.
    */
   private record(n: RunEndNotification): void {
     const runs = this.history();
@@ -415,6 +416,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     "sandboxTier",
     "autoApproveExec",
     "autoApproveWrites",
+    // The operator's check. On the drawer because it is per-project and per-run -- the
+    // command that proves THIS workspace builds is not the one that proved the last.
+    "verifyContract",
     "sampling.temperature",
     "sampling.topP",
     "sampling.topK",
@@ -422,7 +426,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     "sampling.repetitionPenalty",
     // Both budgets, together. The turn limit is the one that keeps ending real missions
     // mid-work, and it is worthless on the drawer on its own: raised without the clock it
-    // just moves the cutoff to `wall_clock_exhausted` at the same wall.
+    // just moves the cutoff to `wall_clock` at the same wall.
     "maxIterations",
     "wallClockSeconds",
     "prompts.agent",
