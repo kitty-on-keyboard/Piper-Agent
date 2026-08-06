@@ -6,6 +6,7 @@
 // be distinguishable from ToolError: v1 conflated a policy refusal with a command
 // failure and the agent burned turns "fixing" a build that was never run.
 //
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -50,6 +51,13 @@ struct ToolResult {
     // because callers that need to tell 127 from 1 are exactly the callers this header
     // forbids to inspect strings -- and one of them decides whether a run may complete.
     int exit_code = -1;
+
+    // Workspace-content bytes consumed by a read tool, and bytes added/removed by a
+    // successful edit. Zero means "not measured or none", never an estimate parsed from
+    // summary prose. Kept on the result so serial, parallel and surface paths cannot
+    // report different instrumentation for the same call.
+    std::size_t bytes_read = 0;
+    std::size_t bytes_changed = 0;
 
     // A mutating tool that SUCCEEDED and changed nothing: the bytes on disk were already
     // the bytes it was asked to write.
@@ -111,6 +119,13 @@ struct ToolResult {
         ToolResult r;
         r.status = Status::Refused;
         r.error_class = ErrorClass::Policy;
+        r.retryable = false;
+        r.summary = std::move(why);
+        return r;
+    }
+    static ToolResult cancelled(std::string why = "cancelled") {
+        ToolResult r;
+        r.status = Status::Cancelled;
         r.retryable = false;
         r.summary = std::move(why);
         return r;

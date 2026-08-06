@@ -3,10 +3,11 @@
 // Chat template -- renders a conversation to TOKEN IDS, never to a string that someone
 // tokenizes later (spec S5.7, S5.8).
 //
-// The format is Qwen 3.6's own, taken from the model's chat_template.jinja (v1 verified
-// it against the shipped template; parsephone re-verified the tool-call framing):
-// ChatML delimiters, a <tools> schema block in the system message, XML tool calls, and
-// tool results wrapped in <tool_response> inside a user turn.
+// The format is Qwen 3.6's own by default (FamilyTraits / ToolCallSyntax::QwenXml),
+// taken from the model's chat_template.jinja: ChatML delimiters, a <tools> schema
+// block in the system message, XML tool calls, and tool results wrapped in
+// <tool_response> inside a user turn. Family-specific framing lives in family_traits.hpp
+// so the next Qwen checkpoint is load + config rather than a loop change.
 //
 // The golden tests assert exact id sequences. Not strings: a template that renders
 // plausible text but tokenizes differently is invisible in a string diff and

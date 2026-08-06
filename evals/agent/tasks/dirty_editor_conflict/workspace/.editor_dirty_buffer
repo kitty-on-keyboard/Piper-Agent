@@ -1,0 +1,3 @@
+def double(value):
+    # Stale editor buffer: looks edited, but the factor is wrong.
+    return value * 3

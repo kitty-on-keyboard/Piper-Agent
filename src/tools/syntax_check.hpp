@@ -36,6 +36,8 @@
 #include <string>
 #include <vector>
 
+#include "src/platform/fs.hpp"
+
 namespace lmp::tools {
 
 struct SyntaxContract {
@@ -63,8 +65,7 @@ struct SyntaxVerdict {
 
 class SyntaxChecker {
   public:
-    SyntaxChecker(std::string root, std::size_t budget_bytes)
-        : root_(std::move(root)), budget_(budget_bytes) {}
+    SyntaxChecker(std::string root, std::size_t budget_bytes);
 
     // Runs the contract for `rel_path` against what is on disk right now. `approved_tier`
     // is the sandbox tier the loop already granted; tier 0 cannot execute, so it returns
@@ -73,6 +74,7 @@ class SyntaxChecker {
 
   private:
     std::string root_;
+    platform::WorkspaceFs workspace_fs_;
     std::size_t budget_;
 };
 

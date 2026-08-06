@@ -1,0 +1,19 @@
+{
+  "split": "private",
+  "mission": "Run `sh ./long_job.sh` via the shell tool and wait for it to finish, then write done.txt with the word finished.",
+  "mode": "agent",
+  "expect": "cancelled",
+  "grader": "check.sh",
+  "max_iterations": 15,
+  "wall_clock_seconds": 120,
+  "harness": {
+    "cancel_after_seconds": 8
+  },
+  "notes": "Cancellation fixture. Harness sends lmp/cancel after a few seconds while a long shell job is expected. Passes when cancel was sent, the long job did not complete its marker, and done.txt was not written as finished.",
+  "protect": [
+    "long_job.sh"
+  ],
+  "tags": [
+    "cancellation"
+  ]
+}

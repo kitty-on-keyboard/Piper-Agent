@@ -227,3 +227,47 @@ TEST(the_engine_holds_its_holdout_score) {
     CHECK_EQ(t.message_total, 48);
     CHECK_EQ(t.context_total, 117);
 }
+
+TEST(structured_analyze_extracts_pytest_and_ctest_fields) {
+    const std::string pytest =
+        "============================= test session starts ==============================\n"
+        "collected 3 items\n"
+        "tests/test_mod.py::test_ok PASSED\n"
+        "tests/test_pipeline.py::test_summarise_average FAILED\n"
+        "FAILED tests/test_pipeline.py::test_summarise_average - AssertionError\n"
+        "======================== 1 failed, 2 passed in 0.09s =========================\n"
+        "tests/test_pipeline.py:12: AssertionError\n";
+    const log_triage::StructuredTriage pt = log_triage::analyze(pytest);
+    CHECK(pt.runner == log_triage::Runner::Pytest);
+    CHECK_EQ(pt.failed, 1);
+    CHECK_EQ(pt.passed, 2);
+    CHECK(!pt.failing_tests.empty());
+    CHECK(pt.failing_tests[0].find("test_summarise_average") != std::string::npos);
+    CHECK(!pt.referenced_paths.empty());
+    const std::string ann = log_triage::format_annotation(pt);
+    CHECK(ann.find("runner=pytest") != std::string::npos);
+    CHECK(ann.find("failing_tests") != std::string::npos);
+
+    const std::string ctest =
+        "13/13 Test #13: budget_enforced ..................Subprocess aborted***Exception\n"
+        "src/fail.cpp:3: Assertion failed\n"
+        "92% tests passed, 1 tests failed out of 13\n"
+        "The following tests FAILED:\n"
+        "\t 13 - budget_enforced (Subprocess aborted)\n"
+        "Errors while running CTest\n";
+    const log_triage::StructuredTriage ct = log_triage::analyze(ctest);
+    CHECK(ct.runner == log_triage::Runner::CTest);
+    CHECK_EQ(ct.failed, 1);
+    CHECK(!ct.failing_tests.empty());
+    CHECK(ct.failing_tests[0].find("budget_enforced") != std::string::npos);
+}
+
+TEST(primary_fingerprint_is_stable_for_identical_diagnostics) {
+    const std::string log =
+        "src/a.cpp:10:3: error: use of undeclared identifier 'x'\n"
+        "src/a.cpp:10:3: error: use of undeclared identifier 'x'\n";
+    const std::string a = log_triage::primary_fingerprint(log_triage::analyze(log));
+    const std::string b = log_triage::primary_fingerprint(log_triage::analyze(log));
+    CHECK(!a.empty());
+    CHECK_EQ(a, b);
+}

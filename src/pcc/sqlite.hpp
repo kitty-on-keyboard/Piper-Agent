@@ -35,12 +35,18 @@ class SqlError : public std::runtime_error {
 
 class Stmt;
 
+enum class LinkPolicy : std::uint8_t {
+    Follow,
+    NoFollow,
+};
+
 // An open database handle. Move-only: two owners closing one handle is a double free,
 // and sqlite3_close on a handle with live statements silently leaks instead of failing.
 class Db {
   public:
     Db() = default;
-    explicit Db(const std::string& path);
+    explicit Db(const std::string& path,
+                LinkPolicy links = LinkPolicy::Follow);
     ~Db();
 
     Db(const Db&) = delete;

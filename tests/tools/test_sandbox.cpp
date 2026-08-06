@@ -6,10 +6,13 @@
 #include <climits>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "src/model/backend.hpp"
 #include "src/platform/fs.hpp"
 #include "src/tools/sandbox.hpp"
 
@@ -412,4 +415,31 @@ TEST(only_t1_rewrites_because_only_t1_nests) {
     const ExecOutcome jailed = run_sandboxed(grant_execution(SandboxTier::T1_Seatbelt),
                                              "echo hello", root, root, limits(10));
     CHECK(jailed.rewritten_command.empty());
+}
+
+TEST(cancel_kills_a_sleeping_command_under_one_second) {
+    // The wall clock for this command is generous on purpose: if cancel were ignored the
+    // test would sit for 30s. The poll is 200 ms, so under a second is the contract the
+    // run loop needs for a visible stop.
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    ExecLimits lim = limits(30);
+    lim.cpu_seconds = 60;
+    lmp::model::CancelToken cancel;
+    const ExecutionGrant grant = grant_execution(SandboxTier::T1_Seatbelt);
+
+    const auto started = std::chrono::steady_clock::now();
+    std::thread killer([&cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel.cancel();
+    });
+    const ExecOutcome o =
+        run_sandboxed(grant, "sleep 30", root, root, lim, &cancel);
+    killer.join();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(o.status == Status::Cancelled);
+    CHECK(o.cancelled);
+    CHECK(!o.wall_clock_killed);
+    CHECK(elapsed < std::chrono::seconds(2));
 }

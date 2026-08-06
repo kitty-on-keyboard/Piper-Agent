@@ -39,6 +39,7 @@ export interface RunSettings {
   auto_approve_writes: boolean;
   require_approval: boolean;
   applies_edits: boolean;
+  provides_code_intel: boolean;
   system_prompt: string;
   allowed_commands: string;
   context_budget_tokens: number;
@@ -66,6 +67,7 @@ export interface PerfSample {
   context_used: number;
   context_max: number;
   tokens_generated: number;
+  prefill_reused_tokens: number;
   compactions: number;
 }
 
@@ -90,6 +92,16 @@ export interface EditAppliedParams {
   error: string;
 }
 export interface EditAppliedResult {
+  accepted: boolean;
+}
+
+export interface CodeIntelResultParams {
+  request_id: string;
+  ok: boolean;
+  error: string;
+  result_text: string;
+}
+export interface CodeIntelResultResult {
   accepted: boolean;
 }
 
@@ -155,6 +167,14 @@ export interface TurnNotification {
   tool_status: ToolStatus;
   summary: string;
   duration_ms: number;
+  think_tokens: number;
+  text_tokens: number;
+  tool_tokens: number;
+  batch_index: number;
+  batch_count: number;
+  read_bytes: number;
+  edit_bytes: number;
+  cap_phase: string;
 }
 
 export interface ChecklistNotification {
@@ -191,6 +211,18 @@ export interface EditNotification {
   run_id: string;
   path: string;
   new_content: string;
+  expected_version: string;
+  expected_absent: boolean;
+}
+
+export interface CodeIntelNotification {
+  request_id: string;
+  run_id: string;
+  op: string;
+  query: string;
+  path: string;
+  line: number;
+  character: number;
 }
 
 export interface PerfNotification {
@@ -210,6 +242,7 @@ export const METHODS = [
   "lmp/start",
   "lmp/cancel",
   "lmp/edit_applied",
+  "lmp/code_intel_result",
   "lmp/approve",
   "lmp/message",
   "lmp/load_model",
@@ -223,6 +256,7 @@ export const METHODS = [
   "lmp/verification",
   "lmp/approval_request",
   "lmp/edit",
+  "lmp/code_intel",
   "lmp/perf",
   "lmp/run_end",
 ] as const;

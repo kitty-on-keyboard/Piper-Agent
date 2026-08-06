@@ -147,6 +147,26 @@ TEST(sampler_is_deterministic_under_a_seed) {
     CHECK_EQ(s1.sample(l1, nullptr, {}).id, s2.sample(l2, nullptr, {}).id);
 }
 
+TEST(temperature_zero_is_greedy_and_seed_independent) {
+    SamplingParams a;
+    a.temperature = 0.0F;
+    a.seed = 1;
+    SamplingParams b = a;
+    b.seed = 999;
+    Sampler s1(a);
+    Sampler s2(b);
+    // Keep several candidates alive. The old temperature-zero path silently substituted
+    // temperature one and sampled among them, so different seeds could choose differently.
+    std::vector<float> l1 = {1.0F, 4.0F, 3.9F, 0.5F};
+    std::vector<float> l2 = l1;
+    CHECK_EQ(s1.sample(l1, nullptr, {}).id, TokenId{1});
+    CHECK_EQ(s2.sample(l2, nullptr, {}).id, TokenId{1});
+
+    // Exact ties use the lowest token id, so greedy smoke remains deterministic there too.
+    std::vector<float> tied = {4.0F, 4.0F, 1.0F};
+    CHECK_EQ(s1.sample(tied, nullptr, {}).id, TokenId{0});
+}
+
 TEST(mask_is_applied_before_shaping) {
     SamplingParams p;
     p.temperature = 0.0001F; // near-greedy

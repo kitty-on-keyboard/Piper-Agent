@@ -33,6 +33,14 @@ void TurnGrammar::reset() {
                             : std::make_unique<parsephony::ToolCallGuard>(tools_);
 }
 
+bool TurnGrammar::force_end_think() noexcept {
+    if (phase_ != TurnPhase::Think) {
+        return false;
+    }
+    phase_ = TurnPhase::Text;
+    return true;
+}
+
 bool TurnGrammar::is_structural(TokenId id) const noexcept {
     const SpecialIds& s = tok_.specials();
     return id == s.im_start || id == s.im_end || id == s.tool_call_open ||

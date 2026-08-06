@@ -91,7 +91,7 @@
         "repeated": true
       },
       {
-        "_comment": "The operator vouching for this server. A remote tool runs in the SERVER's process, outside Seatbelt, so we cannot contain it -- untrusted servers therefore register every tool as irreversible and each call raises an approval card. The server's own MCP annotations (readOnlyHint, destructiveHint) are shown on that card as the server's claim and never decide anything: the MCP spec itself says they must not be trusted for security.",
+        "_comment": "The operator vouching for this server. A remote tool runs in the SERVER's process, outside Seatbelt, so we cannot contain it -- untrusted servers therefore register every tool as irreversible and each call raises an approval card. trusted:true is a T3-class vouch: the extension requires a once-per-window modal acknowledgement, the sidecar logs the server executable/args hash, and every remote call invalidates workspace observation freshness. The server's own MCP annotations (readOnlyHint, destructiveHint) are shown on that card as the server's claim and never decide anything: the MCP spec itself says they must not be trusted for security.",
         "name": "trusted",
         "type": "bool"
       }
@@ -114,10 +114,12 @@
         "type": "SamplingSettings"
       },
       {
+        "_comment": "Positive int32 only; negatives and overflows are refused at the sidecar boundary.",
         "name": "max_iterations",
         "type": "int"
       },
       {
+        "_comment": "Positive int32 only; negatives and overflows are refused at the sidecar boundary.",
         "name": "wall_clock_seconds",
         "type": "int"
       },
@@ -127,7 +129,7 @@
         "type": "int"
       },
       {
-        "_comment": "false makes EVERY command execution raise a card, whatever its risk score. true keeps the risk-routed behaviour, where only the 0.35-0.85 band escalates. Named for what the operator turns on -- 'run commands without asking me' -- rather than for the harness's internal routing.",
+        "_comment": "false makes EVERY command execution raise a card, whatever its risk score. true keeps the risk-routed behaviour for ordinary commands (including toolchain drivers the classifier marks PartiallyParsed, such as `swift build`, so builds stay low-friction under T1). Irreversible capabilities, Unparseable status, and opaque script shapes (interpreter+file, source/eval) always escalate after this switch -- they are property overrides, not score bumps, so turning auto-approve on cannot wave `bash wipe.sh` through. Named for what the operator turns on -- 'run ordinary commands without asking me' -- rather than for the harness's internal routing.",
         "name": "auto_approve_exec",
         "type": "bool"
       },
@@ -146,21 +148,27 @@
         "type": "bool"
       },
       {
+        "_comment": "The client answers lmp/code_intel with language features VS Code already hosts (workspace symbols, definition, references, diagnostics, rename preview). locate_symbol routes through this when true; headless clients leave it false and keep the ranked filesystem walk. Not clangd-in-sidecar and not the post-edit syntax_check seam.",
+        "name": "provides_code_intel",
+        "type": "bool"
+      },
+      {
         "_comment": "Overrides the built-in persona. The editor keeps one per mode, so 'plan' can be told to think out loud and 'agent' to be terse. Empty means the built-in, which is the only reason this can be a plain string rather than a presence flag.",
         "name": "system_prompt",
         "type": "string"
       },
       {
-        "_comment": "Commands the operator has already said yes to, newline-separated (the generator has no array type, and a newline is the one character a shell command cannot contain unescaped). An entry matches a command that equals it, or that starts with it followed by a space. A command containing shell chaining -- ; && || | ` $( > < & -- NEVER matches, because `pytest` on the allowlist must not authorise `pytest; rm -rf ~`. The irreversible-capability gate sits ABOVE this: nothing on this list can auto-approve a call that destroys data, writes outside the workspace, escalates privileges or rewrites history.",
+        "_comment": "Commands the operator has already said yes to, newline-separated (the generator has no array type, and a newline is the one character a shell command cannot contain unescaped). An entry matches a command that equals it, or that starts with it followed by a space. A command containing shell chaining -- ; && || | ` $( > < & -- NEVER matches, because `pytest` on the allowlist must not authorise `pytest; rm -rf ~`. Persistent prefix matches apply ONLY to fully parsed, non-destructive commands -- they cannot auto-approve irreversible capabilities or opaque script shapes (bash/python/source of a file, Unparseable). Toolchain drivers the classifier marks PartiallyParsed (`swift build`, `cmake --build`) are not on this list's path; auto_approve_exec covers their low-friction case under T1. Opaque run-scoped 'Always allow' binds to workspace + command + classifier caps + referenced script digests for the rest of THIS run only. Irreversible command cards do not offer Always allow.",
         "name": "allowed_commands",
         "type": "string"
       },
       {
+        "_comment": "Must be a positive int32. Negatives and overflows are refused at the sidecar boundary. When the loaded checkpoint publishes max_position_embeddings, this value is also clamped so prompt budget + reserved generation cannot exceed the model maximum.",
         "name": "context_budget_tokens",
         "type": "int"
       },
       {
-        "_comment": "The generation cap for ONE turn. AgentConfig has always had this field and the protocol never carried it, so it was pinned at 4096 for every run the editor or the driver could start -- the same wired-on-one-side-consumed-by-nobody shape as sandbox_tier and require_approval before them. MEASURED: a cold start on a five-task mission spent FIVE of its nine turns hitting the cap, produced no tool call on any of them, and ended length_capped_no_progress with an empty workspace. A capped turn leaves nothing behind (reasoning is not carried forward), so it is the one failure that can burn a whole budget while looking like the model is working. Raise it for missions that need a long first plan; it costs decode time per turn, not context.",
+        "_comment": "The generation cap for ONE turn. AgentConfig has always had this field and the protocol never carried it, so it was pinned at 4096 for every run the editor or the driver could start -- the same wired-on-one-side-consumed-by-nobody shape as sandbox_tier and require_approval before them. MEASURED: a cold start on a five-task mission spent FIVE of its nine turns hitting the cap, produced no tool call on any of them, and ended length_capped_no_progress with an empty workspace. A capped turn leaves nothing behind (reasoning is not carried forward), so it is the one failure that can burn a whole budget while looking like the model is working. Raise it for missions that need a long first plan; it costs decode time per turn, not context. Must be a positive int32; refused when it alone exceeds the checkpoint maximum sequence length.",
         "name": "max_new_tokens",
         "type": "int"
       },
@@ -240,6 +248,11 @@
         "type": "int"
       },
       {
+        "_comment": "Prompt tokens reused from the verified KV prefix rather than re-prefilled.",
+        "name": "prefill_reused_tokens",
+        "type": "int"
+      },
+      {
         "name": "compactions",
         "type": "int"
       }
@@ -302,6 +315,33 @@
         }
       ]
     },
+    "lmp/code_intel_result": {
+      "_comment": "The editor's answer to lmp/code_intel. result_text is path:line: detail lines (same shape as locate_symbol) or a diagnostics listing; the sidecar BLOCKS on it the same way it blocks on edit_applied.",
+      "params": [
+        {
+          "name": "request_id",
+          "type": "string"
+        },
+        {
+          "name": "ok",
+          "type": "bool"
+        },
+        {
+          "name": "error",
+          "type": "string"
+        },
+        {
+          "name": "result_text",
+          "type": "string"
+        }
+      ],
+      "result": [
+        {
+          "name": "accepted",
+          "type": "bool"
+        }
+      ]
+    },
     "lmp/approve": {
       "params": [
         {
@@ -318,7 +358,7 @@
           "type": "bool"
         },
         {
-          "_comment": "The 'Always allow' button's OTHER half, for the run that is asking. The rule itself is persisted by the extension into `allowedCommands`, which is right and is where it must live -- but settings reach the sidecar at the next lmp/start, so within the run that raised the card the identical command escalates again and the button reads as broken. MEASURED: an operator clicked 'Always allow' on a build command and answered the same card on the next turn. Latched here for the rest of the run and never persisted (the persistent copy is the extension's); the two halves are deliberately separate, because one has to survive the run and the other has to take effect inside it. Matched on the command VERBATIM rather than by the `allowed_commands` prefix rule: this consent was given for one exact string on one card, and a prefix is a decision the operator makes deliberately in settings, not a side effect of clicking yes.",
+          "_comment": "The 'Always allow' button's OTHER half, for the run that is asking. The rule itself is persisted by the extension into `allowedCommands` for ordinary fully-parsed commands -- but settings reach the sidecar at the next lmp/start, so within the run that raised the card the identical command escalates again and the button reads as broken. MEASURED: an operator clicked 'Always allow' on a build command and answered the same card on the next turn. Latched here for the rest of the run and never persisted (the persistent copy is the extension's); the two halves are deliberately separate, because one has to survive the run and the other has to take effect inside it. Fully-parsed commands match VERBATIM. Opaque (PartiallyParsed / Unparseable) commands latch a key of workspace + command + classifier capabilities + digests of referenced script files, so approving `bash build.sh` does not survive a rewrite of build.sh. Irreversible command cards do not offer Always allow at all.",
           "name": "allow_command_for_run",
           "type": "bool"
         }
@@ -509,6 +549,46 @@
       {
         "name": "duration_ms",
         "type": "double"
+      },
+      {
+        "_comment": "Tokens routed by the grammar into private reasoning prose.",
+        "name": "think_tokens",
+        "type": "int"
+      },
+      {
+        "_comment": "Tokens routed by the grammar into answer prose.",
+        "name": "text_tokens",
+        "type": "int"
+      },
+      {
+        "_comment": "Generated tokens routed into neither prose channel: tool XML and structural delimiters.",
+        "name": "tool_tokens",
+        "type": "int"
+      },
+      {
+        "_comment": "Zero-based position of this tool row in one model-emitted batch.",
+        "name": "batch_index",
+        "type": "int"
+      },
+      {
+        "_comment": "Number of tool calls emitted in this turn; zero for text-only turns.",
+        "name": "batch_count",
+        "type": "int"
+      },
+      {
+        "_comment": "Workspace-content bytes consumed by this read tool, when measured.",
+        "name": "read_bytes",
+        "type": "int"
+      },
+      {
+        "_comment": "Bytes added plus removed by this edit tool, when measured.",
+        "name": "edit_bytes",
+        "type": "int"
+      },
+      {
+        "_comment": "Grammar phase where a length-capped generation stopped; empty otherwise.",
+        "name": "cap_phase",
+        "type": "string"
       }
     ],
     "lmp/checklist": [
@@ -608,6 +688,47 @@
       {
         "name": "new_content",
         "type": "string"
+      },
+      {
+        "_comment": "Optimistic-concurrency preimage: SHA-256 hex of the bytes the edit was computed against. Empty when expected_absent is true (create). The extension compares this to the in-memory TextDocument, not disk alone.",
+        "name": "expected_version",
+        "type": "string"
+      },
+      {
+        "_comment": "Create claim: the path must not exist in the editor (or on disk when first opened). Mutually exclusive with a non-empty expected_version.",
+        "name": "expected_absent",
+        "type": "bool"
+      }
+    ],
+    "lmp/code_intel": [
+      {
+        "_comment": "Matched by lmp/code_intel_result. op is one of workspace_symbols, definition, references, diagnostics, rename_preview. Uses the language services the editor already hosts — not a sidecar clangd.",
+        "name": "request_id",
+        "type": "string"
+      },
+      {
+        "name": "run_id",
+        "type": "string"
+      },
+      {
+        "name": "op",
+        "type": "string"
+      },
+      {
+        "name": "query",
+        "type": "string"
+      },
+      {
+        "name": "path",
+        "type": "string"
+      },
+      {
+        "name": "line",
+        "type": "int"
+      },
+      {
+        "name": "character",
+        "type": "int"
       }
     ],
     "lmp/perf": [

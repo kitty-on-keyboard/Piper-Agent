@@ -1,20 +1,13 @@
 #include "src/model/chat_template.hpp"
+#include "src/model/family_traits.hpp"
 
 namespace lmp::model {
 namespace {
 
-// Qwen 3.6's tool preamble and format reminder, matching the model's own
-// chat_template.jinja (carried from v1, which verified it against the shipped
-// template). Parameter values are raw multi-line text with NO JSON escaping -- this is
-// what makes multi-line write_file content robust: the model never escapes newlines
-// or quotes inside a JSON string.
-constexpr std::string_view kToolsPreamble =
-    "\n\n# Tools\n\n"
-    "You have access to the following functions:\n\n"
-    "<tools>";
-
-constexpr std::string_view kToolsSuffix =
-    "</tools>\n\n"
+// Qwen XML tool-format reminder (parameter values are raw multi-line text, no JSON
+// escaping). Framing open/close tags come from FamilyTraits so the next checkpoint is
+// load + traits, not a loop edit. XML remains the Qwen3 default (P2 §12).
+constexpr std::string_view kQwenXmlToolReminder =
     "If you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
     "<tool_call>\n"
     "<function=example_function_name>\n"
@@ -51,6 +44,7 @@ void append(std::vector<TokenId>& out, const std::vector<TokenId>& ids) {
 void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
                                   std::vector<TokenId>& out) const {
     const SpecialIds& s = tok_.specials();
+    const FamilyTraits traits = traits_for(tok_.family());
     out.push_back(s.im_start);
     switch (m.role) {
         case Role::System: {
@@ -59,9 +53,13 @@ void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
             if (!tools_json.empty()) {
                 // The tools block is structure: preamble and suffix go through the
                 // template path, the schema JSON itself through the content path.
-                append(out, tok_.encode_template(kToolsPreamble));
+                append(out, tok_.encode_template(traits.tools_preamble));
                 append(out, tok_.encode_content(tools_json));
-                append(out, tok_.encode_template(kToolsSuffix));
+                std::string suffix(traits.tools_suffix_head);
+                if (traits.tool_syntax == ToolCallSyntax::QwenXml) {
+                    suffix.append(kQwenXmlToolReminder);
+                }
+                append(out, tok_.encode_template(suffix));
             }
             break;
         }
@@ -92,10 +90,13 @@ void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
 
 void ChatTemplate::append_generation_prompt(std::vector<TokenId>& out) const {
     const SpecialIds& s = tok_.specials();
+    const FamilyTraits traits = traits_for(tok_.family());
     out.push_back(s.im_start);
     append(out, tok_.encode_template("assistant\n"));
-    out.push_back(s.think_open);
-    append(out, tok_.encode_template("\n"));
+    if (traits.prime_think) {
+        out.push_back(s.think_open);
+        append(out, tok_.encode_template("\n"));
+    }
 }
 
 std::vector<TokenId> ChatTemplate::render_with_offsets(

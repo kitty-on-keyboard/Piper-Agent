@@ -15,6 +15,9 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <mutex>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -447,6 +450,59 @@ struct Pipe {
     return want;
 }
 
+std::string scratch_dir(const std::string& workspace_root) {
+    return resolve_real(workspace_root) + "/.lmp_tmp";
+}
+
+// SWEEP THE SCRATCH TREE, once per process, before the first command uses it.
+//
+// TMPDIR points into the workspace so the jail needs no hole in the temp tree, and nothing
+// ever emptied it. Every sandboxed toolchain that calls mkdtemp leaves its directory
+// behind: an observed workspace had 824 `TemporaryDirectory.*` under `.lmp_tmp`, which is
+// also 824 directories every workspace walk then had to descend into.
+//
+// Age-gated rather than "delete everything" because another sidecar may be mid-command in
+// the same workspace, and its scratch directory is not ours to remove. Six hours is far
+// longer than any command that survives the wall-clock killer, so anything older is
+// abandoned by definition.
+void prune_scratch(const std::string& workspace_root) {
+    namespace fs = std::filesystem;
+    const fs::path tmp(scratch_dir(workspace_root));
+    std::error_code ec;
+    if (!fs::is_directory(tmp, ec)) {
+        return;
+    }
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(6);
+    for (fs::directory_iterator it(tmp, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        std::error_code each;
+        const auto when = fs::last_write_time(it->path(), each);
+        if (each || when >= cutoff) {
+            continue;
+        }
+        fs::remove_all(it->path(), each);
+    }
+}
+
+// Once per ROOT, not once per process. A single sidecar only ever has one workspace, but
+// std::once_flag would latch on whichever root arrived first and silently never sweep a
+// second one -- which is precisely how a test suite, or a future multi-workspace host,
+// gets a cleanup that quietly does nothing.
+void prune_scratch_once(const std::string& workspace_root) {
+    static std::mutex mu;
+    static std::vector<std::string> done;
+    {
+        const std::lock_guard<std::mutex> lock(mu);
+        for (const std::string& seen : done) {
+            if (seen == workspace_root) {
+                return;
+            }
+        }
+        done.push_back(workspace_root);
+    }
+    prune_scratch(workspace_root);
+}
+
 void apply_rlimits_in_child(const ExecLimits& limits, rlim_t nproc) {
     const auto set = [](int what, rlim_t v) {
         rlimit rl{v, v};
@@ -458,20 +514,32 @@ void apply_rlimits_in_child(const ExecLimits& limits, rlim_t nproc) {
     set(RLIMIT_NPROC, nproc);
 }
 
-// Reads until EOF or cap, then drains without storing. The wall-clock killer runs in
-// the same loop -- an unattended run cannot afford a command that never returns (S7.3).
-void pump_output(int fd, pid_t pid, const ExecLimits& limits, ExecOutcome& out) {
+// Reads until EOF or cap, then drains without storing. The wall-clock killer and the
+// CancelToken both run in the same loop -- an unattended run cannot afford a command
+// that never returns (S7.3), and a cancelled run cannot afford to wait for that wall
+// clock either.
+void kill_process_group(pid_t pid) {
+    ::kill(-pid, SIGKILL); // the group: a shell's children die too
+    ::kill(pid, SIGKILL);
+}
+
+void pump_output(int fd, pid_t pid, const ExecLimits& limits, ExecOutcome& out,
+                 const model::CancelToken* cancel) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(limits.wall_clock_seconds);
     char buf[8192];
     while (true) {
+        if (cancel != nullptr && cancel->cancelled()) {
+            kill_process_group(pid);
+            out.cancelled = true;
+            return;
+        }
         if (std::chrono::steady_clock::now() > deadline) {
-            ::kill(-pid, SIGKILL); // the group: a shell's children die too
-            ::kill(pid, SIGKILL);
+            kill_process_group(pid);
             out.wall_clock_killed = true;
             return;
         }
-        struct timeval tv {0, 200000}; // 200 ms poll so the deadline is honoured
+        struct timeval tv {0, 200000}; // 200 ms poll so cancel and the deadline are honoured
         fd_set set;
         FD_ZERO(&set);
         FD_SET(fd, &set);
@@ -506,13 +574,23 @@ void pump_output(int fd, pid_t pid, const ExecLimits& limits, ExecOutcome& out) 
 
 ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& command,
                           const std::string& workspace_root, const std::string& cwd,
-                          const ExecLimits& limits) {
+                          const ExecLimits& limits, const model::CancelToken* cancel) {
     ExecOutcome out;
+    if (cancel != nullptr && cancel->cancelled()) {
+        out.status = Status::Cancelled;
+        out.cancelled = true;
+        out.output = "cancelled before the command started";
+        return out;
+    }
     if (grant.tier() == SandboxTier::T0_NoExec) {
         out.status = Status::Refused;
         out.output = "T0: this mode does not execute commands";
         return out;
     }
+    // Before the first command claims TMPDIR, not after the last one releases it: a run
+    // killed by the wall clock never reaches its own cleanup, and that is exactly the run
+    // that leaves scratch behind.
+    prune_scratch_once(workspace_root);
     // T2 rewrites the command into a container invocation and then takes the SAME spawn
     // path as everything else: the pipe, the rlimits, the process group and its
     // wall-clock killer, the output cap. A runtime that ignores a limit must never be the
@@ -587,7 +665,7 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
             ::_exit(126);
         }
         // Scratch space inside the jail, so no temp-tree hole is needed in the profile.
-        const std::string tmp = resolve_real(workspace_root) + "/.lmp_tmp";
+        const std::string tmp = scratch_dir(workspace_root);
         ::mkdir(tmp.c_str(), 0700);
         ::setenv("TMPDIR", tmp.c_str(), 1);
         // A new process group, so the wall-clock killer can take down the whole tree a
@@ -608,11 +686,15 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
     }
     ::setpgid(pid, pid);
     ::close(pipe.write_fd);
-    pump_output(pipe.read_fd, pid, limits, out);
+    pump_output(pipe.read_fd, pid, limits, out, cancel);
     ::close(pipe.read_fd);
 
     int wstatus = 0;
     (void)::waitpid(pid, &wstatus, 0);
+    if (out.cancelled) {
+        out.status = Status::Cancelled;
+        return out;
+    }
     if (out.wall_clock_killed) {
         out.status = Status::Timeout;
         return out;

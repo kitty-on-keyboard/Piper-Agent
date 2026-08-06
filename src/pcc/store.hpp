@@ -123,6 +123,14 @@ struct StoreStats {
     BlobStats blobs;
 };
 
+struct Scratchpad {
+    std::string session;
+    std::string goal;
+    std::string active_errors;
+    std::string target_files;
+    TimeUs updated_at = 0;
+};
+
 // A point in bi-temporal space. Both default to now, which is the common query and the
 // one a caller who has not thought about time should get.
 struct AsOf {
@@ -134,7 +142,8 @@ class Store {
   public:
     // Opens or creates the database at `path`. ":memory:" is a valid path and is what
     // the tests use.
-    explicit Store(std::string path);
+    explicit Store(std::string path,
+                   LinkPolicy links = LinkPolicy::Follow);
 
     // --- writing ------------------------------------------------------------
 
@@ -192,6 +201,14 @@ class Store {
     [[nodiscard]] std::vector<Item> search(std::string_view text, AsOf as_of = {},
                                            std::string_view session = {},
                                            int limit = 20) const;
+
+    // Automated FTS search targeting error signature keywords against past turn resolutions.
+    [[nodiscard]] std::vector<Item> error_signature_search(std::string_view error_text,
+                                                           int limit = 5) const;
+
+    // Scratchpad working memory persistence.
+    void save_scratchpad(Scratchpad scratchpad);
+    [[nodiscard]] std::optional<Scratchpad> get_scratchpad(std::string_view session) const;
 
     // The reconstructed content behind an artifact row.
     [[nodiscard]] std::optional<std::string> artifact_content(const Item& item) const;

@@ -53,7 +53,8 @@ class ContextJournal {
 
   private:
     ContextJournal(const std::string& path, std::string session_id)
-        : store_(path), session_(std::move(session_id)) {}
+        : store_(path, pcc::LinkPolicy::NoFollow),
+          session_(std::move(session_id)) {}
 
     pcc::Store store_;
     std::string session_;

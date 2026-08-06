@@ -94,6 +94,19 @@ TEST(turn_walks_think_text_accept) {
     CHECK_EQ(tok().decode(g.think_ids()), std::string("let me think about this"));
 }
 
+TEST(force_end_think_opens_text_without_close_token) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    CHECK(feed_text(g, "ruminate") == Advance::Ok);
+    CHECK(g.phase() == TurnPhase::Think);
+    CHECK(g.force_end_think());
+    CHECK(g.phase() == TurnPhase::Text);
+    CHECK(!g.force_end_think()); // already out of Think
+    CHECK(feed_text(g, "now tools") == Advance::Ok);
+    CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
+}
+
 TEST(structure_is_rejected_inside_think) {
     REQUIRE(tok().loaded());
     const auto tools = one_tool();

@@ -36,20 +36,6 @@ std::uint64_t hash_ids(const std::vector<TokenId>& ids) noexcept {
     return h;
 }
 
-namespace {
-
-// The fingerprint the ledger WOULD hold for the first `n` ids of `v`. Folded the same way
-// hashes_ is, so the two are comparable by construction rather than by remembering to.
-std::uint64_t hash_prefix(const std::vector<TokenId>& v, std::size_t n) noexcept {
-    std::uint64_t h = kSeed;
-    for (std::size_t i = 0; i < n && i < v.size(); ++i) {
-        h = fold(h, v[i]);
-    }
-    return h;
-}
-
-} // namespace
-
 KvCacheLedger::KvCacheLedger() { hashes_.push_back(kSeed); }
 
 void KvCacheLedger::append(TokenId id) {
@@ -120,20 +106,10 @@ TurnReuse plan_turn_reuse(const KvCacheLedger& ledger, const std::vector<TokenId
         checkpoint_len > ledger.size()) {
         return {ReuseMode::Reset, 0};
     }
-    // VERIFIED, NEVER ASSUMED (S5.10). fingerprint_at() is O(1) and is the right fast
-    // reject, but the hash keys the lookup and equality is the proof -- a few thousand
-    // int32 compares against a 19 GB model is not a cost worth reasoning about, and the
-    // failure this guards is silent.
-    if (ledger.fingerprint_at(checkpoint_len) != hash_prefix(prompt, checkpoint_len)) {
-        return {ReuseMode::Reset, 0};
+    if (checkpoint_len <= d.reusable) {
+        return {ReuseMode::Restore, checkpoint_len};
     }
-    const std::vector<TokenId>& cached = ledger.ids();
-    for (std::size_t i = 0; i < checkpoint_len; ++i) {
-        if (cached[i] != prompt[i]) {
-            return {ReuseMode::Reset, 0};
-        }
-    }
-    return {ReuseMode::Restore, checkpoint_len};
+    return {ReuseMode::Reset, 0};
 }
 
 } // namespace lmp::model

@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cctype>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/loop/agent.hpp"
@@ -15,11 +17,115 @@
 #include "src/platform/fs.hpp"
 
 namespace lmp::loop {
+namespace {
+
+[[nodiscard]] bool is_interpreter(std::string_view w) noexcept {
+    return w == "bash" || w == "sh" || w == "zsh" || w == "ksh" || w == "dash" ||
+           w == "python" || w == "python3" || w == "python2" || w == "ruby" || w == "perl" ||
+           w == "node" || w == "osascript";
+}
+
+[[nodiscard]] bool looks_like_script_path(std::string_view w) noexcept {
+    if (w.empty() || w[0] == '-') {
+        return false;
+    }
+    if (w.find('/') != std::string_view::npos) {
+        return true;
+    }
+    return w.size() > 3 && (w.ends_with(".sh") || w.ends_with(".py") || w.ends_with(".rb") ||
+                            w.ends_with(".pl") || w.ends_with(".js") || w.ends_with(".mjs"));
+}
+
+// Best-effort operands whose bytes are NOT in the command string. Empty when there is
+// nothing to hash (e.g. `bash -c '...'`); the consent key still binds command + caps.
+[[nodiscard]] std::vector<std::string> referenced_script_paths(std::string_view command) {
+    std::vector<std::string> words;
+    std::string cur;
+    for (char ch : command) {
+        if (std::isspace(static_cast<unsigned char>(ch)) != 0) {
+            if (!cur.empty()) {
+                words.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    if (!cur.empty()) {
+        words.push_back(std::move(cur));
+    }
+    if (words.empty()) {
+        return {};
+    }
+    if (words[0] == "source" || words[0] == ".") {
+        if (words.size() >= 2 && looks_like_script_path(words[1])) {
+            return {words[1]};
+        }
+        return {};
+    }
+    if (is_interpreter(words[0])) {
+        for (std::size_t i = 1; i < words.size(); ++i) {
+            if (words[i] == "-c") {
+                return {}; // body is in the string; no file digest
+            }
+            if (!words[i].empty() && words[i][0] == '-') {
+                continue;
+            }
+            if (looks_like_script_path(words[i])) {
+                return {words[i]};
+            }
+            return {};
+        }
+        return {};
+    }
+    if (looks_like_script_path(words[0])) {
+        return {words[0]};
+    }
+    return {};
+}
+
+[[nodiscard]] std::string caps_fingerprint(const tools::RiskHint& hint) {
+    const auto& c = hint.caps;
+    unsigned bits = 0;
+    bits |= c.writes_outside_workspace ? 1u << 0 : 0u;
+    bits |= c.reads_outside_workspace ? 1u << 1 : 0u;
+    bits |= c.destroys_data ? 1u << 2 : 0u;
+    bits |= c.rewrites_vcs_history ? 1u << 3 : 0u;
+    bits |= c.network_access ? 1u << 4 : 0u;
+    bits |= c.spawns_unbounded_process ? 1u << 5 : 0u;
+    bits |= c.signals_foreign_process ? 1u << 6 : 0u;
+    bits |= c.escalates_privileges ? 1u << 7 : 0u;
+    bits |= hint.status == blast_radius::ParseStatus::PartiallyParsed ? 1u << 8 : 0u;
+    bits |= hint.status == blast_radius::ParseStatus::Unparseable ? 1u << 9 : 0u;
+    std::ostringstream oss;
+    oss << std::hex << bits;
+    return oss.str();
+}
+
+[[nodiscard]] std::string digest_of_script(const std::string& workspace_root,
+                                           const std::string& rel) {
+    std::string path = rel;
+    if (!path.empty() && path[0] != '/') {
+        path = workspace_root;
+        if (!path.empty() && path.back() != '/') {
+            path.push_back('/');
+        }
+        path += rel;
+    }
+    const platform::FileContents f = platform::read_file_whole(path, 1U << 20);
+    if (!f.ok()) {
+        return std::string("absent:") + rel;
+    }
+    return platform::content_sha256_hex(f.bytes);
+}
+
+} // namespace
 
 double risk_score(const tools::RiskHint& hint) {
     // The published weights from bakeoff/blast_radius: write_out, destroy and priv are
     // worth three ordinary capabilities. Partial parse is itself risk -- it is the
-    // signal that says "sandbox this regardless of the flags".
+    // signal that says "sandbox this regardless of the flags". The score alone is not
+    // enough: see forces_escalation(), which is the property override.
     const auto& c = hint.caps;
     double score = 0.0;
     score += c.writes_outside_workspace ? 0.30 : 0.0;
@@ -42,6 +148,77 @@ bool is_irreversible(const tools::RiskHint& hint) noexcept {
     const auto& c = hint.caps;
     return c.destroys_data || c.writes_outside_workspace || c.escalates_privileges ||
            c.rewrites_vcs_history;
+}
+
+bool forces_escalation(const tools::RiskHint& hint) noexcept {
+    if (is_irreversible(hint)) {
+        return true;
+    }
+    return hint.status == blast_radius::ParseStatus::PartiallyParsed ||
+           hint.status == blast_radius::ParseStatus::Unparseable;
+}
+
+bool opaque_script_command(const std::string& command) noexcept {
+    if (command.empty()) {
+        return false;
+    }
+    if (!referenced_script_paths(command).empty()) {
+        return true;
+    }
+    // source / . / eval -- body is never in our digest list above when operand-less,
+    // but the shape is still opaque.
+    std::string_view s = command;
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())) != 0) {
+        s.remove_prefix(1);
+    }
+    const auto sp = s.find_first_of(" \t");
+    const std::string_view verb = sp == std::string_view::npos ? s : s.substr(0, sp);
+    return verb == "source" || verb == "." || verb == "eval";
+}
+
+bool allowlist_may_auto_approve(const tools::RiskHint& hint) noexcept {
+    return hint.status == blast_radius::ParseStatus::Parsed && !is_irreversible(hint);
+}
+
+// What the command gate actually forces after auto_approve_exec. Narrower than
+// forces_escalation() for Partial: toolchain Partial is not an opaque script.
+[[nodiscard]] bool command_forces_escalation(const std::string& command,
+                                             const tools::RiskHint& hint) noexcept {
+    if (is_irreversible(hint)) {
+        return true;
+    }
+    if (hint.status == blast_radius::ParseStatus::Unparseable) {
+        return true;
+    }
+    if (hint.status == blast_radius::ParseStatus::PartiallyParsed &&
+        opaque_script_command(command)) {
+        return true;
+    }
+    return false;
+}
+
+std::string opaque_run_consent_key(const std::string& workspace_root,
+                                   const std::string& command,
+                                   const tools::RiskHint& hint) {
+    if (hint.status != blast_radius::ParseStatus::PartiallyParsed &&
+        hint.status != blast_radius::ParseStatus::Unparseable) {
+        return {};
+    }
+    std::string key = workspace_root;
+    key.push_back('\x1f');
+    key += command;
+    key.push_back('\x1f');
+    key += caps_fingerprint(hint);
+    key.push_back('\x1f');
+    bool first = true;
+    for (const std::string& script : referenced_script_paths(command)) {
+        if (!first) {
+            key.push_back(',');
+        }
+        first = false;
+        key += digest_of_script(workspace_root, script);
+    }
+    return key;
 }
 
 bool is_allowlisted(const std::string& command, const std::vector<std::string>& allowed) {
@@ -211,9 +388,14 @@ std::optional<tools::ToolResult> Agent::gate_call(
     const bool overwrites_content =
         decl != nullptr && decl->mutates_workspace && name == "write_file" &&
         run_wrote_.find(write_path) == run_wrote_.end() &&
-        tools::would_overwrite_existing(registry_.workspace().root, write_path);
+        registry_.would_overwrite_existing(write_path);
+    // apply_patch deletes are irreversible like delete_file; updates stay ungated like
+    // replace_in_file (exact match or refuse — a scalpel, not an overwrite).
+    const bool patch_deletes =
+        name == "apply_patch" &&
+        param_value(params, "patch").find("*** Delete File:") != std::string::npos;
     const bool irreversible_tool =
-        (decl != nullptr && decl->irreversible) || overwrites_content;
+        (decl != nullptr && decl->irreversible) || overwrites_content || patch_deletes;
     const bool write_gate = decl != nullptr && decl->mutates_workspace;
     // `irreversible_tool` already overrides the blanket switch, which is what covers the
     // one destructive act that can still reach a mode without allow_destructive: a
@@ -293,96 +475,95 @@ std::optional<tools::ToolResult> Agent::gate_call(
         // own advisory call site had the arguments right; this one starved the classifier
         // of the fact that makes "outside" mean anything.
         const std::string& root = registry_.workspace().root;
-        const tools::RiskHint hint =
-            !cmd.empty() ? tools::classify_command(cmd, root, root) : tools::RiskHint{};
-        Approval route = route_approval(hint, config_.hitl);
+        // An empty command string has nothing to classify. Remote tools declare
+        // executes_commands when untrusted so mode policy sees them, but their
+        // containment card is the write/irreversible gate above -- not a phantom
+        // Unparseable hint from the RiskHint default.
+        if (!cmd.empty()) {
+            const tools::RiskHint hint = tools::classify_command(cmd, root, root);
+            Approval route = route_approval(hint, config_.hitl);
 
-        // Four checks, and the ORDER is the design.
-        //
-        //   1. The allowlist loosens an escalation -- and it also survives the
-        //      irreversibility override below, because it is the operator's EXPLICIT
-        //      decision about this exact command.
-        //   2. auto_approve_exec ON loosens an escalation; OFF tightens an auto-approval.
-        //   3. Irreversibility overrides the BLANKET policies, in the tightening
-        //      direction, always -- but not the per-command rule.
-        //
-        // The distinction in 3 is what makes the "Always allow" button true. The card it
-        // sits on appears precisely for escalated commands, and the commands that
-        // escalate under auto-approve are precisely the irreversible ones -- so an
-        // override that beat the allowlist made the button a no-op for every command it
-        // was ever shown on: the operator clicked "Always allow `rm -rf .build`", the rule
-        // was stored, and the same card came back next turn. A blanket switch yielding to
-        // the hint is caution; a named, remembered rule yielding to it is the machine
-        // overruling the person it just asked.
-        //
-        // Written as separate steps rather than one condition because each is a
-        // different kind of claim -- "the operator said yes to this before", "the
-        // operator wants to see everything", "this cannot be undone" -- and collapsing
-        // them into one boolean is how the last one got lost.
-        const bool allowlisted = is_allowlisted(cmd, config_.allowed_commands);
-        if (allowlisted && route == Approval::Escalate) {
-            route = Approval::AutoApprove;
-        }
-        // ON LOOSENS. This switch used to be tightening-only: it could turn an
-        // auto-approval into an escalation and never the reverse, so the route came
-        // entirely from the risk thresholds and turning "auto-approve command execution"
-        // ON changed nothing an operator could observe. It was the same shape as the
-        // sandbox_tier and require_approval fields before it -- generated, wired,
-        // acknowledged in the editor, consumed by nobody.
-        //
-        // Reject is deliberately NOT loosened: that is the risk score being above the
-        // reject threshold, which is a policy ceiling and not a question to ask. And the
-        // irreversible check below still runs afterwards, so this cannot approve something
-        // that destroys data -- it can only skip the card for an ORDINARY command, which
-        // is exactly what the switch says it does.
-        if (config_.auto_approve_exec && route == Approval::Escalate) {
-            route = Approval::AutoApprove;
-        }
-        if (!config_.auto_approve_exec && route == Approval::AutoApprove && !allowlisted) {
-            route = Approval::Escalate;
-        }
-        if (is_irreversible(hint) && route == Approval::AutoApprove && !allowlisted) {
-            emit("irreversible", {{"tool", name},
-                                  {"risk", std::to_string(risk_score(hint))},
-                                  {"allowlisted", "0"}});
-            route = Approval::Escalate;
-        }
+            // Four checks, and the ORDER is the design.
+            //
+            //   1. The persistent prefix allowlist loosens an escalation ONLY for fully
+            //      parsed, non-destructive commands. Opaque scripts and irreversible
+            //      capabilities are properties; a remembered prefix must not wave them
+            //      through (schema and package.json both claim this -- the code used to
+            //      let named allowlists win, which made those comments a lie).
+            //   2. auto_approve_exec ON loosens an escalation; OFF tightens an auto-approval.
+            //   3. Property overrides (irreversible, Unparseable, opaque script shapes)
+            //      force escalation AFTER the blanket auto-approve step. Toolchain
+            //      PartiallyParsed (`swift build`) is NOT forced -- that would be card
+            //      fatigue. Run-scoped opaque consent (digests) is the approver's job.
+            //
+            // Written as separate steps rather than one condition because each is a
+            // different kind of claim -- "the operator said yes to this ordinary command
+            // before", "the operator wants ordinary work to run without asking", "this
+            // cannot be seen or undone" -- and collapsing them into one boolean is how
+            // the last one got lost.
+            const bool allowlisted = allowlist_may_auto_approve(hint) &&
+                                     is_allowlisted(cmd, config_.allowed_commands);
+            if (allowlisted && route == Approval::Escalate) {
+                route = Approval::AutoApprove;
+            }
+            // ON LOOSENS. Reject is deliberately NOT loosened. The property override
+            // below still runs afterwards, so this cannot approve something opaque or
+            // destructive -- it can only skip the card for an ordinary command.
+            if (config_.auto_approve_exec && route == Approval::Escalate) {
+                route = Approval::AutoApprove;
+            }
+            if (!config_.auto_approve_exec && route == Approval::AutoApprove &&
+                !allowlisted) {
+                route = Approval::Escalate;
+            }
+            if (command_forces_escalation(cmd, hint) && route == Approval::AutoApprove) {
+                emit(is_irreversible(hint) ? "irreversible" : "opaque_command",
+                     {{"tool", name},
+                      {"risk", std::to_string(risk_score(hint))},
+                      {"parse", hint.status == blast_radius::ParseStatus::PartiallyParsed
+                                    ? "partial"
+                                : hint.status == blast_radius::ParseStatus::Unparseable
+                                    ? "unparseable"
+                                    : "parsed"},
+                      {"allowlisted", allowlisted ? "1" : "0"}});
+                route = Approval::Escalate;
+            }
 
-        // The command gate's counterpart to the write event above, emitted once the route
-        // is settled and before anyone is asked. Carries every input the four steps read,
-        // so a surprising card can be explained from the log instead of from this file:
-        // the risk the classifier produced, both switches, and whether the operator's own
-        // allowlist rule was what let it through.
-        emit("approval", {{"gate", "command"},
-                          {"tool", name},
-                          {"command", cmd},
-                          {"escalated", route == Approval::Escalate ? "1" : "0"},
-                          {"route", route == Approval::AutoApprove  ? "auto"
-                                    : route == Approval::Escalate   ? "ask"
-                                                                    : "reject"},
-                          {"risk", std::to_string(risk_score(hint))},
-                          {"destroys_data", is_irreversible(hint) ? "1" : "0"},
-                          {"allowlisted", allowlisted ? "1" : "0"},
-                          {"auto_exec", config_.auto_approve_exec ? "1" : "0"}});
+            emit("approval", {{"gate", "command"},
+                              {"tool", name},
+                              {"command", cmd},
+                              {"escalated", route == Approval::Escalate ? "1" : "0"},
+                              {"route", route == Approval::AutoApprove  ? "auto"
+                                        : route == Approval::Escalate   ? "ask"
+                                                                        : "reject"},
+                              {"risk", std::to_string(risk_score(hint))},
+                              {"destroys_data", is_irreversible(hint) ? "1" : "0"},
+                              {"forces_escalation",
+                               command_forces_escalation(cmd, hint) ? "1" : "0"},
+                              {"allowlisted", allowlisted ? "1" : "0"},
+                              {"auto_exec", config_.auto_approve_exec ? "1" : "0"}});
 
-        // An escalation with nobody to escalate TO is a denial, not a pass. This is the
-        // unattended path: an eval, a script, a dead editor. Deny-by-default (S7.2).
-        if (route == Approval::Escalate && !approver_) {
-            emit("tool_denied", {{"tool", name}, {"why", "escalation with no approver"}});
-            return tools::ToolResult::refused(
-                "this call needs a human decision and no approver is attached");
-        }
+            // An escalation with nobody to escalate TO is a denial, not a pass.
+            // Deny-by-default (S7.2).
+            if (route == Approval::Escalate && !approver_) {
+                emit("tool_denied",
+                     {{"tool", name}, {"why", "escalation with no approver"}});
+                return tools::ToolResult::refused(
+                    "this call needs a human decision and no approver is attached");
+            }
 
-        bool allowed = route == Approval::AutoApprove;
-        if (route == Approval::Escalate && approver_) {
-            allowed = approver_(name, cmd, preview_of(name, params), hint);
-        }
-        if (!allowed) {
-            emit("tool_denied",
-                 {{"tool", name}, {"risk", std::to_string(risk_score(hint))}});
-            return tools::ToolResult::refused(
-                route == Approval::Reject ? "rejected: risk score above the reject threshold"
-                                          : "denied by the operator");
+            bool allowed = route == Approval::AutoApprove;
+            if (route == Approval::Escalate && approver_) {
+                allowed = approver_(name, cmd, preview_of(name, params), hint);
+            }
+            if (!allowed) {
+                emit("tool_denied",
+                     {{"tool", name}, {"risk", std::to_string(risk_score(hint))}});
+                return tools::ToolResult::refused(
+                    route == Approval::Reject
+                        ? "rejected: risk score above the reject threshold"
+                        : "denied by the operator");
+            }
         }
     }
 

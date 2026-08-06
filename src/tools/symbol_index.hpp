@@ -7,12 +7,11 @@
 // symbol mentioned in fifty call sites buried its own definition. `rename_across_files` in
 // evals/agent is the task that pays for this.
 //
-// WHAT THIS IS NOT. It is not an index and it is not an AST. Tree-sitter would be correct
-// and costs twenty vendored grammars against S2.2's "would a competent team building this
-// fresh choose to build it?"; an LSP client would be correct and is sequenced behind the
-// post-edit checker that would justify the daemon. This is the cheap middle: the same grep,
-// ranked by how definition-shaped each hit is, with the ordering decided here where it can
-// be asserted rather than inside a shell pipeline where it cannot.
+// WHAT THIS IS NOT. It is not an index and it is not an AST. When the editor advertises
+// provides_code_intel, locate_symbol uses VS Code language features over lmp/code_intel
+// instead (P2 §10). This ranking remains the headless / fallback path. Navigation is
+// deliberately NOT routed through the post-edit syntax_check seam, and the sidecar does
+// not launch clangd by default.
 //
 // THE RANKING, in the order that decides ties:
 //   3  a definition keyword immediately precedes the symbol  (`def foo`, `class Foo`,

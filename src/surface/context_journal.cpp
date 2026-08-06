@@ -3,6 +3,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/platform/fs.hpp"
+
 namespace lmp::surface {
 namespace {
 
@@ -60,11 +62,22 @@ ContextJournal::Result ContextJournal::open(const std::string& workspace_root,
                                             const std::string& session_id,
                                             context::ContextStore& ctx) {
     Result out;
+    const platform::WorkspaceFs workspace(workspace_root);
+    if (!workspace.valid()) {
+        out.error = workspace.error();
+        return out;
+    }
+    const platform::ContainedPath database =
+        workspace.contained_path(kContextDbName);
+    if (!database.ok()) {
+        out.error = database.error;
+        return out;
+    }
     try {
         // Not make_unique: the constructor is private, deliberately, so the only way to
         // get one is through the path that also attaches the sinks.
         out.journal.reset(
-            new ContextJournal(workspace_root + "/" + kContextDbName, session_id));
+            new ContextJournal(database.absolute, session_id));
     } catch (const std::exception& e) {
         out.error = e.what();
         return out;

@@ -2,6 +2,7 @@
 // repeat cache, the loop breaker, HITL routing, and context compaction. The loop
 // end-to-end (scripted backend, real Agent) lives in test_agent_step.cpp.
 
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -128,7 +129,7 @@ TEST(a_cosmetic_path_difference_is_not_a_different_call) {
     record_ok(d, "list_dir", plain, "the listing");
     CHECK_EQ(d.seen_count("list_dir", slashed), std::size_t{1});
     CHECK_EQ(d.seen_count("list_dir", dotted), std::size_t{1});
-    // The measured ping-pong, served from cache under every spelling.
+    // The measured ping-pong: same call under every spelling, while freshness holds.
     CHECK(d.cached("list_dir", slashed, 0) != nullptr);
     CHECK(d.cached("list_dir", dotted, 0) != nullptr);
 
@@ -322,10 +323,13 @@ TEST(a_user_turn_renders_in_place_and_pins_the_latest_instruction) {
     ctx.add_user_message("stop, use the other approach");
 
     const std::vector<model::Message> msgs = ctx.render("");
-    // The mission stays in the stable system block; the instruction lands in the stream
-    // at the point it actually arrived, AFTER what the model had already said.
-    CHECK(msgs.front().role == model::Role::System);
-    CHECK(msgs.front().content.find("Fix the failing test") != std::string::npos);
+    // Mission is the first stable user message; the follow-up lands in the stream AFTER
+    // what the model had already said, and is pinned in live state against compaction.
+    REQUIRE(msgs.size() >= 2);
+    CHECK(msgs[0].role == model::Role::System);
+    CHECK(msgs[0].content.find("Fix the failing test") == std::string::npos);
+    CHECK(msgs[1].role == model::Role::User);
+    CHECK_EQ(msgs[1].content, std::string("Fix the failing test"));
     bool seen_assistant = false;
     bool instruction_after_assistant = false;
     for (const model::Message& m : msgs) {
@@ -337,7 +341,7 @@ TEST(a_user_turn_renders_in_place_and_pins_the_latest_instruction) {
         }
     }
     CHECK(instruction_after_assistant);
-    // And it is pinned in live state, where compaction cannot reach it.
+    CHECK(ctx.render_live_state().find("# Latest user message") != std::string::npos);
     CHECK(ctx.render_live_state().find("stop, use the other approach") != std::string::npos);
 }
 
@@ -429,15 +433,16 @@ TEST(the_mission_and_pinned_state_survive_every_trim) {
     (void)ctx.compact_oldest(2);
 
     const std::vector<context::Message> msgs = ctx.render("");
-    REQUIRE(msgs.size() >= 2);
+    REQUIRE(msgs.size() >= 3);
 
-    // The mission is T0 and stays in the system message, which never changes within a
-    // run -- that is what keeps the KV prefix reusable.
-    const std::string& system = msgs[0].content;
-    CHECK(system.find("THE MISSION: ship the parser") != std::string::npos);
+    // System is identity/tools only; the mission is the first stable user message.
+    CHECK(msgs[0].role == model::Role::System);
+    CHECK(msgs[0].content.find("THE MISSION: ship the parser") == std::string::npos);
+    CHECK(msgs[1].role == model::Role::User);
+    CHECK_EQ(msgs[1].content, std::string("THE MISSION: ship the parser"));
 
-    // The pinned state survives the trim too, but it renders LAST, not in the system
-    // message. It changes on almost every turn, and in front of the prompt each change
+    // The pinned state survives the trim too, but it renders LAST, not in the stable
+    // head. It changes on almost every turn, and in front of the prompt each change
     // rewrote token 0 and forced a full re-prefill of the whole context.
     const std::string& live = msgs.back().content;
     CHECK(live.find("- [x] write it") != std::string::npos);
@@ -445,7 +450,8 @@ TEST(the_mission_and_pinned_state_survive_every_trim) {
     CHECK(live.find("src/parser.cpp") != std::string::npos);
 
     // And it is NOT in the stable head, which is the property being protected.
-    CHECK(system.find("- [x] write it") == std::string::npos);
+    CHECK(msgs[0].content.find("- [x] write it") == std::string::npos);
+    CHECK(msgs[1].content.find("- [x] write it") == std::string::npos);
 }
 
 // --- HITL routing (S7.6) -----------------------------------------------------
@@ -464,13 +470,70 @@ TEST(risk_routing_is_a_pure_function) {
     destructive.caps.escalates_privileges = true;
     CHECK(route_approval(destructive, t) == Approval::Reject);
 
-    // A command whose effects are NOT in the string escalates on that alone -- that is
-    // what PartiallyParsed is for (S7.1).
+        // Status-only PartiallyParsed scores 0.20 and auto-approves under the default
+    // threshold -- that is the hole forces_escalation() closes. The old fixture compounded
+    // Partial with destroy+network caps, which escalated on score alone and never proved
+    // the property.
     tools::RiskHint unseeable;
     unseeable.status = blast_radius::ParseStatus::PartiallyParsed;
-    unseeable.caps.network_access = true;
-    unseeable.caps.destroys_data = true;
-    CHECK(route_approval(unseeable, t) == Approval::Escalate);
+    CHECK(risk_score(unseeable) < t.auto_approve_below_risk);
+    CHECK(route_approval(unseeable, t) == Approval::AutoApprove);
+    CHECK(forces_escalation(unseeable));
+    CHECK(!allowlist_may_auto_approve(unseeable));
+
+    tools::RiskHint opaque;
+    opaque.status = blast_radius::ParseStatus::Unparseable;
+    CHECK(forces_escalation(opaque));
+    CHECK(!allowlist_may_auto_approve(opaque));
+}
+
+TEST(persistent_allowlist_cannot_auto_approve_opaque_or_destructive_hints) {
+    tools::RiskHint partial;
+    partial.status = blast_radius::ParseStatus::PartiallyParsed;
+    CHECK(!allowlist_may_auto_approve(partial));
+    CHECK(forces_escalation(partial)); // status-only property
+    CHECK(opaque_script_command("bash unknown.sh"));
+    CHECK(opaque_script_command("source unknown.sh"));
+    CHECK(!opaque_script_command("swift build")); // toolchain Partial, not a script shape
+
+    tools::RiskHint destroy;
+    destroy.status = blast_radius::ParseStatus::Parsed;
+    destroy.caps.destroys_data = true;
+    CHECK(!allowlist_may_auto_approve(destroy));
+    CHECK(forces_escalation(destroy));
+
+    tools::RiskHint ordinary;
+    ordinary.status = blast_radius::ParseStatus::Parsed;
+    CHECK(allowlist_may_auto_approve(ordinary));
+    CHECK(!forces_escalation(ordinary));
+}
+
+TEST(opaque_run_consent_binds_to_script_digest) {
+    const std::string root = "/tmp/lmp_opaque_consent_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    (void)::system(("printf 'echo one\\n' > " + root + "/build.sh").c_str());
+
+    tools::RiskHint hint;
+    hint.status = blast_radius::ParseStatus::PartiallyParsed;
+    const std::string key1 = opaque_run_consent_key(root, "bash build.sh", hint);
+    CHECK(!key1.empty());
+    CHECK(key1.find(root) != std::string::npos);
+
+    // Same command, same bytes: same key.
+    CHECK_EQ(opaque_run_consent_key(root, "bash build.sh", hint), key1);
+
+    // Rewrite the script: consent must not carry.
+    (void)::system(("printf 'echo two\\n' > " + root + "/build.sh").c_str());
+    const std::string key2 = opaque_run_consent_key(root, "bash build.sh", hint);
+    CHECK(!key2.empty());
+    CHECK(key1 != key2);
+
+    // Fully parsed commands do not use this path.
+    tools::RiskHint parsed;
+    parsed.status = blast_radius::ParseStatus::Parsed;
+    CHECK(opaque_run_consent_key(root, "swift build", parsed).empty());
+
+    (void)::system(("rm -rf " + root).c_str());
 }
 
 // A compacted span line is PROMPT-FACING, and it named the tool twice: every trimmed turn

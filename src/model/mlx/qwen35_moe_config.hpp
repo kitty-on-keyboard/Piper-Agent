@@ -18,6 +18,10 @@ struct Qwen35MoeConfig {
     int num_key_value_heads{2};
     int head_dim{256};
     int vocab_size{248320};
+    // From text_config.max_position_embeddings (or the root). The hard sequence ceiling
+    // the checkpoint was trained/exported with -- prompt + reserved generation must not
+    // exceed it. 0 means the field was absent; callers treat that as "unknown".
+    int max_position_embeddings{0};
     int intermediate_size{0};
     int moe_intermediate_size{512};
     int shared_expert_intermediate_size{512};
@@ -103,6 +107,13 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
     (void)get_i("num_attention_heads", cfg.num_attention_heads);
     (void)get_i("num_key_value_heads", cfg.num_key_value_heads);
     (void)get_i("head_dim", cfg.head_dim);
+    // Prefer the nested text_config value; some exports also put it on the root.
+    if (!get_i("max_position_embeddings", cfg.max_position_embeddings)) {
+        int64_t root_max = 0;
+        if (!root["max_position_embeddings"].get_int64().get(root_max) && root_max > 0) {
+            cfg.max_position_embeddings = static_cast<int>(root_max);
+        }
+    }
     (void)get_i("moe_intermediate_size", cfg.moe_intermediate_size);
     (void)get_i("shared_expert_intermediate_size", cfg.shared_expert_intermediate_size);
     (void)get_i("num_experts", cfg.num_experts);
@@ -132,6 +143,18 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
     }
 
     return cfg.hidden_size > 0 && cfg.num_hidden_layers > 0;
+}
+
+// The checkpoint's sequence ceiling, or 0 when config.json is missing / unparseable /
+// omits the field. Safe to call without loading weights. Prefer
+// model::load_max_position_embeddings (model_limits.hpp) from call sites outside this
+// translation unit so consumers do not need simdjson on their include path.
+inline int load_max_position_embeddings(const std::string& model_dir) {
+    Qwen35MoeConfig cfg;
+    if (!load_qwen35_moe_config(model_dir, cfg)) {
+        return 0;
+    }
+    return cfg.max_position_embeddings > 0 ? cfg.max_position_embeddings : 0;
 }
 
 } // namespace lmp::model::mlxl

@@ -16,6 +16,7 @@
 // renders. That is a thing worth being able to point at. sidecar.cpp keeps the protocol
 // dispatch and the run loop; the lifecycle of the 19 GB lives here.
 //
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -34,6 +35,10 @@ namespace lmp::surface {
 struct Session {
     std::string model_dir;
     std::string workspace;
+    // From the checkpoint's text_config.max_position_embeddings. 0 when unknown (no
+    // model loaded yet, or the field was absent). Copied into AgentConfig at run start
+    // so the loop can refuse a prompt that cannot fit.
+    std::int32_t model_max_sequence_tokens = 0;
     std::unique_ptr<model::QwenTokenizer> tok;
     std::unique_ptr<model::MlxBackend> backend;
     std::unique_ptr<tools::Registry> registry;
@@ -53,6 +58,8 @@ struct Session {
     // assumed: the extension can, agent_eval.py cannot, and guessing wrong either wedges
     // an unattended run on a reply that never comes or writes behind the editor's back.
     bool client_applies_edits = false;
+    // Whether this client answers lmp/code_intel via editor language features.
+    bool client_provides_code_intel = false;
 
     // Both halves, because either alone is a session that cannot generate. They are only
     // ever assigned together (see load_model), so this can never be half true -- the
@@ -104,10 +111,12 @@ void ensure_registry(Session& session, const std::string& workspace,
 // The repo's own conventions, in the order the surrounding ecosystem settled on. First
 // file found wins; they are alternatives, not layers, and concatenating them would let a
 // stale `.cursorrules` contradict a current AGENTS.md with no way to tell which won.
-[[nodiscard]] std::string load_project_instructions(const std::string& workspace);
+[[nodiscard]] std::string load_project_instructions(
+    const platform::WorkspaceFs& workspace);
 
 // What the agent told itself, last time it was here. The counterpart to the above: same
 // stable-prompt slot, same once-per-session cost, opposite provenance.
-[[nodiscard]] std::string load_project_memory(const std::string& workspace);
+[[nodiscard]] std::string load_project_memory(
+    const platform::WorkspaceFs& workspace);
 
 } // namespace lmp::surface

@@ -1,0 +1,18 @@
+{
+  "split": "private",
+  "mission": "Fix app.py so `python3 -m pytest -q` passes. There may be an editor buffer snapshot present; the on-disk file is authoritative unless you re-read and reconcile versions. Do not paste an outdated buffer over a newer disk file.",
+  "mode": "agent",
+  "expect": "solved",
+  "grader": "check.sh",
+  "max_iterations": 25,
+  "wall_clock_seconds": 600,
+  "notes": "Dirty-editor / version-conflict awareness. The .editor_dirty_buffer contains a plausible wrong fix; the real bug fix is different. Full editor e2e is optional — shell grading is enough for CI self-test of the fixture.",
+  "protect": [
+    "test_app.py",
+    ".editor_dirty_buffer"
+  ],
+  "tags": [
+    "editor",
+    "version_conflict"
+  ]
+}

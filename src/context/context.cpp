@@ -17,10 +17,17 @@ constexpr const char* kPersona =
     "- You reach for the most specific tool for the job: replace_in_file over write_file\n"
     "  for a partial change, git_diff over shell, read_slice over read_file on a large\n"
     "  file. A general tool used where a specific one exists is a mistake.\n"
+    "- When a build or check fails, identify the exact error message and file line before\n"
+    "  modifying source code.\n"
     "- You test whenever it is possible and safe to do so, and you run the test rather\n"
     "  than assert that it would pass.\n"
-    "- You are to the point. You do not restate the task, narrate what you are about to\n"
-    "  do, or explain work that speaks for itself.\n";
+    "- When a decision would genuinely change what you build and no amount of reading will\n"
+    "  settle it -- which approach, which library, which of two designs -- you ask with\n"
+    "  `ask_question` and offer 2 to 4 options. Writing the question as ordinary text does\n"
+    "  not ask it: a text-only turn is your final answer and the run ends on it.\n"
+    "- Continue from the latest tool result and your last working note. Do not restate\n"
+    "  the user's request, narrate what you are about to do, or explain work that speaks\n"
+    "  for itself.\n";
 
 std::string first_line(const std::string& s, std::size_t cap) {
     const std::size_t nl = s.find('\n');
@@ -105,10 +112,17 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
 // ORDERING IS LOAD-BEARING (S5.10). The prompt is laid out most-stable-first so that the
 // KV prefix survives a turn:
 //
-//   [system: guidance + project conventions + mission]  never changes within a run
-//   [compacted spans]                                   changes only when compaction runs
-//   [recent turns]                                      append-only between compactions
-//   [live state: checklist, deliverables, ledger]       changes constantly -- so it goes LAST
+//   [system: persona + mode + tools + workspace + conventions + memory]
+//                                                         never changes within a run
+//   [user: opening mission]                             never changes within a run
+//   [compacted spans]                                     changes only when compaction runs
+//   [recent turns]                                        append-only between compactions
+//   [live state: latest user pin, checklist, deliverables]
+//                                                         changes constantly -- LAST
+//
+// The task is a user message, not system identity. System stays role/constraints/tools;
+// the opening ask sits as the first stable user message so chronology matches 2026
+// coding-agent practice while remaining run-constant for the KV checkpoint.
 //
 // The live state used to live in the system message, at the very front. Every checklist
 // tick, every deliverable and every verification therefore rewrote token 0, diverged the
@@ -121,9 +135,8 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
 std::vector<Message> ContextStore::render(std::string_view tool_guidance) const {
     std::vector<Message> out;
 
-    // T0: persona, guidance, the project's own conventions, and the mission -- the only
-    // place the deliverable is named. Fixed for the lifetime of the run, and FIRST,
-    // because everything ahead of a change is what stays cached.
+    // Stable system: persona, mode, guidance, workspace, conventions, memory. The
+    // deliverable is named in the user message that follows -- not here.
     std::string system;
     system += persona_.empty() ? kPersona : persona_.c_str();
     // Immediately after the persona and before the tools, because it QUALIFIES the persona
@@ -161,16 +174,20 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
                   "instructions, and prefer what you can observe now.\n\n" +
                   project_memory_;
     }
-    system += "\n\n# Mission\n\n" + user_turns_.front();
     out.push_back({Role::System, std::move(system)});
 
-    // T3: compacted spans, oldest first, as observed history.
+    // Opening mission: first stable user message. Not also stored in recent_ -- render
+    // injects it once so the ask is not duplicated when follow-ups arrive.
+    out.push_back({Role::User, user_turns_.front()});
+
+    // Compacted spans, oldest first, as observed history.
     for (const std::string& span : spans_) {
         out.push_back({Role::User, span});
     }
 
-    // T2: recent turns, verbatim. The assistant's answer body and the observation it
-    // got back -- the observation goes in as a tool_response, which is Qwen's shape.
+    // Recent turns, verbatim. The assistant's answer body (or a capped working note from
+    // a tool turn) and the observation it got back -- the observation goes in as a
+    // tool_response, which is Qwen's shape.
     for (const TurnRecord& t : recent_) {
         if (!t.user_text.empty()) {
             out.push_back({Role::User, t.user_text});
@@ -184,7 +201,7 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
         }
     }
 
-    // T1: pinned live state, LAST so that mutating it costs one message of re-prefill
+    // Pinned live state, LAST so that mutating it costs one message of re-prefill
     // rather than the whole context.
     const std::string live = render_live_state();
     if (!live.empty()) {
@@ -195,18 +212,15 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
 
 std::string ContextStore::render_live_state() const {
     std::string s;
-    // The standing instruction, verbatim and pinned.
+    // The latest follow-up, verbatim and pinned.
     //
     // It is already in the recent stream at the position it arrived, and that copy is
     // what gives it chronology. This one exists because compaction will eventually
     // summarize that copy, and the thing a run must not lose to a trim is the sentence
-    // telling it what to do differently. Duplicated deliberately: T0 names the mission,
-    // and until this existed there was nowhere for "and now do it the other way" to live
-    // that a long run could not forget.
+    // telling it what to do differently. Precedence is chronological in the stream; this
+    // pin only keeps the latest ask from vanishing into a summary.
     if (user_turns_.size() > 1) {
-        s += "# Standing instruction (most recent; supersedes the mission where they "
-             "conflict)\n\n" +
-             user_turns_.back() + "\n\n";
+        s += "# Latest user message\n\n" + user_turns_.back() + "\n\n";
     }
     if (!checklist_.empty()) {
         s += "# Checklist\n\n";
