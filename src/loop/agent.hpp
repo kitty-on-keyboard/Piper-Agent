@@ -381,6 +381,12 @@ class Agent {
     std::size_t could_not_run_streak_ = 0;
     std::size_t same_diag_streak_ = 0;
     std::string last_primary_diag_fp_;
+    // How many CONSECUTIVE text-only turns a conversational mode nudges before it accepts
+    // the ending. Any executed tool call resets the count, so this bounds "said it would
+    // act and did not" in a row, not narration across the run. One was too few: a run that
+    // had just read four files and said it would read the rest was nudged once, said it
+    // again, and was ended at turn 12 of 200 with no plan and no question.
+    static constexpr std::size_t kPlanNudgesBeforeYield = 2;
     std::size_t unhandled_text_turns_ = 0;
     std::size_t executed_tool_calls_in_run_ = 0;
 };

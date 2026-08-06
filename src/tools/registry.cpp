@@ -734,23 +734,40 @@ Registry::Registry(WorkspaceContext ctx)
         d.description =
             "Read up to four files in one call. Pass paths as newline-separated text "
             "(or a JSON string array). Each file is returned with the same line-numbered "
-            "format as read_file. Prefer this when several independent files are needed "
-            "before the next edit; keep issuing separate read_file calls when the paths "
-            "are not known together.";
+            "format as read_file. Listing more than four is not an error -- the first four "
+            "are read and the rest are named back to you, so call it again for those. "
+            "Prefer this when several independent files are needed before the next edit; "
+            "keep issuing separate read_file calls when the paths are not known together.";
         d.spec.name = d.name;
         d.spec.params = {param("paths", ParamType::Text, true)};
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::vector<std::string> paths = parse_read_many_paths(*get(p, "paths"));
+            std::vector<std::string> paths = parse_read_many_paths(*get(p, "paths"));
             if (paths.empty()) {
                 return ToolResult::error(ErrorClass::Malformed, true,
                                          "paths must list at least one non-empty path");
             }
+            // READ THE FIRST FOUR, do not refuse all fifteen.
+            //
+            // Over the cap used to be a hard error that read nothing, and a model that has
+            // just listed a directory naturally asks for everything in it. Observed: a run
+            // asked for 15 files, was refused, asked for 7, was refused again, and burned a
+            // quarter of its turns learning a number the error had already told it. The cap
+            // exists to bound how much lands in one observation, and truncating bounds that
+            // exactly as well as refusing does -- while making the turn progress.
+            std::string overflow_note;
             if (paths.size() > kReadManyMaxPaths) {
-                return ToolResult::error(
-                    ErrorClass::Malformed, true,
-                    "paths lists " + std::to_string(paths.size()) +
-                        " files; read_many accepts at most " +
-                        std::to_string(kReadManyMaxPaths));
+                const std::size_t asked = paths.size();
+                std::string dropped;
+                for (std::size_t i = kReadManyMaxPaths; i < asked; ++i) {
+                    dropped += (dropped.empty() ? "" : ", ") + paths[i];
+                }
+                paths.resize(kReadManyMaxPaths);
+                overflow_note = "\n\n(read the first " + std::to_string(kReadManyMaxPaths) +
+                                " of " + std::to_string(asked) +
+                                " paths; read_many caps each call at " +
+                                std::to_string(kReadManyMaxPaths) +
+                                ". Not read yet: " + dropped +
+                                ". Call read_many again for those.)";
             }
             std::vector<std::size_t> indices(paths.size());
             for (std::size_t i = 0; i < paths.size(); ++i) {
@@ -780,6 +797,7 @@ Registry::Registry(WorkspaceContext ctx)
                     all_refused = false;
                 }
             }
+            summary += overflow_note;
             if (all_refused && !parts.empty()) {
                 ToolResult r = ToolResult::refused(summary);
                 r.bytes_read = bytes;
