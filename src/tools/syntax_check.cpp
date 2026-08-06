@@ -57,6 +57,17 @@ const SyntaxContract* contract_for(std::string_view rel_path) {
     return nullptr;
 }
 
+void replace_all(std::string& text, std::string_view from, std::string_view to) {
+    if (from.empty()) {
+        return;
+    }
+    std::size_t at = 0;
+    while ((at = text.find(from, at)) != std::string::npos) {
+        text.replace(at, from.size(), to);
+        at += to.size();
+    }
+}
+
 } // namespace
 
 const std::vector<SyntaxContract>& syntax_contracts() {
@@ -84,10 +95,10 @@ const std::vector<SyntaxContract>& syntax_contracts() {
     return kContracts;
 }
 
-std::string compile_db_syntax_command(const std::string& root,
-                                      const std::string& abs_path) {
-    const std::string db = root + "/build/compile_commands.json";
-    const fsx::FileContents f = fsx::read_file_whole(db, 64U << 20);
+static std::string compile_db_syntax_command(const fsx::WorkspaceFs& workspace,
+                                             const std::string& abs_path) {
+    const fsx::FileContents f =
+        workspace.read_file_whole("build/compile_commands.json", 64U << 20);
     if (!f.ok()) {
         return {};
     }
@@ -140,6 +151,19 @@ std::string compile_db_syntax_command(const std::string& root,
     return {};
 }
 
+std::string compile_db_syntax_command(const std::string& root,
+                                      const std::string& abs_path) {
+    const fsx::WorkspaceFs workspace(root);
+    return compile_db_syntax_command(workspace, abs_path);
+}
+
+SyntaxChecker::SyntaxChecker(std::string root, std::size_t budget_bytes)
+    : root_(std::move(root)), workspace_fs_(root_), budget_(budget_bytes) {
+    if (workspace_fs_.valid()) {
+        root_ = workspace_fs_.root();
+    }
+}
+
 SyntaxVerdict SyntaxChecker::check(const std::string& rel_path, int approved_tier) const {
     SyntaxVerdict v;
     if (approved_tier <= 0) {
@@ -149,16 +173,35 @@ SyntaxVerdict SyntaxChecker::check(const std::string& rel_path, int approved_tie
     if (c == nullptr) {
         return v;
     }
-    const std::string abs = fsx::resolve_against(root_, rel_path);
-    if (!fsx::is_within(root_, abs)) {
+    const fsx::ContainedPath path = workspace_fs_.contained_path(rel_path);
+    if (!path.ok()) {
+        return v;
+    }
+    fsx::OpenedFile source =
+        workspace_fs_.open_file_readonly(path.relative, approved_tier != 2);
+    if (!source.ok()) {
         return v;
     }
 
     std::string command;
     if (c->needs_compile_db) {
-        command = compile_db_syntax_command(root_, abs);
+        command = compile_db_syntax_command(workspace_fs_, path.absolute);
         if (command.empty()) {
             return v; // no entry: stay silent rather than emit a false cascade
+        }
+        if (approved_tier != 2) {
+            // The compiler gets the already-open source descriptor. Add the original
+            // directory as a quote include root because /dev/fd has no source directory.
+            const std::string fd_path = "/dev/fd/" + std::to_string(source.fd);
+            if (command.find(path.absolute) == std::string::npos) {
+                return v; // cannot bind an unknown command shape safely
+            }
+            replace_all(command, path.absolute, fd_path);
+            const std::size_t slash = path.absolute.find_last_of('/');
+            const std::string parent =
+                slash == std::string::npos ? root_ : path.absolute.substr(0, slash);
+            command += " -iquote " + quote(parent);
+            command += extension_of(rel_path) == ".c" ? " -x c" : " -x c++";
         }
     } else {
         command = c->command;
@@ -166,7 +209,11 @@ SyntaxVerdict SyntaxChecker::check(const std::string& rel_path, int approved_tie
         if (at == std::string::npos) {
             return v;
         }
-        command.replace(at, 6, quote(abs));
+        const std::string input =
+            approved_tier == 2
+                ? path.absolute
+                : "/dev/fd/" + std::to_string(source.fd);
+        command.replace(at, 6, quote(input));
     }
 
     const ExecutionGrant grant = grant_execution(

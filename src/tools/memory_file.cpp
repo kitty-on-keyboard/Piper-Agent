@@ -1,8 +1,5 @@
 #include "src/tools/registry.hpp"
 
-#include <filesystem>
-#include <system_error>
-
 #include "src/pcc/store.hpp"
 #include "src/platform/fs.hpp"
 
@@ -16,17 +13,19 @@ namespace lmp::tools {
 namespace fsx = lmp::platform;
 
 bool would_overwrite_existing(const std::string& root, const std::string& rel) {
-    const std::string abs = resolve_contained(root, rel);
-    if (abs.empty()) {
-        return false; // outside the root: refused for a different reason, upstream
+    const fsx::WorkspaceFs workspace(root);
+    if (!workspace.valid()) {
+        return false;
     }
     // Read-based rather than stat-based, so it uses the same door every other path check
     // uses. A file too large to read is certainly not empty, so it counts as content.
-    const fsx::FileContents f = fsx::read_file_whole(abs, 1);
-    if (f.status == fsx::FsStatus::NotFound) {
-        return false;
-    }
-    return !(f.ok() && f.bytes.empty());
+    const fsx::FileContents f = workspace.read_file_whole(rel, 1);
+    return f.status == fsx::FsStatus::TooLarge || (f.ok() && !f.bytes.empty());
+}
+
+bool Registry::would_overwrite_existing(const std::string& rel) const {
+    const fsx::FileContents f = workspace_fs_.read_file_whole(rel, 1);
+    return f.status == fsx::FsStatus::TooLarge || (f.ok() && !f.bytes.empty());
 }
 
 // The bytes on disk are already the bytes asked for.
@@ -39,14 +38,30 @@ bool would_overwrite_existing(const std::string& root, const std::string& rel) {
 // A file too large to read is not unchanged as far as this can prove, so it is written.
 // Being wrong here costs one redundant write; being wrong the other way silently drops an
 // edit, which is the one outcome a write tool may never have.
-static bool already_holds(const std::string& abs_path, std::string_view content,
+static bool already_holds(const fsx::WorkspaceFs& workspace, std::string_view path,
+                          std::string_view content,
                           std::size_t max_bytes) {
-    const fsx::FileContents f = fsx::read_file_whole(abs_path, max_bytes);
+    const fsx::FileContents f = workspace.read_file_whole(path, max_bytes);
     return f.ok() && f.bytes.size() == content.size() && f.bytes == content;
 }
 
-CommitOutcome Registry::commit_write(const std::string& abs_path,
-                                     std::string_view content) {
+void Registry::note_read_version(const std::string& abs_path, std::string_view bytes) {
+    read_versions_[abs_path] = platform::content_sha256_hex(bytes);
+}
+
+std::string Registry::resolve_expected_version(
+    const std::string& abs_path, const std::vector<ToolParamValue>& params) const {
+    if (const std::string* supplied = get(params, "expected_version");
+        supplied != nullptr && !supplied->empty()) {
+        return *supplied;
+    }
+    const auto it = read_versions_.find(abs_path);
+    return it == read_versions_.end() ? std::string() : it->second;
+}
+
+CommitOutcome Registry::commit_write(const fsx::ContainedPath& path,
+                                     std::string_view content,
+                                     const platform::WritePrecondition& pre) {
     CommitOutcome out;
     // BEFORE the sink and before the directory is made, because neither is worth doing for
     // a write that is not going to happen -- and routing an empty edit through the editor
@@ -56,43 +71,61 @@ CommitOutcome Registry::commit_write(const std::string& abs_path,
     // re-writes the operator's file verbatim has made exactly as little progress as one
     // that re-writes its own, and the write gate upstream has already had its say about
     // whether the call was allowed to run at all.
-    if (already_holds(abs_path, content, ctx_.max_read_bytes)) {
+    //
+    // A no-op does not need a prior-read claim: nothing is replaced. It also does not
+    // mint write authority for a different later content -- the ledger is left alone.
+    if (already_holds(workspace_fs_, path.relative, content, ctx_.max_read_bytes)) {
         out.write.status = platform::FsStatus::Ok;
         out.unchanged = true;
         return out;
     }
     if (!edit_sink_) {
-        // The parent directory is MADE, not required to exist. Writing `src/store.py`
-        // into an empty workspace is the most ordinary thing an agent does, and without
-        // this it failed -- on the temp file, so the error named
-        // `src/store.py.tmp.8276: No such file or directory`, a path the model never
-        // asked for and could not act on.
+        // Parent directories are made by the descriptor-rooted primitive. Writing
+        // `src/store.py` into an empty workspace is the most ordinary thing an agent
+        // does, and every created component is opened with O_NOFOLLOW before continuing.
         //
         // MEASURED, and it is the whole reason this file exists in this form: a real run
         // regenerated 8 KB of correct code SIX times against that error (turns 15-21),
         // then degenerated into sending empty content, and spent 20 of its 40 turns there
         // before stumbling onto `mkdir -p src` in a shell call. Nothing was wrong with
         // the model's work; it could not create a directory.
-        //
-        // Containment is already settled: resolve_contained() returned abs_path, so it is
-        // inside the workspace root and so is every parent this creates.
-        const std::filesystem::path parent =
-            std::filesystem::path(abs_path).parent_path();
-        if (!parent.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(parent, ec);
-            // Not reported here: if the directory is genuinely unusable the write below
-            // fails and says so about the path the model NAMED, which is the better
-            // sentence. create_directories also sets ec for "already exists" on some
-            // implementations, and that is not an error.
+        out.write = workspace_fs_.write_file_atomic(path.relative, content, true, pre);
+        if (out.write.ok()) {
+            // Invalidate: a whole-file rewrite must read again before the next overwrite.
+            // Failed writes leave the prior observation in place.
+            read_versions_.erase(path.absolute);
         }
-        out.write = fsx::write_file_atomic(abs_path, content);
         return out;
     }
-    const EditOutcome o = edit_sink_(abs_path, std::string(content));
-    out.write.status = o.applied ? platform::FsStatus::Ok : platform::FsStatus::IoError;
-    out.write.error =
-        o.applied ? std::string() : ("the editor did not apply the edit: " + o.error);
+    // The editor is an external sink and receives an absolute path, but it never receives
+    // one whose current components include a symlink.
+    const fsx::ContainedPath current = workspace_fs_.contained_path(path.relative);
+    if (!current.ok()) {
+        out.write.status = current.status;
+        out.write.error = current.error;
+        return out;
+    }
+    EditIntent intent;
+    intent.abs_path = current.absolute;
+    intent.new_content = std::string(content);
+    intent.expected_version = pre.expected_version;
+    intent.expected_absent = pre.expected_absent;
+    const EditOutcome o = edit_sink_(intent);
+    if (o.applied) {
+        out.write.status = platform::FsStatus::Ok;
+        read_versions_.erase(current.absolute);
+    } else {
+        // Prefer Conflict when the editor names a version mismatch; otherwise IoError so
+        // the existing write_failure mapping stays honest for refuse/IO cases.
+        const bool conflict =
+            o.error.find("version") != std::string::npos ||
+            o.error.find("expected_absent") != std::string::npos ||
+            o.error.find("already exists") != std::string::npos ||
+            o.error.find("conflict") != std::string::npos;
+        out.write.status =
+            conflict ? platform::FsStatus::Conflict : platform::FsStatus::IoError;
+        out.write.error = "the editor did not apply the edit: " + o.error;
+    }
     return out;
 }
 
@@ -165,7 +198,10 @@ ToolResult Registry::remember_fact(const std::string& raw, const std::string& ra
     }
     const std::string key = sanitize_key(raw_key);
 
-    const std::string path = ctx_.root + "/" + kMemoryFileName;
+    const fsx::ContainedPath path = workspace_fs_.contained_path(kMemoryFileName);
+    if (!path.ok()) {
+        return ToolResult::refused(path.error);
+    }
     // KEYED NOTES CARRY THEIR KEY IN THE LINE, and that marker is the whole mechanism.
     //
     // Without it the mirror can only append, so a corrected note leaves the stale one in
@@ -178,7 +214,8 @@ ToolResult Registry::remember_fact(const std::string& raw, const std::string& ra
 
     // Read wider than the cap so a file that is already oversized can be trimmed back
     // rather than refused -- otherwise one oversized write would wedge the tool forever.
-    const fsx::FileContents cur = fsx::read_file_whole(path, kMemoryMaxBytes * 4);
+    const fsx::FileContents cur =
+        workspace_fs_.read_file_whole(path.relative, kMemoryMaxBytes * 4);
     std::string body = cur.ok() ? cur.bytes : std::string();
 
     // Exact repeats are the common case: a model that re-reads its own notes re-derives
@@ -203,7 +240,8 @@ ToolResult Registry::remember_fact(const std::string& raw, const std::string& ra
         body.erase(0, nl + 1);
     }
 
-    const fsx::WriteResult w = fsx::write_file_atomic(path, body);
+    const fsx::WriteResult w =
+        workspace_fs_.write_file_atomic(path.relative, body);
     if (!w.ok()) {
         return ToolResult::error(ErrorClass::Transient, true, w.error);
     }

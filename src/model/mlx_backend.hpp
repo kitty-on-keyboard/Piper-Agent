@@ -21,8 +21,12 @@
 //   prefix reuse verified, never assumed-- KvCacheLedger id-by-id (S5.10); divergence
 //                                          resets and honestly re-prefills
 //   TTFT / prefill tok/s / decode tok/s -- filled on every GenResult
-//   speculative decoding                -- the seam is the draft_model_dir config; not
-//                                          yet implemented, and says so
+//   speculative decoding                -- model-free path in speculative.hpp; OFF by
+//                                          default (LMP_SPECULATIVE=1 or
+//                                          MlxBackendConfig::speculative). draft_model_dir
+//                                          is a separate draft-model seam and stays empty;
+//                                          EAGLE / second-checkpoint speculation is out of
+//                                          scope. Do not enable speculation by default.
 //
 #include <cstddef>
 #include <memory>

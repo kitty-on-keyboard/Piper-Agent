@@ -1,12 +1,13 @@
 {
   "split": "corpus",
-  "mission": "Rename the function `calc_total` to `compute_total` everywhere it appears, including its callers. `python3 -m pytest -q` must still pass afterwards.",
+  "mission": "Rename the function `calc_total` to `compute_total` everywhere it appears, including its callers across billing.py, checkout.py, report.py, and invoices.py. `python3 -m pytest -q` must still pass afterwards.",
   "mode": "agent",
   "expect": "solved",
   "check": "python3 -m pytest -q && ! grep -rq calc_total . --include='*.py'",
+  "grader": "check.sh",
   "max_iterations": 30,
   "wall_clock_seconds": 700,
-  "notes": "Multi-file edit with a mechanical ground truth. Measures whether it finds every call site rather than the first.",
+  "notes": "Multi-file rename with an immutable external grader. Measures whether every call site is found rather than the first.",
   "protect": [
     "test_billing.py"
   ]

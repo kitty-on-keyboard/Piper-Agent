@@ -49,10 +49,13 @@ To install by hand instead: `npm run package`, then Extensions view → `...` �
 
 ### Approvals
 
-A tool call that scores above `lmPipe.hitl.autoApproveBelowRisk` (0.35) raises an
-approval card with the command preview, its risk score, and the capability chips the
-classifier set. **The run blocks until you answer it.** Above
-`lmPipe.hitl.rejectAboveRisk` (0.85) the call is rejected without ever reaching you.
+Ordinary fully-parsed commands follow risk routing; with `lmPipe.autoApproveExec` on,
+low-risk builds and tests run without a card. Irreversible capabilities (destroying
+data, writing outside the workspace, privilege escalation, history rewrite) and opaque
+commands (`PartiallyParsed` / `Unparseable`, e.g. `bash unknown.sh`) always raise a
+card — those are property overrides, not score bumps, and a remembered allowlist entry
+cannot skip them. **The run blocks until you answer.** Risk above the internal reject
+ceiling is refused without a card.
 
 Everything that is not an explicit approval denies: closing the window, cancelling the
 run, or shutting the sidecar down all deny the pending call rather than letting it
@@ -68,7 +71,13 @@ model to finish the token it is on.
 
 - `lmPipe.sandboxTier` 2 (container) **refuses**. Unattended runs require T2 (S7.2), so
   in practice runs are attended-only today.
-- `lmp/edit` writes files directly rather than through the editor's edit API, so agent
-  edits have **no undo and no diff review**.
-- Settings other than `modelDir`, `workspaceRoot` and `mission` are sent but not yet read
-  by the sidecar, which uses its own defaults for sampling, iteration caps and mode.
+- Agent edits go through `lmp/edit` → VS Code `WorkspaceEdit` when the client advertises
+  `applies_edits` (the extension does). **Undo and dirty-buffer / diff review work** on
+  that path. Headless clients that leave `applies_edits` false still write directly.
+- Most `RunSettings` fields (sampling, budgets, mode, allowlists, MCP servers, prompts)
+  are applied by the sidecar at `lmp/start`. Container tier remains refused as above.
+
+## Product scope
+
+Mac-local **one-model** Qwen/MLX agent: a single in-process checkpoint, no subagents, no
+second inference server. Speculative decode stays opt-in (`LMP_SPECULATIVE=1`).

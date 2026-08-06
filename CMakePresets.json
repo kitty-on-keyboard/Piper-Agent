@@ -7,7 +7,8 @@
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "LMP_BUILD_TESTING": "ON"
+        "LMP_BUILD_TESTING": "ON",
+        "LMP_MLX_PYTHON": "/Users/dev/.venvs/lmp-mlx/bin/python"
       }
     },
     {

@@ -70,6 +70,12 @@ class TurnGrammar final : public MaskSource {
 
     void reset();
 
+    // Closes Think without consuming a </think> token. Used when the think budget is
+    // exhausted so the remaining generation budget can still produce tool XML / answer
+    // text -- without this, a long rumination LengthCaps in Think and tools never start.
+    // No-op (returns false) when not in Think.
+    bool force_end_think() noexcept;
+
     [[nodiscard]] Advance advance(TokenId id);
 
     // True if `id` may follow the current state. This is the DEFINITION of the mask --

@@ -8,7 +8,11 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <mutex>
+#include <unordered_map>
+
+#include <nlohmann/json.hpp>
 
 namespace lmp::platform {
 namespace {
@@ -304,8 +308,8 @@ std::string default_event_log_path(const char* pinned, const char* home) {
         return "lmp_events.jsonl";
     }
     // ~/Library/Logs is where a macOS user looks for an application's diagnostics and
-    // where they can delete them without breaking anything. This file is write-only
-    // today -- nothing in the tree reads it back -- so it is diagnostics, not state.
+    // where they can delete them without breaking anything. Resume reads the same path
+    // back via read_event_log; it remains diagnostics-shaped (append-only, rotatable).
     return std::string(home) + "/Library/Logs/LM_Pipe/events.jsonl";
 }
 
@@ -416,6 +420,95 @@ void EventLogWriter::close() {
         registry_release(path_);
         path_.clear();
     }
+}
+
+bool parse_event_line(std::string_view line, Event& out) {
+    out = Event{};
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+        line.remove_suffix(1);
+    }
+    if (line.empty()) {
+        return false;
+    }
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(line.begin(), line.end());
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    if (!j.is_object() || !j.contains("kind") || !j.at("kind").is_string()) {
+        return false;
+    }
+    out.kind = j.at("kind").get<std::string>();
+    if (j.contains("seq") && j.at("seq").is_number_unsigned()) {
+        out.seq = j.at("seq").get<std::uint64_t>();
+    } else if (j.contains("seq") && j.at("seq").is_number_integer()) {
+        const auto v = j.at("seq").get<std::int64_t>();
+        out.seq = v < 0 ? 0 : static_cast<std::uint64_t>(v);
+    }
+    if (j.contains("t_wall_ns") && j.at("t_wall_ns").is_number_integer()) {
+        out.wall_ns = j.at("t_wall_ns").get<std::int64_t>();
+    }
+    if (j.contains("t_mono_us") && j.at("t_mono_us").is_number_integer()) {
+        out.mono_us = j.at("t_mono_us").get<std::int64_t>();
+    }
+
+    // First pass: collect plain string fields. Second: overlay __b64 siblings so
+    // byte-faithful values replace their lossy UTF-8 display forms.
+    std::unordered_map<std::string, std::string> fields;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        const std::string& key = it.key();
+        if (key == "seq" || key == "t_wall_ns" || key == "t_mono_us" || key == "kind") {
+            continue;
+        }
+        if (key.size() > 5 && key.ends_with("__b64")) {
+            continue;
+        }
+        if (it.value().is_string()) {
+            fields[key] = it.value().get<std::string>();
+        }
+    }
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        const std::string& key = it.key();
+        if (key.size() <= 5 || !key.ends_with("__b64") || !it.value().is_string()) {
+            continue;
+        }
+        const std::string base = key.substr(0, key.size() - 5);
+        std::string decoded;
+        if (base64_decode(it.value().get<std::string>(), decoded)) {
+            fields[base] = std::move(decoded);
+        }
+    }
+    out.fields.reserve(fields.size());
+    for (auto& [k, v] : fields) {
+        out.fields.push_back({std::move(k), std::move(v)});
+    }
+    return true;
+}
+
+bool read_event_log(const std::string& path, std::vector<Event>& out, std::size_t& skipped,
+                    std::string& error) {
+    out.clear();
+    skipped = 0;
+    error.clear();
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = "cannot open event log: " + path;
+        return false;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        Event ev;
+        if (!parse_event_line(line, ev)) {
+            ++skipped;
+            continue;
+        }
+        out.push_back(std::move(ev));
+    }
+    return true;
 }
 
 } // namespace lmp::platform

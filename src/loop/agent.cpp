@@ -5,10 +5,14 @@
 #include <chrono>
 #include <cstdlib> // getenv/atoi, for the LMP_TRACE_TEXT gate
 #include <memory>
+#include <string_view>
+#include <unordered_map>
 
 #include "src/loop/parallel_calls.hpp"
 #include "src/loop/token_stream.hpp"
 #include "src/platform/fs.hpp"
+#include "src/tools/apply_patch.hpp"
+#include "src/tools/log_triage.hpp"
 
 namespace lmp::loop {
 namespace {
@@ -44,6 +48,42 @@ std::string capped(std::string s) {
     return s;
 }
 
+// Trailing slice of think for the next prompt when the answer channel was empty.
+// Full CoT stays on the thinking stream (S5.7); this is continuity, not a dump.
+constexpr std::size_t kWorkingNoteCap = 512;
+
+std::string working_note_from_reasoning(std::string_view reasoning) {
+    std::size_t begin = 0;
+    while (begin < reasoning.size() &&
+           (reasoning[begin] == ' ' || reasoning[begin] == '\t' || reasoning[begin] == '\n' ||
+            reasoning[begin] == '\r')) {
+        ++begin;
+    }
+    std::size_t end = reasoning.size();
+    while (end > begin && (reasoning[end - 1] == ' ' || reasoning[end - 1] == '\t' ||
+                           reasoning[end - 1] == '\n' || reasoning[end - 1] == '\r')) {
+        --end;
+    }
+    if (begin >= end) {
+        return {};
+    }
+    std::string_view body = reasoning.substr(begin, end - begin);
+    if (body.size() <= kWorkingNoteCap) {
+        return std::string(body);
+    }
+    std::size_t start = body.size() - kWorkingNoteCap;
+    // Prefer a clean cut at a newline inside the window; otherwise take the tail.
+    const std::size_t nl = body.find('\n', start);
+    if (nl != std::string_view::npos && nl + 1 < body.size()) {
+        start = nl + 1;
+    }
+    return std::string(body.substr(start));
+}
+
+bool is_blank(std::string_view s) {
+    return s.find_first_not_of(" \t\r\n") == std::string_view::npos;
+}
+
 // How repetitive a generation is, measured on the text rather than guessed from its
 // length. Reported ALWAYS, unlike the text itself, because these three numbers are small
 // and a degenerate turn is invisible without them.
@@ -62,7 +102,7 @@ struct TextShape {
 
 TextShape shape_of(const std::string& text) {
     TextShape s;
-    std::vector<std::pair<std::string_view, std::size_t>> counts;
+    std::unordered_map<std::string_view, std::size_t> counts;
     std::size_t at = 0;
     while (at <= text.size()) {
         std::size_t nl = text.find('\n', at);
@@ -77,19 +117,8 @@ TextShape shape_of(const std::string& text) {
             continue;
         }
         ++s.lines;
-        bool seen = false;
-        for (auto& [text_seen, n] : counts) {
-            if (text_seen == line) {
-                ++n;
-                s.worst_line_repeats = std::max(s.worst_line_repeats, n);
-                seen = true;
-                break;
-            }
-        }
-        if (!seen) {
-            counts.emplace_back(line, 1);
-            s.worst_line_repeats = std::max<std::size_t>(s.worst_line_repeats, 1);
-        }
+        const std::size_t n = ++counts[line];
+        s.worst_line_repeats = std::max(s.worst_line_repeats, n);
     }
     s.distinct = counts.size();
     return s;
@@ -117,6 +146,20 @@ constexpr std::size_t kDistinctCeilingPercent = 25;
 bool looks_degenerate(const TextShape& s) {
     return s.lines >= kRepeatFloor && s.worst_line_repeats >= kRepeatFloor &&
            s.distinct * 100 <= s.lines * kDistinctCeilingPercent;
+}
+
+const char* phase_name(model::TurnPhase phase) {
+    switch (phase) {
+        case model::TurnPhase::Think:
+            return "think";
+        case model::TurnPhase::Text:
+            return "text";
+        case model::TurnPhase::ToolCall:
+            return "tool";
+        case model::TurnPhase::Done:
+            return "done";
+    }
+    return "unknown";
 }
 
 // A JSON array of strings, rewritten as one element per line. Empty when the text is not
@@ -186,13 +229,38 @@ constexpr const char kCacheNote[] =
     "\n(unchanged: this exact call already ran and returned the result above; "
     "nothing has been written since, so it was not re-executed.)";
 
-std::string without_cache_note(const std::string& summary) {
+// Named `exit_plan_mode` until that tool stopped existing outside plan mode, which made the
+// advice unfollowable in the two modes that see this note most. `ask_question` is available
+// everywhere, so it is the one worth naming.
+constexpr const char kRepeatNote[] =
+    "\n[Note: This tool call produced identical output to a previous call. Do not repeat the same query. Explore subdirectories, inspect code files, or put the choice to the human with 'ask_question'.]";
+
+std::string without_cache_note(std::string summary) {
+    const std::string_view rnote(kRepeatNote);
+    if (summary.size() >= rnote.size() &&
+        std::string_view(summary).substr(summary.size() - rnote.size()) == rnote) {
+        summary.resize(summary.size() - rnote.size());
+    }
     const std::string_view note(kCacheNote);
     if (summary.size() >= note.size() &&
         std::string_view(summary).substr(summary.size() - note.size()) == note) {
-        return summary.substr(0, summary.size() - note.size());
+        summary.resize(summary.size() - note.size());
     }
     return summary;
+}
+
+// Workspace-derived observations that must revalidate current state (never serve a
+// cached summary as authority after shell/MCP/editor/external changes).
+bool observes_workspace(const std::string& tool) {
+    return tool == "read_file" || tool == "read_many" || tool == "read_slice" ||
+           tool == "list_dir" || tool == "search" || tool == "find_files" ||
+           tool == "locate_symbol" || tool == "git_status" || tool == "git_diff" ||
+           tool == "git_log";
+}
+
+// read_many is excluded: its observation is a multi-file bundle, not one path key.
+bool is_content_read(const std::string& tool) {
+    return tool == "read_file" || tool == "read_slice";
 }
 
 } // namespace
@@ -422,6 +490,27 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // one the run is reproducible from.
     task.sampling.seed = config_.seed;
 
+    // Hard model ceiling: prompt + reserved generation must fit. Compaction is supposed
+    // to keep the prompt under context_budget_tokens, but a mis-set editor budget or a
+    // checkpoint smaller than the default must still refuse rather than OOB the KV.
+    if (config_.model_max_sequence_tokens > 0) {
+        const auto prompt_n = static_cast<std::int64_t>(task.prompt.size());
+        const auto need = prompt_n + static_cast<std::int64_t>(task.max_new_tokens);
+        if (need > static_cast<std::int64_t>(config_.model_max_sequence_tokens)) {
+            turn.generation.status = model::GenStatus::BackendError;
+            turn.generation.error =
+                "prompt (" + std::to_string(task.prompt.size()) + ") + max_new_tokens (" +
+                std::to_string(task.max_new_tokens) + ") exceeds model maximum sequence "
+                "length (" + std::to_string(config_.model_max_sequence_tokens) + ")";
+            turn.outcome = Outcome::BackendError;
+            emit("prompt", {{"tokens", std::to_string(task.prompt.size())},
+                            {"messages", std::to_string(messages.size())},
+                            {"refused", "model_max_sequence"},
+                            {"error", turn.generation.error}});
+            return turn;
+        }
+    }
+
     // Every harness->model append is an event. This invariant is what makes "did the
     // model receive this?" answerable (S8.1, S14).
     emit("prompt", {{"tokens", std::to_string(task.prompt.size())},
@@ -446,7 +535,16 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     if (observer_.on_token) {
         streamer = std::make_unique<TokenStreamer>(tok_, observer_.on_token);
     }
-    GrammarSink sink(grammar, streamer.get());
+    // Leave reserved_tool_tokens of the turn budget for tool XML after think ends.
+    std::size_t think_cap = 0;
+    if (config_.max_think_tokens > 0 && config_.max_new_tokens > 0) {
+        const auto reserved = std::max(0, config_.reserved_tool_tokens);
+        const auto room =
+            std::max(0, config_.max_new_tokens - reserved);
+        think_cap = static_cast<std::size_t>(
+            std::max(0, std::min(config_.max_think_tokens, room)));
+    }
+    GrammarSink sink(grammar, streamer.get(), think_cap);
     turn.generation = backend_.generate(task, sink, cancel);
 
     // Drained and joined BEFORE the text below is read, so what the surface showed and
@@ -460,6 +558,19 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // the same text, not a second opinion about it.
     turn.reasoning = tok_.decode(grammar.think_ids());
     turn.assistant_text = tok_.decode(grammar.text_ids());
+    turn.think_tokens = grammar.think_ids().size();
+    turn.text_tokens = grammar.text_ids().size();
+    const std::size_t generated =
+        static_cast<std::size_t>(std::max(0, turn.generation.tokens_generated));
+    turn.tool_tokens =
+        generated - std::min(generated, turn.think_tokens + turn.text_tokens);
+    if (turn.generation.status == model::GenStatus::LengthCapped) {
+        turn.cap_phase = phase_name(grammar.phase());
+    } else if (sink.think_capped) {
+        // Not a length cap of the turn -- generation continued after think closed -- but
+        // still worth naming so a trace can see why reasoning stopped early.
+        turn.cap_phase = "think_budget";
+    }
     if (observer_.on_perf) {
         // AGAINST THE BUDGET THE RUN IS ACTUALLY MANAGED BY, which is the only denominator
         // that means anything to the person watching the meter.
@@ -468,10 +579,17 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
                           ctx_.compaction_count());
     }
 
-    emit("generation", {{"status", std::to_string(static_cast<int>(turn.generation.status))},
-                        {"tokens", std::to_string(turn.generation.tokens_generated)},
-                        {"ttft_ms", std::to_string(turn.generation.ttft_ms)},
-                        {"decode_tok_per_s", std::to_string(turn.generation.decode_tok_per_s)}});
+    emit("generation",
+         {{"status", std::to_string(static_cast<int>(turn.generation.status))},
+          {"tokens", std::to_string(turn.generation.tokens_generated)},
+          {"think_tokens", std::to_string(turn.think_tokens)},
+          {"text_tokens", std::to_string(turn.text_tokens)},
+          {"tool_tokens", std::to_string(turn.tool_tokens)},
+          {"cap_phase", turn.cap_phase},
+          {"prefill_reused_tokens",
+           std::to_string(turn.generation.prefill_reused_tokens)},
+          {"ttft_ms", std::to_string(turn.generation.ttft_ms)},
+          {"decode_tok_per_s", std::to_string(turn.generation.decode_tok_per_s)}});
 
     // THE SHAPE OF WHAT WAS SAID, always, even when the text itself is not traced. Three
     // integers per turn, and they separate the two failures that `tokens=4096 status=1`
@@ -536,6 +654,7 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // Params up front for every call, because the concurrent pass below needs them all
     // before it starts and the serial pass wants the same values.
     std::vector<std::vector<tools::ToolParamValue>> params(calls.size());
+    turn.batch_count = calls.size();
     for (std::size_t i = 0; i < calls.size(); ++i) {
         for (const auto& p : calls[i].params) {
             params[i].push_back({p.name, p.value});
@@ -546,25 +665,26 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // the summary of a shell call does not contain the command that produced it. Reading
     // "Ok, empty output" three turns running tells you nothing; reading the three
     // commands tells you immediately whether the model is repeating itself.
-    if (trace_text_enabled()) {
-        for (std::size_t i = 0; i < calls.size(); ++i) {
-            std::vector<platform::EventField> fields{{"tool", calls[i].name},
-                                                     {"index", std::to_string(i)}};
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+        std::vector<platform::EventField> fields{{"tool", calls[i].name},
+                                                 {"index", std::to_string(i)},
+                                                 {"batch_index", std::to_string(i)},
+                                                 {"batch_count",
+                                                  std::to_string(calls.size())}};
+        if (trace_text_enabled()) {
             for (const tools::ToolParamValue& p : params[i]) {
                 fields.push_back({"arg." + p.name, capped(p.value)});
             }
-            emit("tool_call", std::move(fields));
         }
+        emit("tool_call", std::move(fields));
     }
 
     // The read-only calls of this batch run at once; everything else stays exactly where
     // it was. See parallel_calls.hpp for which calls qualify and why the others cannot.
-    // A call the repeat cache can answer is excluded: executing it would defeat the
-    // cache, and the serial pass below serves it without a thread.
+    // Repeats always revalidate: the detector annotates, it does not skip execution.
     std::vector<std::size_t> parallel;
     for (std::size_t i = 0; i < calls.size(); ++i) {
-        if (can_run_in_parallel(calls[i].name) &&
-            repeats_.cached(calls[i].name, params[i], ctx_.workspace_writes()) == nullptr) {
+        if (can_run_in_parallel(calls[i].name)) {
             parallel.push_back(i);
         }
     }
@@ -629,7 +749,16 @@ bool Agent::can_run_in_parallel(const std::string& name) const {
     if (decl == nullptr) {
         return false;
     }
-    return !decl->mutates_workspace && !decl->executes_commands && !decl->irreversible;
+    // Editor-backed locate_symbol blocks on the sidecar inbox (lmp/code_intel); that
+    // wait is single-threaded with approval/edit waits and must not run on a worker.
+    if (name == "locate_symbol" && registry_.has_code_intel_sink()) {
+        return false;
+    }
+    // Remote tools run in another process: even a "trusted" one may mutate the
+    // workspace outside the write ledger, so its result is neither parallel-safe
+    // nor cacheable as a fresh observation.
+    return !decl->mutates_workspace && !decl->executes_commands && !decl->irreversible &&
+           !decl->remote;
 }
 
 // The tail dispatch_call would have run for such a call, minus everything the eligibility
@@ -639,12 +768,33 @@ bool Agent::can_run_in_parallel(const std::string& name) const {
 bool Agent::adopt_readonly_result(const std::string& name,
                                   const std::vector<tools::ToolParamValue>& params,
                                   const tools::ToolResult& result) {
+    // Annotate before collapse so the prior observation is still byte-identical to the
+    // fresh result when measuring redundant re-reads.
+    const std::size_t prior_seen = repeats_.seen_count(name, params);
+    if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
+        const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
+        const bool unchanged = prior != nullptr && prior->last_ok &&
+                               prior->last_summary == without_cache_note(result.summary);
+        emit("repeat_reread",
+             {{"tool", name},
+              {"prior_count", std::to_string(prior_seen)},
+              {"unchanged", unchanged ? "1" : "0"},
+              {"read_bytes", std::to_string(result.bytes_read)}});
+        if (unchanged && result.bytes_read > 0) {
+            emit("redundant_read_bytes",
+                 {{"tool", name},
+                  {"bytes", std::to_string(result.bytes_read)},
+                  {"path", param_value(params, "path")}});
+        }
+    }
     // Same duplicate collapse as the serial path. Safe here for the same reason this path
     // exists at all: a call is only eligible for it if it mutates nothing and executes
     // nothing, and the collapse touches only records already in the context.
     collapse_duplicate_read(name, params, result);
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
+                         {"read_bytes", std::to_string(result.bytes_read)},
+                         {"edit_bytes", std::to_string(result.bytes_changed)},
                          {"summary", result.summary}});
     // Refused means the tool NEVER RAN, so it is not an execution (S9.1).
     return result.status != tools::Status::Refused;
@@ -660,15 +810,6 @@ std::string read_range(const std::string& tool,
         return {};
     }
     return param_value(params, "start_line") + "-" + param_value(params, "end_line");
-}
-
-// Whether this tool answers with FILE CONTENT keyed on a path.
-//
-// `list_dir` is deliberately absent. A directory's answer changes whenever anything under
-// it is created or removed; read_file and read_slice are keyed on one path each, and a
-// single write is the entire invalidation rule.
-bool is_content_read(const std::string& tool) {
-    return tool == "read_file" || tool == "read_slice";
 }
 
 } // namespace
@@ -730,7 +871,7 @@ void Agent::collapse_duplicate_read(const std::string& name,
     const std::string path = param_value(params, "path");
     const std::string range = read_range(name, params);
     const std::size_t collapsed = ctx_.supersede_duplicate_observation(
-        result.summary,
+        without_cache_note(result.summary),
         "(" + path + (range.empty() ? "" : " lines " + range) +
             " was read again below and is unchanged; this earlier identical copy is "
             "collapsed to keep one copy in context)");
@@ -760,39 +901,48 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
                     : tools::ToolResult::error(tools::ErrorClass::Malformed, true, r.detail);
     }
 
-    // The two that END THE RUN. Same reason `plan` is here -- the registry cannot stop the
-    // loop -- and they set the halt directly rather than returning a status the loop would
-    // have to interpret, because every other way of ending a run is already a named
-    // termination_reason and these are two more of them.
+    // The three that END THE RUN. Same reason `plan` is here -- the registry cannot stop
+    // the loop -- and they set the halt directly rather than returning a status the loop
+    // would have to interpret, because every other way of ending a run is already a named
+    // termination_reason and these are more of them.
     //
-    // Both are refused rather than silently ignored outside a conversational mode. They
-    // are filtered out of the grammar there, so this is unreachable by sampling; it is
-    // reachable by a synthesized call, and "the loop quietly stopped" is not an outcome
-    // worth leaving a path to.
-    if (name == "ask_user" || name == "exit_plan_mode") {
-        if (!policy_.conversational) {
+    // Only exit_plan_mode is mode-bound, and only because leaving plan mode is meaningless
+    // in a mode that is not plan mode. The two ASKING tools are available everywhere: an
+    // agent run that needs a decision it cannot read out of the code has to be able to ask
+    // for it, and while these were conversational-only its only way to raise the question
+    // was a text turn -- which, in a working mode, is the ending. The question ended the
+    // run instead of asking anything.
+    //
+    // Refused rather than silently ignored: filtered out of the grammar, so unreachable by
+    // sampling and reachable by a synthesized call, and "the loop quietly stopped" is not
+    // an outcome worth leaving a path to.
+    if (name == "ask_user" || name == "ask_question" || name == "exit_plan_mode") {
+        if (name == "exit_plan_mode" && !policy_.conversational) {
             return tools::ToolResult::refused(
-                "'" + name + "' is only available in a mode that yields to the operator");
+                "'exit_plan_mode' is only available in a mode that plans");
         }
         const std::string body =
-            param_value(params, name == "ask_user" ? "question" : "plan");
+            param_value(params, (name == "ask_user" || name == "ask_question") ? "question" : "plan");
         if (body.empty()) {
             return tools::ToolResult::error(
                 tools::ErrorClass::Malformed, true,
                 "'" + name + "' needs a non-empty " +
-                    (name == "ask_user" ? "'question'" : "'plan'"));
+                    ((name == "ask_user" || name == "ask_question") ? "'question'" : "'plan'"));
+        }
+        if (name == "ask_question") {
+            const std::string options = param_value(params, "options");
+            if (options.empty()) {
+                return tools::ToolResult::error(
+                    tools::ErrorClass::Malformed, true,
+                    "'ask_question' requires a non-empty 'options' string with 2-4 selectable options");
+            }
         }
         executed = true;
         halted_ = true;
-        if (name == "ask_user") {
+        if (name == "ask_user" || name == "ask_question") {
+            const std::string options = param_value(params, "options");
             halt_reason_ = "awaiting_user";
-            emit("ask_user", {{"question", body}});
-            // Down the ANSWER channel rather than a notification of its own. The question
-            // is prose the model wrote for a human to read, and the surface already knows
-            // how to render that -- a second path would be a second thing to keep in step
-            // for no difference on screen. Safe here: the token streamer was joined before
-            // the turn's text was read, so this is single-threaded and lands ahead of the
-            // tool row, which still names `ask_user` and keeps the trace honest.
+            emit(name, {{"question", body}, {"options", options}});
             if (observer_.on_token) {
                 observer_.on_token("answer", body);
             }
@@ -813,37 +963,11 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         return std::move(*refusal);
     }
 
-    // AN EXACT REPEAT OF A SUCCESSFUL READ IS SERVED FROM CACHE, not re-executed.
-    //
-    // Eligibility mirrors can_run_in_parallel on purpose: the same registry-declared
-    // properties that make a call safe to run off-thread make its result safe to serve
-    // twice. A shell call is never cached -- commands can mutate outside the write
-    // ledger's sight, and a stale build result served as fresh is exactly the class of
-    // harness-corrupted evidence this loop refuses to produce. A mutating call is never
-    // cached -- the write door already answers a repeated edit factually (`unchanged`).
-    // And one workspace write anywhere invalidates every entry (see RepeatDetector).
-    //
-    // This is the whole of loop protection, and it works by starving the loop rather
-    // than punishing it: the model keeps every tool, and a repeated question costs
-    // nothing and returns the same bytes with a note saying so.
-    if (can_run_in_parallel(name)) {
-        if (const RepeatDetector::SeenCall* hit =
-                repeats_.cached(name, params, ctx_.workspace_writes())) {
-            executed = true;
-            tools::ToolResult result = tools::ToolResult::okay(hit->last_summary);
-            // Collapse the copy the model was already holding BEFORE the note is
-            // appended, so the byte-identity test sees the original observation.
-            collapse_duplicate_read(name, params, result);
-            result.summary += kCacheNote;
-            emit("repeat_cached", {{"tool", name},
-                                   {"count", std::to_string(
-                                       repeats_.seen_count(name, params))}});
-            emit("tool_result", {{"tool", name},
-                                 {"status", std::string(tools::to_string(result.status))},
-                                 {"summary", result.summary}});
-            return result;
-        }
-    }
+    // Prior count for annotation after revalidation. Workspace observations always
+    // re-execute; RepeatDetector is not an authority for mutable state.
+    const std::size_t prior_seen = repeats_.seen_count(name, params);
+    const RepeatDetector::SeenCall* prior =
+        observes_workspace(name) ? repeats_.previous(name, params) : nullptr;
 
     // First touch of a path: record whether its syntax check was ALREADY failing, using
     // what is on disk right now -- which is the pre-image, so nothing has to be
@@ -865,10 +989,85 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // Refused means the tool NEVER RAN, so it is not an execution (S9.1).
     executed = result.status != tools::Status::Refused;
 
+    // A remote call may have rewritten the workspace in a process we do not see.
+    // Invalidate observation freshness whether the call succeeded or failed -- a
+    // failed tool can still have side effects, and a stale read after either is a lie.
+    if (decl != nullptr && decl->remote && executed) {
+        ctx_.invalidate_workspace_freshness();
+        emit("workspace_freshness",
+             {{"why", "remote_tool"}, {"tool", name},
+              {"writes", std::to_string(ctx_.workspace_writes())}});
+    }
+
+    // Every successful shell can mutate outside the write ledger (heredocs, redirects,
+    // build outputs). Advance the freshness epoch so the next observation revalidates.
+    if (decl != nullptr && decl->executes_commands && result.ok() && executed) {
+        ctx_.invalidate_workspace_freshness();
+        emit("workspace_freshness",
+             {{"why", "shell"}, {"tool", name},
+              {"writes", std::to_string(ctx_.workspace_writes())}});
+    }
+
+    // Annotate a revalidated repeat; never withhold the fresh bytes.
+    if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
+        const bool unchanged = prior != nullptr && prior->last_ok &&
+                               prior->last_summary == without_cache_note(result.summary);
+        emit("repeat_reread",
+             {{"tool", name},
+              {"prior_count", std::to_string(prior_seen)},
+              {"unchanged", unchanged ? "1" : "0"},
+              {"read_bytes", std::to_string(result.bytes_read)}});
+        if (unchanged) {
+            if (result.bytes_read > 0) {
+                emit("redundant_read_bytes",
+                     {{"tool", name},
+                      {"bytes", std::to_string(result.bytes_read)},
+                      {"path", param_value(params, "path")}});
+            }
+            // THE CONSTANT, not a copy of its text. without_cache_note() strips this exact
+            // string back off before the summary is cached, so a literal here that drifts
+            // from kRepeatNote silently stops being stripped and the notes stack up: two on
+            // the third repeat, three on the fourth.
+            result.summary += kRepeatNote;
+        }
+    }
+
     // A successful write IS the deliverable.
     if (decl != nullptr && decl->mutates_workspace && result.ok()) {
-        const std::string path = param_value(params, "path");
-        if (!path.empty()) {
+        std::vector<std::string> write_paths;
+        const std::string single = param_value(params, "path");
+        if (!single.empty()) {
+            write_paths.push_back(single);
+        } else if (name == "apply_patch") {
+            // apply_patch has no `path` param; paths live in the patch body / structured_json.
+            if (!result.structured_json.empty() && result.structured_json.front() == '[') {
+                std::string cur;
+                bool in = false;
+                for (char c : result.structured_json) {
+                    if (c == '"') {
+                        if (in) {
+                            write_paths.push_back(cur);
+                            cur.clear();
+                            in = false;
+                        } else {
+                            in = true;
+                        }
+                    } else if (in) {
+                        if (c == '\\') {
+                            continue; // next char is escaped; keep it plain for paths
+                        }
+                        cur.push_back(c);
+                    }
+                }
+            }
+            if (write_paths.empty()) {
+                write_paths = apply_patch::paths_in_patch(param_value(params, "patch"));
+            }
+        }
+        for (const std::string& path : write_paths) {
+            if (path.empty()) {
+                continue;
+            }
             // EVERY WRITE, with the path as the ledger will key it. Writes are the only
             // events that change the workspace, and the deliverable list only reports
             // DISTINCT paths -- so a run editing one file eight times and a run scattering
@@ -889,6 +1088,7 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
                            {"normalised", norm},
                            {"tool", name},
                            {"changed", result.mutation_was_noop ? "0" : "1"},
+                           {"edit_bytes", std::to_string(result.bytes_changed)},
                            {"first_touch", run_wrote_.count(norm) == 0 ? "1" : "0"},
                            {"distinct_files", std::to_string(ctx_.deliverables().size())}});
             if (!result.mutation_was_noop) {
@@ -917,6 +1117,8 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
 
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
+                         {"read_bytes", std::to_string(result.bytes_read)},
+                         {"edit_bytes", std::to_string(result.bytes_changed)},
                          {"summary", result.summary}});
     return result;
 }
@@ -1042,6 +1244,72 @@ void Agent::run_operator_check(const char* why) {
         (check.detail.empty() ? std::string(")")
                               : ". Output:\n" + check.detail + ")");
     marker.observation_is_error = !check.passed;
+
+    // Safe stuck-run signals. Observations only — never a tool lock, never "the contract
+    // is wrong". The operator contract stays authoritative.
+    if (!check.ran) {
+        ++could_not_run_streak_;
+        same_diag_streak_ = 0;
+        last_primary_diag_fp_.clear();
+        if (could_not_run_streak_ >= 2) {
+            marker.observation +=
+                "\n(System Observation: the operator check could not run "
+                "repeatedly — treat this as an environment/contract problem: the "
+                "command may be missing, the sandbox may refuse it, or the contract "
+                "may not be executable here. Do not keep editing as if the check "
+                "failed.)";
+        }
+    } else if (!check.passed) {
+        could_not_run_streak_ = 0;
+        const log_triage::StructuredTriage triage = log_triage::analyze(check.detail);
+        const std::string fp = log_triage::primary_fingerprint(triage);
+        if (!fp.empty() && fp == last_primary_diag_fp_) {
+            ++same_diag_streak_;
+        } else {
+            last_primary_diag_fp_ = fp;
+            same_diag_streak_ = fp.empty() ? 0 : 1;
+        }
+        if (same_diag_streak_ >= 2 && !fp.empty()) {
+            // Overlap between deliverable paths and paths cited in diagnostics.
+            bool overlap = false;
+            for (const std::string& del : ctx_.deliverables()) {
+                for (const std::string& cited : triage.referenced_paths) {
+                    if (del == cited || del.find(cited) != std::string::npos ||
+                        cited.find(del) != std::string::npos) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if (overlap) {
+                    break;
+                }
+                // Also match against failing test node ids / primary diagnostic paths.
+                for (const log_triage::Diagnostic& d : triage.primary_diagnostics) {
+                    if (!d.path.empty() &&
+                        (del == d.path || del.find(d.path) != std::string::npos ||
+                         d.path.find(del) != std::string::npos)) {
+                        overlap = true;
+                        break;
+                    }
+                }
+                if (overlap) {
+                    break;
+                }
+            }
+            if (!overlap) {
+                marker.observation +=
+                    "\n(System Observation: the same primary diagnostics keep "
+                    "appearing and none of the paths they cite overlap the files this "
+                    "run has changed. Reassess the target or ask the user — do not "
+                    "blame the verification command, and do not lock tools.)";
+            }
+        }
+    } else {
+        could_not_run_streak_ = 0;
+        same_diag_streak_ = 0;
+        last_primary_diag_fp_.clear();
+    }
+
     ctx_.add_turn(std::move(marker));
 
     if (observer_.on_verification) {
@@ -1068,7 +1336,16 @@ void Agent::record_call(const std::string& tool,
 
 RunReport Agent::run(const model::CancelToken& cancel) {
     RunReport report;
+    unhandled_text_turns_ = 0;
+    executed_tool_calls_in_run_ = 0;
     const auto started = clock_.mono();
+    // Run-scoped so shell / git / MCP observe the same token from every execute(),
+    // including the parallel read path. Cleared on every exit from this function.
+    registry_.set_cancel_token(&cancel);
+    struct ClearCancel {
+        tools::Registry& reg;
+        ~ClearCancel() { reg.set_cancel_token(nullptr); }
+    } clear_cancel{registry_};
 
     while (!halted_) {
         if (cancel.cancelled()) {
@@ -1125,6 +1402,13 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                       {"outcome", std::string(to_string(turn.outcome))},
                       {"tool", turn.tool_name.empty() ? "-" : turn.tool_name},
                       {"batched", std::to_string(turn.extra_calls.size())},
+                      {"batch_count", std::to_string(turn.batch_count)},
+                      {"think_tokens", std::to_string(turn.think_tokens)},
+                      {"text_tokens", std::to_string(turn.text_tokens)},
+                      {"tool_tokens", std::to_string(turn.tool_tokens)},
+                      {"cap_phase", turn.cap_phase},
+                      {"read_bytes", std::to_string(turn.tool_result.bytes_read)},
+                      {"edit_bytes", std::to_string(turn.tool_result.bytes_changed)},
                       {"ok", turn.tool_result.ok() ? "1" : "0"},
                       {"deliverables", std::to_string(ctx_.deliverables().size())},
                       {"workspace_writes", std::to_string(ctx_.workspace_writes())},
@@ -1144,7 +1428,10 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             observer_.on_turn(turn, turn.generation.ttft_ms);
         }
 
-        // Record the turn -- observations only, nothing inferred (S8.4).
+        // Record the turn -- observations only, nothing inferred about the workspace
+        // (S8.4). A capped working note from think may fill an empty answer channel on a
+        // tool turn so the next prompt has continuity; that is model speech, not a
+        // workspace fact.
         context::TurnRecord rec;
         rec.assistant_text = turn.assistant_text;
         rec.tool_name = turn.tool_name;
@@ -1152,6 +1439,14 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         rec.observation = turn.tool_result.summary;
         rec.observation_is_error = !turn.tool_result.ok();
         rec.last_event_seq = log_.events_written();
+
+        // Tool turns often leave the answer channel empty (reasoning lived in <think>).
+        // Carry a trailing slice so the next turn continues instead of re-deriving.
+        // Never on LengthCapped or cut_for_looping -- that re-seeds a stuck think.
+        if (turn.outcome == Outcome::ToolCallExecuted && !turn.cut_for_looping &&
+            is_blank(rec.assistant_text) && !turn.reasoning.empty()) {
+            rec.assistant_text = working_note_from_reasoning(turn.reasoning);
+        }
 
         // The same floor Registry::execute puts under its tools, applied to the paths
         // that do not go through it. render() drops an empty observation, so without
@@ -1163,18 +1458,13 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                                    : " failed, with no detail)");
         }
 
-        // A turn that hit the token cap mid-thought leaves NOTHING behind: reasoning is
-        // not carried forward (S5.7), there is no answer body and no call ran. The
-        // record would be empty, the context would be unchanged, and the next turn would
-        // re-render a byte-identical prompt -- which at a fixed seed produces a
-        // byte-identical continuation. A deterministic infinite loop at ~50 s a turn.
+        // A turn that hit the token cap mid-thought leaves no answer and no call. Full
+        // reasoning is not backfilled here (that would re-seed a looping think). The
+        // truncation itself becomes the observation so the next prompt is not
+        // byte-identical -- otherwise a fixed seed redraws the same continuation forever.
         //
         // Observed: twelve consecutive turns, prompt `tokens=2044 messages=11` every
         // time, generation `tokens=4096` every time, until the wall clock killed it.
-        //
-        // So the truncation itself becomes the observation. It is an observed fact about
-        // this run, and it perturbs the prompt enough that the next attempt is a
-        // different draw rather than the same one.
         if (turn.outcome == Outcome::LengthCapped) {
             rec.observation =
                 "(generation hit the token cap before any tool call was made; "
@@ -1188,6 +1478,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // three reads per turn invisible to the detector no matter how often they came
         // back.
         if (turn.outcome == Outcome::ToolCallExecuted) {
+            ++executed_tool_calls_in_run_;
+            unhandled_text_turns_ = 0;
             record_call(turn.tool_name, turn.tool_params, turn.tool_result);
         }
         for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
@@ -1195,7 +1487,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         }
 
         // Calls batched behind the first each get their own record and their own UI row.
-        for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
+        for (std::size_t i = 0; i < turn.extra_calls.size(); ++i) {
+            const TurnResult::ExtraCall& extra = turn.extra_calls[i];
             context::TurnRecord er;
             er.tool_name = extra.tool_name;
             er.tool_args_summary = param_value(extra.params, "path");
@@ -1216,6 +1509,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 as_turn.tool_name = extra.tool_name;
                 as_turn.tool_params = extra.params;
                 as_turn.tool_result = extra.result;
+                as_turn.batch_index = i + 1;
+                as_turn.batch_count = turn.batch_count;
                 observer_.on_turn(as_turn, 0.0);
             }
         }
@@ -1251,6 +1546,18 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // continues, and the budgets bound a model that can produce nothing else.
         if (turn.outcome == Outcome::TextOnly && !turn.cut_for_looping) {
             if (policy_.conversational) {
+                if (unhandled_text_turns_ == 0) {
+                    ++unhandled_text_turns_;
+                    context::TurnRecord note;
+                    note.observation =
+                        "[Note: You are in Plan mode. Do not output standalone text updates or commentary. "
+                        "Execute your tool calls (`read_file`, `read_many`, `list_dir`, `find_files`, `search`) directly. "
+                        "If you have design choices to ask, call 'ask_question' with 2-4 interactive options -- "
+                        "asking in plain text does not present the card and does not reach the human. "
+                        "When your plan is complete, call 'exit_plan_mode'.]";
+                    ctx_.add_turn(std::move(note));
+                    continue;
+                }
                 report.termination_reason = "awaiting_user";
                 emit("yielded", {{"why", "text_only_turn"}});
                 break;

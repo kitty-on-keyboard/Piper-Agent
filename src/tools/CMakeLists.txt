@@ -1,6 +1,7 @@
 add_library(lmp_tools
   registry.cpp
   memory_file.cpp
+  concurrent_calls.cpp
   context_tools.cpp
   sandbox.cpp
   container.cpp
@@ -15,9 +16,12 @@ target_include_directories(lmp_tools PUBLIC "${PROJECT_SOURCE_DIR}")
 # forward-declares pcc::Store, so no consumer of this library compiles against SQLite for
 # the sake of two tools. src/pcc sits at L1 and src/tools at L2, so the dependency points
 # the allowed way (scripts/ratchets.json, layers gate).
+# lmp_model is PUBLIC: CancelToken lives in src/model/backend.hpp and is part of the
+# sandbox / Registry execute surface (run-scoped cancellation). tools is L2 over model
+# at L1, so the include direction is allowed; the link must follow.
 target_link_libraries(lmp_tools
   PRIVATE lmp_warnings lmp_assertions simdjson lmp_pcc
-  PUBLIC lmp_platform parsephony lmp_mcp nlohmann_json)
+  PUBLIC lmp_platform lmp_model parsephony lmp_mcp nlohmann_json)
 
 # A diagnostic driver, not a test: points McpHost at a real third-party MCP server and
 # prints what the agent would get. The gate tests drive our own demo server, which cannot

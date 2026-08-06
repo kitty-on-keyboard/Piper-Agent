@@ -7,9 +7,9 @@
 // project.
 //
 // TIERS
-//   T0  Mission. Immutable, always present, THE ONLY THING THAT NAMES THE DELIVERABLE.
+//   T0  Opening mission as the first stable user message (not system identity).
 //   T1  Pinned state: checklist, deliverable ledger, the operator check's last reading.
-//   T2  Recent turns, verbatim.
+//   T2  Recent turns, verbatim (assistant text / working note + observations).
 //   T3  Compacted spans: a summary plus a provenance pointer to the full event range.
 //
 // COMPACTION, NOT EVICTION (S8.3). On trim the dropped span is SUMMARIZED, never
@@ -51,7 +51,10 @@ struct ChecklistItem {
 // meaning of "no, use the other approach".
 struct TurnRecord {
     std::string user_text;        // set only on a human turn; the rest are then empty
-    std::string assistant_text;   // the answer body; reasoning is NOT carried forward
+    // Answer body, or a capped working note backfilled from think on a tool turn when
+    // the model left the answer channel empty. Full think stays on the thinking stream
+    // (S5.7); only a short trailing slice may enter the next prompt for continuity.
+    std::string assistant_text;
     std::string tool_name;        // empty when the turn was text-only
     std::string tool_args_summary;
     std::string observation;      // the tool result summary -- an OBSERVED fact
@@ -73,11 +76,10 @@ struct CheckResult {
 
 class ContextStore {
   public:
-    // The opening mission. Still the only text in the STABLE prompt block that may name
-    // the deliverable (S8.2 T0), and still fixed once set -- but it is now the FIRST user
-    // turn rather than the only one. An agent you can only launch is a batch job; the
-    // store has to outlive one mission for a follow-up to continue a conversation
-    // instead of restarting it.
+    // The opening mission. Rendered as the first stable user message (run-constant for
+    // the KV prefix), not as system identity. Fixed once set; later follow-ups append.
+    // An agent you can only launch is a batch job; the store has to outlive one mission
+    // for a follow-up to continue a conversation instead of restarting it.
     explicit ContextStore(std::string mission) { user_turns_.push_back(std::move(mission)); }
 
     // --- T1 pinned ---------------------------------------------------------
@@ -124,6 +126,10 @@ class ContextStore {
     [[nodiscard]] std::size_t workspace_writes() const noexcept {
         return workspace_writes_;
     }
+    // Something outside the native write door may have changed the workspace: an MCP
+    // call, an opaque shell, an editor-side edit the harness did not apply. Bumps the
+    // same counter the repeat cache keys on, without claiming a deliverable path.
+    void invalidate_workspace_freshness() noexcept { ++workspace_writes_; }
 
     // The repo's own conventions (AGENTS.md / CLAUDE.md / .cursorrules), loaded once and
     // pinned in the STABLE part of the prompt -- they never change within a run.

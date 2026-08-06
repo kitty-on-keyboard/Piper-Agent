@@ -1,0 +1,17 @@
+{
+  "split": "private",
+  "mission": "The widget pricing pipeline integration tests fail. Find and fix the root cause across the package so `python3 -m pytest -q` passes. Do not change the tests.",
+  "mode": "agent",
+  "expect": "solved",
+  "grader": "check.sh",
+  "max_iterations": 40,
+  "wall_clock_seconds": 900,
+  "notes": "Mid-size multi-file Python task: unit mismatch and a stale catalog join span widgetlib/*. Protected tests; external grader.",
+  "protect": [
+    "test_pipeline.py"
+  ],
+  "tags": [
+    "multi_file",
+    "python"
+  ]
+}

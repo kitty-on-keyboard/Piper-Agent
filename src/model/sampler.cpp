@@ -107,16 +107,28 @@ struct Dist {
 Dist softmax(const std::vector<Cand>& cands, float temperature) {
     Dist d;
     d.probs.assign(cands.size(), 0.0F);
-    const float t = temperature <= 0.0F ? 1.0F : temperature;
     float max_logit = kNegInf;
-    for (const Cand& c : cands) {
-        max_logit = std::max(max_logit, c.logit);
+    std::size_t max_index = 0;
+    for (std::size_t i = 0; i < cands.size(); ++i) {
+        if (cands[i].logit > max_logit) {
+            max_logit = cands[i].logit;
+            max_index = i;
+        }
     }
     if (max_logit == kNegInf) {
         return d; // everything masked
     }
+    // Temperature zero means greedy decoding, not "sample at temperature one". Besides
+    // matching the conventional API contract, this is what makes evaluator smoke runs
+    // deterministic independently of seed. Cands are in ascending id order and strict >
+    // above keeps the lowest id on an exact tie.
+    if (temperature <= 0.0F) {
+        d.probs[max_index] = 1.0F;
+        d.total = 1.0F;
+        return d;
+    }
     for (std::size_t i = 0; i < cands.size(); ++i) {
-        d.probs[i] = std::exp((cands[i].logit - max_logit) / t);
+        d.probs[i] = std::exp((cands[i].logit - max_logit) / temperature);
         d.total += d.probs[i];
     }
     return d;

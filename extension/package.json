@@ -1,6 +1,6 @@
 {
   "name": "lm-pipe",
-  "displayName": "LM_Pipe",
+  "displayName": "Piper Agent",
   "description": "A local coding agent for Apple Silicon: Qwen3 in-process via MLX.",
   "version": "2.0.0",
   "publisher": "lm-pipe",
@@ -125,14 +125,6 @@
           "default": false,
           "description": "Ask me about everything. A floor over the two switches above: it can only tighten them, never loosen them."
         },
-        "lmPipe.hitl.autoApproveBelowRisk": {
-          "type": "number",
-          "default": 0.35
-        },
-        "lmPipe.hitl.rejectAboveRisk": {
-          "type": "number",
-          "default": 0.85
-        },
         "lmPipe.sampling.temperature": {
           "type": "number",
           "default": 0.6,
@@ -228,7 +220,7 @@
         "lmPipe.autoApproveExec": {
           "type": "boolean",
           "default": true,
-          "description": "Run commands without asking, subject to the risk thresholds below. Turn off to get a card for every single command the agent runs."
+          "description": "Run ordinary, fully-parsed commands without asking. Irreversible capabilities and opaque (partially parsed / unparseable) commands always raise a card; a remembered allowlist entry cannot skip those. Turn off to get a card for every command."
         },
         "lmPipe.autoApproveWrites": {
           "type": "boolean",
@@ -259,7 +251,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Commands you have already approved. The 'Always allow' button on an approval card adds to this. An entry matches a command that equals it or starts with it followed by a space; a command containing shell chaining (; && || | ` $( > <) never matches, so allowing 'pytest' cannot authorise 'pytest; rm -rf ~'. Irreversible operations (destroying data, writing outside the workspace, escalating privileges, rewriting history) always ask, whatever is on this list."
+          "description": "Commands you have already approved. The 'Always allow' button on an approval card adds to this. An entry matches a command that equals it or starts with it followed by a space; a command containing shell chaining (; && || | ` $( > <) never matches, so allowing 'pytest' cannot authorise 'pytest; rm -rf ~'. Persistent prefix matches apply only to fully parsed, non-destructive commands. Irreversible operations and opaque (partially parsed / unparseable) scripts always ask; opaque approvals for the rest of a run bind to script digests rather than this list."
         },
         "lmPipe.mcpServers": {
           "type": "array",
@@ -310,6 +302,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
+    "test:edit-version": "npm run compile && node scripts/test-edit-version.js",
     "stage-sidecar": "node scripts/stage-sidecar.js",
     "vscode:prepublish": "npm run compile && npm run stage-sidecar",
     "package": "vsce package --no-dependencies --allow-missing-repository --out lm-pipe.vsix && node scripts/verify-vsix.js",

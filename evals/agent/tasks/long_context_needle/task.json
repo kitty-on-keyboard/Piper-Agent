@@ -1,0 +1,24 @@
+{
+  "split": "private",
+  "mission": "Search the haystack/ directory for a line of the form NEEDLE:<token>. Write that token alone into found.txt. Do not invent a token.",
+  "mode": "agent",
+  "expect": "solved",
+  "grader": "check.sh",
+  "skip_in_ci": true,
+  "max_iterations": 40,
+  "wall_clock_seconds": 900,
+  "check_timeout_seconds": 60,
+  "harness": {
+    "plant_long_context": true,
+    "needle": "NEEDLE_TOKEN_lmp_eval_7f3c",
+    "needle_file": "chunk_17.md",
+    "chunks": 24,
+    "chunk_bytes": 1800
+  },
+  "notes": "Long-context / compaction-oriented synthetic task. Haystack is planted by the harness (not stored in git). Skipped in default CI/smoke lists; pass --include-heavy to run.",
+  "protect": [],
+  "tags": [
+    "long_context",
+    "compaction"
+  ]
+}

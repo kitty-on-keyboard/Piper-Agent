@@ -118,19 +118,43 @@ TEST(names_carrying_the_formats_own_delimiters_are_rejected) {
     CHECK(!tool_spec_from_schema("mcp__s__t", bad, spec, why));
 }
 
-TEST(an_unreducible_type_travels_as_json_rather_than_a_false_promise) {
-    // "type": ["string","null"] is legal JSON Schema. Constraining generation to Text
-    // would enforce a shape the server never promised, so it degrades to Json.
+TEST(nullable_and_enum_constraints_are_preserved_when_reducible) {
+    // P2 §12: ["string","null"] keeps Text + nullable rather than collapsing to Json.
+    // Multi-type unions and untyped props still travel as Json.
     parsephony::ToolSpec spec;
     std::string why;
-    const nlohmann::json schema =
-        obj_schema({{"maybe", {{"type", nlohmann::json::array({"string", "null"})}}},
-                    {"untyped", nlohmann::json::object()}},
-                   nlohmann::json::array());
+    const nlohmann::json schema = obj_schema(
+        {{"maybe", {{"type", nlohmann::json::array({"string", "null"})}}},
+         {"mode", {{"type", "string"}, {"enum", nlohmann::json::array({"a", "b"})}}},
+         {"tags", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+         {"cfg",
+          {{"type", "object"},
+           {"properties", {{"x", {{"type", "number"}}}}},
+           {"required", nlohmann::json::array({"x"})}}},
+         {"untyped", nlohmann::json::object()},
+         {"union", {{"type", nlohmann::json::array({"string", "number"})}}}},
+        nlohmann::json::array());
     REQUIRE(tool_spec_from_schema("mcp__s__t", schema, spec, why));
-    REQUIRE(spec.params.size() == 2);
+    REQUIRE(spec.params.size() == 6);
     for (const parsephony::ParamSpec& p : spec.params) {
-        CHECK(p.type == parsephony::ParamType::Json);
+        if (p.name == "maybe") {
+            CHECK(p.type == parsephony::ParamType::Text);
+            CHECK(p.nullable);
+        } else if (p.name == "mode") {
+            CHECK(p.type == parsephony::ParamType::Text);
+            REQUIRE(p.enum_values.size() == 2);
+            CHECK_EQ(p.enum_values[0], std::string("a"));
+            CHECK_EQ(p.enum_values[1], std::string("b"));
+        } else if (p.name == "tags") {
+            CHECK(p.type == parsephony::ParamType::Array);
+            CHECK(p.has_items_type);
+            CHECK(p.items_type == parsephony::ParamType::Text);
+        } else if (p.name == "cfg") {
+            CHECK(p.type == parsephony::ParamType::Object);
+            CHECK(p.schema_extras_json.find("properties") != std::string::npos);
+        } else if (p.name == "untyped" || p.name == "union") {
+            CHECK(p.type == parsephony::ParamType::Json);
+        }
     }
 }
 

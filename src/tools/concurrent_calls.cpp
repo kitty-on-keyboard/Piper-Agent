@@ -1,13 +1,13 @@
-#include "src/loop/parallel_calls.hpp"
+#include "src/tools/concurrent_calls.hpp"
 
 #include <thread>
 
-namespace lmp::loop {
+namespace lmp::tools {
 
-std::vector<tools::ToolResult> run_calls_concurrently(
+std::vector<ToolResult> run_calls_concurrently(
     const std::vector<std::size_t>& indices,
-    const std::function<tools::ToolResult(std::size_t)>& work) {
-    std::vector<tools::ToolResult> results(indices.size());
+    const std::function<ToolResult(std::size_t)>& work) {
+    std::vector<ToolResult> results(indices.size());
     if (indices.empty()) {
         return results;
     }
@@ -33,4 +33,4 @@ std::vector<tools::ToolResult> run_calls_concurrently(
     return results;
 }
 
-} // namespace lmp::loop
+} // namespace lmp::tools

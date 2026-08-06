@@ -44,7 +44,11 @@ harness decides whether it *succeeded*.
 both sides, and read by nobody. Now: tier honoured (including **T3, unsandboxed on the
 host** — opt-in by number, modal confirmation, never a fallback), `auto_approve_exec`,
 `auto_approve_writes`, a user-grown command **allowlist**, and an **irreversibility gate**
-above all of them.
+above all of them. Semantics (do not invert): persistent `allowed_commands` may
+auto-approve only fully-parsed, non-destructive commands — they never waive irreversible
+capabilities or opaque script shapes; irreversible command cards do not offer
+"Always allow"; opaque run-scoped always-allow binds to workspace + command + digests for
+this run only.
 
 **The editor surface.** One transcript with a typewriter and a thinking indicator, a
 settings drawer (sampling, containment, approval switches, per-mode system prompt) that
@@ -53,11 +57,16 @@ and an "Always allow" button. Per-mode prompts live in `lmPipe.prompts.{agent,pl
 
 ## What the suite is for — read this before changing the loop
 
-`scripts/agent_eval.py` runs ten fixture workspaces end to end and scores them on a shell
-command run **after** the agent finishes. It never asks the agent anything.
+`scripts/agent_eval.py` runs fixture workspaces end to end and scores them on an
+**immutable** shell checker run **after** the agent finishes (inline `check` and/or
+external `grader` outside `workspace/`). It never asks the agent anything. See
+`evals/agent/README.md`.
 
 ```bash
+python3 scripts/agent_eval.py self-test
 python3 scripts/agent_eval.py list
+python3 scripts/agent_eval.py run --smoke                  # temp 0, seed 0
+python3 scripts/agent_eval.py run --seed 7,13,42           # 3-seed quality
 python3 scripts/agent_eval.py run --split corpus
 python3 scripts/agent_eval.py run --only median -v
 ```
@@ -81,25 +90,15 @@ The lesson to carry: **one task passing proves nothing about the loop.** Run the
 
 **Pins** live in `evals/agent/pins.json` and are **floors, not equalities** — this drives a
 35B MoE at temperature 0.6 on Metal, where a fixed seed is only approximately reproducible.
-A drop fails; an improvement asks to be re-pinned with `--pin`. The **holdout must stay the
-harder set** (S11.3); if it ever outscores the corpus it has leaked.
+A drop fails; an improvement asks to be re-pinned with `--pin` after a like-for-like
+`--seed 7,13,42` quality run (use `--smoke` for deterministic temp-0 checks on every loop
+change).
 
-**Current baseline** (2026-07-31, n=6 corpus / n=4 holdout — small enough that these are
-floors, not precise rates):
-
-```
-corpus   solved 3/6   completed 1   verified 1   turns 130
-holdout  solved 1/4   completed 2   verified 2   turns 58
-```
-
-Holdout solves at 25% against corpus's 50%, so it is still the harder set. One result to
-watch rather than reactively patch: `email_regex_edges` (holdout) reached evidential
-completion — deliverable recorded, declared contract passed and proven falsifiable — while
-the ground-truth check says it is still wrong. Not a defect in the loop; it is the gap
-S10.4 already names, that a proven-passing verification is evidence for what the declared
-contract covers, not a guarantee it covers the whole mission. If this pattern recurs across
-more tasks once the suite has more history, it is worth its own investigation; one instance
-at n=4 is not that yet.
+**Split policy (2026-08-05):** the four-task holdout is **not** established as harder
+(historically 4/4 vs corpus 5/6). Holdout relative score is diagnostic-only until rebuilt.
+New long-horizon / security fixtures use `split=private` and are **never** pin floors.
+Read `evals/agent/pins.json` `_split_policy` and `evals/agent/README.md` rather than older
+solve-rate quotes in this handoff.
 
 ## Known-imperfect, deliberately left
 

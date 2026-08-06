@@ -12,7 +12,7 @@
 // modes, approvals, budgets. The eighth pass deleted the completion gate, the
 // falsifiability ledger and the ten Correctives after a measured run deadlocked between
 // them (see turn.hpp). What replaced ~2000 lines of steering: a text-only turn is the
-// model's final answer, an exact repeat is served from cache, and the operator's check
+// model's final answer, an exact repeat revalidates current state, and the operator's check
 // command runs after every writing turn with its output placed in front of the model.
 //
 #include <functional>
@@ -56,7 +56,7 @@ struct HitlThresholds {
 
 // Capabilities you cannot take back: destroying data, writing outside the workspace,
 // escalating privileges, rewriting history. These ALWAYS escalate -- above the risk
-// score and above the allowlist.
+// score and above the persistent allowlist.
 //
 // The score cannot express this and should not be asked to. `rm -rf` carries exactly one
 // capability, so it scores 0.30 against a 0.35 auto-approve threshold and never raised a
@@ -67,6 +67,22 @@ struct HitlThresholds {
 // Irreversibility is a PROPERTY, not a quantity. Everything else stays scored.
 [[nodiscard]] bool is_irreversible(const tools::RiskHint& hint) noexcept;
 
+// Hint-level properties that must not be waved through by score alone.
+// Irreversible capabilities and Unparseable status always force. PartiallyParsed
+// alone also reports true here (status-only hints cannot hide), but the command gate
+// narrows Partial via `opaque_script_command` so toolchain drivers the classifier
+// marks Partial (`swift build`, `cmake --build`) stay low-friction under T1.
+[[nodiscard]] bool forces_escalation(const tools::RiskHint& hint) noexcept;
+
+// True for interpreter+script / source / eval / local script-path shapes whose body
+// is not in the command string. The Seatbelt wipe hole: `bash wipe.sh` is Partial
+// with empty destroy caps and must card after auto_approve_exec.
+[[nodiscard]] bool opaque_script_command(const std::string& command) noexcept;
+
+// Persistent prefix allowlists apply only to fully parsed, non-destructive commands.
+// Opaque / irreversible calls cannot be waved through by a remembered prefix.
+[[nodiscard]] bool allowlist_may_auto_approve(const tools::RiskHint& hint) noexcept;
+
 // Whether the operator has already said yes to this exact command.
 //
 // Matches on equality, or on `entry` followed by a space -- and NEVER on a command
@@ -76,6 +92,14 @@ struct HitlThresholds {
 // be perfectly ordinary, it just cannot be waved through on a prefix.
 [[nodiscard]] bool is_allowlisted(const std::string& command,
                                   const std::vector<std::string>& allowed);
+
+// Run-scoped consent key for an opaque (PartiallyParsed / Unparseable) command. Empty
+// when the hint is fully parsed: those use the verbatim command string for the run latch.
+// Non-empty keys bind workspace, command, classifier capabilities, and digests of
+// referenced script files so approving `bash build.sh` does not survive a script rewrite.
+[[nodiscard]] std::string opaque_run_consent_key(const std::string& workspace_root,
+                                                 const std::string& command,
+                                                 const tools::RiskHint& hint);
 
 // One line naming the call and its arguments, each argument truncated for display. Shared
 // with the approval gate in approval.cpp, which puts it on the card.
@@ -113,6 +137,16 @@ struct AgentConfig {
     model::SamplingParams sampling;
     std::int32_t context_budget_tokens = 96000;
     std::int32_t max_new_tokens = 4096;
+    // Checkpoint ceiling (text_config.max_position_embeddings). 0 means unknown -- tests
+    // and ScriptedBackend runs leave it unset and skip the hard refuse. When set,
+    // context_budget_tokens is clamped to it and a turn whose prompt + reserved
+    // generation would overflow is refused rather than sent to the backend.
+    std::int32_t model_max_sequence_tokens = 0;
+    // Thinking is capped separately so a model that ruminates cannot LengthCap mid-write
+    // and leave tool XML with no remaining budget. reserved_tool_tokens is the floor kept
+    // for tool-call structure after think ends (forced or natural).
+    std::int32_t max_think_tokens = 2048;
+    std::int32_t reserved_tool_tokens = 1024;
     std::uint64_t seed = 0;
 
     // --- autonomy -----------------------------------------------------------
@@ -127,7 +161,8 @@ struct AgentConfig {
     int sandbox_tier_override = -1;
 
     // false makes every command execution raise a card whatever its risk score. The
-    // default keeps risk routing, where only the 0.35-0.85 band escalates.
+    // default keeps risk routing for ordinary commands; irreversible / Unparseable /
+    // opaque-script properties still escalate after this switch.
     bool auto_approve_exec = true;
 
     // false makes every workspace-mutating call raise a card. Writes had no HITL path at
@@ -207,6 +242,13 @@ class Agent {
     void set_approver(Approver a) { approver_ = std::move(a); }
     void set_observer(Observer o) { observer_ = std::move(o); }
     void set_steer_source(SteerSource s) { steer_ = std::move(s); }
+
+    // Something outside the native write ledger may have changed the workspace (editor
+    // file-change notification, operator edit). Bumps the freshness epoch the repeat
+    // detector keys on so the next observation revalidates.
+    void note_external_workspace_change() noexcept {
+        ctx_.invalidate_workspace_freshness();
+    }
 
     [[nodiscard]] RunReport run(const model::CancelToken& cancel);
 
@@ -335,6 +377,12 @@ class Agent {
     bool budget_note_sent_ = false;
     bool halted_ = false;
     std::string halt_reason_;
+    // Stuck-run signals for operator_check (observations only; not a tool lock).
+    std::size_t could_not_run_streak_ = 0;
+    std::size_t same_diag_streak_ = 0;
+    std::string last_primary_diag_fp_;
+    std::size_t unhandled_text_turns_ = 0;
+    std::size_t executed_tool_calls_in_run_ = 0;
 };
 
 } // namespace lmp::loop

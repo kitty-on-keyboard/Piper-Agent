@@ -18,6 +18,7 @@
 // (modes, approvals, budgets). Whether the work is done is the model's claim and the
 // operator's judgement, informed by the operator's own check when one is configured.
 //
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -71,6 +72,16 @@ struct TurnResult {
     tools::ToolResult tool_result;
     std::vector<ExtraCall> extra_calls;
     model::GenResult generation;
+    // Exact grammar-channel token counts for the generation. tool_tokens is everything
+    // not routed to reasoning or answer prose: tool XML plus structural delimiters.
+    std::size_t think_tokens = 0;
+    std::size_t text_tokens = 0;
+    std::size_t tool_tokens = 0;
+    // Position in one model-emitted call batch. Text-only turns use count 0.
+    std::size_t batch_index = 0;
+    std::size_t batch_count = 0;
+    // Non-empty only when generation hit its cap; names the grammar phase at the cap.
+    std::string cap_phase;
 };
 
 // Value of a named param, or empty. The grammar guarantees required params are present,
@@ -111,31 +122,32 @@ struct ModePolicy {
 // say nothing new.
 [[nodiscard]] std::string_view mode_brief(Mode m) noexcept;
 
-// Exactly one repeat detector, and it is a CACHE, not a censor.
+// Exactly one repeat detector, and it is a DETECTOR / annotator -- not an authority for
+// mutable workspace state.
 //
 // A call is a repeat when the same tool is invoked with the same arguments as a previous
 // turn. The old response was grammar surgery -- suppress the tool for a few turns -- and
 // it measurably made runs worse: a model with two ways to ask the same question asks the
 // other way (a real run alternated `read_file`/`read_slice` for 27 turns with the
 // suppression firing on nearly every one), and a model denied its editor wrote source
-// files through shell heredocs. The new response: serve the previous observation back
-// with a one-line factual note, and do not re-execute. The model keeps every tool; the
-// repeat costs nothing and teaches something.
+// files through shell heredocs. Serving a cached observation without revalidation was the
+// next failure mode: shell, MCP, editor, and external edits can change files without the
+// detector noticing. So repeats are counted and annotated; file/search/directory/git
+// reads always revalidate current state. Under context pressure, an older verbatim
+// duplicate still sitting in rendered history may be collapsed -- never replaced by a
+// pointer to content that compaction already dropped.
 //
-// Eligibility is decided at the call site (Agent::dispatch_call) on registry-declared
-// properties: only a read-only, non-shell call can be served from cache, and only while
-// nothing has been written since it last ran -- a workspace write invalidates every
-// entry, because any file may have changed. A failed call is never served from cache:
-// retry after an error is legitimate, and an error the model has already seen is exactly
-// what it may be trying to get past.
+// `cached()` remains for diagnostics and tests: it reports the prior successful
+// observation only while the workspace freshness epoch is unchanged. The agent does not
+// serve that string as a substitute for re-execution.
 class RepeatDetector {
   public:
     struct SeenCall {
         std::size_t count = 0;
         bool last_ok = false;
         std::string last_summary;
-        // ctx.workspace_writes() when the call last ran; the cache is valid only while
-        // this still equals the current count, so one write invalidates everything.
+        // ctx.workspace_writes() (freshness epoch) when the call last ran. One write,
+        // successful shell, remote call, or external invalidation bumps the epoch.
         std::size_t writes_at = 0;
     };
 
@@ -144,11 +156,15 @@ class RepeatDetector {
                                          const std::vector<tools::ToolParamValue>& params) const;
     void record(const std::string& tool, const std::vector<tools::ToolParamValue>& params,
                 bool ok, const std::string& summary, std::size_t writes_now);
-    // The previous observation for this exact call, when it is still valid: the call
-    // succeeded, and no workspace write has happened since. Null otherwise.
+    // Prior successful observation for this exact call while the freshness epoch is
+    // unchanged. Null otherwise. Diagnostic only -- not a substitute for revalidation.
     [[nodiscard]] const SeenCall* cached(const std::string& tool,
                                          const std::vector<tools::ToolParamValue>& params,
                                          std::size_t writes_now) const;
+    // Last recorded call for this key, regardless of freshness. Used to measure whether a
+    // revalidated re-read returned the same bytes after a shell/remote bump.
+    [[nodiscard]] const SeenCall* previous(
+        const std::string& tool, const std::vector<tools::ToolParamValue>& params) const;
     void clear() noexcept { seen_.clear(); }
 
   private:

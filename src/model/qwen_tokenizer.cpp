@@ -60,6 +60,7 @@ LoadStatus QwenTokenizer::load(const std::string& path, Family declared) {
         return {false, "declared family Qwen3 but the structural tokens are incomplete; "
                        "refusing to load"};
     }
+    family_ = declared;
     loaded_ = true;
     return {true, {}};
 }

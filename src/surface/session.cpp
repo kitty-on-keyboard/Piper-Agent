@@ -3,6 +3,7 @@
 #include <chrono>
 #include <utility>
 
+#include "src/model/model_limits.hpp"
 #include "src/platform/fs.hpp"
 #include "src/surface/mcp_settings.hpp"
 
@@ -53,6 +54,8 @@ ModelLoad load_model(Session& session, const std::string& model_dir,
     session.tok = std::move(tok);
     session.backend = std::move(backend);
     session.model_dir = model_dir;
+    session.model_max_sequence_tokens =
+        static_cast<std::int32_t>(model::load_max_position_embeddings(model_dir));
     return {true, {}, ms_since(clock, started)};
 }
 
@@ -68,6 +71,7 @@ void unload_model(Session& session) {
     session.backend.reset();
     session.tok.reset();
     session.model_dir.clear();
+    session.model_max_sequence_tokens = 0;
 }
 
 void ensure_registry(Session& session, const std::string& workspace,
@@ -99,11 +103,11 @@ void ensure_registry(Session& session, const std::string& workspace,
     session.mcp_signature = mcp_signature;
 }
 
-std::string load_project_instructions(const std::string& workspace) {
+std::string load_project_instructions(const platform::WorkspaceFs& workspace) {
     static constexpr const char* kNames[] = {"AGENTS.md", "CLAUDE.md", ".cursorrules"};
     for (const char* name : kNames) {
         const platform::FileContents f =
-            platform::read_file_whole(workspace + "/" + name, 64U * 1024);
+            workspace.read_file_whole(name, 64U * 1024);
         if (f.status == platform::FsStatus::Ok && !f.bytes.empty()) {
             return "(from " + std::string(name) + ")\n\n" + f.bytes;
         }
@@ -111,11 +115,11 @@ std::string load_project_instructions(const std::string& workspace) {
     return {};
 }
 
-std::string load_project_memory(const std::string& workspace) {
+std::string load_project_memory(const platform::WorkspaceFs& workspace) {
     // Bounded by the same constant the writer enforces, so a hand-edited file cannot
     // grow the prompt past what `remember` allows.
-    const platform::FileContents f = platform::read_file_whole(
-        workspace + "/" + tools::kMemoryFileName, tools::kMemoryMaxBytes);
+    const platform::FileContents f =
+        workspace.read_file_whole(tools::kMemoryFileName, tools::kMemoryMaxBytes);
     return f.status == platform::FsStatus::Ok ? f.bytes : std::string();
 }
 

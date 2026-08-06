@@ -242,6 +242,12 @@ TOOL_MENTION_STOPLIST = {
     # and named in error text because the fix for a bad range is to re-read the two
     # numbers the prompt printed. Parameters, not tools.
     "token_budget", "this_session_only", "first_event", "last_event",
+    # Optimistic-concurrency vocabulary: a parameter and the read-observation footer,
+    # not tools. The harness tracks versions; the model rarely copies the digest.
+    "expected_version", "content_version",
+    # lmp/code_intel protocol op names (P2 §10), not tools. locate_symbol routes through
+    # the editor using these ops; they must not be mistaken for ghost tool references.
+    "workspace_symbols", "rename_preview", "code_intel", "provides_code_intel",
 }
 
 

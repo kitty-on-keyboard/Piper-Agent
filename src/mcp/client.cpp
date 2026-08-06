@@ -251,27 +251,52 @@ Client::Call Client::send_async(std::string_view method_name, const nlohmann::js
 }
 
 nlohmann::json Client::await(std::future<nlohmann::json> fut, const Id& id,
-                             std::chrono::milliseconds timeout) {
-    if (fut.wait_for(timeout) == std::future_status::timeout) {
-        // Retire the entry and tell the server to stop working on it. Without the
-        // notification the server keeps computing a result nobody will read.
-        {
-            const std::lock_guard<std::mutex> lock(pending_mutex_);
-            pending_.erase(id);
+                             std::chrono::milliseconds timeout, CancelFn cancelled) {
+    // Poll in short slices so a CancelFn (or the deadline) is observed in well under a
+    // second rather than only when the whole timeout elapses.
+    constexpr auto kSlice = std::chrono::milliseconds(200);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+        if (cancelled && cancelled()) {
+            {
+                const std::lock_guard<std::mutex> lock(pending_mutex_);
+                pending_.erase(id);
+            }
+            notify(notification::kCancelled,
+                   nlohmann::json{{"requestId", id.to_json()},
+                                  {"reason", "client cancelled"}});
+            throw McpError(to_int(ErrorCode::kRequestCancelled),
+                           "MCP request " + id.debug() + " cancelled");
         }
-        notify(notification::kCancelled,
-               nlohmann::json{{"requestId", id.to_json()}, {"reason", "client timeout"}});
-        throw McpError(to_int(ErrorCode::kRequestCancelled),
-                       "MCP request " + id.debug() + " timed out after " +
-                           std::to_string(timeout.count()) + " ms");
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            // Retire the entry and tell the server to stop working on it. Without the
+            // notification the server keeps computing a result nobody will read.
+            {
+                const std::lock_guard<std::mutex> lock(pending_mutex_);
+                pending_.erase(id);
+            }
+            notify(notification::kCancelled,
+                   nlohmann::json{{"requestId", id.to_json()}, {"reason", "client timeout"}});
+            throw McpError(to_int(ErrorCode::kRequestCancelled),
+                           "MCP request " + id.debug() + " timed out after " +
+                               std::to_string(timeout.count()) + " ms");
+        }
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        const auto slice = remaining < kSlice ? remaining : kSlice;
+        if (fut.wait_for(slice) == std::future_status::ready) {
+            return fut.get();
+        }
     }
-    return fut.get();
 }
 
 nlohmann::json Client::call(std::string_view method_name, const nlohmann::json& params,
-                            std::optional<std::chrono::milliseconds> timeout) {
+                            std::optional<std::chrono::milliseconds> timeout,
+                            CancelFn cancelled) {
     Call c = send_async(method_name, params, {});
-    return await(std::move(c.future), c.id, timeout.value_or(options_.default_timeout));
+    return await(std::move(c.future), c.id, timeout.value_or(options_.default_timeout),
+                 std::move(cancelled));
 }
 
 void Client::notify(std::string_view method_name, const nlohmann::json& params) {
@@ -438,12 +463,14 @@ std::vector<Tool> Client::list_tools() {
 
 ToolResult Client::call_tool(std::string_view name, const nlohmann::json& arguments,
                              ProgressFn on_progress,
-                             std::optional<std::chrono::milliseconds> timeout) {
+                             std::optional<std::chrono::milliseconds> timeout,
+                             CancelFn cancelled) {
     nlohmann::json params{{"name", std::string(name)}, {"arguments", arguments}};
 
     Call c = send_async(method::kToolsCall, params, std::move(on_progress));
     const nlohmann::json result =
-        await(std::move(c.future), c.id, timeout.value_or(options_.default_timeout));
+        await(std::move(c.future), c.id, timeout.value_or(options_.default_timeout),
+              std::move(cancelled));
 
     ToolResult r;
     if (result.contains("content") && result["content"].is_array()) {

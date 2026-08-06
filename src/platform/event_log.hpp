@@ -59,16 +59,25 @@ bool append_json_string(std::string& out, std::string_view in);
 // Returns false on any character outside the base64 alphabet or a bad length, leaving
 // `out` unspecified.
 //
-// Its only caller today is the round-trip test that keeps base64_encode honest -- said
-// plainly rather than as "used by the replayer", which was written ahead of a replayer
-// that reads traces back and still does not exist. Kept anyway, and this is the whole
-// argument: append_field base64-encodes any field value that is not valid UTF-8, so a
-// trace containing one is not readable without this. An encoder shipped without a
-// decoder is how a trace quietly stops being replayable (S2.1.4).
+// Used by parse_event_line when a field carries a __b64 sibling, and by the round-trip
+// test that keeps base64_encode honest. An encoder without a decoder is how a trace
+// quietly stops being replayable (S2.1.4).
 bool base64_decode(std::string_view in, std::string& out);
 
 // One JSONL line, newline-terminated. Deterministic: field order is exactly as given.
 [[nodiscard]] std::string serialize_event(const Event& ev);
+
+// Inverse of serialize_event for one JSONL line (trailing newline optional).
+// Prefer "<key>__b64" over "<key>" when both are present so byte-faithful values win.
+// Returns false on malformed JSON or a missing `kind`.
+[[nodiscard]] bool parse_event_line(std::string_view line, Event& out);
+
+// Reads every well-formed JSONL event from `path` in file order. Malformed lines are
+// skipped (counted in `skipped`) rather than aborting the whole replay -- a partial
+// trace is still useful for resume decisions. Returns false only when the file cannot
+// be opened; `error` then explains why.
+[[nodiscard]] bool read_event_log(const std::string& path, std::vector<Event>& out,
+                                  std::size_t& skipped, std::string& error);
 
 // ---------------------------------------------------------------------------
 // Adapter -- owns a file descriptor, rotates, bounded.

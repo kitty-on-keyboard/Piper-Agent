@@ -1,13 +1,14 @@
 # LM_Pipe v2
 
 A local coding agent for Apple Silicon: a VS Code extension plus one native sidecar that
-loads a Qwen3 model in-process via MLX and drives a tool-using ReAct loop against the
-user's workspace.
+loads a **single** Qwen3 model in-process via MLX and drives a tool-using ReAct loop
+against the user's workspace. **Product scope:** Mac-local Qwen/MLX, one model loaded,
+no subagents, no second inference server.
 
 **Status: all nine phases landed.** The model runs in-process on MLX and completes a
 grammar-accepted turn at 22.9 tok/s. See [docs/PHASES.md](docs/PHASES.md) for every
-measurement, the places the spec was overruled with the argument, and — importantly —
-what is **not** done (T2 containers, speculative decoding, the approval round-trip).
+measurement and the places the spec was overruled. Remaining gaps include T2 containers;
+model-free speculative decode exists but stays **opt-in** (`LMP_SPECULATIVE=1`).
 
 The build order in the spec is not advisory. Phases 0–2 come before any model code,
 because v1 built the loop first and spent the next month discovering what it could not
@@ -122,7 +123,8 @@ violation links fine and a link-only violation compiles fine.
 
 ## Hard constraints
 
-Apple Silicon only. MLX in-process, no inference server. Qwen3 only; other families are
-refused at load, not adapted. C++20, `-Wall -Wextra -Wpedantic -Werror`, assertions on in
-every configuration. **The agent never touches git** — it edits the workspace; staging,
-committing and branching are the user's.
+Apple Silicon only. MLX in-process, **one model**, no inference server, **no subagents**.
+Qwen3 only; other families are refused at load, not adapted. Speculative decode is
+implemented and stays opt-in (`LMP_SPECULATIVE=1`). C++20, `-Wall -Wextra -Wpedantic
+-Werror`, assertions on in every configuration. **The agent never touches git** — it
+edits the workspace; staging, committing and branching are the user's.

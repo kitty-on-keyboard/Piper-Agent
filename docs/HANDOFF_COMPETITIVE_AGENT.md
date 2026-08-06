@@ -1,5 +1,10 @@
 # Handoff: from "it works" to competitive
 
+> **HISTORICAL (2026-08).** References below to `verification.cpp`, `prove_falsifiable()`,
+> and related verification-ledger APIs are obsolete — those files were removed. Treat this
+> document as a measured gap list from its write date, not as an API map. Current product
+> claim: Mac-local one-model Qwen/MLX, no subagents.
+
 Paste this whole file as the opening prompt of a fresh session in
 `/Users/dev/Desktop/seans_projects_local/LM_Pipe_2`.
 

@@ -271,6 +271,32 @@ TEST(a_timeout_cancels_the_request_server_side) {
     CHECK(Session::cancel_observations().load() > before);
 }
 
+TEST(a_cancel_fn_cancels_the_request_server_side) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+
+    const int before = Session::cancel_observations().load();
+    std::atomic<bool> flag{false};
+    std::thread flipper([&flag]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        flag.store(true);
+    });
+    bool cancelled = false;
+    try {
+        static_cast<void>(s.client().call_tool(
+            "slow", nlohmann::json{{"steps", 40}}, {}, std::chrono::milliseconds(5000),
+            [&flag]() { return flag.load(); }));
+    } catch (const McpError& e) {
+        cancelled = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kRequestCancelled));
+        CHECK(std::string(e.what()).find("cancelled") != std::string::npos);
+    }
+    flipper.join();
+    CHECK(cancelled);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(Session::cancel_observations().load() > before);
+}
+
 TEST(concurrent_requests_each_get_their_own_reply) {
     // The check that would have caught a uint64 correlation map, and the one that
     // catches any future mix-up between in-flight requests. Every caller asks for a

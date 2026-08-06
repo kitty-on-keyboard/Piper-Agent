@@ -18,6 +18,7 @@ import {
   ChecklistNotification,
   ApprovalRequestNotification,
   EditNotification,
+  CodeIntelNotification,
   VerificationNotification,
   PerfNotification,
   ModelStatusNotification,
@@ -30,6 +31,7 @@ export interface SidecarEvents {
   verification: VerificationNotification;
   approval_request: ApprovalRequestNotification;
   edit: EditNotification;
+  code_intel: CodeIntelNotification;
   perf: PerfNotification;
   model_status: ModelStatusNotification;
   run_end: RunEndNotification;
@@ -207,6 +209,21 @@ export class SidecarClient extends EventEmitter {
     error: string
   ): Promise<Reply<{ accepted: boolean }>> {
     return this.request("lmp/edit_applied", { request_id: requestId, applied, error });
+  }
+
+  /** The answer to lmp/code_intel. The sidecar BLOCKS on this the same way as edit. */
+  codeIntelResult(
+    requestId: string,
+    ok: boolean,
+    error: string,
+    resultText: string
+  ): Promise<Reply<{ accepted: boolean }>> {
+    return this.request("lmp/code_intel_result", {
+      request_id: requestId,
+      ok,
+      error,
+      result_text: resultText,
+    });
   }
 
   /** Say something to the agent.

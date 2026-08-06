@@ -89,6 +89,33 @@ TEST(a_path_outside_the_workspace_is_silent) {
     CHECK(!c.check("../escape.py", 1).ran);
 }
 
+TEST(syntax_check_refuses_symlinked_file_and_directory_inputs) {
+    const std::string root = temp_dir();
+    const std::string outside = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(!outside.empty());
+    write(outside + "/broken.py", "def escaped(:\n");
+    REQUIRE(::symlink((outside + "/broken.py").c_str(),
+                      (root + "/file-link.py").c_str()) == 0);
+    REQUIRE(::symlink(outside.c_str(), (root + "/dir-link").c_str()) == 0);
+    const SyntaxChecker c(root, 2048);
+
+    CHECK(!c.check("file-link.py", 1).ran);
+    CHECK(!c.check("dir-link/broken.py", 1).ran);
+}
+
+TEST(syntax_checker_canonicalizes_a_symlinked_workspace_root) {
+    const std::string actual = temp_dir();
+    REQUIRE(!actual.empty());
+    const std::string alias = actual + "-alias";
+    REQUIRE(::symlink(actual.c_str(), alias.c_str()) == 0);
+    write(actual + "/fine.py", "value = 1\n");
+    const SyntaxChecker c(alias, 2048);
+    const SyntaxVerdict v = c.check("fine.py", 1);
+    REQUIRE(v.ran);
+    CHECK(v.clean);
+}
+
 TEST(the_compile_database_command_drops_output_arguments) {
     const std::string root = temp_dir();
     const std::string abs = root + "/x.cpp";
