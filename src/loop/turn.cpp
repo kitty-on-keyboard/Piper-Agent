@@ -58,28 +58,15 @@ std::string_view mode_brief(Mode m) noexcept {
         case Mode::Plan:
             return "# Plan mode\n"
                    "\n"
-                   "You are planning, not building. Nothing you do here changes a file or "
-                   "runs a command -- the tools for that are not loaded, so do not reach "
-                   "for them and do not write as though you had used them. Say what you "
-                   "would do, never what you did.\n"
+                   "You are in Plan mode to inspect the codebase, ask design choices, and present a plan. "
+                   "Nothing you do here changes a file or runs a command -- execution tools are not loaded.\n"
                    "\n"
-                   "- Read first. Go and look at the code the request touches; a plan "
-                   "written from assumptions is worth less than no plan, because it reads "
-                   "as though someone checked.\n"
-                   "- Name what you found, including anything that makes the request "
-                   "harder or different than it sounds. That is the part the human cannot "
-                   "get anywhere else.\n"
-                   "- When something is genuinely undecided and the answer would change "
-                   "the design, ask with `ask_user` -- one question, the load-bearing one, "
-                   "and say what each answer would change. Do not ask to confirm what you "
-                   "already believe, and do not ask for permission to continue.\n"
-                   "- When the approach is settled, call `exit_plan_mode` with the whole "
-                   "plan. It becomes the mission of the run that implements it, so "
-                   "anything you leave out is something that run will not know.\n"
-                   "\n"
-                   "The persona above tells you to run your tests. You cannot, here. Say "
-                   "which command WOULD prove the work correct and leave it for the run "
-                   "that can execute it.\n";
+                   "- Direct Tool Execution: Execute read tool calls (`read_file`, `read_many`, `list_dir`, `find_files`, `search`) directly. "
+                   "Do NOT output standalone conversational updates or text commentary explaining what you intend to read.\n"
+                   "- Ask Design Options (`ask_question`): When design or visual choices are open (e.g. animation style, dashboard structure), "
+                   "invoke `ask_question` with 2 to 4 interactive options (passed via `question` and `options`, one option per line) so the human can click an option card in the UI. "
+                   "Asking the question as plain text does not present the card.\n"
+                   "- Final Plan Submission (`exit_plan_mode`): When your investigation is finished, call `exit_plan_mode` with your completed plan markdown.\n";
         case Mode::Debug:
             return "# Debug mode\n"
                    "\n"
@@ -95,6 +82,8 @@ std::string_view mode_brief(Mode m) noexcept {
                    "not test is not evidence, however well it fits.\n"
                    "- Narrow before you fix. Get to the smallest thing that still fails; "
                    "a fix applied to the whole area is a fix you cannot prove.\n"
+                   "- Once you have a reproduction, continue from that evidence and your "
+                   "last working note. Do not restart by re-explaining the whole project.\n"
                    "- Then fix it, and run the same reproduction again. Answering in text "
                    "without a tool call ends the run as your final answer -- so do not "
                    "conclude until you have watched the reproduction pass.\n";
@@ -202,19 +191,26 @@ void RepeatDetector::record(const std::string& tool,
 const RepeatDetector::SeenCall* RepeatDetector::cached(
     const std::string& tool, const std::vector<tools::ToolParamValue>& params,
     std::size_t writes_now) const {
+    const SeenCall* prev = previous(tool, params);
+    if (prev == nullptr) {
+        return nullptr;
+    }
+    // Valid only while the workspace freshness epoch is unchanged: one write, successful
+    // shell, remote call, or external invalidation bumps it. A failed call is never
+    // treated as a fresh prior -- retry after an error is legitimate.
+    if (prev->last_ok && prev->writes_at == writes_now) {
+        return prev;
+    }
+    return nullptr;
+}
+
+const RepeatDetector::SeenCall* RepeatDetector::previous(
+    const std::string& tool, const std::vector<tools::ToolParamValue>& params) const {
     const std::string k = key(tool, params);
     for (const auto& [seen_key, call] : seen_) {
-        if (seen_key != k) {
-            continue;
-        }
-        // Valid only while the workspace is byte-for-byte where it was: one write
-        // anywhere invalidates every entry, because any file may have changed and a
-        // stale answer served as fresh is worse than the execution it saves. A failed
-        // call is never served either -- retry after an error is legitimate.
-        if (call.last_ok && call.writes_at == writes_now) {
+        if (seen_key == k) {
             return &call;
         }
-        return nullptr;
     }
     return nullptr;
 }

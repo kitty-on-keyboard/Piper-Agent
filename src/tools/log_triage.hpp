@@ -35,6 +35,7 @@
 //
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -663,6 +664,368 @@ struct Line {
         out.resize(cut == std::string::npos ? budget_bytes : cut + 1);
     }
     return out;
+}
+
+// Structured extraction for agent stuck-run signals and compact shell annotations.
+// Complements compact(): it does not replace the compacted log; it names what kind of
+// runner produced it and which workspace paths / tests the primary diagnostics cite.
+enum class Runner : std::uint8_t {
+    Unknown = 0,
+    Pytest,
+    CTest,
+    Cargo,
+    Swift,
+    Xcode,
+};
+
+struct Diagnostic {
+    std::string message; // primary line / assertion
+    std::string path;    // workspace-relative or as printed; empty when none
+    int line = 0;        // 0 when unknown
+};
+
+struct StructuredTriage {
+    Runner runner = Runner::Unknown;
+    int passed = -1; // -1 = not reported
+    int failed = -1;
+    std::vector<std::string> failing_tests;
+    std::vector<Diagnostic> primary_diagnostics;
+    std::vector<std::string> referenced_paths;
+};
+
+namespace detail {
+
+[[nodiscard]] inline Runner detect_runner(std::string_view log) noexcept {
+    if (contains(log, "test session starts") || contains(log, "pytest-") ||
+        (contains(log, "FAILED ") && contains(log, " passed"))) {
+        return Runner::Pytest;
+    }
+    if (contains(log, "The following tests FAILED") || contains(log, "Errors while running CTest") ||
+        (contains(log, "Test project ") && contains(log, "tests passed"))) {
+        return Runner::CTest;
+    }
+    if (contains(log, "Compiling ") && (contains(log, "error[E") || contains(log, " --> "))) {
+        return Runner::Cargo;
+    }
+    if (contains(log, "xcodebuild") || contains(log, "Xcode") ||
+        contains(log, "** BUILD FAILED **") || contains(log, "Testing failed:")) {
+        return Runner::Xcode;
+    }
+    if (contains(log, "error: ") &&
+        (contains(log, ".swift:") || contains(log, "swift build") ||
+         contains(log, "SwiftCompile"))) {
+        return Runner::Swift;
+    }
+    return Runner::Unknown;
+}
+
+[[nodiscard]] inline std::string extract_path_from_locator(std::string_view line) {
+    // Python: File "path", line N
+    const std::size_t file_kw = line.find("File \"");
+    if (file_kw != std::string_view::npos) {
+        const std::size_t start = file_kw + 6;
+        const std::size_t end = line.find('"', start);
+        if (end != std::string_view::npos && end > start) {
+            return std::string(line.substr(start, end - start));
+        }
+    }
+    // rustc: --> path:LINE:COL
+    const std::size_t arrow = line.find("--> ");
+    if (arrow != std::string_view::npos && line.find_first_not_of(" \t") == arrow) {
+        std::string_view rest = line.substr(arrow + 4);
+        const std::size_t colon = rest.find(':');
+        if (colon != std::string_view::npos) {
+            return std::string(rest.substr(0, colon));
+        }
+    }
+    // path:LINE: or path:LINE:COL:
+    const std::size_t loc = find_locator_end(line);
+    if (loc == std::string_view::npos || loc < 2) {
+        return {};
+    }
+    std::size_t path_end = std::string_view::npos;
+    for (std::size_t p = 0; p + 2 < line.size() && p < loc; ++p) {
+        if (line[p] == ':' && is_digit(line[p + 1])) {
+            path_end = p;
+            break;
+        }
+    }
+    if (path_end == std::string_view::npos || path_end == 0) {
+        return {};
+    }
+    std::size_t path_start = 0;
+    while (path_start < path_end &&
+           (line[path_start] == ' ' || line[path_start] == '\t' || line[path_start] == '|')) {
+        ++path_start;
+    }
+    return std::string(line.substr(path_start, path_end - path_start));
+}
+
+[[nodiscard]] inline int extract_line_number(std::string_view line) noexcept {
+    const std::size_t file_kw = line.find("File \"");
+    if (file_kw != std::string_view::npos) {
+        const std::size_t key = line.find("\", line ", file_kw);
+        if (key != std::string_view::npos) {
+            std::size_t j = key + 8;
+            int n = 0;
+            bool any = false;
+            while (j < line.size() && is_digit(line[j])) {
+                any = true;
+                n = n * 10 + (line[j] - '0');
+                ++j;
+            }
+            return any ? n : 0;
+        }
+    }
+    for (std::size_t i = 0; i + 2 < line.size(); ++i) {
+        if (line[i] != ':' || !is_digit(line[i + 1])) {
+            continue;
+        }
+        std::size_t j = i + 1;
+        int n = 0;
+        while (j < line.size() && is_digit(line[j])) {
+            n = n * 10 + (line[j] - '0');
+            ++j;
+        }
+        if (j < line.size() && line[j] == ':') {
+            return n;
+        }
+    }
+    return 0;
+}
+
+inline void push_unique(std::vector<std::string>& v, std::string s) {
+    if (s.empty()) {
+        return;
+    }
+    if (std::find(v.begin(), v.end(), s) == v.end()) {
+        v.push_back(std::move(s));
+    }
+}
+
+inline void parse_counts(std::string_view log, StructuredTriage& t) {
+    // pytest: "3 failed, 128 passed"
+    for (std::size_t i = 0; i + 10 < log.size(); ++i) {
+        if (!is_digit(log[i])) {
+            continue;
+        }
+        std::size_t j = i;
+        int n = 0;
+        while (j < log.size() && is_digit(log[j])) {
+            n = n * 10 + (log[j] - '0');
+            ++j;
+        }
+        while (j < log.size() && (log[j] == ' ' || log[j] == '\t')) {
+            ++j;
+        }
+        if (starts_with(log.substr(j), "failed") && t.failed < 0) {
+            t.failed = n;
+        } else if (starts_with(log.substr(j), "passed") && t.passed < 0) {
+            t.passed = n;
+        }
+        i = j;
+    }
+    // ctest: "92% tests passed, 1 tests failed out of 13"
+    const std::size_t ctest = log.find("tests failed out of");
+    if (ctest != std::string_view::npos) {
+        // walk back for "N tests failed"
+        std::size_t k = ctest;
+        while (k > 0 && !is_digit(log[k - 1])) {
+            --k;
+        }
+        std::size_t end = k;
+        while (k > 0 && is_digit(log[k - 1])) {
+            --k;
+        }
+        if (end > k) {
+            int n = 0;
+            for (std::size_t p = k; p < end; ++p) {
+                n = n * 10 + (log[p] - '0');
+            }
+            t.failed = n;
+        }
+    }
+}
+
+} // namespace detail
+
+[[nodiscard]] inline std::string_view to_string(Runner r) noexcept {
+    switch (r) {
+        case Runner::Pytest:
+            return "pytest";
+        case Runner::CTest:
+            return "ctest";
+        case Runner::Cargo:
+            return "cargo";
+        case Runner::Swift:
+            return "swift";
+        case Runner::Xcode:
+            return "xcode";
+        case Runner::Unknown:
+            break;
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline StructuredTriage analyze(std::string_view full) {
+    using namespace detail;
+    StructuredTriage t;
+    t.runner = detect_runner(full);
+    parse_counts(full, t);
+
+    std::string normalised;
+    normalise(full, normalised);
+    std::string_view log = normalised.empty() ? full : std::string_view(normalised);
+
+    // Failing tests
+    for (std::size_t pos = 0; pos < log.size();) {
+        const std::size_t nl = log.find('\n', pos);
+        const std::string_view line =
+            log.substr(pos, (nl == std::string_view::npos ? log.size() : nl) - pos);
+        pos = (nl == std::string_view::npos) ? log.size() : nl + 1;
+
+        if (t.runner == Runner::Pytest && starts_with(line, "FAILED ")) {
+            std::string_view rest = line.substr(7);
+            const std::size_t cut = rest.find(" - ");
+            push_unique(t.failing_tests,
+                        std::string(cut == std::string_view::npos ? rest
+                                                                  : rest.substr(0, cut)));
+        }
+        if (t.runner == Runner::CTest && line.find(" - ") != std::string_view::npos &&
+            (contains(line, "(Failed)") || contains(line, "(Subprocess aborted)") ||
+             contains(line, "(Timeout)"))) {
+            // "13 - budget_enforced (Subprocess aborted)"
+            const std::size_t dash = line.find(" - ");
+            if (dash != std::string_view::npos) {
+                std::string_view rest = line.substr(dash + 3);
+                const std::size_t paren = rest.find(" (");
+                push_unique(t.failing_tests,
+                            std::string(paren == std::string_view::npos ? rest
+                                                                       : rest.substr(0, paren)));
+            }
+        }
+    }
+
+    // Primary diagnostics: first few high-signal lines with local locators.
+    for (std::size_t pos = 0; pos < log.size() && t.primary_diagnostics.size() < 8;) {
+        const std::size_t nl = log.find('\n', pos);
+        const std::string_view line =
+            log.substr(pos, (nl == std::string_view::npos ? log.size() : nl) - pos);
+        pos = (nl == std::string_view::npos) ? log.size() : nl + 1;
+        if (is_build_noise(line) || line.empty()) {
+            continue;
+        }
+        const bool located = find_locator_end(line) != std::string_view::npos;
+        const bool severe = has_severity(line);
+        const bool py_frame = line.find("File \"") != std::string_view::npos;
+        const bool rust_loc = contains(line, "--> ");
+        if (!(located && (severe || is_warning(line))) && !severe && !rust_loc && !py_frame) {
+            continue;
+        }
+        if (is_warning(line) && !severe) {
+            continue;
+        }
+        Diagnostic d;
+        d.message = std::string(line);
+        d.path = extract_path_from_locator(line);
+        d.line = extract_line_number(line);
+        if (!d.path.empty() && locator_is_local(line)) {
+            push_unique(t.referenced_paths, d.path);
+        } else if (!d.path.empty() && locator_is_local(d.path)) {
+            push_unique(t.referenced_paths, d.path);
+        }
+        // Prefer local diagnostics in the primary list.
+        if (!d.path.empty() && !locator_is_local(d.path) && !locator_is_local(line)) {
+            continue;
+        }
+        t.primary_diagnostics.push_back(std::move(d));
+    }
+
+    // Also harvest paths from failing test node ids (pytest path::test).
+    for (const std::string& ft : t.failing_tests) {
+        const std::size_t sep = ft.find("::");
+        if (sep != std::string::npos) {
+            push_unique(t.referenced_paths, ft.substr(0, sep));
+        }
+    }
+    return t;
+}
+
+// Compact one-line / short block annotation for ToolResult.summary. Empty when there is
+// nothing structured worth saying (unknown runner, no counts, no paths).
+[[nodiscard]] inline std::string format_annotation(const StructuredTriage& t) {
+    if (t.runner == Runner::Unknown && t.primary_diagnostics.empty() &&
+        t.referenced_paths.empty() && t.failing_tests.empty()) {
+        return {};
+    }
+    std::string out = "\n[triage runner=";
+    out += to_string(t.runner);
+    if (t.passed >= 0 || t.failed >= 0) {
+        out += " passed=";
+        out += t.passed >= 0 ? std::to_string(t.passed) : "?";
+        out += " failed=";
+        out += t.failed >= 0 ? std::to_string(t.failed) : "?";
+    }
+    out += "]";
+    if (!t.failing_tests.empty()) {
+        out += "\n[triage failing_tests]";
+        const std::size_t n = std::min(t.failing_tests.size(), std::size_t{6});
+        for (std::size_t i = 0; i < n; ++i) {
+            out += "\n- ";
+            out += t.failing_tests[i];
+        }
+    }
+    if (!t.primary_diagnostics.empty()) {
+        out += "\n[triage primary]";
+        const std::size_t n = std::min(t.primary_diagnostics.size(), std::size_t{4});
+        for (std::size_t i = 0; i < n; ++i) {
+            out += "\n- ";
+            const Diagnostic& d = t.primary_diagnostics[i];
+            if (!d.path.empty()) {
+                out += d.path;
+                if (d.line > 0) {
+                    out += ':';
+                    out += std::to_string(d.line);
+                }
+                out += ": ";
+            }
+            // Keep the message short.
+            std::string_view msg = d.message;
+            if (msg.size() > 160) {
+                msg = msg.substr(0, 160);
+            }
+            out.append(msg.data(), msg.size());
+        }
+    }
+    if (!t.referenced_paths.empty()) {
+        out += "\n[triage paths]";
+        const std::size_t n = std::min(t.referenced_paths.size(), std::size_t{8});
+        for (std::size_t i = 0; i < n; ++i) {
+            out += "\n- ";
+            out += t.referenced_paths[i];
+        }
+    }
+    return out;
+}
+
+// Stable fingerprint of the primary diagnostic set for stuck-run repetition detection.
+[[nodiscard]] inline std::string primary_fingerprint(const StructuredTriage& t) {
+    std::string fp;
+    for (const Diagnostic& d : t.primary_diagnostics) {
+        fp += d.path;
+        fp += '|';
+        fp += std::to_string(d.line);
+        fp += '|';
+        // Message without volatile addresses: first 80 chars.
+        fp.append(d.message.substr(0, std::min(d.message.size(), std::size_t{80})));
+        fp += ';';
+    }
+    for (const std::string& test : t.failing_tests) {
+        fp += "T:";
+        fp += test;
+        fp += ';';
+    }
+    return fp;
 }
 
 } // namespace log_triage

@@ -10,15 +10,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
+#include "src/context/resume.hpp"
 #include "src/loop/agent.hpp"
 // The recall tools' token counter is built here, so this file needs the estimator it
 // falls back to when no model is loaded.
 #include "src/pcc/recall.hpp"
 #include "src/platform/event_log.hpp"
+#include "src/platform/fs.hpp"
 #include "src/surface/protocol_generated.hpp"
 #include "src/surface/session.hpp"
 #include "src/surface/transport.hpp"
@@ -88,6 +92,37 @@ void end_run(const std::string& id, const std::string& reason) {
     notify(end);
 }
 
+// EVERY parameter the call was made with, as a JSON object.
+//
+// This used to send `tool_params[0].value` -- the first parameter's raw text and nothing
+// else. For the tools whose whole point is a second parameter that was a hole with a UI
+// on the other side of it: `ask_question` carries `question` AND `options`, the view
+// JSON.parse()s this field to find them, and what arrived was bare text that threw. The
+// options never reached the card, so the card that renders selectable items could not
+// render them for any call, however well formed.
+//
+// A JSON object rather than a positional list because the view asks for parameters by
+// NAME, and the order the model happened to emit them in is not a contract.
+[[nodiscard]] std::string tool_args_json(const std::vector<tools::ToolParamValue>& params) {
+    if (params.empty()) {
+        return {};
+    }
+    std::string out = "{";
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) {
+            out += ',';
+        }
+        // json_escape() RETURNS THE QUOTES. Adding another pair here produces ""name"" --
+        // invalid JSON, which the view's JSON.parse rejects, which lands it right back on
+        // the "no named arguments" path this function exists to get it off.
+        out += json_escape(params[i].name);
+        out += ':';
+        out += json_escape(params[i].value);
+    }
+    out += '}';
+    return out;
+}
+
 // The UI feed for one run. Every notification is serialized by the GENERATED code for
 // its type, so a schema change the sidecar has not caught up with is a compile error
 // rather than a field the extension silently reads as its default (S4.4).
@@ -105,10 +140,18 @@ loop::Observer make_observer(const std::string& id) {
         n.run_id = id;
         n.outcome = std::string(loop::to_string(t.outcome));
         n.tool_name = t.tool_name;
-        n.tool_args = t.tool_params.empty() ? std::string() : t.tool_params[0].value;
+        n.tool_args = tool_args_json(t.tool_params);
         n.tool_status = std::string(tools::to_string(t.tool_result.status));
         n.summary = t.tool_result.summary;
         n.duration_ms = duration_ms;
+        n.think_tokens = static_cast<std::int64_t>(t.think_tokens);
+        n.text_tokens = static_cast<std::int64_t>(t.text_tokens);
+        n.tool_tokens = static_cast<std::int64_t>(t.tool_tokens);
+        n.batch_index = static_cast<std::int64_t>(t.batch_index);
+        n.batch_count = static_cast<std::int64_t>(t.batch_count);
+        n.read_bytes = static_cast<std::int64_t>(t.tool_result.bytes_read);
+        n.edit_bytes = static_cast<std::int64_t>(t.tool_result.bytes_changed);
+        n.cap_phase = t.cap_phase;
         notify(n);
     };
     obs.on_verification = [id](const context::CheckResult& v) {
@@ -148,6 +191,8 @@ loop::Observer make_observer(const std::string& id) {
         n.sample.context_used = static_cast<std::int64_t>(used);
         n.sample.context_max = static_cast<std::int64_t>(max);
         n.sample.tokens_generated = g.tokens_generated;
+        n.sample.prefill_reused_tokens =
+            static_cast<std::int64_t>(g.prefill_reused_tokens);
         n.sample.compactions = static_cast<std::int64_t>(compactions);
         notify(n);
     };
@@ -170,8 +215,10 @@ loop::Observer make_observer(const std::string& id) {
 // card, a cancel, a shutdown, a malformed reply and a dead parent all return false.
 class RunInbox {
   public:
-    RunInbox(platform::SpscChannel<std::string>& inbox, std::string run_id)
-        : inbox_(inbox), run_id_(std::move(run_id)) {}
+    RunInbox(platform::SpscChannel<std::string>& inbox, std::string run_id,
+             std::string workspace_root, model::CancelToken& cancel)
+        : inbox_(inbox), run_id_(std::move(run_id)),
+          workspace_root_(std::move(workspace_root)), cancel_(cancel) {}
 
     // Everything the user has said since the last call, oldest first. Non-blocking: the
     // run is mid-flight and has work to get back to.
@@ -192,11 +239,18 @@ class RunInbox {
         return allow_writes_for_run_;
     }
 
-    // Whether the operator clicked "Always allow" on this exact command earlier in this
-    // run. VERBATIM, not by the `allowed_commands` prefix rule: the consent was given for
-    // one string on one card, and widening it to a prefix is a decision that belongs in
-    // settings where the operator can see and edit it.
-    [[nodiscard]] bool command_allowed_for_run(const std::string& command) const {
+    // Whether the operator clicked "Always allow" on this command earlier in this run.
+    // Fully-parsed commands match VERBATIM. Opaque (PartiallyParsed / Unparseable)
+    // commands match a key of workspace + command + classifier caps + script digests, so
+    // approving `bash build.sh` does not survive a rewrite of build.sh.
+    [[nodiscard]] bool command_allowed_for_run(const std::string& command,
+                                               const tools::RiskHint& hint) const {
+        const std::string opaque =
+            loop::opaque_run_consent_key(workspace_root_, command, hint);
+        if (!opaque.empty()) {
+            return std::find(run_opaque_keys_.begin(), run_opaque_keys_.end(), opaque) !=
+                   run_opaque_keys_.end();
+        }
         return std::find(run_allowed_commands_.begin(), run_allowed_commands_.end(),
                          command) != run_allowed_commands_.end();
     }
@@ -219,11 +273,17 @@ class RunInbox {
         // request_id and a flag, not the command -- and taking the command from the reply
         // would let a malformed one grant consent for something the card never showed.
         pending_command_ = command;
+        pending_hint_ = hint;
         notify(req);
 
         bool answer = false;
         std::string msg;
         while (true) {
+            if (cancel_.cancelled()) {
+                // The reader thread already flipped the token; leave without pinning the
+                // run on a card nobody will answer.
+                return false;
+            }
             if (inbox_.drained()) {
                 // The parent is gone, so there is nobody left to ask. Deny, rather than
                 // block forever on a dead pipe holding 19 GB of weights.
@@ -247,18 +307,35 @@ class RunInbox {
     // bytes landed -- an edit reported as applied while the editor never wrote it would
     // leave the model reasoning about a file that does not exist, which is the silent
     // failure this whole path is meant to remove.
-    tools::EditOutcome apply_edit(const std::string& path, const std::string& content) {
+    tools::EditOutcome apply_edit(const tools::EditIntent& intent) {
         const std::string request_id = run_id_ + "/edit/" + std::to_string(++seq_);
+        // edit_begin/edit_end bracket the blocking wait so crash-safe resume can refuse
+        // auto-resume when an edit was in flight (P2 §11).
+        if (log_ != nullptr && clock_ != nullptr) {
+            platform::Event begin;
+            begin.kind = "edit_begin";
+            begin.fields = {{"run_id", run_id_},
+                            {"request_id", request_id},
+                            {"path", intent.abs_path}};
+            log_->append(begin, *clock_);
+        }
         protocol::EditNotification req;
         req.request_id = request_id;
         req.run_id = run_id_;
-        req.path = path;
-        req.new_content = content;
+        req.path = intent.abs_path;
+        req.new_content = intent.new_content;
+        req.expected_version = intent.expected_version;
+        req.expected_absent = intent.expected_absent;
         notify(req);
 
         std::string msg;
         while (true) {
+            if (cancel_.cancelled()) {
+                emit_edit_end(request_id, false, "cancelled");
+                return {false, "cancelled"};
+            }
             if (inbox_.drained()) {
+                emit_edit_end(request_id, false, "the editor is gone");
                 return {false, "the editor is gone"};
             }
             if (!inbox_.try_pop(msg)) {
@@ -266,7 +343,43 @@ class RunInbox {
                 continue;
             }
             if (handle_edit_reply(msg, request_id)) {
+                emit_edit_end(request_id, edit_answer_.applied, edit_answer_.error);
                 return edit_answer_;
+            }
+        }
+    }
+
+    void set_event_log(platform::EventLogWriter* log, const platform::Clock* clock) {
+        log_ = log;
+        clock_ = clock;
+    }
+
+    tools::CodeIntelOutcome apply_code_intel(const tools::CodeIntelQuery& query) {
+        const std::string request_id = run_id_ + "/intel/" + std::to_string(++seq_);
+        protocol::CodeIntelNotification req;
+        req.request_id = request_id;
+        req.run_id = run_id_;
+        req.op = query.op;
+        req.query = query.query;
+        req.path = query.path;
+        req.line = query.line;
+        req.character = query.character;
+        notify(req);
+
+        std::string msg;
+        while (true) {
+            if (cancel_.cancelled()) {
+                return {false, {}, "cancelled"};
+            }
+            if (inbox_.drained()) {
+                return {false, {}, "the editor is gone"};
+            }
+            if (!inbox_.try_pop(msg)) {
+                std::this_thread::yield();
+                continue;
+            }
+            if (handle_code_intel_reply(msg, request_id)) {
+                return code_intel_answer_;
             }
         }
     }
@@ -280,7 +393,8 @@ class RunInbox {
     // ANSWERED that edit; everything else falls through to the ordinary routing, so
     // steering typed while a write was in flight is queued rather than lost.
     bool handle_edit_reply(const std::string& msg, const std::string& awaiting) {
-        if (surface::method_of(msg) == "lmp/edit_applied") {
+        const std::string method = surface::method_of(msg);
+        if (method == "lmp/edit_applied") {
             const std::string id = surface::string_field(msg, "id");
             if (surface::string_field(msg, "request_id") == awaiting) {
                 reply_result(id, R"({"accepted":true})");
@@ -292,6 +406,40 @@ class RunInbox {
             // letting it decide the CURRENT write.
             reply_result(id, R"({"accepted":false})");
             return false;
+        }
+        // Cancel / shutdown under an edit must unblock the wait the same way they do
+        // under a card. handle() with a null awaiting only ACKs them; without this the
+        // edit wait could pin 19 GB until the parent drained.
+        if (method == "lmp/cancel" || method == "lmp/shutdown") {
+            bool ignored = false;
+            (void)handle(msg, &awaiting, &ignored);
+            edit_answer_ = {false, method == "lmp/cancel" ? "cancelled" : "shutdown"};
+            return true;
+        }
+        (void)handle(msg, nullptr, nullptr);
+        return false;
+    }
+
+    bool handle_code_intel_reply(const std::string& msg, const std::string& awaiting) {
+        const std::string method = surface::method_of(msg);
+        if (method == "lmp/code_intel_result") {
+            const std::string id = surface::string_field(msg, "id");
+            if (surface::string_field(msg, "request_id") == awaiting) {
+                reply_result(id, R"({"accepted":true})");
+                code_intel_answer_.ok = surface::bool_field(msg, "ok");
+                code_intel_answer_.error = surface::string_field(msg, "error");
+                code_intel_answer_.result_text = surface::string_field(msg, "result_text");
+                return true;
+            }
+            reply_result(id, R"({"accepted":false})");
+            return false;
+        }
+        if (method == "lmp/cancel" || method == "lmp/shutdown") {
+            bool ignored = false;
+            (void)handle(msg, &awaiting, &ignored);
+            code_intel_answer_ = {false, {},
+                                  method == "lmp/cancel" ? "cancelled" : "shutdown"};
+            return true;
         }
         (void)handle(msg, nullptr, nullptr);
         return false;
@@ -336,8 +484,14 @@ class RunInbox {
                 // sends one.
                 if (*answer && surface::bool_field(msg, "allow_command_for_run") &&
                     !pending_command_.empty() &&
-                    !command_allowed_for_run(pending_command_)) {
-                    run_allowed_commands_.push_back(pending_command_);
+                    !command_allowed_for_run(pending_command_, pending_hint_)) {
+                    const std::string opaque = loop::opaque_run_consent_key(
+                        workspace_root_, pending_command_, pending_hint_);
+                    if (!opaque.empty()) {
+                        run_opaque_keys_.push_back(opaque);
+                    } else {
+                        run_allowed_commands_.push_back(pending_command_);
+                    }
                 }
                 return true;
             }
@@ -372,11 +526,29 @@ class RunInbox {
         return false;
     }
 
+    void emit_edit_end(const std::string& request_id, bool applied, const std::string& error) {
+        if (log_ == nullptr || clock_ == nullptr) {
+            return;
+        }
+        platform::Event end;
+        end.kind = "edit_end";
+        end.fields = {{"run_id", run_id_},
+                      {"request_id", request_id},
+                      {"applied", applied ? "1" : "0"},
+                      {"error", error}};
+        log_->append(end, *clock_);
+    }
+
     platform::SpscChannel<std::string>& inbox_;
     std::string run_id_;
+    std::string workspace_root_;
+    model::CancelToken& cancel_;
+    platform::EventLogWriter* log_ = nullptr;
+    const platform::Clock* clock_ = nullptr;
     std::vector<std::string> steering_;
     std::uint64_t seq_ = 0;
     tools::EditOutcome edit_answer_;
+    tools::CodeIntelOutcome code_intel_answer_;
     bool shutdown_ = false;
     // Latched by one card, spent by the rest of the run, and gone when the run ends. A
     // member of the inbox rather than of the session, so it cannot outlive the mission
@@ -387,7 +559,11 @@ class RunInbox {
     // the persistent copy is the extension's `allowedCommands`, and consent given to one
     // mission is not consent to the next.
     std::string pending_command_;
+    tools::RiskHint pending_hint_;
     std::vector<std::string> run_allowed_commands_;
+    // Opaque-script consent keys (see loop::opaque_run_consent_key). Separate from the
+    // verbatim list so a digest-bound approval cannot be smuggled in as a prefix match.
+    std::vector<std::string> run_opaque_keys_;
 };
 
 // How much the operator wants to be asked, and what may run without asking.
@@ -483,14 +659,38 @@ class RunInbox {
     config.seed = static_cast<std::uint64_t>(
         surface::double_field(message, "seed", static_cast<double>(config.seed)));
 
-    config.context_budget_tokens = static_cast<std::int32_t>(surface::double_field(
-        message, "context_budget_tokens", config.context_budget_tokens));
-    config.max_new_tokens = static_cast<std::int32_t>(
-        surface::double_field(message, "max_new_tokens", config.max_new_tokens));
-    config.budget.max_iterations = static_cast<int>(
-        surface::double_field(message, "max_iterations", config.budget.max_iterations));
-    config.budget.wall_clock_seconds = static_cast<int>(surface::double_field(
-        message, "wall_clock_seconds", config.budget.wall_clock_seconds));
+    // Positive, finite, and in int32 range. The wire carries JSON numbers as doubles, so
+    // a negative, NaN, or 1e20 used to cast into a silent wrap / max(1, x) later and look
+    // like a working setting. Refuse at the boundary instead.
+    const auto positive_i32 = [&](const char* key, std::int32_t fallback,
+                                  std::int32_t* out) -> bool {
+        if (!surface::has_field(message, key)) {
+            *out = fallback;
+            return true;
+        }
+        const double v = surface::double_field(message, key, static_cast<double>(fallback));
+        if (!(v > 0.0) || v > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+            reply_error(id, std::string(key) + " must be a positive integer fitting in "
+                                              "int32; got " +
+                                std::to_string(v));
+            return false;
+        }
+        *out = static_cast<std::int32_t>(v);
+        return true;
+    };
+    if (!positive_i32("context_budget_tokens", config.context_budget_tokens,
+                      &config.context_budget_tokens) ||
+        !positive_i32("max_new_tokens", config.max_new_tokens, &config.max_new_tokens)) {
+        return false;
+    }
+    std::int32_t max_iters = config.budget.max_iterations;
+    std::int32_t wall = config.budget.wall_clock_seconds;
+    if (!positive_i32("max_iterations", max_iters, &max_iters) ||
+        !positive_i32("wall_clock_seconds", wall, &wall)) {
+        return false;
+    }
+    config.budget.max_iterations = static_cast<int>(max_iters);
+    config.budget.wall_clock_seconds = static_cast<int>(wall);
 
     // The operator's check -- the only verification the harness runs. Absent keeps the
     // config default (empty: no check), same rule as every field above.
@@ -549,7 +749,8 @@ bool run_loop(const std::string& run_id, surface::Session& session,
                       clock, session.config);
     agent.set_observer(make_observer(run_id));
 
-    RunInbox run_inbox(inbox, run_id);
+    RunInbox run_inbox(inbox, run_id, session.registry->workspace().root, cancel);
+    run_inbox.set_event_log(&log, &clock);
     agent.set_approver([&run_inbox, &log, &clock](const std::string& tool,
                                                   const std::string& command,
                                                   const std::string& preview,
@@ -579,7 +780,7 @@ bool run_loop(const std::string& run_id, surface::Session& session,
         // extension, and that rule reaches the sidecar at the next `lmp/start` -- so
         // without this the operator clicks "always" and answers the identical card again
         // on the very next turn, which is the button not working.
-        if (!write_gate && run_inbox.command_allowed_for_run(command)) {
+        if (!write_gate && run_inbox.command_allowed_for_run(command, hint)) {
             platform::Event ev;
             ev.kind = "approval";
             ev.fields.push_back({"gate", "command"});
@@ -606,11 +807,19 @@ bool run_loop(const std::string& run_id, surface::Session& session,
     // refusing there would break every unattended run for no safety gain at all.
     if (session.client_applies_edits) {
         session.registry->set_edit_sink(
-            [&run_inbox](const std::string& path, const std::string& content) {
-                return run_inbox.apply_edit(path, content);
+            [&run_inbox](const tools::EditIntent& intent) {
+                return run_inbox.apply_edit(intent);
             });
     } else {
         session.registry->set_edit_sink(nullptr);
+    }
+    if (session.client_provides_code_intel) {
+        session.registry->set_code_intel_sink(
+            [&run_inbox](const tools::CodeIntelQuery& query) {
+                return run_inbox.apply_code_intel(query);
+            });
+    } else {
+        session.registry->set_code_intel_sink(nullptr);
     }
 
     cancel.reset();
@@ -671,7 +880,34 @@ bool start_mission(const std::string& id, const std::string& message,
         return false;
     }
 
+    // Clamp/refuse against the checkpoint ceiling now that it is known. apply_settings
+    // cannot do this: the model may not be loaded yet when the wire values arrive.
+    session.config.model_max_sequence_tokens = session.model_max_sequence_tokens;
+    if (session.model_max_sequence_tokens > 0) {
+        if (session.config.context_budget_tokens > session.model_max_sequence_tokens) {
+            session.config.context_budget_tokens = session.model_max_sequence_tokens;
+        }
+        if (session.config.max_new_tokens > session.model_max_sequence_tokens) {
+            end_run(id, "max_new_tokens (" + std::to_string(session.config.max_new_tokens) +
+                            ") exceeds model maximum sequence length (" +
+                            std::to_string(session.model_max_sequence_tokens) + ")");
+            return false;
+        }
+        const auto room =
+            session.model_max_sequence_tokens - session.config.context_budget_tokens;
+        if (room < 1) {
+            end_run(id, "context_budget_tokens leaves no room for generation under the "
+                        "model maximum sequence length (" +
+                            std::to_string(session.model_max_sequence_tokens) + ")");
+            return false;
+        }
+        if (session.config.max_new_tokens > room) {
+            session.config.max_new_tokens = room;
+        }
+    }
+
     surface::ensure_registry(session, workspace, message, log, clock);
+    const std::string& canonical_workspace = session.registry->workspace().root;
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
     // A little above the widest single result the tool layer can produce, so the door
@@ -679,9 +915,11 @@ bool start_mission(const std::string& id, const std::string& message,
     session.ctx->set_observation_budget(32U << 10);
     // Loaded once into the STABLE part of the prompt: neither the repo's conventions nor
     // the agent's own notes change mid-run, so they cost one prefill for the whole run.
-    session.ctx->set_project_instructions(surface::load_project_instructions(workspace));
-    session.ctx->set_project_memory(surface::load_project_memory(workspace));
-    session.ctx->set_workspace_root(workspace);
+    session.ctx->set_project_instructions(
+        surface::load_project_instructions(session.registry->filesystem()));
+    session.ctx->set_project_memory(
+        surface::load_project_memory(session.registry->filesystem()));
+    session.ctx->set_workspace_root(canonical_workspace);
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
     // Logged the way a failed MCP server is (see connect_mcp_servers): a degradation the
@@ -690,7 +928,7 @@ bool start_mission(const std::string& id, const std::string& message,
     // trimmed, which is invisible at the time and matters later -- exactly the shape of
     // thing the event log exists for.
     surface::ContextJournal::Result journal =
-        surface::ContextJournal::open(workspace, id, *session.ctx);
+        surface::ContextJournal::open(canonical_workspace, id, *session.ctx);
     if (!journal.error.empty()) {
         platform::Event ev;
         ev.kind = "context_journal";
@@ -732,6 +970,25 @@ bool start_mission(const std::string& id, const std::string& message,
             });
     }
     session.client_applies_edits = surface::bool_field(message, "applies_edits");
+    session.client_provides_code_intel =
+        surface::bool_field(message, "provides_code_intel");
+
+    // Resume binding (P2 §11). PCC stays cross-session recall; this event is the
+    // turn-accurate checkpoint identity for crash-safe rebuild from the event log.
+    {
+        platform::Event begin;
+        begin.kind = "run_begin";
+        begin.fields = {
+            {"run_id", id},
+            {"mission", mission},
+            {"workspace_root", canonical_workspace},
+            {"model_identity", model_dir},
+            {"protocol_version", protocol::kProtocolVersion},
+            {"tool_schema_hash",
+             platform::content_sha256_hex(session.registry->tools_json())},
+        };
+        log.append(begin, clock);
+    }
 
     return run_loop(id, session, inbox, cancel, log, clock);
 }

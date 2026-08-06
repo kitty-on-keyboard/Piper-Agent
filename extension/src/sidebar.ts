@@ -20,11 +20,14 @@ import {
   VerificationNotification,
   ApprovalRequestNotification,
   EditNotification,
+  CodeIntelNotification,
   PerfNotification,
   ModelStatusNotification,
   PlanReadyNotification,
   RunEndNotification,
 } from "./protocol.generated";
+import { editPreconditionError } from "./edit_version";
+import { handleCodeIntel } from "./code_intel";
 
 /** One finished run, as the history panel shows it.
  *
@@ -69,6 +72,9 @@ export interface ExtensionHost {
   /** The once-per-window unsandboxed confirmation (tier 3). May edit `settings` down to
    *  the sandbox; returns false if the operator backed out entirely. */
   confirmContainment(settings: RunSettings): Promise<boolean>;
+  /** The once-per-window trusted-MCP confirmation. May clear `trusted` on every server;
+   *  returns false if the operator backed out entirely. */
+  confirmTrustedMcp(settings: RunSettings): Promise<boolean>;
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -132,6 +138,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.observe(n.run_id, "approval", n)
     );
     this.client.on("edit", (n: EditNotification) => void this.applyEdit(n));
+    this.client.on("code_intel", (n: CodeIntelNotification) =>
+      void handleCodeIntel(this.client, n)
+    );
     // Not run-scoped: the model outlives every run, and its state is the one thing that
     // decides whether a prompt can be answered at all.
     this.client.on("model_status", (n: ModelStatusNotification) => {
@@ -208,8 +217,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       } catch {
         existing = undefined; // a new file; createFile below
       }
+      // Compare against the in-memory buffer, not disk alone: a dirty human edit that
+      // diverged from the sidecar's preimage must refuse rather than overwrite.
+      const currentText = existing === undefined ? undefined : existing.getText();
+      const precondition = editPreconditionError(
+        currentText,
+        n.expected_version,
+        n.expected_absent
+      );
+      if (precondition !== undefined) {
+        await this.client.editApplied(n.request_id, false, precondition);
+        return;
+      }
       if (existing === undefined) {
-        edit.createFile(uri, { overwrite: false, ignoreIfExists: true });
+        edit.createFile(uri, { overwrite: false, ignoreIfExists: false });
         edit.insert(uri, new vscode.Position(0, 0), n.new_content);
       } else {
         const whole = new vscode.Range(
@@ -221,10 +242,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       const ok = await vscode.workspace.applyEdit(edit);
       // Saved explicitly: an applied-but-unsaved buffer means the next `shell` call --
       // a test run, a build -- reads the OLD bytes off disk, and the model would be told
-      // its edit did not take.
+      // its edit did not take. A declined save is a failed edit, never a silent success.
       if (ok) {
         const doc = await vscode.workspace.openTextDocument(uri);
-        await doc.save();
+        const saved = await doc.save();
+        if (!saved) {
+          await this.client.editApplied(
+            n.request_id,
+            false,
+            "VS Code applied the edit but refused to save the buffer"
+          );
+          return;
+        }
       }
       await this.client.editApplied(
         n.request_id,
@@ -294,6 +323,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.fail("Cancelled: the run needs a containment choice.");
       return;
     }
+    if (!(await this.host.confirmTrustedMcp(settings))) {
+      this.fail("Cancelled: the run needs a trusted-MCP choice.");
+      return;
+    }
     // A fresh run, not a follow-up. Clearing the id is what makes the composer's next
     // message continue the IMPLEMENTATION rather than the planning conversation whose
     // session this would otherwise still be pointing at.
@@ -310,6 +343,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const problems = this.host.problems(settings);
     if (problems.length > 0) return this.fail(problems.join("\n"));
     if (!(await this.host.confirmContainment(settings))) return;
+    if (!(await this.host.confirmTrustedMcp(settings))) return;
     this.beginRun(mission);
     const reply = await this.client.start_run(mission, settings);
     if (reply.error) this.fail(reply.error);
@@ -568,6 +602,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (problems.length > 0) return this.fail(problems.join("\n"));
     if (!(await this.host.confirmContainment(settings))) {
       this.fail("Cancelled: the run needs a containment choice.");
+      return;
+    }
+    if (!(await this.host.confirmTrustedMcp(settings))) {
+      this.fail("Cancelled: the run needs a trusted-MCP choice.");
       return;
     }
     this.beginRun(text, false);

@@ -17,9 +17,18 @@ std::string describe(sqlite3* db, std::string_view what) {
 
 // --- Db ---------------------------------------------------------------------
 
-Db::Db(const std::string& path) {
-    const int rc = sqlite3_open_v2(path.c_str(), &handle_,
-                                   SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+Db::Db(const std::string& path, LinkPolicy links) {
+    int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
+#ifdef SQLITE_OPEN_NOFOLLOW
+    // Durable context lives under the workspace. A precreated database symlink must not
+    // turn journalling or remember() into a write to an unrelated file.
+    if (links == LinkPolicy::NoFollow) {
+        flags |= SQLITE_OPEN_NOFOLLOW;
+    }
+#else
+    (void)links;
+#endif
+    const int rc = sqlite3_open_v2(path.c_str(), &handle_, flags, nullptr);
     if (rc != SQLITE_OK) {
         // sqlite3_open_v2 hands back a handle even on failure, precisely so the error
         // message can be read off it. Closing it here is not optional.

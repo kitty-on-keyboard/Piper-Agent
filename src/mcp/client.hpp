@@ -110,10 +110,14 @@ public:
 
     using ProgressFn = std::function<void(double progress, std::optional<double> total,
                                           std::string_view message)>;
+    // Polled while a reply is outstanding. Layer-safe (src/mcp is L0): callers that own
+    // a CancelToken bind `[&]{ return cancel.cancelled(); }`. Empty means timeout only.
+    using CancelFn = std::function<bool()>;
 
     [[nodiscard]] ToolResult call_tool(std::string_view name, const nlohmann::json& arguments,
                                        ProgressFn on_progress = {},
-                                       std::optional<std::chrono::milliseconds> timeout = {});
+                                       std::optional<std::chrono::milliseconds> timeout = {},
+                                       CancelFn cancelled = {});
 
     // --- resources ---------------------------------------------------------
     [[nodiscard]] std::vector<Resource> list_resources();
@@ -146,7 +150,8 @@ public:
     // Escape hatch for methods this class does not model. Returns the `result` member,
     // or throws McpError carrying the server's code.
     nlohmann::json call(std::string_view method, const nlohmann::json& params,
-                        std::optional<std::chrono::milliseconds> timeout = {});
+                        std::optional<std::chrono::milliseconds> timeout = {},
+                        CancelFn cancelled = {});
     void notify(std::string_view method, const nlohmann::json& params);
 
 private:
@@ -174,7 +179,7 @@ private:
                     ProgressFn on_progress);
 
     nlohmann::json await(std::future<nlohmann::json> fut, const Id& id,
-                         std::chrono::milliseconds timeout);
+                         std::chrono::milliseconds timeout, CancelFn cancelled = {});
 
     [[nodiscard]] Id next_id();
     [[nodiscard]] nlohmann::json client_capabilities() const;

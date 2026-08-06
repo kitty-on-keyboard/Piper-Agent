@@ -138,6 +138,7 @@ struct RunSettings {
     bool auto_approve_writes = false;
     bool require_approval = false;
     bool applies_edits = false;
+    bool provides_code_intel = false;
     std::string system_prompt;
     std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
@@ -179,6 +180,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"applies_edits\":";
     append_value(out, v.applies_edits);
+    out += ",";
+    out += "\"provides_code_intel\":";
+    append_value(out, v.provides_code_intel);
     out += ",";
     out += "\"system_prompt\":";
     append_value(out, v.system_prompt);
@@ -249,6 +253,7 @@ struct PerfSample {
     std::int64_t context_used = 0;
     std::int64_t context_max = 0;
     std::int64_t tokens_generated = 0;
+    std::int64_t prefill_reused_tokens = 0;
     std::int64_t compactions = 0;
 };
 inline void append_value(std::string& out, const PerfSample& v) {
@@ -270,6 +275,9 @@ inline void append_value(std::string& out, const PerfSample& v) {
     out += ",";
     out += "\"tokens_generated\":";
     append_value(out, v.tokens_generated);
+    out += ",";
+    out += "\"prefill_reused_tokens\":";
+    append_value(out, v.prefill_reused_tokens);
     out += ",";
     out += "\"compactions\":";
     append_value(out, v.compactions);
@@ -300,6 +308,17 @@ struct EditAppliedParams {
     std::string error;
 };
 struct EditAppliedResult {
+    bool accepted = false;
+};
+
+// request "lmp/code_intel_result"
+struct CodeIntelResultParams {
+    std::string request_id;
+    bool ok = false;
+    std::string error;
+    std::string result_text;
+};
+struct CodeIntelResultResult {
     bool accepted = false;
 };
 
@@ -404,6 +423,14 @@ struct TurnNotification {
     std::string tool_status;
     std::string summary;
     double duration_ms = 0.0;
+    std::int64_t think_tokens = 0;
+    std::int64_t text_tokens = 0;
+    std::int64_t tool_tokens = 0;
+    std::int64_t batch_index = 0;
+    std::int64_t batch_count = 0;
+    std::int64_t read_bytes = 0;
+    std::int64_t edit_bytes = 0;
+    std::string cap_phase;
     static constexpr const char* kMethod = "lmp/turn";
 };
 [[nodiscard]] inline std::string to_json(const TurnNotification& n) {
@@ -428,6 +455,30 @@ struct TurnNotification {
     out += ",";
     out += "\"duration_ms\":";
     append_value(out, n.duration_ms);
+    out += ",";
+    out += "\"think_tokens\":";
+    append_value(out, n.think_tokens);
+    out += ",";
+    out += "\"text_tokens\":";
+    append_value(out, n.text_tokens);
+    out += ",";
+    out += "\"tool_tokens\":";
+    append_value(out, n.tool_tokens);
+    out += ",";
+    out += "\"batch_index\":";
+    append_value(out, n.batch_index);
+    out += ",";
+    out += "\"batch_count\":";
+    append_value(out, n.batch_count);
+    out += ",";
+    out += "\"read_bytes\":";
+    append_value(out, n.read_bytes);
+    out += ",";
+    out += "\"edit_bytes\":";
+    append_value(out, n.edit_bytes);
+    out += ",";
+    out += "\"cap_phase\":";
+    append_value(out, n.cap_phase);
     out += "}";
     return out;
 }
@@ -542,6 +593,8 @@ struct EditNotification {
     std::string run_id;
     std::string path;
     std::string new_content;
+    std::string expected_version;
+    bool expected_absent = false;
     static constexpr const char* kMethod = "lmp/edit";
 };
 [[nodiscard]] inline std::string to_json(const EditNotification& n) {
@@ -557,6 +610,49 @@ struct EditNotification {
     out += ",";
     out += "\"new_content\":";
     append_value(out, n.new_content);
+    out += ",";
+    out += "\"expected_version\":";
+    append_value(out, n.expected_version);
+    out += ",";
+    out += "\"expected_absent\":";
+    append_value(out, n.expected_absent);
+    out += "}";
+    return out;
+}
+
+// notification "lmp/code_intel"
+struct CodeIntelNotification {
+    std::string request_id;
+    std::string run_id;
+    std::string op;
+    std::string query;
+    std::string path;
+    std::int64_t line = 0;
+    std::int64_t character = 0;
+    static constexpr const char* kMethod = "lmp/code_intel";
+};
+[[nodiscard]] inline std::string to_json(const CodeIntelNotification& n) {
+    std::string out = "{";
+    out += "\"request_id\":";
+    append_value(out, n.request_id);
+    out += ",";
+    out += "\"run_id\":";
+    append_value(out, n.run_id);
+    out += ",";
+    out += "\"op\":";
+    append_value(out, n.op);
+    out += ",";
+    out += "\"query\":";
+    append_value(out, n.query);
+    out += ",";
+    out += "\"path\":";
+    append_value(out, n.path);
+    out += ",";
+    out += "\"line\":";
+    append_value(out, n.line);
+    out += ",";
+    out += "\"character\":";
+    append_value(out, n.character);
     out += "}";
     return out;
 }

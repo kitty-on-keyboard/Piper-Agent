@@ -141,6 +141,10 @@ struct SsmCache {
     }
 };
 
+// Unused by the live model path. Layers use KVCache + truncate_to; paged / rotating
+// multi-session KV remains out of scope (product is one model, one session). Kept as a
+// reference shape rather than deleted so a future opt-in can wire it without reinventing
+// the slice arithmetic. Do not construct this from mlx_backend.
 struct RotatingKVCache {
     int max_size{512};
     std::optional<mx::array> keys;

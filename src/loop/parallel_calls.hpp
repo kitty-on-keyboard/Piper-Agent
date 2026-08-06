@@ -25,19 +25,13 @@
 // transcript, the history records and the UI rows are byte-for-byte what the serial path
 // produced. Parallelism is an execution detail and must not be observable in the output.
 //
-#include <cstddef>
-#include <functional>
-#include <vector>
-
-#include "src/tools/tool_result.hpp"
+// Implementation lives in tools::run_calls_concurrently so `read_many` can reuse it
+// without creating a tools→loop include edge.
+//
+#include "src/tools/concurrent_calls.hpp"
 
 namespace lmp::loop {
 
-// Runs `work(i)` for every i in `indices`, each on its own thread, and returns the results
-// in the SAME ORDER as `indices`. `work` must be safe to call concurrently; that is the
-// caller's claim to make, and the header above says which calls can make it.
-[[nodiscard]] std::vector<tools::ToolResult> run_calls_concurrently(
-    const std::vector<std::size_t>& indices,
-    const std::function<tools::ToolResult(std::size_t)>& work);
+using tools::run_calls_concurrently;
 
 } // namespace lmp::loop

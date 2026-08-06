@@ -1,7 +1,9 @@
 #include "src/tools/mcp_host.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <set>
+#include <string_view>
 #include <utility>
 
 #include "src/mcp/client.hpp"
@@ -19,18 +21,7 @@ namespace {
            n.find('=') == std::string::npos && n.find('\n') == std::string::npos;
 }
 
-[[nodiscard]] parsephony::ParamType param_type_of(const nlohmann::json& prop) {
-    if (!prop.is_object() || !prop.contains("type")) {
-        return parsephony::ParamType::Json;
-    }
-    const nlohmann::json& t = prop.at("type");
-    // JSON Schema allows a list of types ("type": ["string", "null"]). Anything we cannot
-    // reduce to one shape travels as Json, which accepts any value rather than
-    // constraining generation to a shape the server did not actually promise.
-    if (!t.is_string()) {
-        return parsephony::ParamType::Json;
-    }
-    const std::string s = t.get<std::string>();
+[[nodiscard]] parsephony::ParamType param_type_name(std::string_view s) {
     if (s == "string") {
         return parsephony::ParamType::Text;
     }
@@ -47,6 +38,122 @@ namespace {
         return parsephony::ParamType::Array;
     }
     return parsephony::ParamType::Json;
+}
+
+// Reduces JSON Schema `type` to a ParamType. Nullable unions ("type": ["string","null"])
+// keep the non-null arm rather than collapsing to unconstrained Json (P2 §12).
+struct ReducedType {
+    parsephony::ParamType type = parsephony::ParamType::Json;
+    bool nullable = false;
+    bool ok = false;
+};
+
+[[nodiscard]] ReducedType reduce_type_field(const nlohmann::json& t) {
+    ReducedType out;
+    if (t.is_string()) {
+        const std::string s = t.get<std::string>();
+        if (s == "string" || s == "number" || s == "integer" || s == "boolean" ||
+            s == "object" || s == "array") {
+            out.type = param_type_name(s);
+            out.ok = true;
+        }
+        return out;
+    }
+    if (!t.is_array()) {
+        return out;
+    }
+    std::string non_null;
+    bool saw_null = false;
+    for (const nlohmann::json& el : t) {
+        if (!el.is_string()) {
+            return out;
+        }
+        const std::string s = el.get<std::string>();
+        if (s == "null") {
+            saw_null = true;
+            continue;
+        }
+        if (!non_null.empty() && non_null != s) {
+            return out; // multi-type union we cannot reduce
+        }
+        non_null = s;
+    }
+    if (non_null.empty()) {
+        return out;
+    }
+    out.type = param_type_name(non_null);
+    if (out.type == parsephony::ParamType::Json) {
+        return out;
+    }
+    out.nullable = saw_null;
+    out.ok = true;
+    return out;
+}
+
+void fill_param_constraints(const nlohmann::json& prop, parsephony::ParamSpec& p) {
+    if (!prop.is_object()) {
+        return;
+    }
+    if (prop.contains("enum") && prop.at("enum").is_array()) {
+        for (const nlohmann::json& el : prop.at("enum")) {
+            if (el.is_string()) {
+                p.enum_values.push_back(el.get<std::string>());
+            } else if (el.is_number_integer()) {
+                p.enum_values.push_back(std::to_string(el.get<std::int64_t>()));
+            } else if (el.is_number_float()) {
+                p.enum_values.push_back(std::to_string(el.get<double>()));
+            } else if (el.is_boolean()) {
+                p.enum_values.push_back(el.get<bool>() ? "true" : "false");
+            }
+        }
+    }
+    if (p.type == parsephony::ParamType::Array && prop.contains("items") &&
+        prop.at("items").is_object()) {
+        const nlohmann::json& items = prop.at("items");
+        if (items.contains("type")) {
+            const ReducedType rt = reduce_type_field(items.at("type"));
+            if (rt.ok) {
+                p.has_items_type = true;
+                p.items_type = rt.type;
+            }
+        }
+        // Preserve nested item object/array schema in tools_json when present.
+        nlohmann::json extras = nlohmann::json::object();
+        if (items.contains("properties") && items.at("properties").is_object()) {
+            extras["items"] = items;
+            p.schema_extras_json = extras.dump();
+        } else if (items.contains("enum") && items.at("enum").is_array()) {
+            extras["items"] = items;
+            p.schema_extras_json = extras.dump();
+        }
+    }
+    if (p.type == parsephony::ParamType::Object && prop.contains("properties") &&
+        prop.at("properties").is_object()) {
+        nlohmann::json extras = nlohmann::json::object();
+        extras["properties"] = prop.at("properties");
+        if (prop.contains("required") && prop.at("required").is_array()) {
+            extras["required"] = prop.at("required");
+        }
+        p.schema_extras_json = extras.dump();
+    }
+}
+
+[[nodiscard]] parsephony::ParamType param_type_of(const nlohmann::json& prop,
+                                                  bool* nullable) {
+    if (nullable != nullptr) {
+        *nullable = false;
+    }
+    if (!prop.is_object() || !prop.contains("type")) {
+        return parsephony::ParamType::Json;
+    }
+    const ReducedType rt = reduce_type_field(prop.at("type"));
+    if (!rt.ok) {
+        return parsephony::ParamType::Json;
+    }
+    if (nullable != nullptr) {
+        *nullable = rt.nullable;
+    }
+    return rt.type;
 }
 
 // Flattens the MCP tool result's content blocks into the model-facing summary.
@@ -123,8 +230,11 @@ bool tool_spec_from_schema(const std::string& registered_name,
         }
         parsephony::ParamSpec p;
         p.name = key;
-        p.type = param_type_of(prop);
+        bool nullable = false;
+        p.type = param_type_of(prop, &nullable);
+        p.nullable = nullable;
         p.required = required.count(key) != 0;
+        fill_param_constraints(prop, p);
         out.params.push_back(std::move(p));
     }
     return true;
@@ -270,8 +380,12 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
             decl.remote = true;
 
             const std::string remote_name = tool.name;
+            // Capture the Registry so each call can observe the run-scoped CancelToken
+            // without threading it through every Handler signature. The registry owns
+            // this handler, so the reference outlives every call into it.
+            Registry* const host_registry = &registry;
             Registry::Handler handler =
-                [client, remote_name, call_timeout](
+                [client, remote_name, call_timeout, host_registry](
                     const std::vector<ToolParamValue>& params, int) -> ToolResult {
                 // A closed or crashed server is a typed failure, never a hang and never a
                 // call into a half-dead client.
@@ -289,9 +403,14 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
                     args[p.name] = parsed.is_discarded() ? nlohmann::json(p.value)
                                                          : std::move(parsed);
                 }
+                const model::CancelToken* cancel = host_registry->cancel_token();
+                mcp::Client::CancelFn cancelled;
+                if (cancel != nullptr) {
+                    cancelled = [cancel]() { return cancel->cancelled(); };
+                }
                 try {
-                    const mcp::ToolResult r =
-                        client->call_tool(remote_name, args, {}, call_timeout);
+                    const mcp::ToolResult r = client->call_tool(
+                        remote_name, args, {}, call_timeout, std::move(cancelled));
                     std::string text = summarize(r);
                     if (r.is_error) {
                         // The tool ran and failed. That is evidence the model can act on,
@@ -303,6 +422,10 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
                     }
                     return ToolResult::okay(std::move(text));
                 } catch (const mcp::McpError& e) {
+                    if (e.code() == mcp::to_int(mcp::ErrorCode::kRequestCancelled)) {
+                        return ToolResult::cancelled(std::string("MCP call cancelled: ") +
+                                                     e.what());
+                    }
                     ToolResult out = ToolResult::error(ErrorClass::Transient, false,
                                                        std::string("MCP call failed: ") +
                                                            e.what());

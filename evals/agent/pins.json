@@ -68,5 +68,12 @@
     }
   },
   "_measured": "2026-08-05",
-  "_note": "Floors, not equalities: this drives a 35B MoE at temperature 0.6, where a fixed seed is only approximately reproducible. A drop fails; an improvement asks to be re-pinned."
+  "_split_policy": {
+    "status": "diagnostic_holdout_plus_private",
+    "holdout_harder_established": false,
+    "rebuild_required": true,
+    "private_never_tuned": true,
+    "reason": "The current holdout is not established as harder than corpus (4/4 vs 5/6). Holdout relative score is diagnostic-only. New long-horizon/security fixtures use split=private and are never pin floors. Do not re-pin solved floors without a deliberate multi-seed quality run."
+  },
+  "_note": "Floors, not equalities: this drives a 35B MoE at temperature 0.6, where a fixed seed is only approximately reproducible. A drop fails; an improvement asks to be re-pinned. Private is never a pin floor."
 }

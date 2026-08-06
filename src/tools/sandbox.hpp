@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <string>
 
+#include "src/model/backend.hpp"
 #include "src/security/blast_radius.hpp"
 #include "src/tools/tool_result.hpp"
 
@@ -104,6 +105,9 @@ struct ExecOutcome {
     bool signalled = false;
     int signal = 0;
     bool wall_clock_killed = false;
+    // Set when CancelToken fired and the process group was SIGKILLed. Distinct from
+    // wall_clock_killed so a cancelled command is never reported as a timeout.
+    bool cancelled = false;
     std::string output; // interleaved stdout+stderr, capped at max_output_bytes
     bool output_truncated = false;
     // Non-empty when the harness had to alter the command to make it runnable at this
@@ -152,10 +156,16 @@ struct ExecOutcome {
 // meaning); T2 refuses when no container runtime is usable -- refusal, not silent
 // downgrade to T1, because a silent downgrade is exactly the unsafe_host default v1
 // shipped (S13).
+// `cancel` is optional: nullptr means wall-clock only (the historical path, and what
+// every unit test that does not care about stop latency still uses). When set, each
+// pump poll observes it and SIGKILLs the process group -- the same kill path as the
+// wall-clock stopper -- so a cancelled shell stops in well under a second rather than
+// riding out its full ExecLimits::wall_clock_seconds.
 [[nodiscard]] ExecOutcome run_sandboxed(const ExecutionGrant& grant,
                                         const std::string& command,
                                         const std::string& workspace_root,
-                                        const std::string& cwd, const ExecLimits& limits);
+                                        const std::string& cwd, const ExecLimits& limits,
+                                        const model::CancelToken* cancel = nullptr);
 
 // The Seatbelt profile source for a given root -- exposed for the tests that prove the
 // jail holds by attempting to break it (S17 phase 5 exit criterion).

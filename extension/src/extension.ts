@@ -16,6 +16,8 @@ let client: SidecarClient | undefined;
 let output: vscode.OutputChannel;
 /** Set once the operator has confirmed an unsandboxed run in this window. */
 let unsandboxedAcknowledged = false;
+/** Set once the operator has confirmed trusted MCP servers in this window. */
+let trustedMcpAcknowledged = false;
 
 function settingsFromConfig(): RunSettings {
   const cfg = vscode.workspace.getConfiguration("lmPipe");
@@ -60,6 +62,8 @@ function settingsFromConfig(): RunSettings {
     // sidecar writes directly; it must never be assumed, or an unattended run blocks
     // forever on a reply nobody will send.
     applies_edits: true,
+    // Language features VS Code already hosts (workspace symbols / definition / …).
+    provides_code_intel: true,
     // MCP servers connected at run start; their tools register as mcp__<name>__<tool>.
     //
     // Normalised field by field rather than passed through, because this comes from user
@@ -123,6 +127,33 @@ async function confirmContainment(settings: RunSettings): Promise<boolean> {
   return true;
 }
 
+/** Once-per-window acknowledgement for trusted MCP servers.
+ *
+ *  A trusted server's tools run in the SERVER's process, outside Seatbelt, and skip
+ *  per-call approval cards. That is the same class of vouch as T3: legitimate on your
+ *  machine, never silent. Declining clears trusted on every configured server for this
+ *  run; dismissing cancels. */
+async function confirmTrustedMcp(settings: RunSettings): Promise<boolean> {
+  const trusted = settings.mcp_servers.filter((s) => s.trusted);
+  if (trusted.length === 0 || trustedMcpAcknowledged) return true;
+  const names = trusted.map((s) => s.name).join(", ");
+  const choice = await vscode.window.showWarningMessage(
+    `LM_Pipe will treat MCP server${trusted.length === 1 ? "" : "s"} ` +
+      `'${names}' as trusted. Their tools run outside the sandbox with no per-call ` +
+      `approval card — the same class of risk as unsandboxed shell (tier 3).`,
+    { modal: true },
+    "Trust these servers",
+    "Run them untrusted"
+  );
+  if (choice === undefined) return false;
+  if (choice === "Run them untrusted") {
+    for (const s of settings.mcp_servers) s.trusted = false;
+  } else {
+    trustedMcpAcknowledged = true;
+  }
+  return true;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("LM_Pipe");
   client = new SidecarClient();
@@ -144,6 +175,7 @@ export function activate(context: vscode.ExtensionContext): void {
     settings: settingsFromConfig,
     problems: validate,
     confirmContainment,
+    confirmTrustedMcp,
   };
 
   const sidebar = new SidebarProvider(

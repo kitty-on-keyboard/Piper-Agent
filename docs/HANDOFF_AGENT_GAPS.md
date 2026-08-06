@@ -1,5 +1,10 @@
 # Handoff: close the remaining agent/harness gaps
 
+> **HISTORICAL (2026-08).** References below to `src/loop/verification.cpp`,
+> `prove_falsifiable`, and the old verification ledger describe APIs that were deleted.
+> Do not restore them from this handoff. Prefer current `docs/HANDOFF_REMAINING.md` and
+> the code under `src/loop/` / `src/tools/` for what exists today.
+
 Paste this whole file as the opening prompt of a fresh session in
 `/Users/dev/Desktop/seans_projects_local/LM_Pipe_2`.
 

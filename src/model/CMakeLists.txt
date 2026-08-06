@@ -13,6 +13,7 @@ add_library(lmp_model
   grammar.cpp
   kv_cache.cpp
   mlx_backend.cpp
+  model_limits.cpp
   qwen_tokenizer.cpp
   sampler.cpp
   spec_verifier.cpp

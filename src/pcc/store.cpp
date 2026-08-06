@@ -56,6 +56,14 @@ constexpr const char* kSchema = R"sql(
             VALUES('delete', old.id, old.title, old.body);
         INSERT INTO item_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
     END;
+
+    CREATE TABLE IF NOT EXISTS scratchpad (
+        session        TEXT PRIMARY KEY,
+        goal           TEXT NOT NULL DEFAULT '',
+        active_errors  TEXT NOT NULL DEFAULT '',
+        target_files   TEXT NOT NULL DEFAULT '',
+        updated_at     INTEGER NOT NULL
+    );
 )sql";
 
 // Table-qualified throughout. search() joins item against item_fts, which carries its
@@ -96,6 +104,7 @@ std::vector<Item> read_all(Stmt& stmt) {
 // whole input into a phrase-per-term conjunction, which is what a search box means.
 std::string escape_fts(std::string_view text) {
     std::string out;
+    out.reserve(text.size() + (text.size() >> 2));
     bool in_token = false;
     for (const char c : text) {
         const bool word = (static_cast<unsigned char>(c) > 127) || std::isalnum(c) != 0;
@@ -120,7 +129,8 @@ std::string escape_fts(std::string_view text) {
 
 } // namespace
 
-Store::Store(std::string path) : db_(path), cas_(db_), clock_(&system_clock_us) {
+Store::Store(std::string path, LinkPolicy links)
+    : db_(path, links), cas_(db_), clock_(&system_clock_us) {
     // WAL so a reader (a recall running mid-turn) never blocks the writer that is
     // journalling the turn. NORMAL rather than FULL because a torn final turn on power
     // loss is recoverable -- the working context still has it -- and FULL costs an fsync
@@ -343,6 +353,45 @@ StoreStats Store::stats() const {
     }
     s.blobs = cas_.stats();
     return s;
+}
+
+std::vector<Item> Store::error_signature_search(std::string_view error_text,
+                                                      int limit) const {
+    if (error_text.empty()) {
+        return {};
+    }
+    return search(error_text, {}, {}, limit);
+}
+
+void Store::save_scratchpad(Scratchpad scratchpad) {
+    TimeUs ts = scratchpad.updated_at != 0 ? scratchpad.updated_at : now();
+    Stmt stmt(db_, "INSERT INTO scratchpad(session, goal, active_errors, target_files, updated_at) "
+                   "VALUES(?, ?, ?, ?, ?) "
+                   "ON CONFLICT(session) DO UPDATE SET "
+                   "goal = excluded.goal, active_errors = excluded.active_errors, "
+                   "target_files = excluded.target_files, updated_at = excluded.updated_at");
+    stmt.bind(1, scratchpad.session);
+    stmt.bind(2, scratchpad.goal);
+    stmt.bind(3, scratchpad.active_errors);
+    stmt.bind(4, scratchpad.target_files);
+    stmt.bind(5, ts);
+    stmt.run();
+}
+
+std::optional<Scratchpad> Store::get_scratchpad(std::string_view session) const {
+    Stmt stmt(db_, "SELECT session, goal, active_errors, target_files, updated_at "
+                   "FROM scratchpad WHERE session = ?");
+    stmt.bind(1, session);
+    if (!stmt.step()) {
+        return std::nullopt;
+    }
+    Scratchpad pad;
+    pad.session = stmt.column_text(0);
+    pad.goal = stmt.column_text(1);
+    pad.active_errors = stmt.column_text(2);
+    pad.target_files = stmt.column_text(3);
+    pad.updated_at = stmt.column_int(4);
+    return pad;
 }
 
 } // namespace lmp::pcc

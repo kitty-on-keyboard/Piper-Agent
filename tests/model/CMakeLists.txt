@@ -35,6 +35,13 @@ lmp_add_test(test_grammar SOURCES test_grammar.cpp LABELS gate LINK lmp_model TI
 add_dependencies(test_grammar lmp_mini_vocab)
 target_compile_definitions(test_grammar PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
 
+# Model sequence ceiling parsing + think-budget sink (P0 §4). Needs the mini vocab for
+# the GrammarSink walk; config.json parsing needs no checkpoint.
+lmp_add_test(test_model_bounds SOURCES test_model_bounds.cpp LABELS gate LINK lmp_model lmp_loop
+             TIMEOUT 120)
+add_dependencies(test_model_bounds lmp_mini_vocab)
+target_compile_definitions(test_model_bounds PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
+
 # Real-model tests (S11.6): excluded from the gate, and `ctest --preset realmodel`
 # pins jobs=1 -- concurrent large model loads exhaust unified memory.
 lmp_add_test(test_grammar_realmodel SOURCES test_grammar.cpp LABELS realmodel LINK lmp_model TIMEOUT 300)

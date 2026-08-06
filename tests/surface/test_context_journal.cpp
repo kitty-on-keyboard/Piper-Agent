@@ -20,6 +20,7 @@
 
 #include "src/context/context.hpp"
 #include "src/pcc/recall.hpp"
+#include "src/platform/fs.hpp"
 #include "src/surface/context_journal.hpp"
 
 #include "tests/check.hpp"
@@ -84,6 +85,24 @@ TEST(a_failed_journal_leaves_compaction_exactly_as_it_was) {
     CHECK_EQ(ctx.compact_oldest(2), std::size_t{4});
     CHECK_EQ(ctx.recent().size(), std::size_t{2});
     CHECK_EQ(ctx.compacted_spans().size(), std::size_t{1});
+}
+
+TEST(a_journal_database_symlink_is_refused) {
+    ContextStore ctx("mission");
+    const std::string root = temp_dir();
+    const std::string outside = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(!outside.empty());
+    const std::string victim = outside + "/victim.db";
+    REQUIRE(lmp::platform::write_file_atomic(victim, "keep").ok());
+    REQUIRE(::symlink(victim.c_str(),
+                      (root + "/" + lmp::surface::kContextDbName).c_str()) == 0);
+
+    const ContextJournal::Result r = ContextJournal::open(root, "sess-1", ctx);
+    CHECK(r.journal == nullptr);
+    CHECK(!r.error.empty());
+    CHECK_EQ(lmp::platform::read_file_whole(victim, 1024).bytes,
+             std::string("keep"));
 }
 
 TEST(an_opened_journal_keeps_what_the_trim_drops) {

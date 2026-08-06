@@ -74,6 +74,7 @@ class QwenTokenizer {
     [[nodiscard]] LoadStatus load(const std::string& tokenizer_json_path, Family declared);
 
     [[nodiscard]] bool loaded() const noexcept { return loaded_; }
+    [[nodiscard]] Family family() const noexcept { return family_; }
     [[nodiscard]] std::size_t vocab_size() const;
     [[nodiscard]] const SpecialIds& specials() const noexcept { return specials_; }
 
@@ -112,6 +113,7 @@ class QwenTokenizer {
   private:
     std::unique_ptr<mlx_qwen_tokenizer::Tokenizer> tok_;
     SpecialIds specials_;
+    Family family_ = Family::Qwen3;
     bool loaded_ = false;
 };
 

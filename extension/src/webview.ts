@@ -32,8 +32,8 @@ import { orbStyles, orbMarkup, orbScript } from "./orb";
 /** Font stack: the platform's own UI face first, so it reads native on macOS and does
  *  not fall back to something heavier elsewhere. */
 const FONT_STACK =
-  '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", ' +
-  '"Segoe UI", Inter, system-ui, sans-serif';
+  '-apple-system, BlinkMacSystemFont, "Plus Jakarta Sans", Inter, "SF Pro Text", "Segoe UI Variable Text", ' +
+  '"Segoe UI", system-ui, sans-serif';
 
 function styles(): string {
   return `
@@ -42,7 +42,8 @@ function styles(): string {
   --r-sm: 6px;
   --pad: 12px;
   --ease: cubic-bezier(.22,.68,.24,1);
-  --accent: var(--vscode-textLink-foreground, #3b82f6);
+  --accent: #14B8A6;
+  --teal-blue-grad: linear-gradient(135deg, #14B8A6 0%, #06B6D4 40%, #3B82F6 75%, #8B5CF6 100%);
   --fg: var(--vscode-foreground);
   --dim: color-mix(in srgb, var(--fg) 58%, transparent);
   --faint: color-mix(in srgb, var(--fg) 34%, transparent);
@@ -62,6 +63,43 @@ body {
   margin: 0; padding: 0;
   display: flex; flex-direction: column; height: 100vh;
   -webkit-font-smoothing: antialiased;
+}
+
+.wordmark {
+  font-family: ${FONT_STACK};
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.brand-piper {
+  display: inline-flex;
+  align-items: center;
+}
+.teal-i-wrapper {
+  position: relative;
+  display: inline-block;
+}
+.teal-dot-single {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #14B8A6;
+  box-shadow: 0 0 8px #14B8A6;
+}
+.brand-agent {
+  background: var(--teal-blue-grad);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 800;
+  letter-spacing: 0.01em;
 }
 
 /* --- header ------------------------------------------------------------- */
@@ -337,6 +375,140 @@ button.ghost {
   border: 1px solid var(--line); flex: 1;
 }
 
+/* --- question cards (Claude Code & Cursor style multi-select) --------------- */
+.question-card {
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  border-radius: var(--r);
+  padding: 14px 16px;
+  margin: 12px 0;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  backdrop-filter: blur(12px);
+  transition: all 0.2s var(--ease);
+}
+.question-card.submitted {
+  border-color: color-mix(in srgb, var(--ok) 50%, var(--line));
+  background: color-mix(in srgb, var(--ok) 4%, var(--surface));
+}
+.q-header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.question-card h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.4;
+}
+.question-card h4::before {
+  content: '?';
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--teal-blue-grad);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  flex: none;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.q-subtitle {
+  font-size: 11px;
+  color: var(--dim);
+  margin-left: 30px;
+}
+.q-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.q-opt-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 13px;
+  background: var(--surface-hi);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  line-height: 1.45;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.18s var(--ease);
+  position: relative;
+}
+.q-opt-btn:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-hi));
+  transform: translateX(4px);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.q-opt-btn.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface-hi));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.q-opt-badge {
+  font-size: 11px;
+  font-weight: 800;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: all 0.18s var(--ease);
+  margin-top: 1px;
+}
+.q-opt-btn:hover .q-opt-badge, .q-opt-btn.selected .q-opt-badge {
+  background: var(--teal-blue-grad);
+  color: #fff;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.q-opt-text {
+  flex: 1;
+  word-break: break-word;
+}
+.q-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.q-submit-btn {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--r-sm);
+  background: var(--teal-blue-grad);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 40%, transparent);
+  transition: all 0.18s var(--ease);
+}
+.q-submit-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+
 /* --- things that went wrong on THIS side ---------------------------------- */
 /* A sidecar that will not start, a checkpoint that will not load, a request that could
    not be sent. All of these used to be discarded promises: the view simply stayed on
@@ -524,7 +696,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
   font-size: 11px; color: var(--dim);
 }
 #live #orb { --orb-size: 18px; }
-#live.idle #liveOrb, #live.idle #liveLabel { display: none; }
+#live.idle #liveLabel { display: none; }
 /* The toggle is the one part that stays visible at rest -- it is a preference, not a
    status, and hiding it between runs would mean it could only be found mid-run. */
 #thinkToggle {
@@ -578,16 +750,21 @@ function markup(): string {
   <button id="gear" title="Settings">⚙</button>
   <button id="histBtn" title="Run history">◷</button>
   <div id="headRow">
+    ${orbMarkup()}
     <div id="headText">
+      <div class="wordmark">
+        <span class="brand-piper">P<span class="teal-i-wrapper"><span class="teal-dot-single"></span>ı</span>per</span>
+        <span class="brand-agent">Agent</span>
+      </div>
       <div id="mission"></div>
       <div id="status"><span id="statusText">Idle</span><span id="modeNow"></span></div>
     </div>
   </div>
   <div id="modeBar">
     <div class="seg" id="segMode">
+      <button data-v="agent">Agent</button>
       <button data-v="plan">Plan</button>
       <button data-v="debug">Debug</button>
-      <button data-v="agent">Agent</button>
     </div>
   </div>
   <div id="modelBar">
@@ -1759,6 +1936,63 @@ function paint() {
   $('promptBox').value = settings['prompts.' + (settings.mode || 'agent')] || '';
 }
 
+// --- tool arguments -------------------------------------------------------
+//
+// tool_args is a JSON object of every parameter, keyed by name. It was the first
+// parameter's bare text until the sidecar started sending all of them, which is why
+// parseToolArgs tolerates a non-JSON string instead of throwing: an older sidecar against
+// a newer view should degrade to "no named arguments", not to a broken turn row.
+function parseToolArgs(raw) {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+// What the collapsed tool row shows next to the tool name. The row has one line for this,
+// so it names the thing acted ON -- the path, the command -- and never the whole argument
+// object, which is what printing raw JSON here would do.
+function argsPreview(argsObj, raw) {
+  const first = ['path', 'command', 'pattern', 'text', 'query', 'subdir', 'question', 'plan']
+    .map((k) => argsObj[k])
+    .find((v) => typeof v === 'string' && v.trim());
+  const shown = first !== undefined ? first
+    : (Object.keys(argsObj).length === 0 && typeof raw === 'string' ? raw : '');
+  const line = String(shown).split('\\n')[0].trim();
+  return line.length > 120 ? line.slice(0, 119) + '…' : line;
+}
+
+// The selectable options for a question card, from the 'options' argument alone.
+//
+// It deliberately does NOT fall back to the turn's summary. That summary is the loop's own
+// status string -- "asked the operator; the run stops here" -- and the old fallback turned
+// it into a card titled with it, offering it as the single thing to click. A question that
+// arrives without options is a malformed question, and the honest render is the plain tool
+// row, not one fabricated choice.
+function questionOptions(argsObj) {
+  if (Array.isArray(argsObj.options)) {
+    return argsObj.options.map((s) => String(s).trim()).filter(Boolean);
+  }
+  if (typeof argsObj.options !== 'string' || !argsObj.options.trim()) {
+    return [];
+  }
+  // Models emit the list three ways: real newlines, the two-character escape "\\n", or one
+  // line with bullet/ordinal markers in it.
+  const normalized = argsObj.options.replace(/\\\\n/g, '\\n').replace(/\\r\\n/g, '\\n');
+  const parts = normalized.split(/\\n+/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 1 && /(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i.test(parts[0])) {
+    const split = parts[0]
+      .split(/(?=(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+))/i)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (split.length > 1) return split;
+  }
+  return parts;
+}
+
 // --- inbound --------------------------------------------------------------
 window.addEventListener('message', (e) => {
   const { kind, payload } = e.data;
@@ -1853,6 +2087,111 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'turn') {
     closeBubble();
+    const isQuestionTool = payload.tool_name === 'ask_question' || payload.tool_name === 'ask_user';
+    if (isQuestionTool) {
+      try {
+        const argsObj = parseToolArgs(payload.tool_args);
+        const questionText = argsObj.question || 'Clarification required:';
+        const optionList = questionOptions(argsObj);
+
+        if (optionList.length > 0) {
+          const qCard = document.createElement('div');
+          qCard.className = 'question-card';
+
+          const qHeader = document.createElement('div');
+          qHeader.className = 'q-header';
+
+          const qTitle = document.createElement('h4');
+          qTitle.textContent = questionText;
+
+          const qSub = document.createElement('div');
+          qSub.className = 'q-subtitle';
+          qSub.textContent = 'Select option(s) to proceed:';
+
+          qHeader.append(qTitle, qSub);
+
+          const optsContainer = document.createElement('div');
+          optsContainer.className = 'q-options';
+
+          const selectedIndices = new Set();
+
+          const submitBtn = document.createElement('button');
+          submitBtn.className = 'q-submit-btn';
+          submitBtn.style.display = 'none';
+          submitBtn.textContent = 'Submit Selection';
+
+          const submitSelection = () => {
+            const chosenTexts = Array.from(selectedIndices)
+              .sort((a, b) => a - b)
+              .map(i => optionList[i]);
+            if (chosenTexts.length === 0) return;
+            const textToSubmit = chosenTexts.length === 1 ? chosenTexts[0] : chosenTexts.join('\\n\\n');
+
+            api.postMessage({ kind: 'message', text: textToSubmit });
+            qCard.classList.add('submitted');
+            qCard.style.opacity = '0.7';
+            qCard.style.pointerEvents = 'none';
+            submitBtn.style.display = 'none';
+          };
+
+          submitBtn.onclick = submitSelection;
+
+          optionList.forEach((optText, idx) => {
+            const btn = document.createElement('button');
+            btn.className = 'q-opt-btn';
+            btn.type = 'button';
+
+            const badge = document.createElement('span');
+            badge.className = 'q-opt-badge';
+            const letterBadge = String.fromCharCode(65 + idx);
+            badge.textContent = letterBadge;
+
+            const txt = document.createElement('span');
+            txt.className = 'q-opt-text';
+            txt.textContent = optText;
+
+            btn.append(badge, txt);
+
+            btn.onclick = () => {
+              if (selectedIndices.has(idx)) {
+                selectedIndices.delete(idx);
+                btn.classList.remove('selected');
+                badge.textContent = letterBadge;
+              } else {
+                selectedIndices.add(idx);
+                btn.classList.add('selected');
+                badge.textContent = '✓';
+              }
+
+              if (selectedIndices.size > 1) {
+                submitBtn.style.display = 'inline-block';
+                submitBtn.textContent = 'Submit Selection (' + selectedIndices.size + ')';
+              } else if (selectedIndices.size === 1) {
+                // Submit immediately on single choice click or show submit button
+                submitSelection();
+              } else {
+                submitBtn.style.display = 'none';
+              }
+            };
+
+            optsContainer.append(btn);
+          });
+
+          const footer = document.createElement('div');
+          footer.className = 'q-footer';
+          footer.append(submitBtn);
+
+          qCard.append(qHeader, optsContainer, footer);
+          add(qCard, '');
+          busy(true, 'Waiting for choice', 'WAITING');
+          if (window.__orb) window.__orb.impulse('tool');
+          return;
+        }
+      } catch (err) {
+        // fallback to standard tool row on error
+      }
+    }
+
     const d = document.createElement('details');
     d.className = 'tool';
     const s = document.createElement('summary');
@@ -1860,7 +2199,8 @@ window.addEventListener('message', (e) => {
     dot.className = 'dot ' + (payload.tool_status === 'ok' ? 'ok'
       : (payload.tool_status === 'refused' || payload.tool_status === 'denied') ? 'refused' : 'failed');
     const n = document.createElement('span'); n.className = 'name'; n.textContent = payload.tool_name || payload.outcome;
-    const a = document.createElement('span'); a.className = 'args'; a.textContent = payload.tool_args || '';
+    const a = document.createElement('span'); a.className = 'args';
+    a.textContent = argsPreview(parseToolArgs(payload.tool_args), payload.tool_args);
     const ms = document.createElement('span'); ms.className = 'ms';
     ms.textContent = payload.duration_ms ? Math.round(payload.duration_ms) + 'ms' : '';
     s.append(dot, n, a, ms);
@@ -1998,16 +2338,14 @@ window.addEventListener('message', (e) => {
     if (payload.irreversible) {
       const note = document.createElement('div');
       note.className = 'warnbox';
-      // The old text said no allowlist entry and no setting could ever skip this card.
-      // That stopped being true when the command gate was changed so a NAMED, remembered
-      // rule survives the irreversibility override -- the reasoning is in approval.cpp:
-      // a blanket switch yielding to a risk hint is caution, a rule the operator wrote
-      // yielding to it is the machine overruling the person it just asked. The warning
-      // was never updated, so the UI spent that time asserting the opposite of what the
-      // gate did. It now says what is actually true of each gate.
+      // Irreversibility is a property above both the blanket switch and the persistent
+      // prefix allowlist. "Always allow" is not offered on irreversible command cards
+      // (see above); opaque script consent for the rest of a run is digest-bound and
+      // separate. The note must match the gate, not a prior experiment that let named
+      // allowlists beat irreversibility.
       note.textContent = payload.command
-        ? 'This cannot be undone, so the blanket "run without asking" setting will not ' +
-          'skip it. Only "Always allow", which remembers this exact command, will.'
+        ? 'This cannot be undone. Neither auto-approve-exec nor a remembered command ' +
+          'on the allowlist can skip this card -- approve it each time it appears.'
         : 'This overwrites existing content, so auto-approve-writes will not skip it. ' +
           '"Allow writes for this run" covers the rest of this run only.';
       card.append(note);

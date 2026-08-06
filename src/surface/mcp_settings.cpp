@@ -1,9 +1,21 @@
 #include "src/surface/mcp_settings.hpp"
 
+#include "src/platform/fs.hpp"
+
 #include <nlohmann/json.hpp>
 
 namespace lmp::surface {
 namespace {
+
+[[nodiscard]] std::string exec_fingerprint(const tools::McpServerConfig& cfg) {
+    std::string material = cfg.command;
+    material.push_back('\0');
+    for (const std::string& a : cfg.args) {
+        material += a;
+        material.push_back('\0');
+    }
+    return platform::content_sha256_hex(material);
+}
 
 // The string members of a JSON array field, skipping anything that is not a string.
 std::vector<std::string> json_string_array(const nlohmann::json& obj, const char* key) {
@@ -65,12 +77,34 @@ void connect_mcp_servers(tools::McpHost& host,
                          const std::vector<tools::McpServerConfig>& servers,
                          tools::Registry& registry, platform::EventLogWriter& log,
                          const platform::Clock& clock) {
-    for (const tools::McpServerStatus& st : host.connect_and_register(servers, registry)) {
+    // Fingerprints before connect so a spawn failure still records what was asked for.
+    std::vector<std::string> hashes;
+    hashes.reserve(servers.size());
+    for (const tools::McpServerConfig& cfg : servers) {
+        hashes.push_back(exec_fingerprint(cfg));
+        if (cfg.trusted) {
+            platform::Event trust;
+            trust.kind = "mcp_trust";
+            trust.fields.push_back({"name", cfg.name});
+            trust.fields.push_back({"command", cfg.command});
+            trust.fields.push_back({"exec_hash", hashes.back()});
+            trust.fields.push_back(
+                {"why", "operator vouched: tools run outside Seatbelt without per-call cards"});
+            log.append(trust, clock);
+        }
+    }
+    const auto report = host.connect_and_register(servers, registry);
+    for (std::size_t i = 0; i < report.size(); ++i) {
+        const tools::McpServerStatus& st = report[i];
         platform::Event ev;
         ev.kind = "mcp_server";
         ev.fields.push_back({"name", st.name});
         ev.fields.push_back({"connected", st.connected ? "1" : "0"});
         ev.fields.push_back({"tools", std::to_string(st.registered)});
+        if (i < servers.size()) {
+            ev.fields.push_back({"trusted", servers[i].trusted ? "1" : "0"});
+            ev.fields.push_back({"exec_hash", i < hashes.size() ? hashes[i] : ""});
+        }
         if (!st.error.empty()) {
             // Absent, not fatal: the run continues without that server's tools.
             ev.fields.push_back({"error", st.error});

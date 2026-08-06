@@ -1,19 +1,24 @@
 #include "src/tools/registry.hpp"
 
+#include "src/tools/concurrent_calls.hpp"
+#include "src/tools/ignore_dirs.hpp"
 #include "src/tools/symbol_index.hpp"
 #include "src/tools/text_view.hpp"
-
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <cctype>
 #include <cstdlib>
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
+#include <optional>
+#include <sstream>
+#include <string_view>
 
+#include "src/pcc/diff.hpp"
 #include "src/platform/fs.hpp"
+#include "src/tools/apply_patch.hpp"
+#include "src/tools/edit_diagnostics.hpp"
 #include "src/tools/graft_engine.hpp"
 #include "src/tools/log_triage.hpp"
 #include "src/tools/sandbox.hpp"
@@ -45,12 +50,64 @@ ToolResult write_failure(const fsx::WriteResult& w) {
             return ToolResult::error(ErrorClass::Policy, false, w.error);
         case fsx::FsStatus::IsDirectory:
         case fsx::FsStatus::TooLarge:
+        case fsx::FsStatus::InvalidPath:
             return ToolResult::error(ErrorClass::Malformed, false, w.error);
+        case fsx::FsStatus::OutsideRoot:
+        case fsx::FsStatus::Symlink:
+            return ToolResult::refused(w.error);
+        case fsx::FsStatus::Conflict:
+            // Not retryable with the same bytes: the preimage moved. Re-read first.
+            return ToolResult::error(ErrorClass::Conflict, false, w.error);
         case fsx::FsStatus::Ok:
         case fsx::FsStatus::IoError:
             break;
     }
     return ToolResult::error(ErrorClass::Transient, true, w.error);
+}
+
+std::string with_content_version(std::string body, std::string_view version) {
+    if (!body.empty() && body.back() != '\n') {
+        body.push_back('\n');
+    }
+    body += "[content_version sha256=";
+    body.append(version.data(), version.size());
+    body += "]\n";
+    return body;
+}
+
+ToolResult need_read_before_write(const std::string& path) {
+    return ToolResult::error(
+        ErrorClass::Conflict, false,
+        path + ": existing file requires read_file (or read_slice) in this run before "
+               "overwrite/delete so the edit can carry a content version; read it, then "
+               "retry");
+}
+
+ToolResult measured_read(ToolResult result, std::size_t bytes) {
+    result.bytes_read = bytes;
+    return result;
+}
+
+ToolResult measured_edit(ToolResult result, std::size_t bytes) {
+    result.bytes_changed = bytes;
+    return result;
+}
+
+// Added + removed bytes in the smallest contiguous region that differs. replace_in_file
+// changes one region by contract, so this is exact there and avoids pretending the whole
+// rewritten file changed.
+std::size_t contiguous_edit_bytes(std::string_view before, std::string_view after) {
+    std::size_t prefix = 0;
+    while (prefix < before.size() && prefix < after.size() &&
+           before[prefix] == after[prefix]) {
+        ++prefix;
+    }
+    std::size_t suffix = 0;
+    while (suffix < before.size() - prefix && suffix < after.size() - prefix &&
+           before[before.size() - 1 - suffix] == after[after.size() - 1 - suffix]) {
+        ++suffix;
+    }
+    return (before.size() - prefix - suffix) + (after.size() - prefix - suffix);
 }
 
 // The one sandbox failure a model cannot read, turned into one it can act on.
@@ -120,9 +177,22 @@ constexpr std::string_view kNotPermitted = "Operation not permitted";
            "workspace jail stays in force around it either way.";
 }
 
-ToolResult refused_path(const std::string& p) {
-    return ToolResult::refused("path '" + p + "' resolves outside the workspace root; "
-                               "only paths inside the workspace are reachable");
+ToolResult refused_path(const std::string& p, std::string_view detail = {}) {
+    std::string message = "path '" + p + "' is not reachable through the workspace";
+    if (!detail.empty()) {
+        message += ": ";
+        message += detail;
+    }
+    return ToolResult::refused(std::move(message));
+}
+
+ToolResult contained_failure(const std::string& path,
+                             const fsx::ContainedPath& resolved) {
+    if (resolved.status == fsx::FsStatus::OutsideRoot ||
+        resolved.status == fsx::FsStatus::Symlink) {
+        return refused_path(path, resolved.error);
+    }
+    return ToolResult::error(ErrorClass::Malformed, false, resolved.error);
 }
 
 // Single-quote for /bin/sh: wrap in ', and close-escape-reopen each embedded '. The git
@@ -139,6 +209,145 @@ std::string shell_quote(std::string_view s) {
     }
     out += "'";
     return out;
+}
+
+std::string child_path(std::string_view parent, std::string_view name) {
+    if (parent.empty() || parent == ".") {
+        return std::string(name);
+    }
+    return std::string(parent) + "/" + std::string(name);
+}
+
+using FileVisitor = std::function<bool(const std::string&, std::string_view)>;
+
+// Walk through descriptor-rooted list/read operations. A symlink is visible as an entry
+// but is neither traversed nor read; a concurrent replacement is rejected again by the
+// operation that opens the child.
+constexpr std::size_t kFindFilesMax = 500;
+
+// `*` (any run, including empty) and `?` (one character). Iterative with a backtrack point
+// rather than recursive, so a pathological pattern cannot blow the stack.
+bool glob_match(std::string_view pattern, std::string_view text) {
+    std::size_t p = 0;
+    std::size_t t = 0;
+    std::size_t star = std::string_view::npos;
+    std::size_t retry = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == text[t])) {
+            ++p;
+            ++t;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            star = p++;
+            retry = t;
+        } else if (star != std::string_view::npos) {
+            p = star + 1;
+            t = ++retry;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') {
+        ++p;
+    }
+    return p == pattern.size();
+}
+
+// The same descent as walk_regular_files, without opening anything. Separate rather than a
+// flag on that one because its visitor is handed BYTES: walking names through it means
+// reading every file in the tree to look at its path, and passing max_read_bytes=0 to avoid
+// that skips every file instead -- read_file_whole reports a zero cap as "too large", the
+// visit never fires, and the search silently returns nothing.
+bool walk_file_names(const fsx::WorkspaceFs& workspace, const std::string& path,
+                     const std::function<bool(const std::string&)>& visit) {
+    fsx::DirectoryContents dir = workspace.list_directory(path);
+    if (!dir.ok()) {
+        // Not a directory: it is the single file that was asked for. Mirrors
+        // walk_regular_files, which falls back the same way -- without this, naming a file
+        // as `subdir` walks nothing and reports no matches, which reads as "your pattern
+        // found nothing" rather than "you pointed me at a file".
+        return visit(path);
+    }
+    std::sort(dir.entries.begin(), dir.entries.end(),
+              [](const fsx::DirectoryEntry& a, const fsx::DirectoryEntry& b) {
+                  return a.name < b.name;
+              });
+    for (const fsx::DirectoryEntry& entry : dir.entries) {
+        const std::string child = child_path(path, entry.name);
+        if (entry.kind == fsx::DirectoryEntryKind::Directory) {
+            if (skip_during_descent(entry.name)) {
+                continue;
+            }
+            if (!walk_file_names(workspace, child, visit)) {
+                return false;
+            }
+        } else if (entry.kind == fsx::DirectoryEntryKind::File) {
+            if (!visit(child)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool walk_regular_files(const fsx::WorkspaceFs& workspace, const std::string& path,
+                        std::size_t max_read_bytes, const FileVisitor& visit) {
+    fsx::DirectoryContents dir = workspace.list_directory(path);
+    if (!dir.ok()) {
+        const fsx::FileContents file =
+            workspace.read_file_whole(path, max_read_bytes);
+        return !file.ok() || visit(path, file.bytes);
+    }
+    std::sort(dir.entries.begin(), dir.entries.end(),
+              [](const fsx::DirectoryEntry& a, const fsx::DirectoryEntry& b) {
+                  return a.name < b.name;
+              });
+    for (const fsx::DirectoryEntry& entry : dir.entries) {
+        const std::string child = child_path(path, entry.name);
+        if (entry.kind == fsx::DirectoryEntryKind::Directory) {
+            if (skip_during_descent(entry.name)) {
+                continue;
+            }
+            if (!walk_regular_files(workspace, child, max_read_bytes, visit)) {
+                return false;
+            }
+        } else if (entry.kind == fsx::DirectoryEntryKind::File) {
+            const fsx::FileContents file =
+                workspace.read_file_whole(child, max_read_bytes);
+            if (file.ok() && !visit(child, file.bytes)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool identifier_at(std::string_view line, std::size_t at, std::size_t size) {
+    const auto word = [](char c) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        return std::isalnum(u) != 0 || c == '_';
+    };
+    return (at == 0 || !word(line[at - 1])) &&
+           (at + size == line.size() || !word(line[at + size]));
+}
+
+bool definition_shaped(std::string_view line, std::string_view symbol) {
+    std::size_t at = line.find(symbol);
+    while (at != std::string_view::npos) {
+        if (identifier_at(line, at, symbol.size())) {
+            static constexpr std::string_view kLeads[] = {
+                "class", "struct", "enum", "def", "fn", "func", "function",
+                "const", "let", "var", "void", "int", "bool", "auto", "std::string",
+            };
+            const std::string_view before = line.substr(0, at);
+            for (std::string_view lead : kLeads) {
+                if (before.find(lead) != std::string_view::npos) {
+                    return true;
+                }
+            }
+        }
+        at = line.find(symbol, at + symbol.size());
+    }
+    return false;
 }
 
 // JSON string escape for tools_json -- the schema block, not a general serializer.
@@ -180,8 +389,9 @@ const std::string* get(const std::vector<ToolParamValue>& params, const char* na
 }
 
 std::string resolve_contained(const std::string& root, const std::string& rel) {
-    const std::string abs = fsx::resolve_against(root, rel);
-    return fsx::is_within(root, abs) ? abs : std::string();
+    const fsx::WorkspaceFs workspace(root);
+    const fsx::ContainedPath path = workspace.contained_path(rel);
+    return path.ok() ? path.absolute : std::string();
 }
 
 const ToolDecl* Registry::find(const std::string& name) const {
@@ -199,8 +409,12 @@ ToolResult Registry::run_git(const std::string& args, int approved_tier) {
     // not this function -- is what guarantees that.
     const ExecutionGrant grant = grant_execution(tier_for(approved_tier));
     const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
-    const ExecOutcome o = run_sandboxed(grant, "git " + args, ctx_.root, ctx_.root, limits);
+    const ExecOutcome o =
+        run_sandboxed(grant, "git " + args, ctx_.root, ctx_.root, limits, cancel_token_);
 
+    if (o.status == Status::Cancelled) {
+        return ToolResult::cancelled(o.output.empty() ? "cancelled" : o.output);
+    }
     if (o.status == Status::Refused) {
         ToolResult r;
         r.status = o.status;
@@ -239,7 +453,33 @@ bool Registry::declare_remote(ToolDecl decl, Handler handler) {
 }
 
 ToolResult Registry::execute(const std::string& name,
-                             const std::vector<ToolParamValue>& params, int approved_tier) {
+                             const std::vector<ToolParamValue>& params, int approved_tier,
+                             const model::CancelToken* cancel) {
+    // A non-null argument installs a temporary token only when the run has not already
+    // set one: the agent path uses set_cancel_token once for the whole run (including
+    // parallel execute), and restoring a temporary over that would race. Tests that
+    // never call set_cancel_token still get a per-call override.
+    const model::CancelToken* previous = cancel_token_;
+    const bool installed = cancel != nullptr && cancel_token_ == nullptr;
+    if (installed) {
+        cancel_token_ = cancel;
+    }
+    struct Restorer {
+        Registry* reg;
+        const model::CancelToken* previous;
+        bool installed;
+        ~Restorer() {
+            if (installed) {
+                reg->cancel_token_ = previous;
+            }
+        }
+    } restorer{this, previous, installed};
+
+    const model::CancelToken* active = cancel_token_;
+    if (active != nullptr && active->cancelled()) {
+        return ToolResult::cancelled();
+    }
+
     const auto it = handlers_.find(name);
     if (it == handlers_.end()) {
         // Unreachable when the guard did its job; typed anyway, never a crash.
@@ -289,13 +529,57 @@ std::string Registry::tools_json(const std::function<bool(const ToolDecl&)>& inc
                 out += ", ";
             }
             first = false;
-            out += "\"" + p.name + "\": {\"type\": \"" +
-                   (p.type == ParamType::Number   ? "number"
-                    : p.type == ParamType::Boolean ? "boolean"
-                    : p.type == ParamType::Object  ? "object"
-                    : p.type == ParamType::Array   ? "array"
-                                                   : "string") +
-                   "\"}";
+            const char* base_type = p.type == ParamType::Number    ? "number"
+                                    : p.type == ParamType::Boolean ? "boolean"
+                                    : p.type == ParamType::Object  ? "object"
+                                    : p.type == ParamType::Array   ? "array"
+                                    : p.type == ParamType::Json    ? "object"
+                                                                   : "string";
+            out += "\"" + p.name + "\": {";
+            if (p.nullable && p.type != ParamType::Json) {
+                out += "\"type\": [\"";
+                out += base_type;
+                out += "\", \"null\"]";
+            } else {
+                out += "\"type\": \"";
+                out += base_type;
+                out += "\"";
+            }
+            if (!p.enum_values.empty()) {
+                out += ", \"enum\": [";
+                for (std::size_t i = 0; i < p.enum_values.size(); ++i) {
+                    if (i > 0) {
+                        out += ", ";
+                    }
+                    out += "\"";
+                    append_json_escaped(out, p.enum_values[i]);
+                    out += "\"";
+                }
+                out += "]";
+            }
+            if (p.has_items_type && p.schema_extras_json.empty()) {
+                const char* item = p.items_type == ParamType::Number    ? "number"
+                                   : p.items_type == ParamType::Boolean ? "boolean"
+                                   : p.items_type == ParamType::Object  ? "object"
+                                   : p.items_type == ParamType::Array   ? "array"
+                                                                        : "string";
+                out += ", \"items\": {\"type\": \"";
+                out += item;
+                out += "\"}";
+            }
+            if (!p.schema_extras_json.empty()) {
+                // schema_extras_json is a JSON object; splice its fields in.
+                if (p.schema_extras_json.size() >= 2 && p.schema_extras_json.front() == '{' &&
+                    p.schema_extras_json.back() == '}') {
+                    const std::string inner =
+                        p.schema_extras_json.substr(1, p.schema_extras_json.size() - 2);
+                    if (!inner.empty()) {
+                        out += ", ";
+                        out += inner;
+                    }
+                }
+            }
+            out += "}";
             if (p.required) {
                 required += required.empty() ? "" : ", ";
                 required += "\"" + p.name + "\"";
@@ -306,7 +590,128 @@ std::string Registry::tools_json(const std::function<bool(const ToolDecl&)>& inc
     return out;
 }
 
-Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
+// Cap on paths inside one read_many call. Matches TurnGrammar::kMaxCallsPerTurn so a
+// batched primitive cannot outrun the multi-call surface the model already has.
+inline constexpr std::size_t kReadManyMaxPaths = 4;
+
+// Newline-separated paths, or a JSON string array flattened the same way plan accepts.
+// Empty lines are skipped; the caller enforces the bound.
+std::vector<std::string> parse_read_many_paths(std::string_view raw) {
+    std::string text(raw);
+    // Narrow JSON-array acceptance: starts with `[`, first element is `"`, ends with `]`.
+    const std::size_t open = text.find_first_not_of(" \t\r\n");
+    if (open != std::string::npos && text[open] == '[') {
+        const std::size_t first = text.find_first_not_of(" \t\r\n", open + 1);
+        const std::size_t close = text.find_last_not_of(" \t\r\n");
+        if (first != std::string::npos && text[first] == '"' &&
+            close != std::string::npos && text[close] == ']') {
+            std::string flat;
+            bool in_string = false;
+            std::string current;
+            for (std::size_t i = first; i < close; ++i) {
+                const char c = text[i];
+                if (!in_string) {
+                    if (c == '"') {
+                        in_string = true;
+                    }
+                    continue;
+                }
+                if (c == '\\' && i + 1 < close) {
+                    current += text[++i];
+                    continue;
+                }
+                if (c == '"') {
+                    in_string = false;
+                    if (!current.empty()) {
+                        flat += current;
+                        flat += '\n';
+                    }
+                    current.clear();
+                    continue;
+                }
+                current += c;
+            }
+            if (!in_string) {
+                text = std::move(flat);
+            }
+        }
+    }
+    std::vector<std::string> paths;
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::size_t a = line.find_first_not_of(" \t\r");
+        if (a == std::string::npos) {
+            continue;
+        }
+        const std::size_t b = line.find_last_not_of(" \t\r");
+        paths.push_back(line.substr(a, b - a + 1));
+    }
+    return paths;
+}
+
+ToolResult Registry::read_one_file(const std::string& path) {
+    const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+    if (!resolved.ok()) {
+        return contained_failure(path, resolved);
+    }
+    fsx::FileContents f = workspace_fs_.read_file_whole(path, ctx_.max_read_bytes);
+    if (!f.ok()) {
+        if (f.status == fsx::FsStatus::Symlink ||
+            f.status == fsx::FsStatus::InvalidPath) {
+            return refused_path(path, f.error);
+        }
+        const ErrorClass ec = f.status == fsx::FsStatus::NotFound
+                                  ? ErrorClass::NotFound
+                                  : ErrorClass::Malformed;
+        std::string err_msg = f.error;
+        if (f.status == fsx::FsStatus::NotFound) {
+            err_msg += ". File not found at '" + path + "'. If you provided a bare filename, use list_dir to find its relative path in the workspace.";
+        }
+        return ToolResult::error(ec, false, err_msg);
+    }
+    // The PROMPT budget, not the read budget. These two used to be one number at
+    // 4 MiB, so a single read could hand the context store more bytes than the
+    // whole 96k-token window holds -- while this description already claimed it
+    // "fails honestly with the real size". It does now.
+    if (f.bytes.size() > ctx_.max_model_read_bytes) {
+        return ToolResult::error(
+            ErrorClass::Malformed, false,
+            path + " is " + std::to_string(f.bytes.size()) + " bytes over " +
+                std::to_string(count_lines(f.bytes)) +
+                " lines, above the " + std::to_string(ctx_.max_model_read_bytes) +
+                "-byte prompt budget. Use read_slice(path, start_line, end_line) "
+                "to read a range.");
+    }
+    // An empty file is a FACT, and it has to be stated. Returning "" makes a
+    // successful read indistinguishable from nothing happening at all -- and an
+    // empty observation is dropped from the rendered prompt entirely
+    // (context.cpp), so the next turn cannot see that the call was ever made.
+    //
+    // MEASURED: a run wrote 0 bytes to src/kv_store.py, then read it back 17 turns
+    // running, getting "" each time and re-issuing the identical call, until the
+    // budget ended the run.
+    const std::string version = fsx::content_sha256_hex(f.bytes);
+    note_read_version(resolved.absolute, f.bytes);
+    if (f.bytes.empty()) {
+        return measured_read(
+            ToolResult::okay(with_content_version(
+                "(" + path + " exists and is empty: 0 bytes)", version)),
+            0);
+    }
+    // Always return current content. Under context pressure the agent may collapse an
+    // older verbatim duplicate still in rendered history; a pointer-only "refer to
+    // previous read" is never safe after compaction.
+    return measured_read(
+        ToolResult::okay(with_content_version(number_lines(f.bytes, 1), version)),
+        f.bytes.size());
+}
+
+Registry::Registry(WorkspaceContext ctx)
+    : ctx_(std::move(ctx)), workspace_fs_(ctx_.root) {
+    if (workspace_fs_.valid()) {
+        ctx_.root = workspace_fs_.root();
+    }
     // --- read_file ---------------------------------------------------------
     {
         ToolDecl d;
@@ -314,47 +719,77 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.description = "Read a file, whole, with 1-based line numbers prefixed for "
                         "reference. Fails honestly with the real size if it exceeds the "
                         "prompt budget; use read_slice for a line range instead. The line "
-                        "numbers are display only -- never include them in old_text.";
+                        "numbers are display only -- never include them in old_text. "
+                        "Re-reading always returns current content.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true)};
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string* path = get(p, "path");
-            const std::string abs = resolve_contained(ctx_.root, *path);
-            if (abs.empty()) {
-                return refused_path(*path);
+            return read_one_file(*get(p, "path"));
+        });
+    }
+    // --- read_many ---------------------------------------------------------
+    {
+        ToolDecl d;
+        d.name = "read_many";
+        d.description =
+            "Read up to four files in one call. Pass paths as newline-separated text "
+            "(or a JSON string array). Each file is returned with the same line-numbered "
+            "format as read_file. Prefer this when several independent files are needed "
+            "before the next edit; keep issuing separate read_file calls when the paths "
+            "are not known together.";
+        d.spec.name = d.name;
+        d.spec.params = {param("paths", ParamType::Text, true)};
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            const std::vector<std::string> paths = parse_read_many_paths(*get(p, "paths"));
+            if (paths.empty()) {
+                return ToolResult::error(ErrorClass::Malformed, true,
+                                         "paths must list at least one non-empty path");
             }
-            fsx::FileContents f = fsx::read_file_whole(abs, ctx_.max_read_bytes);
-            if (!f.ok()) {
-                const ErrorClass ec = f.status == fsx::FsStatus::NotFound
-                                          ? ErrorClass::NotFound
-                                          : ErrorClass::Malformed;
-                return ToolResult::error(ec, false, f.error);
-            }
-            // The PROMPT budget, not the read budget. These two used to be one number at
-            // 4 MiB, so a single read could hand the context store more bytes than the
-            // whole 96k-token window holds -- while this description already claimed it
-            // "fails honestly with the real size". It does now.
-            if (f.bytes.size() > ctx_.max_model_read_bytes) {
+            if (paths.size() > kReadManyMaxPaths) {
                 return ToolResult::error(
-                    ErrorClass::Malformed, false,
-                    *path + " is " + std::to_string(f.bytes.size()) + " bytes over " +
-                        std::to_string(count_lines(f.bytes)) +
-                        " lines, above the " + std::to_string(ctx_.max_model_read_bytes) +
-                        "-byte prompt budget. Use read_slice(path, start_line, end_line) "
-                        "to read a range.");
+                    ErrorClass::Malformed, true,
+                    "paths lists " + std::to_string(paths.size()) +
+                        " files; read_many accepts at most " +
+                        std::to_string(kReadManyMaxPaths));
             }
-            // An empty file is a FACT, and it has to be stated. Returning "" makes a
-            // successful read indistinguishable from nothing happening at all -- and an
-            // empty observation is dropped from the rendered prompt entirely
-            // (context.cpp), so the next turn cannot see that the call was ever made.
-            //
-            // MEASURED: a run wrote 0 bytes to src/kv_store.py, then read it back 17 turns
-            // running, getting "" each time and re-issuing the identical call, until the
-            // budget ended the run.
-            if (f.bytes.empty()) {
-                return ToolResult::okay("(" + *path + " exists and is empty: 0 bytes)");
+            std::vector<std::size_t> indices(paths.size());
+            for (std::size_t i = 0; i < paths.size(); ++i) {
+                indices[i] = i;
             }
-            return ToolResult::okay(number_lines(f.bytes, 1));
+            // Same concurrent primitive as multi-call batches. One path stays on this
+            // thread; two or more fan out.
+            const std::vector<ToolResult> parts = run_calls_concurrently(
+                indices, [this, &paths](std::size_t i) { return read_one_file(paths[i]); });
+            std::string summary;
+            std::size_t bytes = 0;
+            bool any_error = false;
+            bool all_refused = true;
+            for (std::size_t i = 0; i < parts.size(); ++i) {
+                if (i > 0) {
+                    summary += "\n\n";
+                }
+                summary += "=== ";
+                summary += paths[i];
+                summary += " ===\n";
+                summary += parts[i].summary;
+                bytes += parts[i].bytes_read;
+                if (!parts[i].ok()) {
+                    any_error = true;
+                }
+                if (parts[i].status != Status::Refused) {
+                    all_refused = false;
+                }
+            }
+            if (all_refused && !parts.empty()) {
+                ToolResult r = ToolResult::refused(summary);
+                r.bytes_read = bytes;
+                return r;
+            }
+            if (any_error) {
+                return measured_read(
+                    ToolResult::error(ErrorClass::Transient, true, summary), bytes);
+            }
+            return measured_read(ToolResult::okay(std::move(summary)), bytes);
         });
     }
     // --- read_slice --------------------------------------------------------
@@ -370,12 +805,18 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                          param("start_line", ParamType::Number, true),
                          param("end_line", ParamType::Number, true)};
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
-            if (abs.empty()) {
-                return refused_path(*get(p, "path"));
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
             }
-            fsx::FileContents f = fsx::read_file_whole(abs, ctx_.max_read_bytes);
+            fsx::FileContents f =
+                workspace_fs_.read_file_whole(path, ctx_.max_read_bytes);
             if (!f.ok()) {
+                if (f.status == fsx::FsStatus::Symlink ||
+                    f.status == fsx::FsStatus::InvalidPath) {
+                    return refused_path(path, f.error);
+                }
                 return ToolResult::error(f.status == fsx::FsStatus::NotFound
                                              ? ErrorClass::NotFound
                                              : ErrorClass::Malformed,
@@ -427,7 +868,13 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                         "; continue with read_slice(path, " +
                         std::to_string(stopped_at) + ", ...)]\n";
             }
-            return ToolResult::okay(std::move(outp));
+            // Whole-file digest: the slice is a view, but the concurrency claim is on the
+            // file bytes replace_in_file / write_file will touch.
+            const std::string version = fsx::content_sha256_hex(f.bytes);
+            note_read_version(resolved.absolute, f.bytes);
+            return measured_read(
+                ToolResult::okay(with_content_version(std::move(outp), version)),
+                f.bytes.size());
         });
     }
     // --- list_dir -----------------------------------------------------------
@@ -439,71 +886,171 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true)};
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
-            if (abs.empty()) {
-                return refused_path(*get(p, "path"));
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
             }
-            DIR* dir = ::opendir(abs.c_str());
-            if (dir == nullptr) {
-                return ToolResult::error(ErrorClass::NotFound, false, abs + ": cannot open");
+            fsx::DirectoryContents dir = workspace_fs_.list_directory(path);
+            if (!dir.ok()) {
+                if (dir.status == fsx::FsStatus::Symlink ||
+                    dir.status == fsx::FsStatus::InvalidPath) {
+                    return refused_path(path, dir.error);
+                }
+                return ToolResult::error(ErrorClass::NotFound, false, dir.error);
             }
             std::vector<std::string> names;
-            while (dirent* e = ::readdir(dir)) {
-                const std::string n = e->d_name;
-                if (n == "." || n == "..") {
-                    continue;
-                }
-                names.push_back(e->d_type == DT_DIR ? n + "/" : n);
+            for (const fsx::DirectoryEntry& entry : dir.entries) {
+                names.push_back(entry.kind == fsx::DirectoryEntryKind::Directory
+                                    ? entry.name + "/"
+                                    : entry.name);
             }
-            ::closedir(dir);
             std::sort(names.begin(), names.end());
             std::string outp;
             for (const std::string& n : names) {
                 outp += n + "\n";
             }
-            return ToolResult::okay(std::move(outp));
+            const std::size_t bytes = outp.size();
+            // SAY IT, rather than returning nothing and letting the loop's generic floor
+            // say "list_dir succeeded and produced no output" -- which a model reads as
+            // "this directory is empty" whether or not that is what happened. It cost a
+            // whole run: a shared-offset bug made every listing of the workspace root come
+            // back with zero entries, the model was told the project was empty, and it
+            // spent fourteen turns re-listing a directory it had been told was not there.
+            if (names.empty()) {
+                return measured_read(
+                    ToolResult::okay("(" + path + " is an empty directory)"), 0);
+            }
+            return measured_read(ToolResult::okay(std::move(outp)), bytes);
         });
     }
     // --- search -------------------------------------------------------------
     {
         ToolDecl d;
         d.name = "search";
-        d.description = "Literal substring search across the workspace. Returns "
-                        "path:line: text matches, capped; narrow with subdir.";
+        d.description = "Literal substring search of file CONTENTS across the workspace. "
+                        "Returns path:line: text matches, capped; narrow with subdir. To "
+                        "find files by NAME or extension, use find_files instead.";
         d.spec.name = d.name;
         d.spec.params = {param("text", ParamType::Text, true),
                          param("subdir", ParamType::Text, false)};
-        declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
-            // grep does this better than any reimplementation; it runs under the same
-            // sandbox as shell so search cannot become the unsandboxed escape hatch.
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
             const std::string* sub = get(p, "subdir");
             const std::string where =
                 (sub != nullptr && !sub->empty()) ? *sub : std::string(".");
-            const std::string abs = resolve_contained(ctx_.root, where);
-            if (abs.empty()) {
-                return refused_path(where);
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(where);
+            if (!resolved.ok()) {
+                return contained_failure(where, resolved);
             }
-            std::string cmd = "grep -rn --binary-files=without-match -F -e ";
-            cmd += "'" ;
-            for (char c : *get(p, "text")) {
-                if (c == '\'') { cmd += "'\\''"; } else { cmd += c; }
+            const std::string& needle = *get(p, "text");
+            std::string output;
+            std::size_t matches = 0;
+            (void)walk_regular_files(
+                workspace_fs_, resolved.relative, ctx_.max_read_bytes,
+                [&](const std::string& path, std::string_view bytes) {
+                    if (bytes.find('\0') != std::string_view::npos) {
+                        return true;
+                    }
+                    std::size_t at = 0;
+                    std::size_t line_number = 1;
+                    while (at <= bytes.size()) {
+                        const std::size_t nl = bytes.find('\n', at);
+                        const std::size_t stop =
+                            nl == std::string_view::npos ? bytes.size() : nl;
+                        const std::string_view line = bytes.substr(at, stop - at);
+                        if (line.find(needle) != std::string_view::npos) {
+                            const std::string hit =
+                                path + ":" + std::to_string(line_number) + ":" +
+                                std::string(line) + "\n";
+                            if (matches >= 200 ||
+                                output.size() + hit.size() > ctx_.max_result_bytes) {
+                                return false;
+                            }
+                            output += hit;
+                            ++matches;
+                        }
+                        if (nl == std::string_view::npos) {
+                            break;
+                        }
+                        at = nl + 1;
+                        ++line_number;
+                    }
+                    return true;
+                });
+            return ToolResult::okay(output.empty() ? "(no matches)" : std::move(output));
+        });
+    }
+    // --- find_files ---------------------------------------------------------
+    //
+    // The gap `search` kept being asked to fill. `search` reads CONTENTS, so a model
+    // looking for the Swift files in a project reaches for search(".swift"), gets no
+    // matches -- correctly, since no line of code contains that string -- and concludes
+    // the files are not there. Watched twice in one run.
+    {
+        ToolDecl d;
+        d.name = "find_files";
+        d.description =
+            "Find files by NAME. `pattern` is a glob when it contains * or ? (e.g. "
+            "'*.swift'), and a plain substring otherwise (e.g. '.swift' or 'Dashboard'). "
+            "A pattern containing '/' is matched against the whole relative path, "
+            "otherwise against the file name alone; '*' spans directory separators, so "
+            "'Sources/*.swift' also matches files in subdirectories of Sources. Returns "
+            "one relative path per line, capped; narrow with subdir.";
+        d.spec.name = d.name;
+        d.spec.params = {param("pattern", ParamType::Text, true),
+                         param("subdir", ParamType::Text, false)};
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            const std::string* sub = get(p, "subdir");
+            const std::string where =
+                (sub != nullptr && !sub->empty()) ? *sub : std::string(".");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(where);
+            if (!resolved.ok()) {
+                return contained_failure(where, resolved);
             }
-            cmd += "' -- '" + abs + "' | head -200";
-            const ExecutionGrant grant = grant_execution(
-                approved_tier == 0 ? SandboxTier::T0_NoExec : SandboxTier::T1_Seatbelt);
-            const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
-            ExecOutcome o = run_sandboxed(grant, cmd, ctx_.root, ctx_.root, limits);
-            if (o.status == Status::Refused) {
-                return ToolResult::refused(o.output);
+            const std::string& pattern = *get(p, "pattern");
+            if (pattern.empty()) {
+                return ToolResult::error(ErrorClass::Malformed, false,
+                                         "'pattern' must not be empty");
             }
-            // grep exits 1 on "no matches" -- that is a successful empty search.
-            if (o.exit_code == 1 && o.output.empty()) {
-                return ToolResult::okay("(no matches)");
+            const bool is_glob = pattern.find_first_of("*?") != std::string::npos;
+            const bool whole_path = pattern.find('/') != std::string::npos;
+            std::vector<std::string> hits;
+            // Names only -- nothing is opened, so this stays cheap on a tree where
+            // `search` would be expensive.
+            (void)walk_file_names(
+                workspace_fs_, resolved.relative, [&](const std::string& path) {
+                    const std::size_t slash = path.rfind('/');
+                    const std::string_view subject =
+                        whole_path || slash == std::string::npos
+                            ? std::string_view(path)
+                            : std::string_view(path).substr(slash + 1);
+                    const bool hit = is_glob ? glob_match(pattern, subject)
+                                             : subject.find(pattern) != std::string_view::npos;
+                    if (hit) {
+                        hits.push_back(path);
+                    }
+                    return hits.size() < kFindFilesMax;
+                });
+            std::sort(hits.begin(), hits.end());
+            std::string output;
+            bool capped = hits.size() >= kFindFilesMax;
+            for (const std::string& h : hits) {
+                if (output.size() + h.size() + 1 > ctx_.max_result_bytes) {
+                    capped = true;
+                    break;
+                }
+                output += h + "\n";
             }
-            if (o.status != Status::Ok && o.exit_code != 1) {
-                return ToolResult::error(ErrorClass::Transient, true, o.output);
+            // SAY that the list is partial. A silently truncated list is worse than a short
+            // one: the model treats "18 files" as the whole set and reasons about what is
+            // missing as if it were absent from the workspace.
+            if (capped) {
+                output += "(truncated -- narrow the pattern or pass subdir)\n";
             }
-            return ToolResult::okay(std::move(o.output));
+            const std::size_t bytes = output.size();
+            return measured_read(
+                ToolResult::okay(output.empty() ? "(no files matched)" : std::move(output)),
+                bytes);
         });
     }
     // --- locate_symbol ------------------------------------------------------
@@ -511,10 +1058,10 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         ToolDecl d;
         d.name = "locate_symbol";
         d.description = "Find likely definition sites of a symbol (class, function, "
-                        "variable) as path:line: text. Grep-based, language-agnostic.";
+                        "variable) as path:line: text. Language-agnostic.";
         d.spec.name = d.name;
         d.spec.params = {param("symbol", ParamType::Text, true)};
-        declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
             std::string sym;
             for (char c : *get(p, "symbol")) {
                 if ((std::isalnum(static_cast<unsigned char>(c)) != 0) || c == '_') {
@@ -525,18 +1072,53 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                 return ToolResult::error(ErrorClass::Malformed, false,
                                          "symbol must be an identifier");
             }
-            const std::string cmd =
-                "grep -rnE --binary-files=without-match "
-                "'(class|struct|enum|def|fn|func|function|const|let|var|void|int|bool|auto"
-                "|std::string)[^;]*\\b" + sym + "\\b' -- '" + ctx_.root + "' | head -400";
-            const ExecutionGrant grant = grant_execution(
-                approved_tier == 0 ? SandboxTier::T0_NoExec : SandboxTier::T1_Seatbelt);
-            const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
-            ExecOutcome o = run_sandboxed(grant, cmd, ctx_.root, ctx_.root, limits);
-            if (o.status == Status::Refused) {
-                return ToolResult::refused(o.output);
+            // Editor language features when the client advertised provides_code_intel.
+            // Headless keeps the ranked walk below. Not routed through syntax_check and
+            // not a sidecar-launched clangd (P2 §10).
+            if (code_intel_sink_) {
+                CodeIntelQuery q;
+                q.op = "workspace_symbols"; // protocol op name, not a tool
+                q.query = sym;
+                const CodeIntelOutcome o = code_intel_sink_(q);
+                if (o.ok) {
+                    return ToolResult::okay(o.result_text.empty()
+                                                ? ("(no workspace symbols for '" + sym +
+                                                   "')")
+                                                : o.result_text);
+                }
+                // Fall through to the walk when the editor has no provider / failed.
             }
-            if (o.output.empty()) {
+            std::string candidates;
+            std::size_t candidate_count = 0;
+            (void)walk_regular_files(
+                workspace_fs_, ".", ctx_.max_read_bytes,
+                [&](const std::string& path, std::string_view bytes) {
+                    if (bytes.find('\0') != std::string_view::npos) {
+                        return true;
+                    }
+                    std::size_t at = 0;
+                    long line_number = 1;
+                    while (at <= bytes.size()) {
+                        const std::size_t nl = bytes.find('\n', at);
+                        const std::size_t stop =
+                            nl == std::string_view::npos ? bytes.size() : nl;
+                        const std::string_view line = bytes.substr(at, stop - at);
+                        if (definition_shaped(line, sym)) {
+                            candidates += path + ":" + std::to_string(line_number) +
+                                          ":" + std::string(line) + "\n";
+                            if (++candidate_count >= 400) {
+                                return false;
+                            }
+                        }
+                        if (nl == std::string_view::npos) {
+                            break;
+                        }
+                        at = nl + 1;
+                        ++line_number;
+                    }
+                    return true;
+                });
+            if (candidates.empty()) {
                 return ToolResult::okay("(no definition-shaped lines found for '" + sym +
                                         "'; try search)");
             }
@@ -546,7 +1128,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             // is decided where it can be asserted.
             std::size_t suppressed = 0;
             const std::vector<SymbolHit> hits =
-                rank_symbol_hits(o.output, sym, 40, suppressed);
+                rank_symbol_hits(candidates, sym, 40, suppressed);
             std::string out;
             for (const SymbolHit& h : hits) {
                 out += h.path + ":" + std::to_string(h.line) + ":" + h.text + "\n";
@@ -570,20 +1152,57 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         // setting says (it destroys data), and a model that knows the price can weigh it.
         d.description = "Create or fully replace a file with the given content. "
                         "Atomic: a crash leaves the old file or the new one, never a "
-                        "prefix. For a partial change use replace_in_file: it is not just "
-                        "tidier, it is cheaper -- replacing the whole of a file this run "
-                        "did not write destroys the existing content and stops for a "
-                        "human decision, while a scoped edit does not.";
+                        "prefix. Overwriting an existing file requires a prior "
+                        "read_file/read_slice in this run (content version); a create "
+                        "requires the path to still be absent. For a partial change use "
+                        "replace_in_file: it is not just tidier, it is cheaper -- "
+                        "replacing the whole of a file this run did not write destroys "
+                        "the existing content and stops for a human decision, while a "
+                        "scoped edit does not.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
-                         param("content", ParamType::Text, true)};
+                         param("content", ParamType::Text, true),
+                         param("expected_version", ParamType::Text, false)};
         d.mutates_workspace = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
-            if (abs.empty()) {
-                return refused_path(*get(p, "path"));
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
             }
-            const CommitOutcome w = commit_write(abs, *get(p, "content"));
+            fsx::WritePrecondition pre;
+            const std::string_view content = *get(p, "content");
+            // Presence, not would_overwrite_existing: an empty file still exists, so a
+            // rewrite must carry a version rather than expected_absent (which would
+            // conflict against the empty inode).
+            const fsx::FileContents cur =
+                workspace_fs_.read_file_whole(path, ctx_.max_read_bytes);
+            if (cur.status == fsx::FsStatus::Symlink ||
+                cur.status == fsx::FsStatus::InvalidPath) {
+                return refused_path(path, cur.error);
+            }
+            if (cur.status == fsx::FsStatus::IsDirectory) {
+                return ToolResult::error(ErrorClass::Malformed, false, cur.error);
+            }
+            const bool exists =
+                cur.ok() || cur.status == fsx::FsStatus::TooLarge;
+            if (exists) {
+                if (cur.ok() && cur.bytes == content) {
+                    return ToolResult::no_change(
+                        path + " already contained exactly these " +
+                        std::to_string(content.size()) +
+                        " bytes; nothing was written and the file is unchanged.");
+                }
+                pre.expected_version = resolve_expected_version(resolved.absolute, p);
+                if (pre.expected_version.empty()) {
+                    return need_read_before_write(path);
+                }
+            } else if (cur.status == fsx::FsStatus::NotFound) {
+                pre.expected_absent = true;
+            } else {
+                return ToolResult::error(ErrorClass::Malformed, false, cur.error);
+            }
+            const CommitOutcome w = commit_write(resolved, content, pre);
             if (!w.ok()) {
                 return write_failure(w.write);
             }
@@ -598,9 +1217,11 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                     std::to_string(get(p, "content")->size()) +
                     " bytes; nothing was written and the file is unchanged.");
             }
-            return ToolResult::okay("wrote " +
-                                    std::to_string(get(p, "content")->size()) +
-                                    " bytes to " + *get(p, "path"));
+            return measured_edit(
+                ToolResult::okay("wrote " +
+                                 std::to_string(get(p, "content")->size()) +
+                                 " bytes to " + *get(p, "path")),
+                get(p, "content")->size());
         });
     }
     // --- replace_in_file ----------------------------------------------------
@@ -614,19 +1235,34 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
                          param("old_text", ParamType::Text, true),
-                         param("new_text", ParamType::Text, true)};
+                         param("new_text", ParamType::Text, true),
+                         param("expected_version", ParamType::Text, false)};
         d.mutates_workspace = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
-            if (abs.empty()) {
-                return refused_path(*get(p, "path"));
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
             }
-            fsx::FileContents f = fsx::read_file_whole(abs, ctx_.max_read_bytes);
+            fsx::FileContents f =
+                workspace_fs_.read_file_whole(path, ctx_.max_read_bytes);
             if (!f.ok()) {
+                if (f.status == fsx::FsStatus::Symlink ||
+                    f.status == fsx::FsStatus::InvalidPath) {
+                    return refused_path(path, f.error);
+                }
                 return ToolResult::error(f.status == fsx::FsStatus::NotFound
                                              ? ErrorClass::NotFound
                                              : ErrorClass::Malformed,
                                          false, f.error);
+            }
+            // This tool's own read is the preimage. Prefer an explicit expected_version
+            // when the model supplies one; otherwise bind to the bytes just observed.
+            note_read_version(resolved.absolute, f.bytes);
+            fsx::WritePrecondition pre;
+            pre.expected_version = resolve_expected_version(resolved.absolute, p);
+            if (pre.expected_version.empty()) {
+                pre.expected_version = fsx::content_sha256_hex(f.bytes);
             }
             // Accept what read_file and read_slice displayed. See strip_line_numbers.
             //
@@ -644,9 +1280,54 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                                         : *get(p, "new_text");
             const graft::Result g = graft::apply(f.bytes, old_text, new_text);
             if (g.status == graft::Status::NoMatch) {
+                std::string snippet = "\n\n[Current ground-truth lines from " + *get(p, "path") + "]:\n```\n";
+                std::string target_line;
+                std::size_t nl = 0;
+                while (nl < old_text.size()) {
+                    std::size_t next_nl = old_text.find('\n', nl);
+                    std::string line = old_text.substr(nl, next_nl == std::string::npos ? std::string::npos : next_nl - nl);
+                    while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(line.begin());
+                    while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) line.pop_back();
+                    if (!line.empty()) {
+                        target_line = line;
+                        break;
+                    }
+                    if (next_nl == std::string::npos) break;
+                    nl = next_nl + 1;
+                }
+
+                long approx_line = 1;
+                if (!target_line.empty()) {
+                    std::size_t found = f.bytes.find(target_line);
+                    if (found != std::string::npos) {
+                        approx_line = 1;
+                        for (std::size_t i = 0; i < found; ++i) {
+                            if (f.bytes[i] == '\n') approx_line++;
+                        }
+                    }
+                }
+
+                long start_line = std::max(1L, approx_line - 5);
+                long end_line = start_line + 40;
+                long curr_line = 1;
+                std::size_t at = 0;
+                while (at <= f.bytes.size() && curr_line <= end_line) {
+                    std::size_t next_nl = f.bytes.find('\n', at);
+                    std::size_t stop = (next_nl == std::string::npos) ? f.bytes.size() : next_nl + 1;
+                    if (curr_line >= start_line) {
+                        snippet += std::to_string(curr_line) + "\t";
+                        snippet.append(f.bytes, at, stop - at);
+                    }
+                    if (next_nl == std::string::npos) break;
+                    at = stop;
+                    curr_line++;
+                }
+                snippet += "```";
+                // Nearest regions are DIAGNOSTICS ONLY — similarity never authorizes a write.
+                snippet += edit_diagnostics::format_nearest(*get(p, "path"), f.bytes, old_text);
                 return ToolResult::error(ErrorClass::NotFound, false,
                                          "old_text not found in " + *get(p, "path") +
-                                             "; re-read the file and try again");
+                                             "; check the current lines below and update old_text:" + snippet);
             }
             if (g.status == graft::Status::Ambiguous) {
                 std::string sites;
@@ -657,7 +1338,7 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                          "old_text matches more than one site (lines " +
                                              sites + "); include more context");
             }
-            const CommitOutcome w = commit_write(abs, g.result);
+            const CommitOutcome w = commit_write(resolved, g.result, pre);
             if (!w.ok()) {
                 return write_failure(w.write);
             }
@@ -670,30 +1351,214 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                     "old_text matched in " + *get(p, "path") +
                     " but new_text is identical to it, so the file is unchanged.");
             }
-            return ToolResult::okay("replaced one occurrence in " + *get(p, "path"));
+            return measured_edit(
+                ToolResult::okay("replaced one occurrence in " + *get(p, "path")),
+                contiguous_edit_bytes(f.bytes, g.result));
+        });
+    }
+    // --- apply_patch --------------------------------------------------------
+    {
+        ToolDecl d;
+        d.name = "apply_patch";
+        d.description =
+            "Apply an exact structured patch (*** Begin Patch / *** End Patch) with "
+            "Add/Update/Delete File sections. Matching is byte-exact context/preimage "
+            "only — never fuzzy. Each existing file binds to the content version from "
+            "the last read_file/read_slice (or this tool's own preimage read); all hunks "
+            "for a file apply or none do. Prefer this for multi-hunk edits; keep "
+            "replace_in_file for a single old_text→new_text swap. Pass the patch as raw "
+            "multiline text in `patch`.";
+        d.spec.name = d.name;
+        d.spec.params = {param("patch", ParamType::Text, true)};
+        d.mutates_workspace = true;
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            const std::string& patch = *get(p, "patch");
+            const apply_patch::Result parsed = apply_patch::parse(patch);
+            if (parsed.status != apply_patch::Status::Applied) {
+                return ToolResult::error(ErrorClass::Malformed, false,
+                                         "apply_patch parse error: " + parsed.failure.reason);
+            }
+
+            // One coherent snapshot per path: hunks and content versions share these bytes.
+            std::map<std::string, std::string> snapshot;
+            std::map<std::string, fsx::ContainedPath> resolved_by_path;
+            for (const apply_patch::FileOp& op : parsed.ops) {
+                const fsx::ContainedPath resolved = workspace_fs_.contained_path(op.path);
+                if (!resolved.ok()) {
+                    return contained_failure(op.path, resolved);
+                }
+                resolved_by_path.emplace(op.path, resolved);
+                const fsx::FileContents f =
+                    workspace_fs_.read_file_whole(op.path, ctx_.max_read_bytes);
+                if (op.kind == apply_patch::FileOpKind::Add) {
+                    if (f.ok() || f.status == fsx::FsStatus::TooLarge) {
+                        // Presence makes Add a conflict; seed snapshot so apply_to sees it.
+                        snapshot.emplace(op.path, f.ok() ? f.bytes : std::string());
+                    } else if (f.status == fsx::FsStatus::Symlink ||
+                               f.status == fsx::FsStatus::InvalidPath) {
+                        return refused_path(op.path, f.error);
+                    } else if (f.status != fsx::FsStatus::NotFound) {
+                        return ToolResult::error(ErrorClass::Malformed, false, f.error);
+                    }
+                    continue;
+                }
+                if (!f.ok()) {
+                    if (f.status == fsx::FsStatus::Symlink ||
+                        f.status == fsx::FsStatus::InvalidPath) {
+                        return refused_path(op.path, f.error);
+                    }
+                    if (f.status == fsx::FsStatus::NotFound) {
+                        return ToolResult::error(ErrorClass::NotFound, false,
+                                                 op.path + ": not found for patch apply");
+                    }
+                    return ToolResult::error(ErrorClass::Malformed, false, f.error);
+                }
+                note_read_version(resolved.absolute, f.bytes);
+                snapshot.emplace(op.path, f.bytes);
+            }
+
+            auto read_opt = [&snapshot](const std::string& rel) -> std::optional<std::string> {
+                const auto it = snapshot.find(rel);
+                if (it == snapshot.end()) {
+                    return std::nullopt;
+                }
+                return it->second;
+            };
+            const apply_patch::Result applied = apply_patch::apply_to(parsed.ops, read_opt);
+            if (applied.status != apply_patch::Status::Applied) {
+                std::string msg = "apply_patch refused on " + applied.failure.path + ": " +
+                                  applied.failure.reason;
+                if (!applied.failure.nearby.empty()) {
+                    msg += "\n\n[Current nearby lines]:\n```\n";
+                    msg += applied.failure.nearby;
+                    msg += "```";
+                }
+                const ErrorClass ec =
+                    applied.status == apply_patch::Status::Ambiguous ? ErrorClass::Conflict
+                    : applied.status == apply_patch::Status::Conflict ? ErrorClass::Conflict
+                    : applied.status == apply_patch::Status::ParseError
+                          ? ErrorClass::Malformed
+                          : ErrorClass::NotFound;
+                return ToolResult::error(ec, false, std::move(msg));
+            }
+
+            std::size_t bytes_changed = 0;
+            std::vector<std::string> ok_paths;
+            for (const apply_patch::FileChange& ch : applied.changes) {
+                const fsx::ContainedPath& resolved = resolved_by_path.at(ch.path);
+                fsx::WritePrecondition pre;
+                if (ch.delete_file || ch.kind == apply_patch::FileOpKind::Update) {
+                    pre.expected_version = resolve_expected_version(resolved.absolute, p);
+                    if (pre.expected_version.empty()) {
+                        pre.expected_version = fsx::content_sha256_hex(snapshot.at(ch.path));
+                    }
+                } else {
+                    pre.expected_absent = true;
+                }
+                if (ch.delete_file) {
+                    const fsx::RemoveResult removed =
+                        workspace_fs_.remove_file(ch.path, pre.expected_version);
+                    if (removed.status == fsx::FsStatus::Conflict) {
+                        return ToolResult::error(ErrorClass::Conflict, false, removed.error);
+                    }
+                    if (!removed.ok()) {
+                        if (removed.status == fsx::FsStatus::Symlink ||
+                            removed.status == fsx::FsStatus::InvalidPath) {
+                            return refused_path(ch.path, removed.error);
+                        }
+                        return ToolResult::error(ErrorClass::Transient, true, removed.error);
+                    }
+                    read_versions_.erase(resolved.absolute);
+                    bytes_changed += removed.removed_size;
+                    ok_paths.push_back(ch.path);
+                    continue;
+                }
+                const CommitOutcome w = commit_write(resolved, ch.new_content, pre);
+                if (!w.ok()) {
+                    return write_failure(w.write);
+                }
+                if (!w.unchanged) {
+                    const auto before = snapshot.find(ch.path);
+                    bytes_changed += before == snapshot.end()
+                                         ? ch.new_content.size()
+                                         : contiguous_edit_bytes(before->second, ch.new_content);
+                }
+                ok_paths.push_back(ch.path);
+            }
+
+            if (bytes_changed == 0 && !ok_paths.empty()) {
+                return ToolResult::no_change(
+                    "apply_patch matched but produced no byte changes in " +
+                    std::to_string(ok_paths.size()) + " file(s)");
+            }
+            std::string summary = "apply_patch applied to ";
+            summary += std::to_string(ok_paths.size());
+            summary += " file(s): ";
+            for (std::size_t i = 0; i < ok_paths.size(); ++i) {
+                if (i) {
+                    summary += ", ";
+                }
+                summary += ok_paths[i];
+            }
+            ToolResult r = measured_edit(ToolResult::okay(std::move(summary)), bytes_changed);
+            r.structured_json = "[";
+            for (std::size_t i = 0; i < ok_paths.size(); ++i) {
+                if (i) {
+                    r.structured_json += ",";
+                }
+                r.structured_json += "\"";
+                for (char c : ok_paths[i]) {
+                    if (c == '"' || c == '\\') {
+                        r.structured_json += '\\';
+                    }
+                    r.structured_json += c;
+                }
+                r.structured_json += "\"";
+            }
+            r.structured_json += "]";
+            return r;
         });
     }
     // --- append_file --------------------------------------------------------
     {
         ToolDecl d;
         d.name = "append_file";
-        d.description = "Append content to the end of a file, creating it if absent.";
+        d.description = "Append content to the end of a file, creating it if absent. "
+                        "An existing file's current bytes become the content version "
+                        "checked at apply time.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
-                         param("content", ParamType::Text, true)};
+                         param("content", ParamType::Text, true),
+                         param("expected_version", ParamType::Text, false)};
         d.mutates_workspace = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
-            if (abs.empty()) {
-                return refused_path(*get(p, "path"));
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
             }
-            fsx::FileContents f = fsx::read_file_whole(abs, ctx_.max_read_bytes);
+            fsx::FileContents f =
+                workspace_fs_.read_file_whole(path, ctx_.max_read_bytes);
             std::string content =
                 f.ok() ? f.bytes + *get(p, "content") : *get(p, "content");
+            if (f.status == fsx::FsStatus::Symlink ||
+                f.status == fsx::FsStatus::InvalidPath) {
+                return refused_path(path, f.error);
+            }
             if (!f.ok() && f.status != fsx::FsStatus::NotFound) {
                 return ToolResult::error(ErrorClass::Malformed, false, f.error);
             }
-            const CommitOutcome w = commit_write(abs, content);
+            fsx::WritePrecondition pre;
+            if (f.ok()) {
+                note_read_version(resolved.absolute, f.bytes);
+                pre.expected_version = resolve_expected_version(resolved.absolute, p);
+                if (pre.expected_version.empty()) {
+                    pre.expected_version = fsx::content_sha256_hex(f.bytes);
+                }
+            } else {
+                pre.expected_absent = true;
+            }
+            const CommitOutcome w = commit_write(resolved, content, pre);
             if (!w.ok()) {
                 return write_failure(w.write);
             }
@@ -705,41 +1570,78 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                 return ToolResult::no_change(*get(p, "path") +
                                              " is unchanged: there was nothing to append.");
             }
-            return ToolResult::okay("appended " +
-                                    std::to_string(get(p, "content")->size()) +
-                                    " bytes to " + *get(p, "path"));
+            return measured_edit(
+                ToolResult::okay("appended " +
+                                 std::to_string(get(p, "content")->size()) +
+                                 " bytes to " + *get(p, "path")),
+                get(p, "content")->size());
         });
     }
     // --- delete_file --------------------------------------------------------
     {
         ToolDecl d;
         d.name = "delete_file";
-        d.description = "Delete one file (not a directory).";
+        d.description = "Delete one file (not a directory). Requires a prior "
+                        "read_file/read_slice in this run so the delete carries the "
+                        "content version observed then; refuses if the file changed.";
         d.spec.name = d.name;
-        d.spec.params = {param("path", ParamType::Text, true)};
+        d.spec.params = {param("path", ParamType::Text, true),
+                         param("expected_version", ParamType::Text, false)};
         d.mutates_workspace = true;
         // Nothing in the workspace can undo this, so it always asks (S7.2).
         d.irreversible = true;
         declare(d, [this](const std::vector<ToolParamValue>& p, int) {
-            const std::string abs = resolve_contained(ctx_.root, *get(p, "path"));
-            if (abs.empty()) {
-                return refused_path(*get(p, "path"));
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
             }
-            struct stat st {};
-            if (::stat(abs.c_str(), &st) != 0) {
+            const std::string expected = resolve_expected_version(resolved.absolute, p);
+            if (expected.empty()) {
+                // Path-kind refusals (symlink, directory) must still surface as Refused
+                // rather than "read first" -- the model cannot fix a symlink by reading it.
+                const fsx::FileContents probe =
+                    workspace_fs_.read_file_whole(path, 1);
+                if (probe.status == fsx::FsStatus::Symlink ||
+                    probe.status == fsx::FsStatus::InvalidPath) {
+                    return refused_path(path, probe.error);
+                }
+                if (probe.status == fsx::FsStatus::NotFound) {
+                    return ToolResult::error(ErrorClass::NotFound, false,
+                                             path + ": not found");
+                }
+                if (probe.status == fsx::FsStatus::IsDirectory) {
+                    return ToolResult::refused("'" + path +
+                                               "' is a directory; this tool deletes files "
+                                               "only");
+                }
+                return need_read_before_write(path);
+            }
+            const fsx::RemoveResult removed =
+                workspace_fs_.remove_file(path, expected);
+            if (removed.status == fsx::FsStatus::NotFound) {
                 return ToolResult::error(ErrorClass::NotFound, false,
-                                         *get(p, "path") + ": not found");
+                                         path + ": not found");
             }
-            if (S_ISDIR(st.st_mode)) {
-                return ToolResult::refused("'" + *get(p, "path") +
+            if (removed.status == fsx::FsStatus::IsDirectory) {
+                return ToolResult::refused("'" + path +
                                            "' is a directory; this tool deletes files "
                                            "only");
             }
-            if (::unlink(abs.c_str()) != 0) {
-                return ToolResult::error(ErrorClass::Transient, true,
-                                         *get(p, "path") + ": unlink failed");
+            if (removed.status == fsx::FsStatus::Symlink ||
+                removed.status == fsx::FsStatus::InvalidPath) {
+                return refused_path(path, removed.error);
             }
-            return ToolResult::okay("deleted " + *get(p, "path"));
+            if (removed.status == fsx::FsStatus::Conflict) {
+                return ToolResult::error(ErrorClass::Conflict, false, removed.error);
+            }
+            if (!removed.ok()) {
+                return ToolResult::error(ErrorClass::Transient, true,
+                                         removed.error);
+            }
+            read_versions_.erase(resolved.absolute);
+            return measured_edit(
+                ToolResult::okay("deleted " + path), removed.removed_size);
         });
     }
     // --- shell --------------------------------------------------------------
@@ -763,10 +1665,15 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
                                     1024,
                                     256,
                                     4U << 20};
-            ExecOutcome o = run_sandboxed(grant, cmd, ctx_.root, ctx_.root, limits);
+            ExecOutcome o =
+                run_sandboxed(grant, cmd, ctx_.root, ctx_.root, limits, cancel_token_);
 
             ToolResult r;
             r.status = o.status;
+            if (o.status == Status::Cancelled) {
+                r.summary = o.output.empty() ? "cancelled" : o.output;
+                return r;
+            }
             if (o.status == Status::Refused) {
                 r.error_class = ErrorClass::Policy;
                 r.summary = o.output;
@@ -776,6 +1683,10 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             // own-code beats system headers, never head-truncate.
             r.summary = log_triage::compact(o.output, ctx_.max_result_bytes);
             r.exit_code = o.exit_code;
+            // Structured triage from the FULL log (counts/paths may sit outside the compact
+            // budget). Attached as a short annotation — never replaces the compacted body.
+            const log_triage::StructuredTriage triage = log_triage::analyze(o.output);
+            const std::string triage_note = log_triage::format_annotation(triage);
             if (o.wall_clock_killed) {
                 r.error_class = ErrorClass::Transient;
                 r.retryable = false;
@@ -793,13 +1704,19 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             }
             // Spool the full output when compaction dropped anything (S14).
             if (o.output.size() > r.summary.size() && !ctx_.spool_dir.empty()) {
-                const std::string spool =
+                const std::string requested_spool =
                     ctx_.spool_dir + "/shell_" +
                     std::to_string(reinterpret_cast<std::uintptr_t>(&o) ^ o.output.size()) +
                     ".log";
-                if (fsx::write_file_atomic(spool, o.output).ok()) {
-                    r.artifacts.push_back(spool);
+                const fsx::ContainedPath spool =
+                    workspace_fs_.contained_path(requested_spool);
+                if (spool.ok() &&
+                    workspace_fs_.write_file_atomic(spool.relative, o.output).ok()) {
+                    r.artifacts.push_back(spool.absolute);
                 }
+            }
+            if (!triage_note.empty()) {
+                r.summary += triage_note;
             }
             // LAST, and read off the FULL output rather than the compacted summary: the
             // signature is one line inside a manifest dump that log_triage may well have
@@ -885,8 +1802,9 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             if (path == nullptr || path->empty()) {
                 return run_git("diff --stat -p", approved_tier);
             }
-            if (resolve_contained(ctx_.root, *path).empty()) {
-                return refused_path(*path);
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(*path);
+            if (!resolved.ok()) {
+                return contained_failure(*path, resolved);
             }
             return run_git("diff --stat -p -- " + shell_quote(*path), approved_tier);
         });
@@ -979,11 +1897,40 @@ Registry::Registry(WorkspaceContext ctx) : ctx_(std::move(ctx)) {
             "what each answer would change. The run ends here; their reply continues this "
             "same conversation with everything you have read still in context.";
         d.spec.name = d.name;
-        d.spec.params = {param("question", ParamType::Text, true)};
-        d.conversational_only = true;
+        d.spec.params = {param("question", ParamType::Text, true),
+                         param("options", ParamType::Text, false)};
+        // NOT conversational_only. Needing an answer is not a property of plan mode; it is
+        // a property of a question the code cannot settle, and an agent run hits those too.
+        // While this was Plan-only, a working run that needed a decision had exactly one way
+        // to raise it -- answer in text -- and in a working mode a text-only turn IS the
+        // ending, so "I need to know X before I continue" terminated the run instead of
+        // asking anything.
         declare(d, [](const std::vector<ToolParamValue>&, int) {
             return ToolResult::error(ErrorClass::Malformed, false,
                                      "internal: 'ask_user' must be handled by the loop");
+        });
+    }
+    // --- ask_question --------------------------------------------------------
+    {
+        ToolDecl d;
+        d.name = "ask_question";
+        d.description =
+            "Ask the human a question with 2 to 4 selectable options, which they answer by "
+            "clicking a card. Pass `question` (text) and `options` (newline-separated "
+            "choices, one per line). Prefer this over `ask_user` whenever the answers are a "
+            "short closed set -- which approach, which library, which of two designs -- "
+            "because clicking one is faster for them than typing it. Ask when the answer "
+            "would genuinely change what you build and reading more code would not settle "
+            "it; do not ask permission to continue. The run stops here and their choice "
+            "continues this same conversation with everything you have read still in "
+            "context.";
+        d.spec.name = d.name;
+        d.spec.params = {param("question", ParamType::Text, true),
+                         param("options", ParamType::Text, true)};
+        // Available in every mode -- see ask_user above for why.
+        declare(d, [](const std::vector<ToolParamValue>&, int) {
+            return ToolResult::error(ErrorClass::Malformed, false,
+                                     "internal: 'ask_question' must be handled by the loop");
         });
     }
     // --- exit_plan_mode -----------------------------------------------------

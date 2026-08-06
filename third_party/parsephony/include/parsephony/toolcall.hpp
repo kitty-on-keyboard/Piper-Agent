@@ -57,6 +57,15 @@ struct ParamSpec {
     std::string name;
     ParamType type = ParamType::Text;
     bool required = false;
+    // Constraint metadata for host/tools_json fidelity. The ToolCallGuard enforces
+    // `type` (+ required) only; these fields must not be treated as mask constraints.
+    bool nullable = false;
+    std::vector<std::string> enum_values;
+    bool has_items_type = false;
+    ParamType items_type = ParamType::Json;
+    // Optional JSON object fragment merged into tools_json properties (e.g. nested
+    // "properties" / richer "items"). Empty means none.
+    std::string schema_extras_json;
 };
 
 struct ToolSpec {

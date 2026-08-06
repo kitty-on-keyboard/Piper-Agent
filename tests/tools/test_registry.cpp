@@ -67,12 +67,24 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // end the run and the registry cannot do that. They are the only way a conversational
     // mode can stop and hand back: before them, a plan-mode run that asked a question was
     // scored as a turn that made no move, and three of those ended it as a stall.
-    CHECK_EQ(reg.decls().size(), std::size_t{18});
+    //
+    // 18 -> 19: `read_many`, bounded batch read (at most four paths).
+    // 19 -> 20: `apply_patch`, exact structured multi-hunk edits (keeps replace_in_file).
+    // 20 -> 21: `ask_question`, structured multiple choice question tool.
+    //
+    // 21 -> 22: `find_files`, search by file NAME. `search` reads contents, and a model
+    // looking for a project's Swift files reaches for search(".swift"), gets no matches --
+    // correctly, no line contains that string -- and concludes the files are not there.
+    CHECK_EQ(reg.decls().size(), std::size_t{22});
+    CHECK(reg.find("find_files") != nullptr);
     CHECK(reg.find("ask_user") != nullptr);
+    CHECK(reg.find("ask_question") != nullptr);
     CHECK(reg.find("exit_plan_mode") != nullptr);
     CHECK(reg.find("git_diff") != nullptr);
     CHECK(reg.find("plan") != nullptr);
     CHECK(reg.find("read_file") != nullptr);
+    CHECK(reg.find("read_many") != nullptr);
+    CHECK(reg.find("apply_patch") != nullptr);
     CHECK(reg.find("shell") != nullptr);
     CHECK(reg.find("remember") != nullptr);
     CHECK(reg.find("no_such_tool") == nullptr);
@@ -137,6 +149,112 @@ TEST(paths_outside_the_root_are_refused_not_errored) {
     CHECK(r.error_class == ErrorClass::Policy);
 }
 
+TEST(native_tools_refuse_symlink_file_and_directory_escapes) {
+    const std::string root = temp_dir();
+    const std::string outside = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(!outside.empty());
+    REQUIRE(lmp::platform::write_file_atomic(
+                outside + "/secret.py", "def outside_only():\n    return 7\n")
+                .ok());
+    REQUIRE(::symlink((outside + "/secret.py").c_str(),
+                      (root + "/file-link.py").c_str()) == 0);
+    REQUIRE(::symlink(outside.c_str(), (root + "/dir-link").c_str()) == 0);
+    Registry reg = make_registry(root);
+
+    for (const char* tool : {"read_file", "read_slice"}) {
+        const ToolResult r =
+            std::string(tool) == "read_slice"
+                ? reg.execute(tool,
+                              args({{"path", "file-link.py"},
+                                    {"start_line", "1"},
+                                    {"end_line", "2"}}),
+                              1)
+                : reg.execute(tool, args({{"path", "file-link.py"}}), 1);
+        CHECK(r.status == Status::Refused);
+    }
+    CHECK(reg.execute("list_dir", args({{"path", "dir-link"}}), 1).status ==
+          Status::Refused);
+    CHECK(reg.execute("search",
+                      args({{"text", "outside_only"}, {"subdir", "dir-link"}}), 1)
+              .status == Status::Refused);
+    const ToolResult whole_search =
+        reg.execute("search", args({{"text", "outside_only"}}), 1);
+    REQUIRE(whole_search.ok());
+    CHECK(whole_search.summary.find("secret.py") == std::string::npos);
+    const ToolResult locate =
+        reg.execute("locate_symbol", args({{"symbol", "outside_only"}}), 1);
+    REQUIRE(locate.ok());
+    CHECK(locate.summary.find("secret.py") == std::string::npos);
+
+    CHECK(reg.execute("write_file",
+                      args({{"path", "file-link.py"}, {"content", "changed\n"}}), 1)
+              .status == Status::Refused);
+    CHECK(reg.execute("replace_in_file",
+                      args({{"path", "file-link.py"},
+                            {"old_text", "return 7"},
+                            {"new_text", "return 8"}}),
+                      1)
+              .status == Status::Refused);
+    CHECK(reg.execute("append_file",
+                      args({{"path", "file-link.py"}, {"content", "changed\n"}}), 1)
+              .status == Status::Refused);
+    CHECK(reg.execute("delete_file", args({{"path", "file-link.py"}}), 1).status ==
+          Status::Refused);
+    CHECK(reg.execute("write_file",
+                      args({{"path", "dir-link/new.py"}, {"content", "escaped\n"}}), 1)
+              .status == Status::Refused);
+
+    CHECK_EQ(lmp::platform::read_file_whole(outside + "/secret.py", 1U << 20).bytes,
+             std::string("def outside_only():\n    return 7\n"));
+    CHECK(lmp::platform::read_file_whole(outside + "/new.py", 1024).status ==
+          lmp::platform::FsStatus::NotFound);
+}
+
+TEST(memory_and_artifact_paths_refuse_symlinked_boundaries) {
+    const std::string root = temp_dir();
+    const std::string outside = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(!outside.empty());
+    const std::string victim = outside + "/memory-victim.md";
+    REQUIRE(lmp::platform::write_file_atomic(victim, "keep\n").ok());
+    REQUIRE(::symlink(victim.c_str(),
+                      (root + "/" + std::string(kMemoryFileName)).c_str()) == 0);
+    REQUIRE(::symlink(outside.c_str(), (root + "/.spool").c_str()) == 0);
+    Registry reg = make_registry(root);
+
+    const ToolResult remember =
+        reg.execute("remember", args({{"fact", "must not escape"}}), 1);
+    CHECK(remember.status == Status::Refused);
+    CHECK_EQ(lmp::platform::read_file_whole(victim, 1024).bytes,
+             std::string("keep\n"));
+
+    const ToolResult shell = reg.execute(
+        "shell",
+        args({{"command", "python3 -c \"print('artifact-data-' * 5000)\""}}), 1);
+    REQUIRE(shell.ok());
+    CHECK(shell.artifacts.empty());
+    lmp::platform::WorkspaceFs outside_fs(outside);
+    const lmp::platform::DirectoryContents entries = outside_fs.list_directory(".");
+    REQUIRE(entries.ok());
+    CHECK_EQ(entries.entries.size(), std::size_t{1}); // memory-victim.md only
+}
+
+TEST(registry_canonicalizes_a_symlinked_workspace_root) {
+    const std::string actual = temp_dir();
+    REQUIRE(!actual.empty());
+    const std::string alias = actual + "-alias";
+    REQUIRE(::symlink(actual.c_str(), alias.c_str()) == 0);
+    Registry reg = make_registry(alias);
+
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "inside.txt"}, {"content", "ok\n"}}), 1)
+                .ok());
+    CHECK_EQ(lmp::platform::read_file_whole(actual + "/inside.txt", 1024).bytes,
+             std::string("ok\n"));
+    CHECK(reg.workspace().root.find(alias) == std::string::npos);
+}
+
 TEST(write_read_replace_round_trip) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
@@ -144,11 +262,14 @@ TEST(write_read_replace_round_trip) {
     ToolResult w = reg.execute(
         "write_file", args({{"path", "a.cpp"}, {"content", "int x = 1;\nint y = 2;\n"}}), 1);
     REQUIRE(w.ok());
+    CHECK_EQ(w.bytes_changed, std::string("int x = 1;\nint y = 2;\n").size());
 
     ToolResult rd = reg.execute("read_file", args({{"path", "a.cpp"}}), 1);
     REQUIRE(rd.ok());
+    CHECK_EQ(rd.bytes_read, std::string("int x = 1;\nint y = 2;\n").size());
     // Line-numbered: the numbers are display only, and read_slice takes them as args.
-    CHECK_EQ(rd.summary, std::string("1\tint x = 1;\n2\tint y = 2;\n"));
+    CHECK(rd.summary.find("1\tint x = 1;\n2\tint y = 2;\n") == 0);
+    CHECK(rd.summary.find("[content_version sha256=") != std::string::npos);
 
     // Whitespace-tolerant replace: the model wrote `int  x=1;` with different spacing.
     ToolResult rp = reg.execute("replace_in_file",
@@ -157,6 +278,8 @@ TEST(write_read_replace_round_trip) {
                                       {"new_text", "int x = 42;"}}),
                                 1);
     CHECK(rp.ok());
+    CHECK(rp.bytes_changed > 0);
+    CHECK(rp.bytes_changed < rd.bytes_read);
     rd = reg.execute("read_file", args({{"path", "a.cpp"}}), 1);
     CHECK(rd.summary.find("42") != std::string::npos);
 }
@@ -184,6 +307,7 @@ TEST(a_write_creates_the_directories_its_path_names) {
     const ToolResult a = reg.execute(
         "append_file", args({{"path", "tests/unit/test_store.py"}, {"content", "pass\n"}}), 1);
     REQUIRE(a.ok());
+    CHECK_EQ(a.bytes_changed, std::size_t{5});
     const lmp::platform::FileContents g =
         lmp::platform::read_file_whole(root + "/tests/unit/test_store.py", 1U << 20);
     CHECK_EQ(g.bytes, std::string("pass\n"));
@@ -260,8 +384,10 @@ TEST(read_slice_returns_exact_lines) {
         "read_slice",
         args({{"path", "l.txt"}, {"start_line", "2"}, {"end_line", "3"}}), 1);
     REQUIRE(r.ok());
+    CHECK_EQ(r.bytes_read, std::string("one\ntwo\nthree\nfour\n").size());
     // ABSOLUTE line numbers, not slice-relative: slice-relative is an off-by-start_line trap.
-    CHECK_EQ(r.summary, std::string("2\ttwo\n3\tthree\n"));
+    CHECK(r.summary.find("2\ttwo\n3\tthree\n") == 0);
+    CHECK(r.summary.find("[content_version sha256=") != std::string::npos);
 }
 
 TEST(shell_reports_exit_codes_and_compacts) {
@@ -275,6 +401,17 @@ TEST(shell_reports_exit_codes_and_compacts) {
     CHECK(bad.status == Status::ToolError);
     CHECK(bad.summary.find("[exit 3]") != std::string::npos);
     CHECK(bad.retryable);
+}
+
+TEST(shell_cancel_returns_cancelled_not_timeout) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    lmp::model::CancelToken cancel;
+    cancel.cancel();
+    const ToolResult r =
+        reg.execute("shell", args({{"command", "sleep 30"}}), 1, &cancel);
+    CHECK(r.status == Status::Cancelled);
+    CHECK(r.summary.find("cancelled") != std::string::npos);
 }
 
 TEST(a_nested_sandbox_failure_says_what_it_is_and_what_to_do) {
@@ -344,9 +481,11 @@ TEST(an_attached_edit_sink_receives_the_write_instead_of_the_disk) {
 
     std::string seen_path;
     std::string seen_content;
-    reg.set_edit_sink([&](const std::string& p, const std::string& c) {
-        seen_path = p;
-        seen_content = c;
+    bool seen_absent = false;
+    reg.set_edit_sink([&](const EditIntent& intent) {
+        seen_path = intent.abs_path;
+        seen_content = intent.new_content;
+        seen_absent = intent.expected_absent;
         return EditOutcome{true, {}};
     });
 
@@ -355,6 +494,7 @@ TEST(an_attached_edit_sink_receives_the_write_instead_of_the_disk) {
     CHECK(w.ok());
     CHECK_EQ(seen_content, std::string("print(1)\n"));
     CHECK(seen_path.find("x.py") != std::string::npos);
+    CHECK(seen_absent);
     // The sidecar did NOT write it -- the editor was supposed to, and in this test the
     // editor is a lambda that only recorded. A file on disk here would mean the handover
     // is half-wired and the editor's buffer and the disk disagree.
@@ -366,7 +506,7 @@ TEST(an_attached_edit_sink_receives_the_write_instead_of_the_disk) {
 TEST(a_refusing_edit_sink_surfaces_as_a_tool_error) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
-    reg.set_edit_sink([](const std::string&, const std::string&) {
+    reg.set_edit_sink([](const EditIntent&) {
         return EditOutcome{false, "buffer is read-only"};
     });
     const ToolResult w = reg.execute(
@@ -389,6 +529,44 @@ TEST(no_edit_sink_writes_directly) {
         lmp::platform::read_file_whole(root + "/z.py", 1U << 20);
     REQUIRE(f.ok());
     CHECK_EQ(f.bytes, std::string("print(2)\n"));
+}
+
+TEST(code_intel_sink_is_preferred_for_locate_symbol) {
+    const std::string root = temp_dir();
+    REQUIRE(lmp::platform::write_file_atomic(
+                root + "/a.py", "def sink_only_symbol():\n    return 1\n")
+                .ok());
+    Registry reg = make_registry(root);
+    std::string seen_op;
+    std::string seen_query;
+    reg.set_code_intel_sink([&](const CodeIntelQuery& q) {
+        seen_op = q.op;
+        seen_query = q.query;
+        return CodeIntelOutcome{true, "editor/path.py:3:def sink_only_symbol", {}};
+    });
+    const ToolResult r =
+        reg.execute("locate_symbol", args({{"symbol", "sink_only_symbol"}}), 1);
+    REQUIRE(r.ok());
+    CHECK_EQ(seen_op, std::string("workspace_symbols"));
+    CHECK_EQ(seen_query, std::string("sink_only_symbol"));
+    CHECK(r.summary.find("editor/path.py:3:") != std::string::npos);
+    // Must not have fallen through to the filesystem walk's a.py hit.
+    CHECK(r.summary.find("a.py") == std::string::npos);
+}
+
+TEST(code_intel_sink_failure_falls_back_to_ranked_walk) {
+    const std::string root = temp_dir();
+    REQUIRE(lmp::platform::write_file_atomic(
+                root + "/b.py", "def fallback_symbol():\n    return 1\n")
+                .ok());
+    Registry reg = make_registry(root);
+    reg.set_code_intel_sink([](const CodeIntelQuery&) {
+        return CodeIntelOutcome{false, {}, "no provider"};
+    });
+    const ToolResult r =
+        reg.execute("locate_symbol", args({{"symbol", "fallback_symbol"}}), 1);
+    REQUIRE(r.ok());
+    CHECK(r.summary.find("fallback_symbol") != std::string::npos);
 }
 
 // --- G4: the prompt read budget ---------------------------------------------
@@ -618,7 +796,8 @@ TEST(rewriting_a_file_with_its_own_bytes_is_reported_as_no_change) {
     CHECK(again.summary.find("run your verification") == std::string::npos);
 
     // One byte of difference and it is a real write again -- the test is byte identity,
-    // not similarity, so nothing here can swallow an edit.
+    // not similarity, so nothing here can swallow an edit. Overwrites require a read first.
+    REQUIRE(reg.execute("read_file", args({{"path", "a.cpp"}}), 1).ok());
     const ToolResult changed = reg.execute(
         "write_file", args({{"path", "a.cpp"}, {"content", body + "int z = 3;\n"}}), 1);
     CHECK(changed.ok());
@@ -664,7 +843,7 @@ TEST(a_no_op_write_never_reaches_the_edit_sink) {
                 .ok());
 
     int sink_calls = 0;
-    reg.set_edit_sink([&](const std::string&, const std::string&) {
+    reg.set_edit_sink([&](const EditIntent&) {
         ++sink_calls;
         return EditOutcome{true, {}};
     });
@@ -675,7 +854,8 @@ TEST(a_no_op_write_never_reaches_the_edit_sink) {
     CHECK(again.mutation_was_noop);
     CHECK_EQ(sink_calls, 0);
 
-    // A real change still goes through it.
+    // A real change still goes through it -- after a read establishes the preimage.
+    REQUIRE(reg.execute("read_file", args({{"path", "x.py"}}), 1).ok());
     CHECK(reg.execute("write_file", args({{"path", "x.py"}, {"content", "print(2)\n"}}), 1)
               .ok());
     CHECK_EQ(sink_calls, 1);
@@ -750,4 +930,316 @@ TEST(execution_and_command_classification_are_separate_declarations) {
     for (const ToolDecl& d : reg.decls()) {
         CHECK(!d.remote);
     }
+}
+
+TEST(reread_returns_current_content_not_orphan_pointer) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    (void)reg.execute("write_file", args({{"path", "sample.txt"}, {"content", "line 1\nline 2\nline 3\n"}}), 1);
+
+    // First read returns full contents with line numbers
+    ToolResult r1 = reg.execute("read_file", args({{"path", "sample.txt"}}), 1);
+    REQUIRE(r1.ok());
+    CHECK(r1.summary.find("1\tline 1") != std::string::npos);
+    CHECK(r1.summary.find("[content_version sha256=") != std::string::npos);
+
+    // Second read must return real content again -- never a pointer-only System
+    // Observation that can orphan after compaction.
+    ToolResult r2 = reg.execute("read_file", args({{"path", "sample.txt"}}), 1);
+    REQUIRE(r2.ok());
+    CHECK(r2.summary.find("1\tline 1") != std::string::npos);
+    CHECK(r2.summary.find("already read earlier") == std::string::npos);
+    CHECK(r2.summary.find("Refer to the previous") == std::string::npos);
+
+    // NoMatch edit failure includes line-numbered ground truth snippet
+    ToolResult nomatch = reg.execute("replace_in_file",
+                                      args({{"path", "sample.txt"},
+                                            {"old_text", "nonexistent line"},
+                                            {"new_text", "replacement"}}),
+                                      1);
+    CHECK(!nomatch.ok());
+    CHECK(nomatch.summary.find("old_text not found") != std::string::npos);
+    CHECK(nomatch.summary.find("1\tline 1") != std::string::npos);
+}
+
+TEST(apply_patch_exact_update_create_delete_and_all_or_none) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "a.py"},
+                              {"content", "def f():\n    return 1\n\ndef g():\n    return 2\n"}}),
+                        1)
+                .ok());
+    REQUIRE(reg.execute("read_file", args({{"path", "a.py"}}), 1).ok());
+
+    const std::string patch =
+        "*** Begin Patch\n"
+        "*** Update File: a.py\n"
+        "@@\n"
+        " def f():\n"
+        "-    return 1\n"
+        "+    return 42\n"
+        "*** Add File: b.py\n"
+        "+x = 1\n"
+        "*** End Patch\n";
+    ToolResult ok = reg.execute("apply_patch", args({{"patch", patch}}), 1);
+    REQUIRE(ok.ok());
+    CHECK(ok.summary.find("a.py") != std::string::npos);
+    CHECK(ok.summary.find("b.py") != std::string::npos);
+    CHECK(ok.structured_json.find("a.py") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/a.py", 1U << 20).bytes,
+             std::string("def f():\n    return 42\n\ndef g():\n    return 2\n"));
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/b.py", 1U << 20).bytes,
+             std::string("x = 1\n"));
+
+    // Failed hunk refuses and leaves the file untouched (exact match only).
+    REQUIRE(reg.execute("read_file", args({{"path", "a.py"}}), 1).ok());
+    const std::string bad =
+        "*** Begin Patch\n"
+        "*** Update File: a.py\n"
+        "@@\n"
+        " def f():\n"
+        "-    return 999\n"
+        "+    return 0\n"
+        "*** End Patch\n";
+    ToolResult miss = reg.execute("apply_patch", args({{"patch", bad}}), 1);
+    CHECK(!miss.ok());
+    CHECK(miss.summary.find("not found exactly") != std::string::npos);
+    CHECK(miss.summary.find("Current nearby lines") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/a.py", 1U << 20).bytes,
+             std::string("def f():\n    return 42\n\ndef g():\n    return 2\n"));
+
+    // Delete binds to content version from the prior read.
+    REQUIRE(reg.execute("read_file", args({{"path", "b.py"}}), 1).ok());
+    const std::string del =
+        "*** Begin Patch\n"
+        "*** Delete File: b.py\n"
+        "*** End Patch\n";
+    ToolResult gone = reg.execute("apply_patch", args({{"patch", del}}), 1);
+    REQUIRE(gone.ok());
+    CHECK(lmp::platform::read_file_whole(root + "/b.py", 1024).status ==
+          lmp::platform::FsStatus::NotFound);
+}
+
+TEST(apply_patch_preserves_crlf_and_no_final_newline) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const std::string crlf = "alpha\r\nbeta\r\ngamma"; // no final newline
+    REQUIRE(lmp::platform::write_file_atomic(root + "/crlf.txt", crlf).ok());
+    REQUIRE(reg.execute("read_file", args({{"path", "crlf.txt"}}), 1).ok());
+
+    const std::string patch =
+        "*** Begin Patch\n"
+        "*** Update File: crlf.txt\n"
+        "@@\n"
+        " alpha\n"
+        "-beta\n"
+        "+BETA\n"
+        " gamma\n"
+        "*** End Patch\n";
+    ToolResult r = reg.execute("apply_patch", args({{"patch", patch}}), 1);
+    REQUIRE(r.ok());
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(root + "/crlf.txt", 1U << 20);
+    REQUIRE(f.ok());
+    CHECK_EQ(f.bytes, std::string("alpha\r\nBETA\r\ngamma"));
+    CHECK(f.bytes.find('\r') != std::string::npos);
+    CHECK(f.bytes.back() != '\n');
+}
+
+TEST(replace_nomatch_lists_nearest_candidates_as_diagnostics_only) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "m.py"},
+                              {"content",
+                               "def alpha():\n    return 1\n\n"
+                               "def beta():\n    return 2\n\n"
+                               "def gamma():\n    return 3\n"}}),
+                        1)
+                .ok());
+    // Close but not exact — graft NoMatch; nearest regions should still be offered.
+    ToolResult r = reg.execute(
+        "replace_in_file",
+        args({{"path", "m.py"},
+              {"old_text", "def beta():\n    return 99\n"},
+              {"new_text", "def beta():\n    return 100\n"}}),
+        1);
+    CHECK(!r.ok());
+    CHECK(r.summary.find("old_text not found") != std::string::npos);
+    CHECK(r.summary.find("Nearest candidate regions") != std::string::npos);
+    CHECK(r.summary.find("diagnostics only") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/m.py", 1U << 20).bytes,
+             std::string("def alpha():\n    return 1\n\n"
+                         "def beta():\n    return 2\n\n"
+                         "def gamma():\n    return 3\n"));
+}
+
+TEST(read_many_reads_up_to_four_paths) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    for (const char* name : {"a.txt", "b.txt", "c.txt"}) {
+        REQUIRE(reg.execute("write_file",
+                            args({{"path", name},
+                                  {"content", std::string("body of ") + name + "\n"}}),
+                            1)
+                    .ok());
+    }
+
+    ToolResult batch = reg.execute(
+        "read_many", args({{"paths", "a.txt\nb.txt\nc.txt"}}), 1);
+    REQUIRE(batch.ok());
+    CHECK(batch.summary.find("=== a.txt ===") != std::string::npos);
+    CHECK(batch.summary.find("body of a.txt") != std::string::npos);
+    CHECK(batch.summary.find("=== b.txt ===") != std::string::npos);
+    CHECK(batch.summary.find("body of c.txt") != std::string::npos);
+    CHECK(batch.bytes_read > 0);
+
+    ToolResult json_batch = reg.execute(
+        "read_many", args({{"paths", R"(["a.txt","b.txt"])"}}), 1);
+    REQUIRE(json_batch.ok());
+    CHECK(json_batch.summary.find("=== a.txt ===") != std::string::npos);
+    CHECK(json_batch.summary.find("=== b.txt ===") != std::string::npos);
+
+    ToolResult too_many = reg.execute(
+        "read_many",
+        args({{"paths", "a.txt\nb.txt\nc.txt\na.txt\nb.txt"}}), 1);
+    CHECK(!too_many.ok());
+    CHECK(too_many.summary.find("at most 4") != std::string::npos);
+}
+
+TEST(overwrite_without_prior_read_is_conflict) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "a.txt"}, {"content", "one\n"}}), 1)
+                .ok());
+    const ToolResult clobber = reg.execute(
+        "write_file", args({{"path", "a.txt"}, {"content", "two\n"}}), 1);
+    CHECK(!clobber.ok());
+    CHECK(clobber.error_class == ErrorClass::Conflict);
+    CHECK(clobber.summary.find("read_file") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/a.txt", 1024).bytes,
+             std::string("one\n"));
+}
+
+TEST(stale_preimage_refuses_direct_write) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "a.txt"}, {"content", "one\n"}}), 1)
+                .ok());
+    REQUIRE(reg.execute("read_file", args({{"path", "a.txt"}}), 1).ok());
+    // External mutation after the read: the harness ledger is now stale.
+    REQUIRE(lmp::platform::write_file_atomic(root + "/a.txt", "changed-underfoot\n").ok());
+    const ToolResult w = reg.execute(
+        "write_file", args({{"path", "a.txt"}, {"content", "two\n"}}), 1);
+    CHECK(!w.ok());
+    CHECK(w.error_class == ErrorClass::Conflict);
+    CHECK(w.summary.find("version conflict") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/a.txt", 1024).bytes,
+             std::string("changed-underfoot\n"));
+}
+
+TEST(create_race_refuses_when_file_appears) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    std::string seen_version;
+    bool seen_absent = false;
+    reg.set_edit_sink([&](const EditIntent& intent) {
+        seen_absent = intent.expected_absent;
+        seen_version = intent.expected_version;
+        return EditOutcome{false, "expected_absent but the file already exists"};
+    });
+    const ToolResult w = reg.execute(
+        "write_file", args({{"path", "new.txt"}, {"content", "x\n"}}), 1);
+    CHECK(!w.ok());
+    CHECK(seen_absent);
+    CHECK(seen_version.empty());
+    CHECK(w.error_class == ErrorClass::Conflict);
+}
+
+TEST(delete_requires_read_and_honours_version) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "gone.txt"}, {"content", "bye\n"}}), 1)
+                .ok());
+    const ToolResult blind =
+        reg.execute("delete_file", args({{"path", "gone.txt"}}), 1);
+    CHECK(!blind.ok());
+    CHECK(blind.error_class == ErrorClass::Conflict);
+
+    REQUIRE(reg.execute("read_file", args({{"path", "gone.txt"}}), 1).ok());
+    REQUIRE(lmp::platform::write_file_atomic(root + "/gone.txt", "moved\n").ok());
+    const ToolResult stale =
+        reg.execute("delete_file", args({{"path", "gone.txt"}}), 1);
+    CHECK(!stale.ok());
+    CHECK(stale.error_class == ErrorClass::Conflict);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/gone.txt", 1024).bytes,
+             std::string("moved\n"));
+
+    REQUIRE(reg.execute("read_file", args({{"path", "gone.txt"}}), 1).ok());
+    const ToolResult ok = reg.execute("delete_file", args({{"path", "gone.txt"}}), 1);
+    CHECK(ok.ok());
+    CHECK(lmp::platform::read_file_whole(root + "/gone.txt", 1024).status ==
+          lmp::platform::FsStatus::NotFound);
+}
+
+TEST(replace_and_append_bind_current_preimage) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "m.txt"}, {"content", "abc\n"}}), 1)
+                .ok());
+    // No prior read_file: replace_in_file's own read supplies the claim.
+    REQUIRE(reg.execute("replace_in_file",
+                        args({{"path", "m.txt"},
+                              {"old_text", "abc"},
+                              {"new_text", "xyz"}}),
+                        1)
+                .ok());
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/m.txt", 1024).bytes,
+             std::string("xyz\n"));
+    REQUIRE(reg.execute("append_file",
+                        args({{"path", "m.txt"}, {"content", "!\n"}}), 1)
+                .ok());
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/m.txt", 1024).bytes,
+             std::string("xyz\n!\n"));
+}
+
+TEST(edit_sink_receives_expected_version_from_prior_read) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "e.txt"}, {"content", "v1\n"}}), 1)
+                .ok());
+    // Headless write so the file exists for read; then route through a sink.
+    const ToolResult read = reg.execute("read_file", args({{"path", "e.txt"}}), 1);
+    REQUIRE(read.ok());
+    const std::string marker = "[content_version sha256=";
+    const auto at = read.summary.find(marker);
+    REQUIRE(at != std::string::npos);
+    const auto start = at + marker.size();
+    const auto end = read.summary.find(']', start);
+    REQUIRE(end != std::string::npos);
+    const std::string version = read.summary.substr(start, end - start);
+
+    std::string sink_version;
+    bool sink_absent = true;
+    reg.set_edit_sink([&](const EditIntent& intent) -> EditOutcome {
+        sink_version = intent.expected_version;
+        sink_absent = intent.expected_absent;
+        // Simulate the editor applying the bytes so the tool succeeds.
+        if (!lmp::platform::write_file_atomic(intent.abs_path, intent.new_content).ok()) {
+            return EditOutcome{false, "sink failed to write"};
+        }
+        return EditOutcome{true, {}};
+    });
+    const ToolResult w = reg.execute(
+        "write_file", args({{"path", "e.txt"}, {"content", "v2\n"}}), 1);
+    CHECK(w.ok());
+    CHECK(!sink_absent);
+    CHECK_EQ(sink_version, version);
 }

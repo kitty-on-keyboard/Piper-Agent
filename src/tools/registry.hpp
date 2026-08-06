@@ -1,12 +1,12 @@
 #pragma once
 //
-// Tool registry (spec S6). Sixteen tools always, eighteen when this run has a durable
-// context store -- and it resists growth either way: every tool is permanent surface
-// area, advertised in the KV prefix, and impossible to remove once a model has been
-// trained to expect it.
+// Tool registry (spec S6). Twenty native tools always, plus two when this run has a
+// durable context store -- and it resists growth either way: every tool is permanent
+// surface area, advertised in the KV prefix, and impossible to remove once a model has
+// been trained to expect it.
 //
-//   read_file  read_slice  list_dir  search  locate_symbol
-//   write_file  replace_in_file  append_file  delete_file
+//   read_file  read_many  read_slice  list_dir  search  locate_symbol
+//   write_file  replace_in_file  apply_patch  append_file  delete_file
 //   shell  job_status
 //   git_status  git_diff  git_log      (read-only; the agent never MUTATES git)
 //   remember                           (cross-session notes, S8)
@@ -32,6 +32,7 @@
 // The advertised set is baked into the KV prefix and is therefore run-constant (S6.4):
 // the registry is immutable after construction.
 //
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <string>
@@ -39,6 +40,7 @@
 
 #include <parsephony/toolcall.hpp>
 
+#include "src/model/backend.hpp"
 #include "src/platform/fs.hpp"
 #include "src/tools/tool_result.hpp"
 
@@ -95,9 +97,8 @@ struct ToolDecl {
     bool conversational_only = false;
 };
 
-// Everything a tool invocation may touch. Paths are resolved against `root` and
-// containment-checked textually (blast-radius rule 1); a path outside the root is a
-// Refused, not an error.
+// Everything a tool invocation may touch. Registry opens `root` as a descriptor-rooted
+// platform capability; path authorization does not rely on this string.
 struct WorkspaceContext {
     std::string root;             // absolute, no trailing slash
     // INTERNAL read budget. These bytes are read to be edited, hashed or matched against;
@@ -139,8 +140,37 @@ struct EditOutcome {
     bool applied = false;
     std::string error;
 };
-using EditSink =
-    std::function<EditOutcome(const std::string& abs_path, const std::string& new_content)>;
+
+// One workspace mutation routed through the editor (or refused by it).
+//
+// `expected_absent` and `expected_version` are the optimistic-concurrency claim: the
+// extension compares them to the current in-memory TextDocument immediately before
+// WorkspaceEdit, so a dirty buffer that no longer matches the preimage becomes an
+// explicit conflict instead of a silent overwrite.
+struct EditIntent {
+    std::string abs_path;
+    std::string new_content;
+    std::string expected_version; // lowercase SHA-256 hex; empty iff expected_absent
+    bool expected_absent = false;
+};
+using EditSink = std::function<EditOutcome(const EditIntent& intent)>;
+
+// Editor-backed code intelligence (P2 §10). When set, locate_symbol prefers this over
+// the headless ranked walk. Ops match lmp/code_intel: workspace_symbols, definition,
+// references, diagnostics, rename_preview.
+struct CodeIntelQuery {
+    std::string op;
+    std::string query;
+    std::string path;
+    std::int64_t line = 0;
+    std::int64_t character = 0;
+};
+struct CodeIntelOutcome {
+    bool ok = false;
+    std::string result_text;
+    std::string error;
+};
+using CodeIntelSink = std::function<CodeIntelOutcome(const CodeIntelQuery& query)>;
 
 // What one trip through the write door did, including the case where it did not need to
 // open. `unchanged` is a separate answer from `ok()`: nothing failed, and nothing moved.
@@ -164,9 +194,27 @@ class Registry {
     explicit Registry(WorkspaceContext ctx);
 
     void set_edit_sink(EditSink sink) { edit_sink_ = std::move(sink); }
+    void set_code_intel_sink(CodeIntelSink sink) { code_intel_sink_ = std::move(sink); }
+    [[nodiscard]] bool has_code_intel_sink() const noexcept {
+        return static_cast<bool>(code_intel_sink_);
+    }
+
+    // Run-scoped cancel observation for tools that can block (shell, git, MCP). Set
+    // once at run start; cleared when the run ends. Handlers read it rather than taking
+    // CancelToken through every declare() lambda -- parallel execute() calls then all
+    // see the same token without a per-call restore race on a temporary override.
+    void set_cancel_token(const model::CancelToken* cancel) noexcept {
+        cancel_token_ = cancel;
+    }
+    [[nodiscard]] const model::CancelToken* cancel_token() const noexcept {
+        return cancel_token_;
+    }
 
     [[nodiscard]] const std::vector<ToolDecl>& decls() const noexcept { return decls_; }
     [[nodiscard]] const WorkspaceContext& workspace() const noexcept { return ctx_; }
+    [[nodiscard]] const platform::WorkspaceFs& filesystem() const noexcept {
+        return workspace_fs_;
+    }
     [[nodiscard]] const std::vector<parsephony::ToolSpec>& guard_specs() const noexcept {
         return specs_;
     }
@@ -187,9 +235,15 @@ class Registry {
     // Executes a call that already passed the grammar (so `name` is registered and
     // required params are present -- the guard enforced it). `approved_tier` is the
     // sandbox tier the loop's policy granted for THIS call; only `shell` consumes it.
+    //
+    // `cancel` defaults to nullptr and means "use the run-scoped token from
+    // set_cancel_token()", which is what the agent path does. Tests that never call
+    // set_cancel_token may pass a token here; a non-null argument wins for that call
+    // only when no run-scoped token is installed (single-threaded test path).
     [[nodiscard]] ToolResult execute(const std::string& name,
                                      const std::vector<ToolParamValue>& params,
-                                     int approved_tier);
+                                     int approved_tier,
+                                     const model::CancelToken* cancel = nullptr);
 
     using Handler =
         std::function<ToolResult(const std::vector<ToolParamValue>&, int approved_tier)>;
@@ -251,6 +305,9 @@ class Registry {
     // handlers_.emplace silently kept the first handler.
     bool declare_context_tools(ContextSourceFn source, TokenCounter count_tokens);
 
+    // True when `rel` securely names an existing, non-empty regular file.
+    [[nodiscard]] bool would_overwrite_existing(const std::string& rel) const;
+
   private:
 
     void declare(ToolDecl decl, Handler handler);
@@ -270,25 +327,49 @@ class Registry {
     //
     // The unchanged check lives HERE for the same reason the door does. Putting it in
     // each handler means three copies of it and a fourth tool added later with none.
-    [[nodiscard]] CommitOutcome commit_write(const std::string& abs_path,
-                                             std::string_view content);
+    //
+    // `pre` is the optimistic-concurrency claim enforced by the editor sink or, on the
+    // headless path, immediately before the atomic rename.
+    [[nodiscard]] CommitOutcome commit_write(const platform::ContainedPath& path,
+                                             std::string_view content,
+                                             const platform::WritePrecondition& pre);
+
+    // Records a successful read's content version so a later write_file/delete_file can
+    // carry it without the model copying the digest. Keyed by absolute path.
+    void note_read_version(const std::string& abs_path, std::string_view bytes);
+    // Resolves the version claim for an existing-file mutation: optional tool param wins,
+    // else the harness ledger from a prior read in this run. Empty means "no claim".
+    [[nodiscard]] std::string resolve_expected_version(
+        const std::string& abs_path, const std::vector<ToolParamValue>& params) const;
+
+    // One whole-file read with line numbers and content version. Shared by read_file and
+    // read_many so a batch cannot drift from the single-path tool.
+    [[nodiscard]] ToolResult read_one_file(const std::string& path);
 
     // Runs `git <args>` in the workspace under the same sandbox as any other command.
     // `args` is composed by the registry, never supplied by the model.
     [[nodiscard]] ToolResult run_git(const std::string& args, int approved_tier);
 
     WorkspaceContext ctx_;
+    platform::WorkspaceFs workspace_fs_;
     EditSink edit_sink_;
+    CodeIntelSink code_intel_sink_;
+    const model::CancelToken* cancel_token_ = nullptr;
     // Set by declare_context_tools. Read by remember_fact() too, which mirrors each note
     // into the store -- see memory_file.cpp.
     ContextSourceFn context_source_;
     std::vector<ToolDecl> decls_;
     std::vector<parsephony::ToolSpec> specs_;
     std::map<std::string, Handler> handlers_;
+    // Absolute path -> SHA-256 hex of bytes last observed by read_file/read_slice.
+    // Invalidated on a successful mutation so the next whole-file overwrite must read
+    // again. Re-reads always return current content; duplicate collapse under context
+    // pressure is the agent's job, never a pointer-only System Observation here.
+    std::map<std::string, std::string> read_versions_;
 };
 
 // Declaration helpers, shared by the files that declare tools -- registry.cpp for the
-// sixteen above and context_tools.cpp for the two that read the durable store. They were
+// native tools above and context_tools.cpp for the two that read the durable store. They were
 // local to registry.cpp until there was a second declarations file; copying twelve lines
 // of boilerplate into it would have been the cheaper edit and the wrong one.
 [[nodiscard]] parsephony::ParamSpec param(const char* name, parsephony::ParamType type,
@@ -296,8 +377,9 @@ class Registry {
 [[nodiscard]] const std::string* get(const std::vector<ToolParamValue>& params,
                                      const char* name);
 
-// Pure helper shared by tools and tests: resolves `rel` against root/cwd and refuses
-// anything that escapes. Empty result means refused.
+// Compatibility helper shared by tests and policy code. It opens `root`, validates
+// existing components without following symlinks, and returns the canonical absolute
+// spelling. Registry operations use its already-open WorkspaceFs instead.
 [[nodiscard]] std::string resolve_contained(const std::string& root, const std::string& rel);
 
 // True when `rel` names an existing, non-empty file inside `root`.
