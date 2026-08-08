@@ -18,6 +18,11 @@ namespace {
 // Written by the build; see tests/model/CMakeLists.txt and tests/fixtures/.
 const char* fixture_path() { return LMP_MINI_VOCAB_JSON; }
 
+// The two shapes load() must refuse: `foreign` is out of the size band, `unmarked` is
+// inside it but carries no structural tokens.
+const char* foreign_path() { return LMP_FOREIGN_VOCAB_JSON; }
+const char* unmarked_path() { return LMP_UNMARKED_VOCAB_JSON; }
+
 } // namespace
 
 // The point of the whole fixture: it goes through QwenTokenizer::load unchanged, size
@@ -29,6 +34,32 @@ TEST(the_fixture_passes_real_family_verification) {
     CHECK(tok.loaded());
     CHECK(tok.vocab_size() >= 140000);
     CHECK(tok.specials().complete());
+}
+
+// The negative twin of the test above, and v1's silent-mis-tokenization bug made
+// structural (S5.2). Both cases assert the REASON, not just !ok: a fixture that stopped
+// being loadable at all would fail inside frankentok and still leave `ok` false, so a
+// bare CHECK(!ok) is a test that passes while asserting nothing.
+TEST(a_foreign_vocabulary_is_refused_on_the_size_band) {
+    // 262,168 entries -- Gemma-4's measured size, the number the 260,000 ceiling exists
+    // to exclude.
+    QwenTokenizer tok;
+    const LoadStatus st = tok.load(foreign_path(), Family::Qwen3);
+    CHECK(!st.ok);
+    CHECK(!tok.loaded());
+    CHECK(st.error.find("outside the Qwen3 band") != std::string::npos);
+    CHECK(st.error.find("262168") != std::string::npos);
+}
+
+// Isolates the SECOND probe, which the old Gemma test never reached: the size check
+// short-circuited before it. In-band size, near-miss specials (`<|tool_call>`, not
+// `<tool_call>`) -- exactly what name-sniffing accepts and this must not.
+TEST(an_in_band_vocabulary_without_structural_tokens_is_refused) {
+    QwenTokenizer tok;
+    const LoadStatus st = tok.load(unmarked_path(), Family::Qwen3);
+    CHECK(!st.ok);
+    CHECK(!tok.loaded());
+    CHECK(st.error.find("structural tokens are incomplete") != std::string::npos);
 }
 
 // Ids that deliberately DISAGREE with the production checkpoint (im_start=248045 there).

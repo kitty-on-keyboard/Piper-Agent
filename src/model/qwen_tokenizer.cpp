@@ -34,7 +34,9 @@ LoadStatus QwenTokenizer::load(const std::string& path, Family declared) {
 
     // Family verification (S5.2): size band plus structural literals. Qwen3 dense ships
     // ~151,936 entries, Qwen3.6 MoE ships 248,077 (measured from this machine's
-    // checkpoint). A Gemma tokenizer fails both probes below.
+    // checkpoint). Gemma-4 ships 262,168 and fails the band; its `<|tool_call>` is a
+    // near-miss for `<tool_call>` and would fail the literals too. Both probes are
+    // asserted in the gate against generated fixtures -- see tests/model/test_mini_vocab.
     const std::size_t n = tok_->get_vocab().size();
     if (n < 140000 || n > 260000) {
         tok_.reset();

@@ -2,7 +2,7 @@
 //
 // These require the checkpoints present on this machine and FAIL LOUDLY when absent --
 // a skip that prints green is how a suite stops testing without anyone noticing.
-// Override paths with LMP_QWEN_DIR / LMP_GEMMA_TOKENIZER.
+// Override the checkpoint path with LMP_QWEN_DIR.
 
 #include <cstdlib>
 #include <string>
@@ -58,19 +58,10 @@ TEST(qwen_tokenizer_loads_and_verifies_family) {
     CHECK_EQ(tok.specials().think_close, TokenId{248069});
 }
 
-TEST(the_gemma_tokenizer_is_refused) {
-    // v1's silent-mis-tokenization bug, made structural: this is the OTHER model on
-    // this machine, a different family, and load() must refuse it.
-    const std::string gemma = env_or(
-        "LMP_GEMMA_TOKENIZER",
-        "/Users/dev/.lmstudio/models/lmstudio-community/gemma-4-26B-A4B-it-QAT-MLX-4bit/"
-        "tokenizer.json");
-    QwenTokenizer tok;
-    const LoadStatus st = tok.load(gemma, Family::Qwen3);
-    CHECK(!st.ok);
-    CHECK(!tok.loaded());
-    CHECK(!st.error.empty());
-}
+// The family-refusal guard used to live here, loading the Gemma checkpoint that sat on
+// this machine. That checkpoint is gone (Qwen-only product), and being `realmodel` meant
+// the guard was excluded from CI anyway. It now runs in the GATE against generated
+// fixtures of the same measured shape -- see test_mini_vocab.cpp.
 
 TEST(content_encoding_cannot_mint_control_tokens) {
     const QwenTokenizer& tok = loaded_tokenizer();

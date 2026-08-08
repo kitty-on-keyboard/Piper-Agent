@@ -46,7 +46,13 @@ jobs:
         run: npm ci --prefix extension
 
       - name: Configure
-        run: cmake --preset dev
+        # -DLMP_WITH_MLX=OFF is not a downgrade of what CI checks: it is what CI has
+        # ALWAYS done. The old venv probe could not find an interpreter with mlx on a
+        # runner, so MLX_FOUND was false here and MlxBackend compiled as a typed refusal.
+        # Now that MLX is built from source rather than discovered, leaving it on would
+        # compile every Metal kernel at -j3 and blow the 20-minute budget. The gate is
+        # model-free by design (S11.6), so nothing below depends on it.
+        run: cmake --preset dev -DLMP_WITH_MLX=OFF
 
       - name: Build
         run: cmake --build --preset dev -j3
@@ -73,6 +79,8 @@ jobs:
       # selected set disagree, and test_gate_manifest fails by design.
       - run: npm ci --prefix extension
 
+      # The asan preset never had MLX either (same probe, same absent interpreter), and
+      # LMP_WITH_MLX defaults OFF, so this stays as it was.
       - run: cmake --preset asan
       - run: cmake --build --preset asan -j3
       - run: ctest --preset gate-asan
