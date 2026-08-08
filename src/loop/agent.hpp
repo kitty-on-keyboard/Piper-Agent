@@ -381,12 +381,21 @@ class Agent {
     std::size_t could_not_run_streak_ = 0;
     std::size_t same_diag_streak_ = 0;
     std::string last_primary_diag_fp_;
-    // How many CONSECUTIVE text-only turns a conversational mode nudges before it accepts
-    // the ending. Any executed tool call resets the count, so this bounds "said it would
-    // act and did not" in a row, not narration across the run. One was too few: a run that
-    // had just read four files and said it would read the rest was nudged once, said it
-    // again, and was ended at turn 12 of 200 with no plan and no question.
-    static constexpr std::size_t kPlanNudgesBeforeYield = 2;
+    // How many CONSECUTIVE text-only turns each mode nudges before it accepts the ending.
+    // Any executed tool call resets the count, so these bound "said it would act and did
+    // not" IN A ROW, not narration across the run.
+    //
+    // Plan mode gets two. One was too few: a run that had just read four files and said it
+    // would read the rest was nudged once, said it again, and was ended at turn 12 of 200
+    // with no plan and no question.
+    //
+    // An implementation run gets one, and until 2026-08-08 it got none -- the first text
+    // turn ended the run outright, so a model that said "let me read the remaining files"
+    // was recorded as a COMPLETED run that had written nothing. One rather than two
+    // because there, unlike in plan mode, a text-only turn legitimately IS the ending most
+    // of the time, and every nudge is a turn spent on a run that was already finished.
+    static constexpr std::size_t kPlanNudgesBeforeEnding = 2;
+    static constexpr std::size_t kRunNudgesBeforeEnding = 1;
     std::size_t unhandled_text_turns_ = 0;
     std::size_t executed_tool_calls_in_run_ = 0;
 };
