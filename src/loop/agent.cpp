@@ -1546,20 +1546,36 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // continues, and the budgets bound a model that can produce nothing else.
         if (turn.outcome == Outcome::TextOnly && !turn.cut_for_looping) {
             if (policy_.conversational) {
-                if (unhandled_text_turns_ == 0) {
-                    ++unhandled_text_turns_;
+                // NUDGE EVERY TIME, and end only after the model has ignored the nudge.
+                //
+                // This used to nudge on the first text turn of a streak and end the run on
+                // the second, which killed a run that was plainly still working: it had
+                // just read four files, said "let me read the remaining UI files", got the
+                // note, said it again, and was terminated at turn 12 of 200 with no plan
+                // and no question. The model was mid-exploration, not handing back.
+                //
+                // The count is of CONSECUTIVE text turns -- any executed tool call resets
+                // it -- so this is not a budget for narration across a run, it is how many
+                // times in a row the model may say it will act without acting. Two nudges,
+                // then the run ends: a model that has been told twice and still answers in
+                // prose IS handing back, whatever its words say.
+                ++unhandled_text_turns_;
+                if (unhandled_text_turns_ <= kPlanNudgesBeforeYield) {
                     context::TurnRecord note;
                     note.observation =
-                        "[Note: You are in Plan mode. Do not output standalone text updates or commentary. "
-                        "Execute your tool calls (`read_file`, `read_many`, `list_dir`, `find_files`, `search`) directly. "
-                        "If you have design choices to ask, call 'ask_question' with 2-4 interactive options -- "
-                        "asking in plain text does not present the card and does not reach the human. "
-                        "When your plan is complete, call 'exit_plan_mode'.]";
+                        "[Note: You are in Plan mode and your last turn called no tool. Do not output "
+                        "standalone text updates or commentary -- they do not reach the human. "
+                        "If you were about to read something, call the tool NOW "
+                        "(`read_file`, `read_many`, `list_dir`, `find_files`, `search`). "
+                        "If you have a design choice to put to the human, call 'ask_question' with 2-4 options. "
+                        "If your plan is ready, call 'exit_plan_mode'. "
+                        "You do not need to read every file before asking or planning.]";
                     ctx_.add_turn(std::move(note));
                     continue;
                 }
                 report.termination_reason = "awaiting_user";
-                emit("yielded", {{"why", "text_only_turn"}});
+                emit("yielded", {{"why", "text_only_turn"},
+                                 {"consecutive", std::to_string(unhandled_text_turns_)}});
                 break;
             }
             // Last look at the inbox before the run closes. A human watching a run
