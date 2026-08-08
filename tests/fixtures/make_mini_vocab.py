@@ -26,6 +26,21 @@ WHAT MAKES IT USABLE RATHER THAN JUST BIG:
     checkpoint's tokens are byte fragments;
   * ids that DELIBERATELY do not match the real checkpoint's, so any code that assumes a
     literal id fails here instead of in production.
+
+THE FOREIGN SHAPES. `--shape` also emits the two vocabularies family verification must
+REFUSE. Until 2026-08-08 that test loaded a real 31 MB Gemma tokenizer off this machine;
+the checkpoint is gone (Sean never ran it, and this is a Qwen-only product) and keeping a
+model on disk as a test fixture was the wrong dependency anyway -- it made the guard a
+`realmodel` test, so it never ran in CI.
+
+  * `foreign` reproduces that Gemma tokenizer's measured shape: 262,144 base entries plus
+    the 24 added tokens it actually shipped, so the upper bound is exercised at 262,168 --
+    the real number that motivated the ceiling. Its specials are Gemma's real ones, which
+    matter because they are NEAR-MISSES: `<|tool_call>` and `<|think|>` against Qwen's
+    `<tool_call>` and `<think>`. A name-sniffing loader accepts those; that is v1's bug.
+  * `unmarked` sits INSIDE the band and simply has no structural tokens, which isolates
+    the second probe. The Gemma test never reached it -- the size check short-circuited --
+    so that half of load() went unasserted for as long as it existed.
 """
 
 import json
@@ -62,12 +77,31 @@ SPECIALS = [
     "</think>",
 ]
 
+# Gemma-4's 24 added tokens, read off the checkpoint before it was deleted. Kept verbatim
+# rather than invented: the point of this list is that `<|tool_call>` is not
+# `<tool_call>` and `<|think|>` is not `<think>`, and a plausible-looking substitute
+# would lose exactly the near-miss the refusal exists to catch.
+FOREIGN_SPECIALS = [
+    "<pad>", "<eos>", "<bos>", "<unk>", "<mask>",
+    "<|tool>", "<tool|>", "<|tool_call>", "<tool_call|>",
+    "<|tool_response>", "<tool_response|>", '<|"|>',
+    "<|think|>", "<|channel>", "<channel|>", "<|turn>", "<turn|>",
+    "<|image>", "<|audio>", "<|image|>", "<|audio|>",
+    "<image|>", "<audio|>", "<|video|>",
+]
+
 # The band QwenTokenizer::load enforces. Sitting just above the floor keeps the file as
 # small as honesty allows.
 VOCAB_FLOOR = 140_000
 
+# Gemma-4's measured base vocabulary. + 24 added = 262,168, which is what the ceiling of
+# 260,000 was chosen to exclude.
+FOREIGN_VOCAB_FLOOR = 262_144
 
-def build():
+SHAPES = ("qwen", "foreign", "unmarked")
+
+
+def build(shape="qwen"):
     b2u = bytes_to_unicode()
     vocab = {}
     nxt = 0
@@ -98,12 +132,16 @@ def build():
 
     # Filler, so the vocabulary reaches the size band the family check requires. Named so
     # that a filler token showing up in a decode is obviously a bug and not a near-miss.
+    floor = FOREIGN_VOCAB_FLOOR if shape == "foreign" else VOCAB_FLOOR
     i = 0
-    while nxt < VOCAB_FLOOR:
+    while nxt < floor:
         add(f"ġunused{i}")
         i += 1
 
-    added = [{"content": s, "id": nxt + k} for k, s in enumerate(SPECIALS)]
+    # `unmarked` ships none, which is the whole point of it: in-band size, no structural
+    # tokens, so load() has to fail on the second probe or not at all.
+    specials = {"qwen": SPECIALS, "foreign": FOREIGN_SPECIALS, "unmarked": []}[shape]
+    added = [{"content": s, "id": nxt + k} for k, s in enumerate(specials)]
 
     return {
         "version": "1.0",
@@ -129,16 +167,21 @@ def build():
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: make_mini_vocab.py <out/tokenizer.json>", file=sys.stderr)
+    args = sys.argv[1:]
+    shape = "qwen"
+    if len(args) == 2:
+        shape, args = args[0], args[1:]
+    if len(args) != 1 or shape not in SHAPES:
+        print(f"usage: make_mini_vocab.py [{'|'.join(SHAPES)}] <out/tokenizer.json>",
+              file=sys.stderr)
         return 2
-    out = sys.argv[1]
+    out = args[0]
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    doc = build()
+    doc = build(shape)
     with open(out, "w") as f:
         json.dump(doc, f)
     n = len(doc["model"]["vocab"]) + len(doc["added_tokens"])
-    print(f"make_mini_vocab: {n} entries -> {out}")
+    print(f"make_mini_vocab[{shape}]: {n} entries -> {out}")
     return 0
 
 

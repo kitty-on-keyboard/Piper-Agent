@@ -14,6 +14,10 @@ __pycache__/
 *.a
 *.dylib
 
+# clangd's index, written next to compile_commands.json. 6.5 MB of machine-local
+# binary that has no business in a diff.
+/.cache/
+
 # CTest run artifacts. Root-anchored: core.ignorecase=true on macOS, so a bare
 # "Testing/" would also swallow a src/testing/ directory.
 /Testing/

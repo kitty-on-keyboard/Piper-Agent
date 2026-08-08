@@ -4,15 +4,31 @@
 # honest fixture is ~140k entries and a few MB of JSON. Generating it keeps the property
 # that matters -- the fixture goes through the SAME family verification production does --
 # without committing a blob nobody will read. See tests/fixtures/make_mini_vocab.py.
+#
+# Three shapes: the Qwen-shaped one every gate test decodes with, and the two load() must
+# REFUSE. The refusals used to need a 31 MB Gemma checkpoint on this machine, which made
+# them `realmodel` and so they never ran in CI; generating them moves the family guard
+# into the gate and costs nothing on disk.
 set(LMP_MINI_VOCAB "${CMAKE_CURRENT_BINARY_DIR}/mini_qwen/tokenizer.json")
-add_custom_command(
-  OUTPUT "${LMP_MINI_VOCAB}"
-  COMMAND "${CMAKE_COMMAND}" -E env python3
-          "${PROJECT_SOURCE_DIR}/tests/fixtures/make_mini_vocab.py" "${LMP_MINI_VOCAB}"
-  DEPENDS "${PROJECT_SOURCE_DIR}/tests/fixtures/make_mini_vocab.py"
-  COMMENT "Generating the miniature Qwen-shaped vocabulary"
-  VERBATIM)
+set(LMP_FOREIGN_VOCAB "${CMAKE_CURRENT_BINARY_DIR}/mini_foreign/tokenizer.json")
+set(LMP_UNMARKED_VOCAB "${CMAKE_CURRENT_BINARY_DIR}/mini_unmarked/tokenizer.json")
+
+function(lmp_make_vocab shape out)
+  add_custom_command(
+    OUTPUT "${out}"
+    COMMAND "${CMAKE_COMMAND}" -E env python3
+            "${PROJECT_SOURCE_DIR}/tests/fixtures/make_mini_vocab.py" "${shape}" "${out}"
+    DEPENDS "${PROJECT_SOURCE_DIR}/tests/fixtures/make_mini_vocab.py"
+    COMMENT "Generating the ${shape} vocabulary fixture"
+    VERBATIM)
+endfunction()
+
+lmp_make_vocab(qwen "${LMP_MINI_VOCAB}")
+lmp_make_vocab(foreign "${LMP_FOREIGN_VOCAB}")
+lmp_make_vocab(unmarked "${LMP_UNMARKED_VOCAB}")
 add_custom_target(lmp_mini_vocab DEPENDS "${LMP_MINI_VOCAB}")
+add_custom_target(lmp_refused_vocabs
+                  DEPENDS "${LMP_FOREIGN_VOCAB}" "${LMP_UNMARKED_VOCAB}")
 
 lmp_add_test(test_backend_seam SOURCES test_backend_seam.cpp LABELS gate LINK lmp_model)
 # The speculative block algebra runs in the GATE: SpecForward is an interface precisely so
@@ -22,8 +38,11 @@ lmp_add_test(test_speculative SOURCES test_speculative.cpp LABELS gate LINK lmp_
 # wrong text rather than crashing, so the algebra is pure and asserted with no GPU.
 lmp_add_test(test_kv_reuse SOURCES test_kv_reuse.cpp LABELS gate LINK lmp_model)
 lmp_add_test(test_mini_vocab SOURCES test_mini_vocab.cpp LABELS gate LINK lmp_model)
-add_dependencies(test_mini_vocab lmp_mini_vocab)
-target_compile_definitions(test_mini_vocab PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
+add_dependencies(test_mini_vocab lmp_mini_vocab lmp_refused_vocabs)
+target_compile_definitions(test_mini_vocab PRIVATE
+  LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}"
+  LMP_FOREIGN_VOCAB_JSON="${LMP_FOREIGN_VOCAB}"
+  LMP_UNMARKED_VOCAB_JSON="${LMP_UNMARKED_VOCAB}")
 
 # The turn grammar runs in BOTH suites off one source (R1). It reads token bytes, so it
 # needs a vocabulary -- but a vocabulary is not a GPU, and labelling it `realmodel` meant
@@ -46,11 +65,16 @@ target_compile_definitions(test_model_bounds PRIVATE LMP_MINI_VOCAB_JSON="${LMP_
 # pins jobs=1 -- concurrent large model loads exhaust unified memory.
 lmp_add_test(test_grammar_realmodel SOURCES test_grammar.cpp LABELS realmodel LINK lmp_model TIMEOUT 300)
 lmp_add_test(test_realmodel SOURCES test_realmodel.cpp LABELS realmodel LINK lmp_model TIMEOUT 1200)
+# These are the tests that actually reach the GPU, so they need mlx.metallib beside them
+# (see lmp_stage_metallib in src/model/CMakeLists.txt). No-op when MLX is off.
+lmp_stage_metallib(test_realmodel)
 # G3's falsifier: reuse must fire, and must be INVISIBLE in the output. A stale-cache bug
 # decodes fluent wrong text rather than crashing, so byte-identity is the only assertion
 # that catches it.
 lmp_add_test(test_kv_reuse_realmodel SOURCES test_kv_reuse_realmodel.cpp LABELS realmodel LINK lmp_model TIMEOUT 1200)
+lmp_stage_metallib(test_kv_reuse_realmodel)
 lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK lmp_model simdjson TIMEOUT 900)
+lmp_stage_metallib(test_spec_cache)
 # Same relaxation mlx_backend.cpp and the diag driver carry: this TU includes the vendored
 # MLX numerics directly, to drive Qwen35MoeModel's cache API below the backend seam.
 set_source_files_properties(test_spec_cache.cpp PROPERTIES COMPILE_OPTIONS
@@ -60,6 +84,7 @@ set_source_files_properties(test_spec_cache.cpp PROPERTIES COMPILE_OPTIONS
 # attributed by observation rather than by guessing (S19.3). Built on demand.
 add_executable(lmp_diag EXCLUDE_FROM_ALL diag_main.cpp diag_moe.cpp)
 target_link_libraries(lmp_diag PRIVATE lmp_warnings lmp_assertions lmp_model simdjson)
+lmp_stage_metallib(lmp_diag)
 # Same relaxation mlx_backend.cpp carries: these TUs include the vendored MLX numerics
 # directly so the scan can be benchmarked against its own reference implementation.
 set_source_files_properties(diag_main.cpp diag_moe.cpp PROPERTIES COMPILE_OPTIONS
