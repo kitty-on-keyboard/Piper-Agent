@@ -1545,49 +1545,75 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // interrupted it. The fact of the cut is already in the context; the run
         // continues, and the budgets bound a model that can produce nothing else.
         if (turn.outcome == Outcome::TextOnly && !turn.cut_for_looping) {
-            if (policy_.conversational) {
-                // NUDGE EVERY TIME, and end only after the model has ignored the nudge.
-                //
-                // This used to nudge on the first text turn of a streak and end the run on
-                // the second, which killed a run that was plainly still working: it had
-                // just read four files, said "let me read the remaining UI files", got the
-                // note, said it again, and was terminated at turn 12 of 200 with no plan
-                // and no question. The model was mid-exploration, not handing back.
-                //
-                // The count is of CONSECUTIVE text turns -- any executed tool call resets
-                // it -- so this is not a budget for narration across a run, it is how many
-                // times in a row the model may say it will act without acting. Two nudges,
-                // then the run ends: a model that has been told twice and still answers in
-                // prose IS handing back, whatever its words say.
-                ++unhandled_text_turns_;
-                if (unhandled_text_turns_ <= kPlanNudgesBeforeYield) {
-                    context::TurnRecord note;
-                    note.observation =
-                        "[Note: You are in Plan mode and your last turn called no tool. Do not output "
-                        "standalone text updates or commentary -- they do not reach the human. "
-                        "If you were about to read something, call the tool NOW "
-                        "(`read_file`, `read_many`, `list_dir`, `find_files`, `search`). "
-                        "If you have a design choice to put to the human, call 'ask_question' with 2-4 options. "
-                        "If your plan is ready, call 'exit_plan_mode'. "
-                        "You do not need to read every file before asking or planning.]";
-                    ctx_.add_turn(std::move(note));
-                    continue;
-                }
-                report.termination_reason = "awaiting_user";
-                emit("yielded", {{"why", "text_only_turn"},
-                                 {"consecutive", std::to_string(unhandled_text_turns_)}});
-                break;
-            }
-            // Last look at the inbox before the run closes. A human watching a run
-            // drift toward an ending is exactly the human who types "keep going" -- and
-            // ending the run a moment after they said it, having already read it off the
-            // pipe, would be the worst possible time to stop listening.
+            // Last look at the inbox before anything else. A human watching a run drift
+            // toward an ending is exactly the human who types "keep going" -- and ending
+            // the run a moment after they said it, having already read it off the pipe,
+            // would be the worst possible time to stop listening.
             const std::size_t rescued = take_steering();
             if (rescued > 0) {
                 report.steers_received += rescued;
                 continue;
             }
+
+            // NUDGE ONCE, IN BOTH MODES, and end only after the model has ignored it.
+            //
+            // The count is of CONSECUTIVE text turns -- any executed tool call resets it
+            // -- so this is not a budget for narration across a run, it is how many times
+            // in a row the model may say it will act without acting.
+            //
+            // Plan mode allows two, because there a text turn is never the wanted output:
+            // one was too few for a run that had read four files, said it would read the
+            // rest, was nudged, said it again, and was ended at turn 12 of 200 with no
+            // plan and no question.
+            //
+            // AN IMPLEMENTATION RUN GETS ONE, and until 2026-08-08 it got none. The
+            // comment above still holds -- a text-only turn IS how a run ends, and the
+            // harness does not judge whether the work is done -- but "here is my answer"
+            // and "let me read the remaining files" are the same shape to this loop, and
+            // reading the second as the first ends the run mid-exploration. That is not a
+            // hypothetical: a dashboard rewrite ran list_dir, find_files, read_many,
+            // read_many, said "let me read the remaining files", and was recorded as
+            // `ended` / completed=true after four turns having written ZERO bytes. A
+            // false success is worse than a stall, because nothing downstream flags it.
+            //
+            // The nudge is not adjudication. The harness still forms no view on whether
+            // the answer is right or the work finished; it declines to read one ambiguous
+            // turn as two different things, and gives the model one unmistakable chance
+            // to say which it meant. A second text turn after that IS the ending,
+            // whatever its words say. The cost is one turn on a genuinely final answer.
+            const std::size_t allowed =
+                policy_.conversational ? kPlanNudgesBeforeEnding : kRunNudgesBeforeEnding;
+            ++unhandled_text_turns_;
+            if (unhandled_text_turns_ <= allowed) {
+                context::TurnRecord note;
+                note.observation =
+                    policy_.conversational
+                        ? "[Note: You are in Plan mode and your last turn called no tool. Do not output "
+                          "standalone text updates or commentary -- they do not reach the human. "
+                          "If you were about to read something, call the tool NOW "
+                          "(`read_file`, `read_many`, `list_dir`, `find_files`, `search`). "
+                          "If you have a design choice to put to the human, call 'ask_question' with 2-4 options. "
+                          "If your plan is ready, call 'exit_plan_mode'. "
+                          "You do not need to read every file before asking or planning.]"
+                        : "[Note: Your last turn called no tool. If you were about to act -- reading, "
+                          "editing, or running something -- call the tool NOW; saying you will act does "
+                          "not perform the action, and this run has not finished the work yet. "
+                          "If you are genuinely done and this text WAS your final answer, say so again "
+                          "and the run will end.]";
+                ctx_.add_turn(std::move(note));
+                emit("nudged", {{"why", "text_only_turn"},
+                                {"consecutive", std::to_string(unhandled_text_turns_)}});
+                continue;
+            }
+            if (policy_.conversational) {
+                report.termination_reason = "awaiting_user";
+                emit("yielded", {{"why", "text_only_turn"},
+                                 {"consecutive", std::to_string(unhandled_text_turns_)}});
+                break;
+            }
             report.termination_reason = "ended";
+            emit("ended", {{"why", "text_only_turn"},
+                           {"consecutive", std::to_string(unhandled_text_turns_)}});
             break;
         }
     }
