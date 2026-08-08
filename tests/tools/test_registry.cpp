@@ -1102,11 +1102,21 @@ TEST(read_many_reads_up_to_four_paths) {
     CHECK(json_batch.summary.find("=== a.txt ===") != std::string::npos);
     CHECK(json_batch.summary.find("=== b.txt ===") != std::string::npos);
 
+    // Over the cap READS THE FIRST FOUR rather than refusing all five. It used to be a hard
+    // error that read nothing, and a model that has just listed a directory asks for
+    // everything in it: one run asked for 15, was refused, asked for 7, was refused again,
+    // and spent a quarter of its turns discovering a number the error had already stated.
     ToolResult too_many = reg.execute(
         "read_many",
-        args({{"paths", "a.txt\nb.txt\nc.txt\na.txt\nb.txt"}}), 1);
-    CHECK(!too_many.ok());
-    CHECK(too_many.summary.find("at most 4") != std::string::npos);
+        args({{"paths", "a.txt\nb.txt\nc.txt\na.txt\nmissing_e.txt"}}), 1);
+    CHECK(too_many.ok());
+    CHECK(too_many.summary.find("=== a.txt ===") != std::string::npos);
+    CHECK(too_many.summary.find("body of c.txt") != std::string::npos);
+    CHECK(too_many.bytes_read > 0);
+    // The fifth path is not read, and is named back so the next call can pick it up --
+    // silently dropping it would read as "that file does not exist".
+    CHECK(too_many.summary.find("read the first 4 of 5") != std::string::npos);
+    CHECK(too_many.summary.find("missing_e.txt") != std::string::npos);
 }
 
 TEST(overwrite_without_prior_read_is_conflict) {

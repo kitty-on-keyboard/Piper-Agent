@@ -63,9 +63,12 @@ std::string_view mode_brief(Mode m) noexcept {
                    "\n"
                    "- Direct Tool Execution: Execute read tool calls (`read_file`, `read_many`, `list_dir`, `find_files`, `search`) directly. "
                    "Do NOT output standalone conversational updates or text commentary explaining what you intend to read.\n"
-                   "- Ask Design Options (`ask_question`): When design or visual choices are open (e.g. animation style, dashboard structure), "
-                   "invoke `ask_question` with 2 to 4 interactive options (passed via `question` and `options`, one option per line) so the human can click an option card in the UI. "
-                   "Asking the question as plain text does not present the card.\n"
+                   "- Ask Design Options (`ask_question`) EARLY: when the request leaves a design or visual choice open "
+                   "(e.g. animation style, colour direction, dashboard structure), invoke `ask_question` with 2 to 4 interactive options "
+                   "(passed via `question` and `options`, one option per line) so the human can click an option card in the UI. "
+                   "Ask as soon as you know enough to name the alternatives -- that is usually after reading a handful of files, "
+                   "NOT after reading the whole codebase. Their answer changes what is worth reading next. "
+                   "Asking the question as plain text does not present the card and does not reach them.\n"
                    "- Final Plan Submission (`exit_plan_mode`): When your investigation is finished, call `exit_plan_mode` with your completed plan markdown.\n";
         case Mode::Debug:
             return "# Debug mode\n"

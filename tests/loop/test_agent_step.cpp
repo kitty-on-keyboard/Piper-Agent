@@ -1644,11 +1644,18 @@ TEST(plan_mode_yields_on_a_text_only_turn_instead_of_stalling) {
     REQUIRE(tok.loaded());
 
     model::ScriptedBackend backend;
+    // THREE text turns, because two nudges precede the ending. A run that says it will
+    // read something, is told to call the tool, and says it again is still working -- the
+    // one-nudge version ended a real run at turn 12 of 200 with no plan and no question.
+    // The third consecutive text turn is the ending: told twice and still answering in
+    // prose IS handing back, whatever the words say.
     backend.enqueue_response(text_turn(tok, "considering", "Here is what I would do."));
-    // A SECOND turn is queued deliberately. If the loop does not stop, it takes this one
-    // and the iteration count says so -- an assertion on the termination reason alone
-    // would pass just as well against a run that ended for the wrong reason.
     backend.enqueue_response(text_turn(tok, "again", "And more."));
+    backend.enqueue_response(text_turn(tok, "still", "And more again."));
+    // A FOURTH is queued deliberately. If the loop does not stop, it takes this one and the
+    // iteration count says so -- an assertion on the termination reason alone would pass
+    // just as well against a run that ended for the wrong reason.
+    backend.enqueue_response(text_turn(tok, "extra", "This must never be reached."));
 
     tools::Registry registry(workspace("/tmp"));
     context::ContextStore ctx("plan the work");
@@ -1665,7 +1672,45 @@ TEST(plan_mode_yields_on_a_text_only_turn_instead_of_stalling) {
     // `awaiting_user`, not `ended`: a conversational turn is "your move", not "I am done",
     // and the surface renders the two differently.
     CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
-    CHECK_EQ(report.iterations, 2);
+    CHECK_EQ(report.iterations, 3);
+}
+
+// The other half of the same contract: a text turn the model FOLLOWS with a tool call is
+// not an ending at all, and must not consume the run's patience. The counter resets on any
+// executed call, so narrate/act/narrate/act continues indefinitely -- which is what a run
+// exploring a codebase actually looks like.
+TEST(plan_mode_text_turn_followed_by_a_tool_call_does_not_end_the_run) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string list_body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "thinking", "Let me look at that."));
+    backend.enqueue_response(call_turn(tok, list_body));
+    backend.enqueue_response(text_turn(tok, "thinking", "Now the other one."));
+    backend.enqueue_response(call_turn(tok, list_body));
+    backend.enqueue_response(text_turn(tok, "done", "One."));
+    backend.enqueue_response(text_turn(tok, "done", "Two."));
+    backend.enqueue_response(text_turn(tok, "done", "Three."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // All seven: the two interleaved text turns were nudged and reset by the reads, and
+    // only the final unbroken run of three ended it.
+    CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
+    CHECK_EQ(report.iterations, 7);
 }
 
 // --- plan mode cannot reach the disk, and is not offered the chance ----------
