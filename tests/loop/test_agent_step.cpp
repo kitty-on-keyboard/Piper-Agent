@@ -302,6 +302,11 @@ TEST(a_length_capped_turn_is_not_completion) {
 // by the operator's check when one is configured. The old loop kept a run alive through
 // three text-only turns and then called it `text_only_no_progress` -- so a model that
 // finished cleanly on turn one was indistinguishable from one that had given up.
+//
+// It takes TWO such turns, because one nudge precedes the ending (S: kRunNudgesBeforeEnding).
+// Ending on the first was the 2026-08-08 defect: "here is my answer" and "let me read the
+// remaining files" are the same shape to this loop, and reading the second as the first
+// recorded a run as completed=true after four turns and ZERO bytes written.
 
 TEST(a_text_only_turn_in_agent_mode_ends_the_run_as_ended) {
     const model::QwenTokenizer& tok = mini_vocab();
@@ -309,7 +314,9 @@ TEST(a_text_only_turn_in_agent_mode_ends_the_run_as_ended) {
 
     model::ScriptedBackend backend;
     backend.enqueue_response(text_turn(tok, "considering", "The work is done."));
-    // A SECOND turn is queued deliberately. If the loop does not stop, it takes this one
+    // The second is the one the run actually ends on: the first is nudged.
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+    // A THIRD turn is queued deliberately. If the loop does not stop, it takes this one
     // and the iteration count says so -- an assertion on the termination reason alone
     // would pass just as well against a run that ended for the wrong reason.
     backend.enqueue_response(text_turn(tok, "again", "And more."));
@@ -327,7 +334,7 @@ TEST(a_text_only_turn_in_agent_mode_ends_the_run_as_ended) {
     const loop::RunReport report = agent.run(cancel);
 
     CHECK_EQ(report.termination_reason, std::string("ended"));
-    CHECK_EQ(report.iterations, 1);
+    CHECK_EQ(report.iterations, 2);
     // No operator check configured, so `completed` reports only that the model answered.
     CHECK(report.completed);
 }
@@ -338,6 +345,7 @@ TEST(a_text_only_turn_in_debug_mode_ends_the_run_as_ended) {
 
     model::ScriptedBackend backend;
     backend.enqueue_response(text_turn(tok, "traced it", "The bug was the off-by-one."));
+    backend.enqueue_response(text_turn(tok, "again", "Still the off-by-one."));
     backend.enqueue_response(text_turn(tok, "again", "And more."));
 
     tools::Registry registry(workspace("/tmp"));
@@ -353,7 +361,66 @@ TEST(a_text_only_turn_in_debug_mode_ends_the_run_as_ended) {
     const loop::RunReport report = agent.run(cancel);
 
     CHECK_EQ(report.termination_reason, std::string("ended"));
-    CHECK_EQ(report.iterations, 1);
+    CHECK_EQ(report.iterations, 2);
+}
+
+// THE REGRESSION, as it actually happened on 2026-08-08. A dashboard rewrite ran
+// list_dir, find_files, read_many, read_many, then said "let me read the remaining
+// files" -- and the run was recorded `ended` / completed=true after four turns having
+// written nothing. The model was mid-exploration; the loop read its narration as a final
+// answer because the two are indistinguishable at this seam.
+//
+// The assertion that matters is NOT the termination reason -- the old behaviour and the
+// new one both end eventually. It is that the tool call AFTER the text turn ran. A run
+// that resumes has not been mistaken for a finished one.
+TEST(an_announced_intent_after_tool_calls_is_nudged_not_ended_in_agent_mode) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "listing"));
+    // Narration mid-work: the exact shape that ended the real run.
+    backend.enqueue_response(text_turn(tok, "t", "let me read the remaining files"));
+    // The model does what it said. This turn is only REACHABLE if the nudge kept the run
+    // alive -- under the old code the run was already over.
+    backend.enqueue_response(call_turn(tok, body, "listing again"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("read the files");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    std::size_t executed = 0;
+    loop::Observer obs;
+    obs.on_turn = [&](const loop::TurnResult& t, double) {
+        if (t.outcome == loop::Outcome::ToolCallExecuted) {
+            ++executed;
+        }
+    };
+    agent.set_observer(obs);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // THE ASSERTION THAT MATTERS: both calls ran. One means the run died on the
+    // narration and never came back -- which is the defect, and which the termination
+    // reason alone cannot distinguish, because the old behaviour also ended as `ended`.
+    CHECK_EQ(executed, std::size_t{2});
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+
+    // And the count is of CONSECUTIVE text turns: the call between them reset it, so the
+    // two trailing text turns are a fresh streak (nudge, then end) rather than the
+    // narration's continuation. Five turns, not four.
+    CHECK_EQ(report.iterations, 5);
 }
 
 // The turn budget is checked BEFORE a turn is spent, and named for which limit fired:
@@ -395,6 +462,9 @@ TEST(steering_that_arrives_on_a_final_text_turn_continues_the_run) {
     model::ScriptedBackend backend;
     backend.enqueue_response(text_turn(tok, "t", "I believe this is done."));
     backend.enqueue_response(text_turn(tok, "t", "Checked the other file too; done."));
+    // Steering is drained BEFORE the nudge, so the rescue still happens on turn 1. The
+    // run then needs one nudge and one more turn to end, hence a third response.
+    backend.enqueue_response(text_turn(tok, "t", "Still done."));
 
     tools::Registry registry(workspace("/tmp"));
     context::ContextStore ctx("do the work");
@@ -420,7 +490,10 @@ TEST(steering_that_arrives_on_a_final_text_turn_continues_the_run) {
     const loop::RunReport report = agent.run(cancel);
 
     CHECK_EQ(report.termination_reason, std::string("ended"));
-    CHECK_EQ(report.iterations, 2); // the rescue bought exactly one more turn
+    // Three: the rescue bought one more turn, and the nudge on turn 2 bought the last.
+    // Steering wins over the nudge -- a human instruction beats a canned note -- which is
+    // why the drain still runs first and steers_received is still 1.
+    CHECK_EQ(report.iterations, 3);
     CHECK_EQ(report.steers_received, std::size_t{1});
     // And the instruction is in the context the second turn was generated from.
     bool seen = false;
@@ -450,6 +523,8 @@ TEST(the_operator_check_runs_after_a_write_turn_and_its_output_reaches_the_next_
 
     model::ScriptedBackend backend;
     backend.enqueue_response(call_turn(tok, write_body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+    // A second text turn: a run ends on the SECOND consecutive one; the first is nudged.
     backend.enqueue_response(text_turn(tok, "t", "done"));
 
     tools::Registry registry(workspace(root));
@@ -503,6 +578,8 @@ TEST(a_run_with_no_writes_and_an_operator_check_runs_it_once_at_the_end) {
     (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
 
     model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "looked around", "Nothing needed changing."));
+    // A second text turn: a run ends on the SECOND consecutive one; the first is nudged.
     backend.enqueue_response(text_turn(tok, "looked around", "Nothing needed changing."));
 
     tools::Registry registry(workspace(root));
@@ -1360,6 +1437,8 @@ TEST(a_run_leaves_a_trace_that_explains_its_own_repeats) {
     backend.enqueue_response(call_turn(tok, write_body));
     backend.enqueue_response(call_turn(tok, read_body)); // the real read
     backend.enqueue_response(call_turn(tok, read_body)); // the repeat: cache-served
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+    // A second text turn: a run ends on the SECOND consecutive one; the first is nudged.
     backend.enqueue_response(text_turn(tok, "t", "done"));
 
     tools::Registry registry(workspace(root));
