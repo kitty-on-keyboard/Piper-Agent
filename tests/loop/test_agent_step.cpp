@@ -364,6 +364,48 @@ TEST(a_text_only_turn_in_debug_mode_ends_the_run_as_ended) {
     CHECK_EQ(report.iterations, 2);
 }
 
+// A run does not get to report `completed` while its OWN checklist has items open.
+//
+// Measured 2026-08-08: a dashboard rewrite ended after 66 turns with `completed=true` and
+// `unfinished_items=10` -- every item of the plan it wrote itself still open. The number
+// existed; `unfinished_items` was simply computed AFTER the completed decision and never
+// consulted.
+//
+// This asserts nothing about whether the work was any good, which stays the operator's
+// judgement. It asserts the report does not contradict itself.
+TEST(a_run_that_leaves_its_own_checklist_open_does_not_report_completed) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] read it\n[ ] fix it\n</parameter>\n"
+        "</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, plan_body));
+    // Neither item ticked; the model just answers.
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // It still ENDED normally -- the ending and the claim of completion are different
+    // facts, and only the second one is wrong here.
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    CHECK_EQ(report.unfinished_items, std::size_t{2});
+    CHECK(!report.completed);
+}
+
 // THE REGRESSION, as it actually happened on 2026-08-08. A dashboard rewrite ran
 // list_dir, find_files, read_many, read_many, then said "let me read the remaining
 // files" -- and the run was recorded `ended` / completed=true after four turns having
