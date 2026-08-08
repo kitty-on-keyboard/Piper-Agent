@@ -301,6 +301,25 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     }
     if (!config_.operator_verify_contract.empty()) {
         emit("operator_contract", {{"contract", config_.operator_verify_contract}});
+    } else if (policy_.allow_workspace_writes) {
+        // A WRITING RUN WITH NO CHECK HAS NO FEEDBACK LOOP, and that has to be visible
+        // rather than merely absent. The post-write check is the ONLY verification this
+        // harness performs; with it empty, nothing the model writes is ever read back by
+        // anything, and the run's only evidence is whatever it thinks to gather itself.
+        //
+        // Measured on 2026-08-08: a dashboard rewrite ran `swift build` ONCE at turn 22,
+        // then spent 44 more turns editing against that same stale error list -- 24
+        // writes, zero verifications -- and re-derived the same wrong diagnosis until the
+        // budget ran out. A configured check would have put fresh compiler output in
+        // front of it after every one of those writes.
+        //
+        // Emitted, not enforced: an empty contract is a legitimate configuration (a
+        // read-only question, a project with no build command) and the harness does not
+        // get to insist. But it stops being a silent default.
+        emit("no_operator_contract",
+             {{"why", "writing mode with no verify_contract configured"},
+              {"consequence", "no check runs after any write; `completed` rests on the "
+                              "model's own answer and its own checklist"}});
     }
     if (config_.auto_syntax_check) {
         syntax_ = std::make_unique<tools::SyntaxChecker>(registry_.workspace().root,
@@ -1621,26 +1640,37 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         report.termination_reason = halted_ ? halt_reason_ : "loop_exit";
     }
 
-    // `completed` is two observed facts, not a verdict: the model answered, and -- when
-    // the operator configured a check -- that check's latest reading passed. A run that
-    // answered with no check configured completes on its answer alone, and the report
-    // says which claim is being made by carrying the check (or its absence) in the trace.
+    report.compactions = ctx_.compaction_count();
+    report.unfinished_items = ctx_.open_checklist_items();
+
+    // `completed` is THREE observed facts, not a verdict: the model answered, its own
+    // checklist has nothing left open, and -- when the operator configured a check --
+    // that check's latest reading passed. A run that answered with no check configured
+    // completes on the first two alone, and the report says which claim is being made by
+    // carrying the check (or its absence) in the trace.
+    //
+    // The checklist clause is the 2026-08-08 addition, and it is arithmetic rather than
+    // judgement: the list is the MODEL'S OWN, written by its own `plan` call. A run that
+    // ended with 10 of its own 10 items open and reported completed=true was not making a
+    // debatable claim, it was contradicting itself -- and `unfinished_items` was computed
+    // AFTER this block, so the number existed and simply was not consulted.
+    //
+    // This still says nothing about whether the work is right. It says the model did not
+    // finish the list it wrote.
     if (report.termination_reason == "ended") {
+        const bool list_clear = report.unfinished_items == 0;
         if (config_.operator_verify_contract.empty()) {
-            report.completed = true;
+            report.completed = list_clear;
         } else {
             // A run that wrote nothing never triggered the post-write reading; take one
             // now so the ending is judged against the workspace as the run left it.
             if (!ctx_.last_check().has_value()) {
                 run_operator_check("final");
             }
-            report.completed =
-                ctx_.last_check().has_value() && ctx_.last_check()->passed;
+            report.completed = list_clear && ctx_.last_check().has_value() &&
+                               ctx_.last_check()->passed;
         }
     }
-
-    report.compactions = ctx_.compaction_count();
-    report.unfinished_items = ctx_.open_checklist_items();
     emit("run_end", {{"termination_reason", report.termination_reason},
                      {"iterations", std::to_string(report.iterations)},
                      {"completed", report.completed ? "true" : "false"},
