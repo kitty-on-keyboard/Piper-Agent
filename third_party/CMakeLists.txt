@@ -6,7 +6,7 @@
 #   simdjson 4.6.1   -- bakeoff corpus loaders (verbatim v1 code depends on it)
 #   pcre2 10.43      -- frankentok's pretokenizer (Split regex read from tokenizer.json)
 #   utf8proc 2.x     -- frankentok's NFC normalizer (tokenizer.json declares NFC)
-#   nlohmann_json    -- frankentok's tokenizer.json parse (header-only)
+#   lmp_nlohmann     -- frankentok's tokenizer.json parse (header-only)
 #   frankentok       -- mlx_qwen_tokenizer: the Qwen 3.6 tokenizer, HF-parity verified
 #                       (15,045 cases id-identical, exact streaming decode, binary cache)
 #   parsephony       -- JSON PDA + Qwen 3.6 XML ToolCallGuard + token mask engine,
@@ -33,8 +33,19 @@ set(UTF8PROC_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(utf8proc EXCLUDE_FROM_ALL)
 
 # --- nlohmann (header-only) -------------------------------------------------
-add_library(nlohmann_json INTERFACE)
-target_include_directories(nlohmann_json SYSTEM INTERFACE
+#
+# NOT named `nlohmann_json`, which is what this was until 2026-08-08. That is the target
+# name nlohmann's own CMakeLists creates, and MLX fetches nlohmann/json unconditionally
+# (mlx/CMakeLists.txt "Downloading json") -- so with -DLMP_WITH_MLX=ON the two collided
+# and configuration failed outright with "another target with the same name already
+# exists". Squatting on an upstream target name only works until something upstream
+# wants it.
+#
+# The vendored copy is v3.11.3, the same release MLX pulls, so the two coexisting in one
+# build is a duplicate header set and not a version conflict -- and MLX consumes its copy
+# PRIVATE, so nothing of ours sees it.
+add_library(lmp_nlohmann INTERFACE)
+target_include_directories(lmp_nlohmann SYSTEM INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/nlohmann/include")
 
 # --- frankentok -------------------------------------------------------------
@@ -52,7 +63,7 @@ target_include_directories(frankentok
                 "${CMAKE_CURRENT_SOURCE_DIR}/frankentok"
                 # pretokenizer.h includes <pcre2.h>, generated into pcre2's build dir
                 "${CMAKE_CURRENT_BINARY_DIR}/pcre2")
-target_link_libraries(frankentok PUBLIC pcre2-8 PRIVATE nlohmann_json utf8proc)
+target_link_libraries(frankentok PUBLIC pcre2-8 PRIVATE lmp_nlohmann utf8proc)
 target_compile_definitions(frankentok PRIVATE PCRE2_CODE_UNIT_WIDTH=8 UTF8PROC_STATIC)
 target_compile_features(frankentok PUBLIC cxx_std_20)
 target_compile_options(frankentok PRIVATE -O2 -w)

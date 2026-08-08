@@ -13,6 +13,8 @@ target_link_libraries(lmp_surface PRIVATE lmp_warnings lmp_assertions
 add_executable(lmp_sidecar sidecar.cpp)
 target_link_libraries(lmp_sidecar PRIVATE lmp_warnings lmp_assertions
   lmp_surface lmp_loop lmp_tools lmp_context lmp_model lmp_platform)
+# MLX opens its Metal kernels from beside the executable. No-op when MLX is off.
+lmp_stage_metallib(lmp_sidecar)
 
 # `cmake --build build --target vsix` produces extension/lm-pipe.vsix with THIS binary
 # inside it, verified by hash. Not part of `all`: packaging is a deliberate act, and a

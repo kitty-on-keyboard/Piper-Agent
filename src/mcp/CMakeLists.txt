@@ -16,7 +16,7 @@ add_library(lmp_mcp
 target_include_directories(lmp_mcp PUBLIC "${PROJECT_SOURCE_DIR}")
 target_link_libraries(lmp_mcp
   PRIVATE lmp_warnings lmp_assertions
-  PUBLIC nlohmann_json)
+  PUBLIC lmp_nlohmann)
 target_compile_features(lmp_mcp PUBLIC cxx_std_20)
 
 # --- demo binaries ----------------------------------------------------------

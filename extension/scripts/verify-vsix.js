@@ -15,7 +15,9 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const vsix = path.join(root, "lm-pipe.vsix");
-const built = path.resolve(root, "..", "build", "src", "surface", "lmp_sidecar");
+const buildDir = path.resolve(root, "..", "build", "src", "surface");
+const built = path.join(buildDir, "lmp_sidecar");
+const builtMetallib = path.join(buildDir, "mlx.metallib");
 
 function die(msg) {
   console.error(`verify-vsix: ${msg}`);
@@ -55,3 +57,42 @@ if (packaged !== current) {
 }
 
 console.log(`verify-vsix: ok, sidecar sha256 ${current.slice(0, 16)}...`);
+
+// The metallib has exactly the same failure shape as the sidecar, one layer down: MLX
+// opens it at runtime from beside the executable, so a package that omits it installs
+// cleanly and dies at the first GPU op with "failed to load the default metallib" --
+// which reads like a driver or hardware problem, not a packaging one. Only checked when
+// the build produced one; -DLMP_WITH_MLX=OFF is a legitimate package without it.
+if (fs.existsSync(builtMetallib)) {
+  const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), "lmp-vsix-mtl-"));
+  try {
+    execFileSync("unzip", ["-o", "-q", vsix, "extension/bin/mlx.metallib", "-d", tmp2], {
+      stdio: "pipe",
+    });
+  } catch (e) {
+    die(
+      "the build has an mlx.metallib but the package does not. The extension will " +
+        "install cleanly and fail at the first GPU op with a missing-metallib error. " +
+        "Run `npm run stage-sidecar` and package again."
+    );
+  }
+  const packagedMtl = sha(
+    fs.readFileSync(path.join(tmp2, "extension", "bin", "mlx.metallib"))
+  );
+  const currentMtl = sha(fs.readFileSync(builtMetallib));
+  fs.rmSync(tmp2, { recursive: true, force: true });
+  if (packagedMtl !== currentMtl) {
+    die(
+      `the packaged mlx.metallib is NOT the one that was just built.\n` +
+        `  packaged sha256 ${packagedMtl}\n` +
+        `  built    sha256 ${currentMtl}\n` +
+        `A metallib compiled for a different deployment target will not load.`
+    );
+  }
+  console.log(`verify-vsix: ok, metallib sha256 ${currentMtl.slice(0, 16)}...`);
+} else {
+  console.log(
+    "verify-vsix: no mlx.metallib in the build -- packaging an MLX-OFF sidecar, which " +
+      "refuses at load() rather than running a model."
+  );
+}
