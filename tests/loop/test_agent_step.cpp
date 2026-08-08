@@ -10,7 +10,9 @@
 // tokens are the subject. That is a genuine need for the real vocab; this is not.
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "src/context/context.hpp"
@@ -39,6 +41,19 @@ const model::QwenTokenizer& mini_vocab() {
         }
     }
     return tok;
+}
+
+std::string temp_dir() {
+    const char* base = std::getenv("TMPDIR");
+    std::string tmpl = std::string(base != nullptr ? base : "/tmp") + "/lmp_agent_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    const char* made = ::mkdtemp(buf.data());
+    return made != nullptr ? std::string(made) : std::string();
+}
+
+void write_text(const std::string& path, std::string_view bytes) {
+    (void)platform::write_file_atomic(path, bytes);
 }
 
 tools::WorkspaceContext workspace(const std::string& root) {
@@ -362,6 +377,39 @@ TEST(a_text_only_turn_in_debug_mode_ends_the_run_as_ended) {
 
     CHECK_EQ(report.termination_reason, std::string("ended"));
     CHECK_EQ(report.iterations, 2);
+}
+
+// The workspace's own build command, adopted when the operator configured none.
+//
+// This exists because the post-write check is the ONLY verification this harness runs and
+// it defaulted to empty -- so out of the box a writing run had no feedback loop. Measured
+// 2026-08-08: nine files rewritten, `swift build` run ONCE at turn 22, then 44 turns of
+// editing against that one stale error list.
+//
+// The negative cases carry the weight. A wrong guess costs a shell call after every write
+// and teaches the model to distrust the check, so "no marker" and "two markers" must both
+// answer empty rather than pick something plausible.
+TEST(an_obvious_build_command_is_detected_and_an_ambiguous_one_is_not) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    // Nothing recognisable: no guess.
+    CHECK_EQ(loop::detected_verify_command(root), std::string(""));
+
+    write_text(root + "/Package.swift", "// swift-tools-version:6.0\n");
+    CHECK_EQ(loop::detected_verify_command(root), std::string("swift build"));
+
+    // TWO build systems in one root is exactly the ambiguity this refuses to guess
+    // through -- it answers empty rather than picking the one it happened to see first.
+    write_text(root + "/Cargo.toml", "[package]\n");
+    CHECK_EQ(loop::detected_verify_command(root), std::string(""));
+
+    (void)::system(("rm -f " + root + "/Package.swift").c_str());
+    CHECK_EQ(loop::detected_verify_command(root), std::string("cargo build"));
+
+    (void)::system(("rm -rf " + root).c_str());
+    // A root that is not there at all is not a crash and not a guess.
+    CHECK_EQ(loop::detected_verify_command(root), std::string(""));
 }
 
 // A run does not get to report `completed` while its OWN checklist has items open.
