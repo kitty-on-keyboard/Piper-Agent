@@ -265,6 +265,59 @@ bool is_content_read(const std::string& tool) {
 
 } // namespace
 
+// The build command this workspace obviously has, or empty when it is not obvious.
+//
+// WHY THE HARNESS GUESSES AT ALL. The post-write check is the only verification this
+// harness performs, and it defaulted to empty -- so out of the box, a writing run had no
+// feedback loop whatsoever. Measured 2026-08-08: nine files rewritten, `swift build` run
+// ONCE at turn 22, then 44 turns of editing against that one stale error list. Asking the
+// operator to configure a build command before the agent can check its own work is not a
+// setting, it is the agent not working.
+//
+// ONLY UNAMBIGUOUS MARKERS. Each of these names exactly one build command for the whole
+// workspace with no configuration step in between. Deliberately absent: CMakeLists.txt
+// (the command depends on a build directory that may not be configured), package.json
+// (`build` may not exist as a script, and may mean bundling rather than checking), and
+// Makefile (the default target is anyone's guess). A wrong guess is worse than none: it
+// spends a shell call per write and teaches the model to distrust the check.
+//
+// The operator's own setting always wins -- this is consulted only when theirs is empty.
+std::string detected_verify_command(const std::string& workspace_root) {
+    platform::WorkspaceFs fs(workspace_root);
+    if (!fs.valid()) {
+        return {};
+    }
+    const platform::DirectoryContents root = fs.list_directory(".");
+    if (!root.ok()) {
+        return {};
+    }
+    bool package_swift = false;
+    bool cargo_toml = false;
+    bool go_mod = false;
+    for (const platform::DirectoryEntry& e : root.entries) {
+        if (e.kind != platform::DirectoryEntryKind::File) {
+            continue;
+        }
+        package_swift = package_swift || e.name == "Package.swift";
+        cargo_toml = cargo_toml || e.name == "Cargo.toml";
+        go_mod = go_mod || e.name == "go.mod";
+    }
+    // One marker or none. Two build systems in one root is exactly the ambiguity this
+    // refuses to guess through.
+    const int markers = static_cast<int>(package_swift) + static_cast<int>(cargo_toml) +
+                        static_cast<int>(go_mod);
+    if (markers != 1) {
+        return {};
+    }
+    if (package_swift) {
+        return "swift build";
+    }
+    if (cargo_toml) {
+        return "cargo build";
+    }
+    return "go build ./...";
+}
+
 Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
              tools::Registry& registry, context::ContextStore& ctx,
              platform::EventLogWriter& log, const platform::Clock& clock,
@@ -299,25 +352,27 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
                             {"samplable", std::to_string(mode_specs_.size())},
                             {"of", std::to_string(registry_.guard_specs().size())}});
     }
+    if (config_.operator_verify_contract.empty() && policy_.allow_workspace_writes) {
+        // A WRITING RUN WITH NO CHECK HAS NO FEEDBACK LOOP AT ALL. Rather than leave that
+        // as a silent default, adopt the workspace's obvious build command when it has
+        // one. See detected_verify_command() for why the detection is deliberately narrow.
+        std::string detected = detected_verify_command(registry_.workspace().root);
+        if (!detected.empty()) {
+            config_.operator_verify_contract = detected;
+            emit("verify_contract_detected",
+                 {{"contract", detected},
+                  {"why", "no verify_contract configured; adopted from the workspace"}});
+        }
+    }
     if (!config_.operator_verify_contract.empty()) {
         emit("operator_contract", {{"contract", config_.operator_verify_contract}});
     } else if (policy_.allow_workspace_writes) {
-        // A WRITING RUN WITH NO CHECK HAS NO FEEDBACK LOOP, and that has to be visible
-        // rather than merely absent. The post-write check is the ONLY verification this
-        // harness performs; with it empty, nothing the model writes is ever read back by
-        // anything, and the run's only evidence is whatever it thinks to gather itself.
-        //
-        // Measured on 2026-08-08: a dashboard rewrite ran `swift build` ONCE at turn 22,
-        // then spent 44 more turns editing against that same stale error list -- 24
-        // writes, zero verifications -- and re-derived the same wrong diagnosis until the
-        // budget ran out. A configured check would have put fresh compiler output in
-        // front of it after every one of those writes.
-        //
-        // Emitted, not enforced: an empty contract is a legitimate configuration (a
-        // read-only question, a project with no build command) and the harness does not
-        // get to insist. But it stops being a silent default.
+        // Nothing configured and nothing detected: the run genuinely has no verification,
+        // and that is worth one loud line in the trace rather than an absence. It stays a
+        // legitimate state -- a read-only question, a project with no build command -- so
+        // this is emitted, not enforced.
         emit("no_operator_contract",
-             {{"why", "writing mode with no verify_contract configured"},
+             {{"why", "writing mode, no verify_contract configured and none detected"},
               {"consequence", "no check runs after any write; `completed` rests on the "
                               "model's own answer and its own checklist"}});
     }
