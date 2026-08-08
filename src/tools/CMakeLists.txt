@@ -21,7 +21,7 @@ target_include_directories(lmp_tools PUBLIC "${PROJECT_SOURCE_DIR}")
 # at L1, so the include direction is allowed; the link must follow.
 target_link_libraries(lmp_tools
   PRIVATE lmp_warnings lmp_assertions simdjson lmp_pcc
-  PUBLIC lmp_platform lmp_model parsephony lmp_mcp nlohmann_json)
+  PUBLIC lmp_platform lmp_model parsephony lmp_mcp lmp_nlohmann)
 
 # A diagnostic driver, not a test: points McpHost at a real third-party MCP server and
 # prints what the agent would get. The gate tests drive our own demo server, which cannot

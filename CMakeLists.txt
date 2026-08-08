@@ -1,4 +1,40 @@
 cmake_minimum_required(VERSION 3.24)
+
+# The oldest macOS a shipped build runs on. STATED, and stated BEFORE project(), because
+# the alternative is not "no opinion" -- it is an accidental one. Left unset, MLX compiled
+# its objects and its metallib for whatever this machine happens to run (26.5.2) while our
+# own targets linked at 26.0: ~120 "built for newer macOS version" linker warnings, and
+# the developer's OS silently becomes the product's minimum. A metallib will not load
+# below the version it was compiled for, so that surfaces at a user's first GPU call
+# rather than here.
+#
+# 26.2 IS A PRODUCT DECISION, made deliberately for performance (Sean, 2026-08-08), not a
+# build tuning knob somebody flipped. It is the threshold at which MLX compiles its M5
+# neural-accelerator kernels -- quantized_nax, steel_gemm_*_nax, steel_attention_nax --
+# which target the matrix units on M5-class GPUs. Below it MLX defines MLX_METAL_NO_NAX
+# and every matrix kernel takes the general path. Difusio measured 3.4x end-to-end on one
+# M5 Pro transformer forward from that difference alone.
+#
+# WHAT IT COSTS: macOS 26.2 becomes the minimum this product runs on, full stop. A
+# metallib will not load below the version it was compiled for, so an older machine fails
+# at the first GPU call rather than degrading. Shipping both would mean two metallibs and
+# a runtime choice, which MLX's build is not arranged to produce.
+#
+# WHAT IT DOES NOT COST: older HARDWARE. MLX checks is_nax_available() at runtime (M5-class
+# GPU) and falls back on its own, so a NAX build on an M4 is identical, not slower.
+#
+# Dropping back to "15.0" is the entire rollback, and is also the thing to compare against
+# if a NAX kernel is ever suspected of being wrong.
+#
+# The guard matters: CMake always has this cache entry (empty by default), so a plain
+# set(... CACHE ...) would be silently ignored, which is how this came to be unset at all.
+# Note it also means an EXISTING build dir keeps its old value -- pass
+# -DCMAKE_OSX_DEPLOYMENT_TARGET=... explicitly to change one in place.
+if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING
+      "Minimum macOS. >= 26.2 enables MLX's M5 accelerator kernels (NAX)." FORCE)
+endif()
+
 project(lm_pipe2 CXX)
 
 # LM_Pipe v2 -- Apple Silicon only. Unified memory is assumed, not abstracted over.
