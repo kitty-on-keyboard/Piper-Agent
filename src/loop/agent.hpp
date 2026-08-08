@@ -83,6 +83,16 @@ struct HitlThresholds {
 // Opaque / irreversible calls cannot be waved through by a remembered prefix.
 [[nodiscard]] bool allowlist_may_auto_approve(const tools::RiskHint& hint) noexcept;
 
+// The build command this workspace obviously has, or empty when it is not obvious.
+//
+// Consulted only when the operator configured no verify_contract and the mode can write,
+// because a writing run with no check has no feedback loop at all. Deliberately narrow:
+// it recognises Package.swift / Cargo.toml / go.mod and nothing else, and refuses to
+// answer when a root carries more than one. See the definition for why CMake, npm and
+// make are excluded. Exposed rather than file-static so the mapping is unit-testable
+// without spawning a shell.
+[[nodiscard]] std::string detected_verify_command(const std::string& workspace_root);
+
 // Whether the operator has already said yes to this exact command.
 //
 // Matches on equality, or on `entry` followed by a space -- and NEVER on a command
