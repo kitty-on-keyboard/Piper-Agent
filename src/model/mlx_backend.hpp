@@ -50,6 +50,13 @@ struct MemoryReport {
 
 [[nodiscard]] MemoryReport mlx_memory_report();
 
+// The ceiling this process put on MLX's allocator cache at load, in bytes; 0 before any
+// load and in a build without MLX. MLX has no getter for it -- `set_cache_limit` only
+// returns the value it displaced -- so the number is remembered here rather than asked
+// for. It is logged next to `active` and `cache` because those three together are what
+// say whether a run is heading for the kill described in bound_allocator_cache().
+[[nodiscard]] std::size_t mlx_cache_limit();
+
 struct MlxBackendConfig {
     std::string model_dir; // required (S7.5: no defaultable security-relevant input)
     std::string draft_model_dir; // a DRAFT MODEL seam; empty = off. Unrelated to the
