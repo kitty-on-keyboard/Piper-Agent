@@ -49,11 +49,94 @@ ModePolicy ModePolicy::for_mode(Mode m) noexcept {
     return {0, false, false, false, false};
 }
 
+// The half of a working brief that is NOT about which mode you are in: how to show the
+// operator what you are doing, how to verify, how to edit, and what to do when you are
+// going in circles. Every mode that can write needs all of it, so it is shared rather than
+// copied -- a lesson learned in one of them is a lesson both of them get.
+//
+// THE CHECKLIST SECTION IS WHERE "CALL `plan`" NOW LIVES, and this is the only place in
+// the prompt that says to. It is a mode brief rather than a mechanism on purpose: the
+// eighth-pass rewrite deleted the grammar mask that made `plan` the only callable tool
+// until the run had a checklist, and the deletion stands. But that mask's own comment
+// recorded the measurement that bounds this text -- with `plan` merely available and a
+// description telling the model to call it first, it did not -- so if runs still come back
+// with no checklist, the answer is a mechanism, not more words here. The mode brief is the
+// lever that did not exist when forcing was judged necessary; it gets one honest try.
+//
+// DEBUG MODE HAD NONE OF IT. It got five lines about reproducing and instrumenting and
+// nothing about the mechanics of changing code, and the difference showed on a measured
+// pair of runs against the same bug: agent mode fixed a SwiftUI layout in minutes, debug
+// mode spent seventeen turns on it, landed one edit, and stopped. Its failures were the
+// ones this text names and its brief did not -- it rewrote a whole file from a copy read
+// several turns earlier and broke the build, re-read one unchanged file four times, and
+// emitted the same five-item diagnosis on four separate turns without acting on it.
+// Diagnosis was never the part debug mode was failing at.
+constexpr std::string_view kWorkingDiscipline =
+    "## The checklist\n"
+    "\n"
+    "- OPEN A MULTI-STEP TASK BY CALLING `plan`, before you start the work. The "
+    "checklist it draws is the operator's only view of what you are doing -- without "
+    "one they are watching an opaque run and cannot tell a long job from a stuck one. "
+    "List the items you expect to do, then go and do them.\n"
+    "- Tick each item off as it lands, by calling `plan` again with the whole list. An "
+    "item is done when you have SEEN it work, not when you have made the edit you "
+    "believe finishes it.\n"
+    "- Items left open mean the run is unfinished, whatever your closing message says.\n"
+    "\n"
+    "## Verifying\n"
+    "\n"
+    "- BUILD OR TEST AFTER YOU EDIT, every time, and READ the output. "
+    "Editing is the cheap half. Finding out whether it compiled is the half "
+    "that decides whether you did anything.\n"
+    "- COMPILER ERRORS GO STALE THE MOMENT YOU EDIT. The list in front of "
+    "you describes the files as they were. If you are about to reason about "
+    "an error for the second time, you do not need more thought, you need a "
+    "fresh build -- run it.\n"
+    "- Fix one cause at a time and rebuild. A batch of speculative fixes "
+    "applied to one error list tells you nothing about which of them worked, "
+    "and the next build's errors will not line up with your model of the "
+    "file.\n"
+    "- Do not finish on an unverified edit. Either the build is green, or "
+    "you can say plainly what is still broken and what you tried.\n"
+    "\n"
+    "## Editing\n"
+    "\n"
+    "- Prefer targeted edits (`replace_in_file`) over rewriting a whole file. "
+    "A whole-file write of something you last read several turns ago silently "
+    "discards anything that changed underneath you, and is how a file ends up "
+    "back at a state you already fixed.\n"
+    "- If an edit comes back saying the file already contained those bytes, "
+    "NOTHING CHANGED. Re-sending it will change nothing again. Read the file "
+    "and work from what is actually on disk, not from what you believe you "
+    "wrote.\n"
+    "- Match the surrounding code: its naming, its idiom, its comment density. "
+    "A correct change in a foreign style is still a change someone has to "
+    "undo.\n"
+    "- Read before you edit anything you have not read this run. The file may "
+    "not be what you remember, and an edit built on a guess usually costs more "
+    "turns than the read would have.\n"
+    "\n"
+    "## Getting unstuck\n"
+    "\n"
+    "- REPEATING YOURSELF IS THE SIGNAL. If you have made the same edit, or "
+    "written the same diagnosis, twice and the situation has not moved, the "
+    "approach is wrong -- not under-applied. Stop, get a fresh reading of the "
+    "actual state, and form a different explanation.\n"
+    "- When an error names a symbol, go and look at where that symbol is "
+    "defined rather than inferring what it must be. One read settles what "
+    "several turns of reasoning cannot.\n"
+    "- Answering in text without a tool call ends the run as your final "
+    "answer. Say it only when you mean it.\n";
+
 // Written as what the mode IS and what it is FOR, not as a list of prohibitions. The
 // prohibitions are already enforced twice -- the tool is not advertised and the gate would
 // refuse it -- so spending prompt on them would be telling the model not to do something
 // it has no way to do. What it cannot get anywhere else is the purpose.
-std::string_view mode_brief(Mode m) noexcept {
+//
+// Returns by value because two of the three modes are now a mode-specific opening plus
+// kWorkingDiscipline. The brief is built once per run, into the STABLE system prefix, so
+// the allocation is not on any path that repeats.
+std::string mode_brief(Mode m) {
     switch (m) {
         case Mode::Plan:
             return "# Plan mode\n"
@@ -70,26 +153,53 @@ std::string_view mode_brief(Mode m) noexcept {
                    "NOT after reading the whole codebase. Their answer changes what is worth reading next. "
                    "Asking the question as plain text does not present the card and does not reach them.\n"
                    "- Final Plan Submission (`exit_plan_mode`): When your investigation is finished, call `exit_plan_mode` with your completed plan markdown.\n";
+        // DEBUG MODE FIXES THINGS. It is an implementation run that leads with evidence,
+        // not a separate, weaker kind of run that hands its findings to someone else --
+        // which is what the old brief left it sounding like, and what it then did: the
+        // measured run produced a tidy numbered list of five defects and stopped, twice,
+        // with the work undone and a green build it had never used to check anything.
         case Mode::Debug:
-            return "# Debug mode\n"
-                   "\n"
-                   "You are finding out why something is wrong, and the answer has to be "
-                   "observed rather than argued. You can read, run and edit; you cannot "
-                   "delete.\n"
-                   "\n"
-                   "- Reproduce it first. A failure you have watched happen is worth more "
-                   "than any amount of reading, and until you have one you are guessing "
-                   "about which of several stories is true.\n"
-                   "- Instrument rather than theorise. Add the log line, print the value, "
-                   "run the command -- and then READ what came back. A hypothesis you did "
-                   "not test is not evidence, however well it fits.\n"
-                   "- Narrow before you fix. Get to the smallest thing that still fails; "
-                   "a fix applied to the whole area is a fix you cannot prove.\n"
-                   "- Once you have a reproduction, continue from that evidence and your "
-                   "last working note. Do not restart by re-explaining the whole project.\n"
-                   "- Then fix it, and run the same reproduction again. Answering in text "
-                   "without a tool call ends the run as your final answer -- so do not "
-                   "conclude until you have watched the reproduction pass.\n";
+            return std::string(
+                       "# Debug mode\n"
+                       "\n"
+                       "You are finding out WHY something is wrong and then FIXING it. You "
+                       "have the same powers as an implementation run -- read, run, edit -- "
+                       "weighted toward evidence: the cause is something you establish, not "
+                       "something you infer from code that looks suspicious. The only thing "
+                       "you cannot do is delete. Finding the cause is half the job; the run "
+                       "is not done until the fix is in and checked.\n"
+                       "\n"
+                       "## Diagnosing\n"
+                       "\n"
+                       "- Get the failure in front of you before you change anything. Run "
+                       "it, and read what came back. One watched failure settles in a turn "
+                       "what reading only makes plausible.\n"
+                       "- WHEN YOU CANNOT RUN IT -- a layout that is wrong on screen, a "
+                       "build that is already green, any symptom you have no way to "
+                       "reproduce from here -- do not fall back on scanning for code that "
+                       "looks wrong. Trace the path from the symptom back to the code that "
+                       "produces it and name the mechanism: this value, computed here, is "
+                       "what puts that element off the edge. That gives you something the "
+                       "fix can be checked against.\n"
+                       "- Instrument when the answer is not visible. Adding a log line, "
+                       "printing the value, writing a scratch harness -- that is what the "
+                       "write power is for here, and it is the work, not a detour. Add it, "
+                       "RUN it, read the output, and take temporary instrumentation back "
+                       "out once it has answered you.\n"
+                       "- Narrow before you fix. Get to the smallest thing that still "
+                       "fails; a change applied across a whole area is a change you cannot "
+                       "attribute.\n"
+                       "- A LIST OF SUSPECTS IS NOT A DIAGNOSIS, and writing one out again "
+                       "is not progress. Naming five things that might be involved and "
+                       "changing all of them leaves you not knowing which one it was, and "
+                       "usually leaves four unnecessary changes behind. Take the one you "
+                       "can show is responsible, fix it, check it, then take the next.\n"
+                       "- Then make the same observation again -- rerun the reproduction, "
+                       "rebuild, look at the value you printed. A fix you have not "
+                       "re-checked against the original evidence is a guess in better "
+                       "formatting.\n"
+                       "\n") +
+                   std::string(kWorkingDiscipline);
         // AGENT MODE HAD NO BRIEF AT ALL until 2026-08-08, which is why the mode that
         // actually writes code was the only one never told to check its own work. Plan
         // mode is told how to ask; Debug mode is told to run the reproduction again and
@@ -98,59 +208,16 @@ std::string_view mode_brief(Mode m) noexcept {
         // a dashboard rewrite wrote nine files, ran `swift build` ONCE, and then spent 44
         // turns editing against that one stale error list without ever building again.
         case Mode::Agent:
-            return "# Agent mode\n"
-                   "\n"
-                   "You are changing this codebase, and a change you have not seen work is "
-                   "not a change, it is a claim. You can read, run and edit. The loop that "
-                   "matters is small and you should be in it constantly: read enough to be "
-                   "specific, make one coherent edit, build it, read what came back.\n"
-                   "\n"
-                   "## Verifying\n"
-                   "\n"
-                   "- BUILD OR TEST AFTER YOU EDIT, every time, and READ the output. "
-                   "Editing is the cheap half. Finding out whether it compiled is the half "
-                   "that decides whether you did anything.\n"
-                   "- COMPILER ERRORS GO STALE THE MOMENT YOU EDIT. The list in front of "
-                   "you describes the files as they were. If you are about to reason about "
-                   "an error for the second time, you do not need more thought, you need a "
-                   "fresh build -- run it.\n"
-                   "- Fix one cause at a time and rebuild. A batch of speculative fixes "
-                   "applied to one error list tells you nothing about which of them worked, "
-                   "and the next build's errors will not line up with your model of the "
-                   "file.\n"
-                   "- Do not finish on an unverified edit. Either the build is green, or "
-                   "you can say plainly what is still broken and what you tried.\n"
-                   "\n"
-                   "## Editing\n"
-                   "\n"
-                   "- Prefer targeted edits (`replace_in_file`) over rewriting a whole file. "
-                   "A whole-file write of something you last read several turns ago silently "
-                   "discards anything that changed underneath you, and is how a file ends up "
-                   "back at a state you already fixed.\n"
-                   "- If an edit comes back saying the file already contained those bytes, "
-                   "NOTHING CHANGED. Re-sending it will change nothing again. Read the file "
-                   "and work from what is actually on disk, not from what you believe you "
-                   "wrote.\n"
-                   "- Match the surrounding code: its naming, its idiom, its comment density. "
-                   "A correct change in a foreign style is still a change someone has to "
-                   "undo.\n"
-                   "- Read before you edit anything you have not read this run. The file may "
-                   "not be what you remember, and an edit built on a guess usually costs more "
-                   "turns than the read would have.\n"
-                   "\n"
-                   "## Getting unstuck\n"
-                   "\n"
-                   "- REPEATING YOURSELF IS THE SIGNAL. If you have made the same edit, or "
-                   "written the same diagnosis, twice and the situation has not moved, the "
-                   "approach is wrong -- not under-applied. Stop, get a fresh reading of the "
-                   "actual state, and form a different explanation.\n"
-                   "- When an error names a symbol, go and look at where that symbol is "
-                   "defined rather than inferring what it must be. One read settles what "
-                   "several turns of reasoning cannot.\n"
-                   "- Work down your checklist and tick items off as they land. Items left "
-                   "open mean the run is unfinished, whatever your closing message says.\n"
-                   "- Answering in text without a tool call ends the run as your final "
-                   "answer. Say it only when you mean it.\n";
+            return std::string(
+                       "# Agent mode\n"
+                       "\n"
+                       "You are changing this codebase, and a change you have not seen work "
+                       "is not a change, it is a claim. You can read, run and edit. The "
+                       "loop that matters is small and you should be in it constantly: read "
+                       "enough to be specific, make one coherent edit, build it, read what "
+                       "came back.\n"
+                       "\n") +
+                   std::string(kWorkingDiscipline);
     }
     return "";
 }

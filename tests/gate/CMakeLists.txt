@@ -53,6 +53,14 @@ if(LMP_NODE)
     COMMAND "${LMP_NODE}"
             "${PROJECT_SOURCE_DIR}/extension/scripts/verify-transcript-order.js"
     LABELS gate)
+  # The other half of the same invariant, and invisible to the one above: that stub records
+  # the order nodes ARRIVE, and in this defect every node arrived in the right order and
+  # was then parented in the wrong place. Inline code spans were swept out of the sentence
+  # that wrote them and collected at the end of the bubble.
+  lmp_add_script_test(test_inline_code_order
+    COMMAND "${LMP_NODE}"
+            "${PROJECT_SOURCE_DIR}/extension/scripts/verify-inline-code-order.js"
+    LABELS gate)
 else()
   message(STATUS "transcript order check skipped: node not found")
 endif()

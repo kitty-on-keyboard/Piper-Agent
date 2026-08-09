@@ -149,6 +149,16 @@ bool looks_degenerate(const TextShape& s) {
            s.distinct * 100 <= s.lines * kDistinctCeilingPercent;
 }
 
+// A PER-TURN SEED DERIVED FROM THE RUN'S. SplitMix64's finalizer, which is cheap and
+// decorrelates adjacent indices -- turn 4 and turn 5 must not get neighbouring draw
+// sequences, since consecutive turns are exactly the ones that were coming out identical.
+std::uint64_t seed_for_turn(std::uint64_t run_seed, std::uint64_t turn) {
+    std::uint64_t z = run_seed + 0x9E3779B97F4A7C15ULL * (turn + 1);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
 const char* phase_name(model::TurnPhase phase) {
     switch (phase) {
         case model::TurnPhase::Think:
@@ -161,6 +171,29 @@ const char* phase_name(model::TurnPhase phase) {
             return "done";
     }
     return "unknown";
+}
+
+// The escapes a checklist item can carry, decoded. Anything else keeps its literal
+// character, which is what the line parser would have seen anyway.
+//
+// ONE TABLE, read by both JSON shapes below, because they differ only in their framing and
+// a second copy of this switch is a second copy to drift.
+std::string decode_json_escapes(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '\\' || i + 1 >= s.size()) {
+            out += s[i];
+            continue;
+        }
+        switch (s[++i]) {
+            case 'n': out += '\n'; break;
+            case 't': out += '\t'; break;
+            case 'r': break;
+            default: out += s[i]; break;
+        }
+    }
+    return out;
 }
 
 // A JSON array of strings, rewritten as one element per line. Empty when the text is not
@@ -187,39 +220,109 @@ std::string flatten_json_array(const std::string& raw) {
     }
 
     std::string out;
-    bool in_string = false;
-    std::string current;
-    for (std::size_t i = first; i < close; ++i) {
-        const char c = raw[i];
-        if (!in_string) {
-            if (c == '"') {
-                in_string = true;
-            }
+    std::size_t i = first;
+    while (i < close) {
+        if (raw[i] != '"') {
+            ++i;
             continue;
         }
-        if (c == '\\' && i + 1 < close) {
-            // Only the escapes that can appear in a checklist item. Anything else keeps
-            // its literal character, which is what the line parser would have seen anyway.
-            const char next = raw[++i];
-            switch (next) {
-                case 'n': current += '\n'; break;
-                case 't': current += '\t'; break;
-                case 'r': break;
-                default: current += next; break;
-            }
-            continue;
+        // Scan to the closing quote, stepping over an escaped one rather than ending on it.
+        const std::size_t begin = i + 1;
+        std::size_t end = begin;
+        while (end < close && raw[end] != '"') {
+            end += raw[end] == '\\' ? 2 : 1;
         }
-        if (c == '"') {
-            in_string = false;
-            out += current;
-            out += '\n';
-            current.clear();
-            continue;
+        if (end >= close) {
+            // An unterminated final string means the text was not the array it looked like.
+            return {};
         }
-        current += c;
+        out += decode_json_escapes(std::string_view(raw).substr(begin, end - begin));
+        out += '\n';
+        i = end + 1;
     }
-    // An unterminated final string means the text was not the array it looked like.
-    return in_string ? std::string{} : out;
+    return out;
+}
+
+// A bare JSON string, unquoted and decoded. Empty when the text is not one.
+//
+// THE SHAPE THAT COLLAPSED A 17-ITEM CHECKLIST INTO ONE ITEM. `items` is a list, so a
+// model that reaches for JSON sends one of two things: an array, which flatten_json_array
+// handles, or -- when it has joined the list up itself -- a single string, `"[x] a\n[x] b"`.
+// Nothing decoded the second shape, so the quotes and the two-character `\n` sequences
+// arrived as text, the line parser found no newline to split on, and the whole plan became
+// one item whose label began with a quote mark.
+//
+// MEASURED, run 3 of 2026-08-09: a 17-item checklist became `items=1 open=1` mid-run, the
+// panel showed the entire plan as one unfinished line with `\n[x]` through it, and the
+// model spent its last four turns re-sending the same call -- which is the `stalled`
+// ending the operator was shown, 28 turns into a 200-turn budget.
+std::string unquote_json_string(const std::string& raw) {
+    const std::size_t open = raw.find_first_not_of(" \t\r\n");
+    if (open == std::string::npos || raw[open] != '"') {
+        return {};
+    }
+    const std::size_t close = raw.find_last_not_of(" \t\r\n");
+    if (close <= open || raw[close] != '"') {
+        return {};
+    }
+    return decode_json_escapes(std::string_view(raw).substr(open + 1, close - open - 1));
+}
+
+// One item per line: an optional `- `/`* ` bullet, an optional `[ ]`/`[x]` marker, then the
+// text. Tolerant of prose-ish markdown, because refusing a checklist over a dash would be
+// theatre.
+std::vector<context::ChecklistItem> parse_checklist_lines(const std::string& source) {
+    std::vector<context::ChecklistItem> items;
+    std::size_t at = 0;
+    while (at < source.size()) {
+        std::size_t nl = source.find('\n', at);
+        if (nl == std::string::npos) {
+            nl = source.size();
+        }
+        std::string line = source.substr(at, nl - at);
+        at = nl + 1;
+        std::size_t i = line.find_first_not_of(" \t-*");
+        if (i == std::string::npos) {
+            continue;
+        }
+        bool done = false;
+        if (line.compare(i, 3, "[x]") == 0 || line.compare(i, 3, "[X]") == 0) {
+            done = true;
+            i += 3;
+        } else if (line.compare(i, 3, "[ ]") == 0) {
+            i += 3;
+        }
+        const std::size_t text_at = line.find_first_not_of(" \t", i);
+        if (text_at == std::string::npos) {
+            continue;
+        }
+        items.push_back({line.substr(text_at), done});
+    }
+    return items;
+}
+
+// Does this single item carry a SECOND checkbox? Then the list arrived unsplit: a real
+// one-item plan does not mention another item's marker.
+bool holds_a_whole_list(const std::string& text) {
+    return text.find("[ ]") != std::string::npos || text.find("[x]") != std::string::npos ||
+           text.find("[X]") != std::string::npos;
+}
+
+// Is there an ESCAPED newline here with the next item's checkbox behind it? That is an
+// unsplit list and nothing else.
+//
+// The bare `\n` test this replaces was not good enough: `[ ] make write_file emit \n rather
+// than a newline` is ONE item that talks about the escape, and decoding it tore the item in
+// half at the word "rather". What separates the two cases is what FOLLOWS the escape -- a
+// marker (through any bullet or indent) means another item starts there.
+bool escaped_newline_starts_an_item(const std::string& s) {
+    for (std::size_t at = s.find("\\n"); at != std::string::npos; at = s.find("\\n", at + 2)) {
+        const std::size_t next = s.find_first_not_of(" \t-*", at + 2);
+        if (next != std::string::npos && s[next] == '[') {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The note a cache-served repeat carries. A named constant because record_call() has to
@@ -257,6 +360,48 @@ bool observes_workspace(const std::string& tool) {
            tool == "list_dir" || tool == "search" || tool == "find_files" ||
            tool == "locate_symbol" || tool == "git_status" || tool == "git_diff" ||
            tool == "git_log";
+}
+
+// A PROGRESS DISPLAY IS NOT PROGRESS. `plan` writes no bytes and observes nothing -- it
+// restates the model's own checklist for the operator's panel -- so a turn that only
+// called it has neither written nor learned, whatever the panel now says.
+//
+// It counted as progress because observation_is_new() returns true for anything that does
+// not read the workspace, which reset the inert-turn counter on every call. Measured: 56
+// of one run's 98 tool calls were `plan`, and the ending could not see any of them.
+bool is_display_only(const std::string& tool) {
+    return tool == "plan";
+}
+
+// WHICH COPY OF THIS FILE IS THE FILE, said on the copy that is.
+//
+// Appended, never rewritten, so it costs nothing but the tokens: the stale snapshots stay
+// where they are and this says plainly that they are stale. That is the whole of what the
+// model was missing -- not room, not a better receipt, just an answer to "which of these
+// four copies is current".
+//
+// Only fires when the run is actually holding a superseded copy, so a first read and a
+// re-read of an unchanged file are both silent (the unchanged case has kRepeatNote).
+// MUST RUN LAST, after the repeat note and after the collapse. Both of those compare the
+// fresh result against what is already in the context, and both normalise with
+// without_cache_note() -- so a note appended ahead of them makes the comparison miss and
+// silently disables them. Measured the moment it was written the other way round: an
+// unchanged re-read got called stale, and the identity collapse stopped collapsing.
+void note_stale_copies(const context::ContextStore& ctx, const std::string& path,
+                       const std::string& current, tools::ToolResult& result) {
+    const std::size_t stale = ctx.stale_copies_of_path(path, current);
+    if (stale == 0) {
+        return;
+    }
+    result.summary += "\n[Note: this is the CURRENT content of " + path + ". " +
+                      std::to_string(stale) + " earlier cop" +
+                      (stale == 1 ? "y" : "ies") + " of this same file appear" +
+                      (stale == 1 ? "s" : "") +
+                      " higher up in this conversation and " +
+                      (stale == 1 ? "is" : "are") +
+                      " OUT OF DATE -- the file has been edited since. Work from this copy "
+                      "and ignore the earlier ones; do not read the file again to resolve "
+                      "the difference.]";
 }
 
 // read_many is excluded: its observation is a multi-file bundle, not one path key.
@@ -345,7 +490,7 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     // In the Agent rather than in the sidecar, so every client gets it -- the eval harness
     // and scripts/drive.py send a mode too, and a brief only the editor's runs received
     // would make the two disagree about what plan mode even is.
-    ctx_.set_mode_brief(std::string(mode_brief(config_.mode)));
+    ctx_.set_mode_brief(mode_brief(config_.mode));
 
     // WHAT THIS MODE TOOK AWAY, once, at the top of the run.
     if (!withheld_by_mode.empty()) {
@@ -423,44 +568,48 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     if (raw == nullptr) {
         return {false, "plan requires 'items'"};
     }
-    // ONE ITEM PER LINE -- unless the model sent a JSON array, which it does, because
-    // `items` is a list-shaped parameter and that is what a list looks like to a model
-    // that has spent its training on JSON tool calls.
+    // ONE ITEM PER LINE -- unless the model sent JSON, which it does, because `items` is a
+    // list-shaped parameter and that is what a list looks like to a model that has spent
+    // its training on JSON tool calls. Both JSON shapes are handled here, in the order that
+    // makes each test unambiguous, and each one is rewritten into the newline-separated
+    // list the line parser reads.
     //
-    // This parser split on '\n' and nothing else, so an array arrived as ONE line, the
-    // `[ ]` test failed against the leading `["`, and the entire array became a single
-    // checklist item whose text was its own JSON source.
-    const std::string flattened = flatten_json_array(*raw);
-    const std::string& source = flattened.empty() ? *raw : flattened;
-    std::size_t at = 0;
-    while (at < source.size()) {
-        std::size_t nl = source.find('\n', at);
-        if (nl == std::string::npos) {
-            nl = source.size();
+    // The line parser split on '\n' and nothing else, so JSON arrived as ONE line, the
+    // `[ ]` test failed against the leading `["` or `"[`, and the entire list became a
+    // single checklist item whose text was its own JSON source.
+    std::string source = flatten_json_array(*raw);
+    if (source.empty()) {
+        source = unquote_json_string(*raw);
+    }
+    if (source.empty()) {
+        source = *raw;
+    }
+    items = parse_checklist_lines(source);
+    // ESCAPED NEWLINES WITH NO QUOTES AROUND THEM: the same list, sent without the JSON
+    // framing that would have identified it. Retried only when the first parse found a
+    // single item AND an escape in it has another item's marker behind it, so an item that
+    // merely talks about a backslash-n keeps it.
+    if (items.size() == 1 && escaped_newline_starts_an_item(source)) {
+        std::vector<context::ChecklistItem> retry =
+            parse_checklist_lines(decode_json_escapes(source));
+        if (retry.size() > items.size()) {
+            items = std::move(retry);
         }
-        std::string line = source.substr(at, nl - at);
-        at = nl + 1;
-        // Tolerate a leading "- " and either bracket style; the model writes prose-ish
-        // markdown and refusing it over a dash would be theatre.
-        std::size_t i = line.find_first_not_of(" \t-*");
-        if (i == std::string::npos) {
-            continue;
-        }
-        bool done = false;
-        if (line.compare(i, 3, "[x]") == 0 || line.compare(i, 3, "[X]") == 0) {
-            done = true;
-            i += 3;
-        } else if (line.compare(i, 3, "[ ]") == 0) {
-            i += 3;
-        }
-        const std::size_t text_at = line.find_first_not_of(" \t", i);
-        if (text_at == std::string::npos) {
-            continue;
-        }
-        items.push_back({line.substr(text_at), done});
     }
     if (items.empty()) {
         return {false, "plan produced no items; give one item per line"};
+    }
+    // ONE ITEM CARRYING THE WHOLE LIST IS A PARSE FAILURE, NOT A ONE-ITEM PLAN, and the
+    // model has to be told so: every shape above can be defeated by a fourth one, and the
+    // failure this replaces was silent. A run set a 1-item checklist, read back "checklist
+    // set: 0/1 done" -- which is what a healthy one-item plan says -- and re-sent the same
+    // call until the run ended. An error is information; a plausible number is not.
+    if (items.size() == 1 && holds_a_whole_list(items[0].text)) {
+        return {false,
+                "plan got ONE item containing other checkbox markers, so the list arrived "
+                "unsplit and was not applied. Put each item on its own line with a real "
+                "newline between them, or send a JSON array of strings -- not one string "
+                "with \\n sequences inside it."};
     }
     const std::size_t open = static_cast<std::size_t>(std::count_if(
         items.begin(), items.end(), [](const context::ChecklistItem& c) { return !c.done; }));
@@ -575,8 +724,26 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     task.max_new_tokens = config_.max_new_tokens;
     task.sampling = config_.sampling;
     // config_.seed stays authoritative over the sampling block's own field: it is the
-    // one the run is reproducible from.
-    task.sampling.seed = config_.seed;
+    // one the run is reproducible from -- but it is the seed of the RUN, not of the turn,
+    // and handing the same value to every generation is what made stuck runs unbreakable.
+    //
+    // THE BACKEND BUILDS A FRESH Sampler PER GENERATION (mlx_backend.cpp) and seeds it
+    // from this field. With one constant for the whole run, every turn replayed the SAME
+    // sequence of draws; a model that had settled into a confident repetition then
+    // re-emitted it token for token, and nothing the harness appended to the prompt could
+    // shift it. That is why every repeat note and every nudge in every stuck trace has
+    // looked ignored -- they were being written into a prompt whose continuation had
+    // already been decided by the RNG.
+    //
+    // MEASURED, plan mode, ResMon, temperature 0.6: prompts of 2901 and 3042 tokens
+    // produced byte-identical 147-token generations; prompts of 3342 and 3586 produced
+    // byte-identical 238-token ones. Two independent draws agreeing for 238 tokens at
+    // that temperature does not happen -- the draws were not independent.
+    //
+    // Mixing the turn index in keeps a run REPRODUCIBLE, which is the property config_.seed
+    // exists for: turn n of a given config always gets the same seed. What it stops being
+    // is reproducible ACROSS turns of the same run, which was never a feature.
+    task.sampling.seed = seed_for_turn(config_.seed, turns_generated_++);
 
     // Hard model ceiling: prompt + reserved generation must fit. Compaction is supposed
     // to keep the prompt under context_budget_tokens, but a mis-set editor budget or a
@@ -922,7 +1089,15 @@ bool Agent::turn_made_progress(const TurnResult& turn) noexcept {
 bool Agent::observation_is_new(const std::string& name,
                                const std::vector<tools::ToolParamValue>& params,
                                const tools::ToolResult& result) const {
-    if (!result.ok() || !observes_workspace(name)) {
+    if (!result.ok()) {
+        return true;
+    }
+    // A malformed `plan` is caught above -- an error is information. A SUCCESSFUL one
+    // learns nothing by construction, so it must not reset the inert-turn counter.
+    if (is_display_only(name)) {
+        return false;
+    }
+    if (!observes_workspace(name)) {
         return true;
     }
     const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
@@ -966,6 +1141,11 @@ bool Agent::adopt_readonly_result(const std::string& name,
     // exists at all: a call is only eligible for it if it mutates nothing and executes
     // nothing, and the collapse touches only records already in the context.
     collapse_duplicate_read(name, params, result);
+    // LAST: the two mechanisms above both compare against the un-annotated bytes.
+    if (is_content_read(name) && result.ok()) {
+        note_stale_copies(ctx_, param_value(params, "path"),
+                          without_cache_note(result.summary), result);
+    }
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
                          {"read_bytes", std::to_string(result.bytes_read)},
@@ -1045,11 +1225,23 @@ void Agent::collapse_duplicate_read(const std::string& name,
     }
     const std::string path = param_value(params, "path");
     const std::string range = read_range(name, params);
-    const std::size_t collapsed = ctx_.supersede_duplicate_observation(
-        without_cache_note(result.summary),
-        "(" + path + (range.empty() ? "" : " lines " + range) +
-            " was read again below and is unchanged; this earlier identical copy is "
-            "collapsed to keep one copy in context)");
+    const std::string current = without_cache_note(result.summary);
+    std::size_t collapsed = ctx_.supersede_duplicate_observation(
+        current, "(" + path + (range.empty() ? "" : " lines " + range) +
+                     " was read again below and is unchanged; this earlier identical copy "
+                     "is collapsed to keep one copy in context)");
+    // AND THE COPIES THAT ARE NOT IDENTICAL, which are the ones that were doing the harm.
+    //
+    // Identity-only collapse removes duplicates and keeps every snapshot the run has since
+    // edited past -- so at the moment a file has been edited, which is exactly when the
+    // context holds contradictory copies of it, this mechanism reclaimed nothing at all.
+    // We are already paying the re-prefill by being here; superseding a copy known to be
+    // FALSE is worth more than superseding one merely known to be redundant.
+    collapsed += ctx_.supersede_stale_copies_of_path(
+        path, current,
+        "(" + path +
+            " was edited after this snapshot was taken and read again below; this earlier "
+            "copy is out of date and has been dropped. The current content is further down.)");
     if (collapsed == 0) {
         return;
     }
@@ -1286,6 +1478,11 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // The duplicate collapse, on the SAME success condition as everything above it: a call
     // that was refused or failed read nothing, so there is nothing to have duplicated.
     collapse_duplicate_read(name, params, result);
+    // LAST: the two mechanisms above both compare against the un-annotated bytes.
+    if (is_content_read(name) && result.ok()) {
+        note_stale_copies(ctx_, param_value(params, "path"),
+                          without_cache_note(result.summary), result);
+    }
 
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
@@ -1609,6 +1806,12 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         rec.assistant_text = turn.assistant_text;
         rec.tool_name = turn.tool_name;
         rec.tool_args_summary = preview_of(turn.tool_name, turn.tool_params);
+        rec.tool_call_text = call_surface_form(turn.tool_name, turn.tool_params);
+        // Whole-file reads are SNAPSHOTS, and the context has to be able to find the ones
+        // a later edit has invalidated. See ContextStore::stale_copies_of_path.
+        if (is_content_read(turn.tool_name) && turn.tool_result.ok()) {
+            rec.observed_path = param_value(turn.tool_params, "path");
+        }
         rec.observation = turn.tool_result.summary;
         rec.observation_is_error = !turn.tool_result.ok();
         rec.last_event_seq = log_.events_written();
@@ -1638,10 +1841,34 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         //
         // Observed: twelve consecutive turns, prompt `tokens=2044 messages=11` every
         // time, generation `tokens=4096` every time, until the wall clock killed it.
+        //
+        // AND IT MUST SAY WHICH PHASE RAN OUT, because the remedy differs and the model
+        // cannot see the counter. Capping inside the TOOL phase does not mean the model
+        // never got started -- it means the call it was emitting was too long to finish.
+        // The old text said "before any tool call was made; nothing ran" in every case,
+        // which reads as "you did not begin" and hid the only fact that would have
+        // changed the next move.
+        //
+        // Measured on a synthwave-theme run: two consecutive turns capped at 4030 and
+        // 4018 TOOL tokens, both whole-file rewrites of a file too big to emit in one
+        // generation. Told only that nothing ran, the model never learned the size was
+        // the problem -- it spent its last four turns re-reading that same file,
+        // byte-identically, and the run ended `stalled` with one of fourteen items done.
         if (turn.outcome == Outcome::LengthCapped) {
-            rec.observation =
-                "(generation hit the token cap before any tool call was made; "
-                "nothing ran.)";
+            if (turn.cap_phase == "tool") {
+                rec.observation =
+                    "(your tool call was CUT OFF after " + std::to_string(turn.tool_tokens) +
+                    " tokens -- too long to finish in one turn, so nothing ran and nothing "
+                    "changed on disk. Sending it again unchanged will hit the same limit. "
+                    "Make a SMALLER call: a targeted `replace_in_file` for the one section "
+                    "you are changing rather than a whole-file write, or split the change "
+                    "into several edits and apply them one at a time.)";
+            } else {
+                rec.observation = "(generation hit the token cap during " +
+                                  (turn.cap_phase.empty() ? std::string("this turn")
+                                                          : turn.cap_phase) +
+                                  "; no tool call was made and nothing ran.)";
+            }
             rec.observation_is_error = true;
         }
         ctx_.add_turn(std::move(rec));
@@ -1674,6 +1901,13 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             er.tool_args_summary = param_value(extra.params, "path");
             if (er.tool_args_summary.empty()) {
                 er.tool_args_summary = param_value(extra.params, "command");
+            }
+            // Batched calls carry their surface form too. A turn that read four files
+            // showed one call and three tool_responses with nothing that produced them,
+            // which is the same missing-call defect at four times the rate.
+            er.tool_call_text = call_surface_form(extra.tool_name, extra.params);
+            if (is_content_read(extra.tool_name) && extra.result.ok()) {
+                er.observed_path = param_value(extra.params, "path");
             }
             er.observation = extra.result.summary;
             er.observation_is_error = !extra.result.ok();
@@ -1768,9 +2002,23 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 // advice for a model that just called one and got back bytes it already
                 // had -- and it is exactly what the old single note told it, which is how
                 // a nudge came to reinforce the re-read loop it was meant to break.
+                //
+                // A `plan` TURN IS ITS OWN FAILURE AND NEEDS ITS OWN NOTE. The spun note
+                // below explains a byte-identical read or a no-op edit, and a model that
+                // restated its checklist did neither -- it read advice about files it never
+                // touched. Measured on the run that produced this: four plan-only turns,
+                // each one nudged with the file note, none of them broken out of.
+                const bool display_only_turn =
+                    spun && turn.extra_calls.empty() && is_display_only(turn.tool_name);
                 context::TurnRecord note;
                 note.observation =
-                    spun ? "[Note: That call changed nothing and returned nothing you did not "
+                    display_only_turn
+                    ? "[Note: That turn called only `plan`. Restating the checklist writes "
+                      "nothing and reads nothing, so the run is exactly where it was before "
+                      "it -- and the panel already shows the list you just sent. Do the next "
+                      "open item NOW: make the edit, or run the build to see where you stand. "
+                      "Turns that neither write nor learn anything end the run.]"
+                    : spun ? "[Note: That call changed nothing and returned nothing you did not "
                            "already have -- either the file was byte-identical to a copy already "
                            "in this conversation, or the edit matched but wrote no bytes. Calling "
                            "it again will produce the same result. Scroll up and use what is "
