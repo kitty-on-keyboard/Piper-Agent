@@ -930,7 +930,7 @@ bool start_mission(const std::string& id, const std::string& message,
     session.ctx = std::make_unique<context::ContextStore>(mission);
     // A little above the widest single result the tool layer can produce, so the door
     // catches a tool that forgot to bound itself without firing on a legitimate one.
-    session.ctx->set_observation_budget(32U << 10);
+    session.ctx->set_observation_budget(tools::kObservationBudgetBytes);
     // Loaded once into the STABLE part of the prompt: neither the repo's conventions nor
     // the agent's own notes change mid-run, so they cost one prefill for the whole run.
     session.ctx->set_project_instructions(

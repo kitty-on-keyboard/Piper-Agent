@@ -590,10 +590,6 @@ std::string Registry::tools_json(const std::function<bool(const ToolDecl&)>& inc
     return out;
 }
 
-// Cap on paths inside one read_many call. Matches TurnGrammar::kMaxCallsPerTurn so a
-// batched primitive cannot outrun the multi-call surface the model already has.
-inline constexpr std::size_t kReadManyMaxPaths = 4;
-
 // Newline-separated paths, or a JSON string array flattened the same way plan accepts.
 // Empty lines are skipped; the caller enforces the bound.
 std::vector<std::string> parse_read_many_paths(std::string_view raw) {
@@ -798,6 +794,27 @@ Registry::Registry(WorkspaceContext ctx)
                 }
             }
             summary += overflow_note;
+
+            // BOUND THE AGGREGATE. Each part is already inside max_model_read_bytes, but
+            // four of them are not, and the context store's door asserts on the total.
+            // Truncating here is what the assert's message asks for -- "the tool layer
+            // must bound it" -- and it is the tool layer that knows which files were read
+            // and can say so.
+            if (ctx_.max_observation_bytes > 0 &&
+                summary.size() > ctx_.max_observation_bytes) {
+                const std::size_t kept = ctx_.max_observation_bytes;
+                // Leave room for the note rather than emitting something the store will
+                // then clamp again, which would cut the explanation off mid-sentence.
+                const std::string note =
+                    "\n\n(read_many truncated: the files above total " +
+                    std::to_string(summary.size()) + " bytes, over the " +
+                    std::to_string(kept) +
+                    "-byte observation budget. Read fewer paths per call, or use "
+                    "read_slice for the parts you need.)";
+                const std::size_t room = kept > note.size() ? kept - note.size() : 0;
+                summary.resize(room);
+                summary += note;
+            }
             if (all_refused && !parts.empty()) {
                 ToolResult r = ToolResult::refused(summary);
                 r.bytes_read = bytes;
