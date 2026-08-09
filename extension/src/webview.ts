@@ -803,6 +803,7 @@ function markup(): string {
       <label>System prompt <b id="promptMode"></b></label>
       <textarea id="promptBox" placeholder="Empty uses the built-in Piper persona"></textarea>
     </div>
+    <div class="set"><label>View build <b id="viewBuild"></b></label></div>
   </div>
 </div>
 <div id="plan"></div>
@@ -1304,6 +1305,29 @@ function flushQueue() {
   feed.scrollTop = feed.scrollHeight;
 }
 
+// WHERE THE NEXT THING GOES, for every writer into the transcript.
+//
+// The caret is the write cursor, so anything being added lands BEFORE it when it is a
+// child of the container -- text and elements alike. There used to be two rules: drain()
+// inserted text before the caret while applyMd() appended elements past it, and any
+// container holding a caret that was not its last child split permanently in two, prose
+// before and elements after.
+//
+// MEASURED: "identified it as a Swift package (\`ResMon.xcodeproj\`, \`Package.swift\`)"
+// rendered as "identified it as a Swift package (, )" with every code span swept to the
+// end of the bubble and run together, since adjacent <code> siblings with no text between
+// them read as a single span. applyMd re-anchors the caret after each structural op, which
+// hid this whenever it ran -- but that re-anchoring is conditional on the context still
+// being the current one, and a bubble draining after the next has opened is exactly the
+// case where it stops. One rule cannot come apart that way.
+//
+// Pinned by scripts/verify-inline-code-order.js.
+function putIn(parent, node) {
+  if (caret && caret.parentNode === parent) parent.insertBefore(node, caret);
+  else parent.appendChild(node);
+  return node;
+}
+
 // Spends budget characters across as many jobs as it takes. Returns what it did not
 // spend, so a frame that runs out of queue does not busy-wait on the remainder.
 function drain(budget) {
@@ -1327,11 +1351,7 @@ function drain(budget) {
     job.at += take;
     budget -= take;
     pending -= take;
-    if (caret && caret.parentNode === target) {
-      target.insertBefore(document.createTextNode(chunk), caret);
-    } else {
-      target.appendChild(document.createTextNode(chunk));
-    }
+    putIn(target, document.createTextNode(chunk));
     if (job.at >= job.text.length) queue.shift();
   }
   return budget;
@@ -1375,7 +1395,7 @@ function applyMd(ctx, e) {
     ctx.lists.length = 0;
     const h = document.createElement('h' + Math.min(6, Math.max(1, e.level)));
     h.className = 'md-h';
-    ctx.bubble.appendChild(h);
+    putIn(ctx.bubble, h);
     ctx.headEl = h;
   } else if (e.kind === 'headingClose') {
     ctx.headEl = null; ctx.afterBlock = true;
@@ -1392,14 +1412,14 @@ function applyMd(ctx, e) {
     }
     const code = document.createElement('code');
     pre.appendChild(code);
-    ctx.bubble.appendChild(pre);
+    putIn(ctx.bubble, pre);
     ctx.codeEl = code;
   } else if (e.kind === 'codeClose') {
     ctx.codeEl = null; ctx.afterBlock = true;
   } else if (e.kind === 'inlineOpen') {
     const c = document.createElement('code');
     c.className = 'md-inline';
-    ctx.target().appendChild(c);
+    putIn(ctx.target(), c);
     ctx.inlineEl = c;
   } else if (e.kind === 'inlineClose') {
     ctx.inlineEl = null;
@@ -1409,14 +1429,14 @@ function applyMd(ctx, e) {
     if (e.level < ctx.lists.length) {
       const cur = ctx.lists[e.level];
       const li = document.createElement('li');
-      cur.ul.appendChild(li);
+      putIn(cur.ul, li);
       cur.li = li;
       ctx.lists.length = e.level + 1;
     } else {
       const ul = document.createElement(e.ordered ? 'ol' : 'ul');
       ul.className = 'md-list';
       if (e.ordered && e.start > 1) ul.setAttribute('start', String(e.start));
-      ctx.blockParent().appendChild(ul);
+      putIn(ctx.blockParent(), ul);
       const li = document.createElement('li');
       ul.appendChild(li);
       ctx.lists.push({ ul, li });
@@ -1424,7 +1444,7 @@ function applyMd(ctx, e) {
   } else if (e.kind === 'paraBreak') {
     ctx.lists.length = 0;
     if (ctx.afterBlock) ctx.afterBlock = false;
-    else ctx.bubble.appendChild(document.createTextNode('\\n'));
+    else putIn(ctx.bubble, document.createTextNode('\\n'));
   }
   // ONLY for the context the caret actually belongs to.
   //
@@ -1758,6 +1778,11 @@ const put = (key, value) => {
   settings[key] = value;
   api.postMessage({ kind: 'setting', key, value });
 };
+
+// See viewBuildId(): the one thing on screen that says which VIEW code is running, as
+// against which sidecar. They update on different schedules and the event log only knows
+// about the sidecar.
+$('viewBuild').textContent = VIEW_BUILD;
 
 // One panel at a time: two stacked disclosures push the composer off a narrow sidebar.
 $('gear').onclick = () => {
@@ -2217,9 +2242,18 @@ window.addEventListener('message', (e) => {
   if (kind === 'checklist') {
     const items = JSON.parse(payload.items_json);
     const done = items.filter((i) => i.done).length;
+    // A CHECKLIST THE READER FOLDED AWAY STAYS FOLDED. The card is rebuilt from scratch on
+    // every \`plan\` call, and \`open = true\` was hardcoded into the rebuild -- so collapsing
+    // it bought nothing: the next thing the agent did sprang it back open, and on a run
+    // that restates its checklist every few turns that is every few turns.
+    //
+    // Read before the wipe, because the wipe is what destroys the state being read. Absent
+    // (first render of a run) means open, which is where a new checklist should start.
+    const prev = $('plan').querySelector('details');
+    const wasOpen = prev ? prev.open : true;
     $('plan').innerHTML = '';
     const det = document.createElement('details');
-    det.open = true;
+    det.open = wasOpen;
     const sum = document.createElement('summary');
     sum.textContent = 'Checklist · ' + done + '/' + items.length;
     const ul = document.createElement('ul');
@@ -2471,10 +2505,36 @@ api.postMessage({ kind: 'ready' });
 `;
 }
 
+// WHICH VIEW CODE IS ACTUALLY RUNNING, shown in the settings drawer.
+//
+// The sidecar binary is re-read from disk on every run; this script is read once, when the
+// window loads. So an editor left open across a reinstall runs the NEW sidecar against the
+// OLD renderer -- and the event log cannot see the difference, because the log is written
+// by the sidecar. That combination has already cost one round of "the C++ fix landed and
+// the view fix did not", with no way to tell it from an incomplete fix.
+//
+// Derived from the shipped script text itself rather than from a version field or a build
+// step, so it cannot be stale by construction: it changes exactly when the view changes,
+// and `git stash`-ing a fix changes it back.
+function viewBuildId(text: string): string {
+  // FNV-1a, 32-bit. A short label a human reads off the screen and compares, not a
+  // cryptographic digest -- collisions between two builds someone is choosing between are
+  // not the failure mode here.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
 export function webviewHtml(nonce: string): string {
+  const body = script();
+  const build = viewBuildId(body);
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>${styles()}</style></head><body>${markup()}
-<script nonce="${nonce}">${script()}</script></body></html>`;
+<script nonce="${nonce}">const VIEW_BUILD = ${JSON.stringify(build)};
+${body}</script></body></html>`;
 }

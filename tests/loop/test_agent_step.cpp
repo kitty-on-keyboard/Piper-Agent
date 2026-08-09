@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <fstream>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -240,6 +241,430 @@ TEST(a_tool_turn_with_empty_answer_keeps_a_working_note_from_think) {
     CHECK(note_in_prompt);
 }
 
+// A RE-READ AFTER AN EDIT MUST SAY WHICH COPY IS THE FILE.
+//
+// The context is append-only, so every whole-file read leaves a snapshot in it. Once the
+// run edits that file, every earlier snapshot is a statement that is no longer true --
+// and the collapse that existed could not touch them: it matched on byte IDENTITY, so by
+// construction it removed only copies that were still correct and kept every copy that
+// had gone wrong. A model holding four copies of one file, all labelled alike and three
+// of them false, cannot tell which is the file. Reading it again is the rational move,
+// and that read appends a fifth copy.
+//
+// MEASURED, one 25-turn run: DashboardWindow.swift read SIX times around three small
+// edits, prompt 41,849 -> 61,398 tokens, ended stalled with 8 of 10 items open -- while
+// each edit receipt said, correctly, "this is the whole change, so you do not need to read
+// the file back to see it". The receipt was not the missing piece; an answer to "which of
+// these copies is current" was.
+//
+// The note is APPENDED, never rewritten, so it costs tokens and not a re-prefill.
+TEST(a_read_after_an_edit_says_the_earlier_copies_are_stale) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_stale_snapshot_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    // Long enough to look like a source file rather than a one-liner.
+    std::string before = "// header\n";
+    for (int i = 0; i < 40; ++i) {
+        before += "let value" + std::to_string(i) + " = compute()\n";
+    }
+    { std::ofstream f(root + "/App.swift"); f << before; }
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nApp.swift\n</parameter>\n</function>\n";
+    const std::string edit_body =
+        "<function=replace_in_file>\n<parameter=path>\nApp.swift\n</parameter>\n"
+        "<parameter=old_text>\n// header\n</parameter>\n"
+        "<parameter=new_text>\n// CHANGED HEADER\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body, "first look"));
+    backend.enqueue_response(call_turn(tok, edit_body, "editing"));
+    backend.enqueue_response(call_turn(tok, read_body, "looking again"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("edit it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    // The SECOND read carries the note; the first cannot, since nothing preceded it.
+    std::size_t reads = 0;
+    bool first_read_clean = true;
+    bool second_read_warns = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.tool_name != "read_file") {
+            continue;
+        }
+        ++reads;
+        const bool warns = rec.observation.find("OUT OF DATE") != std::string::npos;
+        if (reads == 1 && warns) {
+            first_read_clean = false;
+        }
+        if (reads == 2 && warns) {
+            second_read_warns = true;
+        }
+    }
+    REQUIRE(reads == 2);
+    CHECK(first_read_clean);
+    CHECK(second_read_warns);
+
+    // It must name the file and tell the model not to go round again.
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.observation.find("OUT OF DATE") == std::string::npos) {
+            continue;
+        }
+        CHECK(rec.observation.find("App.swift") != std::string::npos);
+        CHECK(rec.observation.find("do not read the file again") != std::string::npos);
+    }
+}
+
+// An UNCHANGED re-read must not claim anything is out of date -- that is the repeat note's
+// case, and two notes contradicting each other is worse than either alone.
+TEST(an_unchanged_reread_is_not_called_stale) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_unchanged_reread_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    std::string body = "// header\n";
+    for (int i = 0; i < 40; ++i) {
+        body += "let value" + std::to_string(i) + " = compute()\n";
+    }
+    { std::ofstream f(root + "/App.swift"); f << body; }
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nApp.swift\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body, "first look"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        CHECK(rec.observation.find("OUT OF DATE") == std::string::npos);
+    }
+}
+
+// THE THIRD read is where it broke, which is why two reads were not enough to catch it.
+//
+// The stale test compared a stored snapshot against the current read, but the stored copy
+// kept whatever note was appended the turn it was recorded while `current` arrived with
+// notes stripped. Reads one and two matched and stayed silent; on read three, copy two --
+// carrying the repeat note -- compared unequal, and the model was told the file "has been
+// edited since" when nothing in the run had written to it.
+//
+// MEASURED, run 3 of 2026-08-09, MemoryGaugeView.swift, never written to by that run:
+// "1 earlier copy of this same file appears higher up in this conversation and is OUT OF
+// DATE". The appended note also made that read's summary differ from the previous one, so a
+// byte-identical re-read counted as progress and reset the inert-turn counter -- turn 23
+// counted as inert and turn 24, the same read again, did not.
+TEST(a_third_unchanged_reread_is_still_not_called_stale) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_third_reread_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    std::string body = "// header\n";
+    for (int i = 0; i < 40; ++i) {
+        body += "let value" + std::to_string(i) + " = compute()\n";
+    }
+    { std::ofstream f(root + "/App.swift"); f << body; }
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nApp.swift\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body, "first look"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(call_turn(tok, read_body, "and again"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    std::size_t reads = 0;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.tool_name == "read_file") {
+            ++reads;
+        }
+        CHECK(rec.observation.find("OUT OF DATE") == std::string::npos);
+    }
+    // All three ran: the run must not have ended before reaching the read that broke.
+    CHECK(reads == 3);
+}
+
+// THE RUN MUST SEE ITSELF MAKING CALLS.
+//
+// History carried the assistant's PROSE and the tool's RESPONSE and nothing in between, so
+// a run's own transcript read `assistant: <prose>` / `tool_response: <result>` -- a result
+// arriving after a message that called nothing. Nowhere in its context did the model ever
+// see itself emit a call.
+//
+// MEASURED, plan mode, one run, 13 turns, split perfectly: every turn whose answer channel
+// held real prose (13, 16, 17, 17, 23, 29 tokens) made NO call and ended the turn, and
+// every turn that did call something held 1-4 tokens of prose. The model was reproducing
+// the shape of its own history, in which an assistant message containing prose is a
+// message that ends the turn -- so the ordinary "Let me read the remaining files."
+// preamble became a run-ending answer, over and over, until the run yielded with nothing
+// planned and nothing written.
+//
+// Asserted on the tokens the backend RECEIVED, because that is the only place the defect
+// exists: every behavioural test passes with the call missing from the prompt, and a
+// scripted backend never reads the prompt at all.
+TEST(the_prompt_shows_the_assistant_emitting_its_own_tool_call) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "looking around"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("look around");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    // The SECOND prompt is the one that carries turn 1's history.
+    REQUIRE(backend.received().size() >= 2);
+    const std::vector<model::TokenId>& prompt = backend.received()[1].prompt;
+
+    // The call is framed by the same special ids the model emits, not by the literal
+    // characters -- a prompt teaching a shape the grammar rejects would be worse than one
+    // teaching nothing.
+    const model::SpecialIds& s = tok.specials();
+    const auto open = std::find(prompt.begin(), prompt.end(), s.tool_call_open);
+    const auto close = std::find(prompt.begin(), prompt.end(), s.tool_call_close);
+    CHECK(open != prompt.end());
+    CHECK(close != prompt.end());
+    CHECK(open < close);
+
+    // And the response still comes after the call that produced it, never before.
+    const auto response = std::find(prompt.begin(), prompt.end(), s.tool_response_open);
+    CHECK(response != prompt.end());
+    CHECK(close < response);
+
+    // The call's own text is there, so the model can see WHICH tool it called with WHAT.
+    const std::string rendered = tok.decode(prompt);
+    CHECK(rendered.find("<function=list_dir>") != std::string::npos);
+    CHECK(rendered.find("<parameter=path>") != std::string::npos);
+}
+
+// A REPLAYED CALL IS VERBATIM. The first version of this truncated any argument over 600
+// bytes and said so inside the <parameter> block -- which put a lie about what the model
+// sent into the history the model reads back.
+//
+// MEASURED: `plan`'s checklist ran ~900 bytes, so every replay came back abridged; the
+// model re-sent what it saw, elision marker and all, and its 12-item checklist collapsed
+// to two -- the list crushed onto one line plus the marker as a second "item". It then
+// restated the checklist, which was over 600 bytes again, and the oscillation ran 56
+// `plan` calls out of 98 tool calls before the run stalled.
+//
+// A call cannot be larger than the generation that produced it, so max_new_tokens bounds
+// this already; prompt growth past that is compaction's job.
+TEST(a_replayed_call_is_verbatim_and_never_abridged) {
+    const std::string big(5000, 'x');
+    const std::vector<tools::ToolParamValue> params = {{"path", "a.txt"}, {"content", big}};
+    const std::string form = loop::call_surface_form("write_file", params);
+
+    CHECK(form.find("<function=write_file>") != std::string::npos);
+    CHECK(form.find("<parameter=path>") != std::string::npos);
+    CHECK(form.find("a.txt") != std::string::npos);
+    CHECK(form.find(big) != std::string::npos);
+    // Nothing that could be mistaken for the argument itself.
+    CHECK(form.find("bytes total") == std::string::npos);
+    CHECK(form.find("...") == std::string::npos);
+    // A text-only turn has no call to replay.
+    CHECK(loop::call_surface_form("", params).empty());
+}
+
+// A `plan` call is a PROGRESS DISPLAY, and updating a display is not progress. It used to
+// reset the inert-turn counter -- observation_is_new() returns true for anything that does
+// not read the workspace -- so a run could restate its checklist indefinitely and the
+// ending could not see it. Measured: 56 of one run's 98 tool calls were `plan`.
+TEST(restating_the_checklist_is_not_progress) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // Four plan-only turns: three nudges, then the run ends on the fourth.
+    const std::string items =
+        "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 6; ++i) {
+        backend.enqueue_response(call_turn(tok, items, "restating"));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // STALLED, not a budget exhaustion: the harness saw calls that achieved nothing.
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK(report.iterations < 6);
+}
+
+// EVERY TURN GETS ITS OWN SAMPLER SEED, and the run stays reproducible anyway.
+//
+// The backend builds a fresh Sampler per generation and seeds it from task.sampling.seed.
+// That field used to be config_.seed for every turn of the run, so each turn replayed the
+// identical sequence of draws -- and once the model settled into a confident repetition it
+// re-emitted it token for token, whatever the harness appended to the prompt. Measured in
+// plan mode at temperature 0.6: prompts of 2901 and 3042 tokens produced byte-identical
+// 147-token generations, and 3342 and 3586 produced byte-identical 238-token ones. Every
+// repeat note and nudge in every stuck trace was landing in a prompt whose continuation
+// the RNG had already fixed.
+//
+// Asserted on the tasks the backend actually received, because this is invisible without a
+// real model: a scripted backend ignores sampling entirely and every behavioural test here
+// would pass with the bug back in place.
+TEST(each_turn_draws_with_its_own_seed_and_the_run_stays_reproducible) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+    const auto drive = [&](model::ScriptedBackend& backend) {
+        backend.enqueue_response(call_turn(tok, body, "one"));
+        backend.enqueue_response(call_turn(tok, body, "two"));
+        backend.enqueue_response(text_turn(tok, "three", "done"));
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx("look around");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+    };
+
+    model::ScriptedBackend first;
+    drive(first);
+    REQUIRE(first.received().size() >= 3);
+
+    // The defect, stated directly: consecutive turns must not replay one draw sequence.
+    CHECK(first.received()[0].sampling.seed != first.received()[1].sampling.seed);
+    CHECK(first.received()[1].sampling.seed != first.received()[2].sampling.seed);
+    CHECK(first.received()[0].sampling.seed != first.received()[2].sampling.seed);
+
+    // And the property config_.seed exists for survives: turn n of a given config draws
+    // the same way every time the run is repeated.
+    model::ScriptedBackend second;
+    drive(second);
+    REQUIRE(second.received().size() >= 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK_EQ(first.received()[i].sampling.seed, second.received()[i].sampling.seed);
+    }
+}
+
+// A TOOL CALL CUT AT THE TOKEN CAP MUST SAY SO, and say that its SIZE was the problem.
+//
+// Every length cap used to report "generation hit the token cap before any tool call was
+// made; nothing ran" -- true of a cap in think, badly wrong for a cap in the tool phase,
+// where the model had been emitting a call for thousands of tokens and simply could not
+// finish it. Reading "you did not begin", it has no reason to make the next call smaller.
+//
+// Measured: two turns capped at 4030 and 4018 tool tokens, both whole-file rewrites of a
+// file too large for one generation. The run then re-read that file four times over,
+// byte-identically, and ended `stalled` with thirteen of fourteen checklist items open.
+TEST(a_tool_call_cut_at_the_cap_is_told_it_was_too_long) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // A call whose body runs past the cap: generation stops inside the tool phase, so no
+    // call is ever parsed and nothing runs.
+    std::string body = "<function=list_dir>\n<parameter=path>\n";
+    for (int i = 0; i < 200; ++i) {
+        body += "a directory that does not exist ";
+    }
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "writing it all out"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("write the file");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    // Low enough that the mini vocab's near-one-token-per-character content overruns it
+    // while still inside the tool call.
+    config.max_new_tokens = 64;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    // Through run(), not step(): the observation is written where the turn is recorded.
+    std::string capped_phase;
+    bool saw_capped_turn = false;
+    loop::Observer obs;
+    obs.on_turn = [&](const loop::TurnResult& t, double) {
+        if (t.outcome == loop::Outcome::LengthCapped) {
+            saw_capped_turn = true;
+            capped_phase = t.cap_phase;
+        }
+    };
+    agent.set_observer(std::move(obs));
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(saw_capped_turn);
+    CHECK_EQ(capped_phase, std::string("tool"));
+
+    bool told_it_was_too_long = false;
+    bool told_nothing_began = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.observation.find("CUT OFF") != std::string::npos &&
+            rec.observation.find("replace_in_file") != std::string::npos) {
+            told_it_was_too_long = true;
+        }
+        // The old text, which described a half-written call as one that never started.
+        if (rec.observation.find("before any tool call was made") != std::string::npos) {
+            told_nothing_began = true;
+        }
+    }
+    CHECK(told_it_was_too_long);
+    CHECK(!told_nothing_began);
+}
+
 // Failed tool observations stay factual -- no ritual System Directive that forces a
 // root-cause essay before the next action.
 TEST(a_failed_tool_observation_has_no_system_directive) {
@@ -441,6 +866,13 @@ TEST(a_run_that_leaves_its_own_checklist_open_does_not_report_completed) {
 
     model::ScriptedBackend backend;
     backend.enqueue_response(call_turn(tok, plan_body));
+    // One real call, so the run has PROGRESSED before it starts narrating. Without it the
+    // whole run is inert -- a checklist and then silence -- and the ending is `stalled`,
+    // which is correct but a different fact from the one under test here. Restating a
+    // checklist stopped counting as progress once a run was measured spending 56 of its 98
+    // calls doing exactly that; see restating_the_checklist_is_not_progress.
+    backend.enqueue_response(
+        call_turn(tok, "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n"));
     // Neither item ticked; the model just answers, for as many turns as the ending takes.
     backend.enqueue_response(text_turn(tok, "t", "done"));
     backend.enqueue_response(text_turn(tok, "t", "done"));
@@ -1829,6 +2261,140 @@ TEST(plan_still_reads_a_plain_markdown_checklist) {
     CHECK(ctx.checklist()[0].text == "build it");
     CHECK(ctx.checklist()[1].text == "test it");
     CHECK(ctx.checklist()[1].done);
+}
+
+// The OTHER JSON shape: not an array, one string with the list joined up inside it. Nothing
+// decoded it, so the quotes and the two-character `\n` sequences reached the line parser as
+// text and the whole plan became one item.
+//
+// MEASURED, run 3 of 2026-08-09, mid-run: a 17-item checklist became `items=1 open=1`, the
+// operator's panel showed the entire plan as a single unfinished line with `\n[x]` running
+// through it, and the model spent its last four turns re-sending the same call -- the
+// `stalled` ending, 28 turns into a 200-turn budget.
+TEST(plan_accepts_a_json_string_with_escaped_newlines) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        R"("[x] Edit DashboardWindow.swift\n[ ] Build it\n[x] Edit CPUCoreGridView.swift")"
+        "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix them");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 3);
+    CHECK(ctx.checklist()[0].text == "Edit DashboardWindow.swift");
+    CHECK(ctx.checklist()[0].done);
+    CHECK(ctx.checklist()[1].text == "Build it");
+    CHECK(!ctx.checklist()[1].done);
+    CHECK(ctx.checklist()[2].text == "Edit CPUCoreGridView.swift");
+    CHECK(ctx.checklist()[2].done);
+    CHECK(ctx.open_checklist_items() == 1);
+}
+
+// The same list without the quotes that would have identified it as JSON. Only retried when
+// the first parse found a single item, so an item that legitimately contains a backslash-n
+// keeps it -- which the companion case below holds.
+TEST(plan_splits_escaped_newlines_sent_without_quotes) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        R"([ ] read it\n[x] write it)"
+        "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 2);
+    CHECK(ctx.checklist()[0].text == "read it");
+    CHECK(ctx.checklist()[1].text == "write it");
+    CHECK(ctx.checklist()[1].done);
+}
+
+// A ONE-ITEM PLAN IS STILL A PLAN, and a backslash-n inside its text is text. The re-split
+// above must not fire here: one item in, one item out, escape intact.
+TEST(plan_keeps_a_single_item_that_merely_contains_a_backslash_n) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        R"([ ] make write_file emit \n rather than a newline)"
+        "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 1);
+    CHECK(ctx.checklist()[0].text == R"(make write_file emit \n rather than a newline)");
+}
+
+// THE BACKSTOP, for the fifth shape nobody has seen yet. A single item carrying another
+// item's checkbox marker is an unsplit list, and the model is TOLD so rather than being
+// handed "checklist set: 0/1 done" -- which is what a healthy one-item plan says, and is
+// what the run that stalled read four times without learning anything.
+TEST(plan_refuses_one_item_that_carries_the_whole_list) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // Two markers, no newline and no escape anywhere: nothing above this can split it.
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        "[ ] read it [x] write it\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    // NOT APPLIED: a checklist showing the whole plan as one unfinished line is worse than
+    // no checklist, because `unfinished_items` then reads 1 for a run with 17 items to go.
+    CHECK(ctx.checklist().empty());
 }
 
 // The duplicate collapse rewrites a turn record that sits INSIDE the KV-cached stable

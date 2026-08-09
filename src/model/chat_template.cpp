@@ -71,6 +71,17 @@ void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
         case Role::Assistant: {
             append(out, tok_.encode_template("assistant\n"));
             append(out, tok_.encode_content(m.content));
+            // The call, framed by the same SPECIAL ids the grammar accepts when the model
+            // emits one -- not the literal characters "<tool_call>", which encode_content
+            // would turn into ordinary bytes and which would teach the model a shape it is
+            // not allowed to produce.
+            if (!m.tool_call.empty()) {
+                out.push_back(s.tool_call_open);
+                append(out, tok_.encode_template("\n"));
+                append(out, tok_.encode_content(m.tool_call));
+                append(out, tok_.encode_template("\n"));
+                out.push_back(s.tool_call_close);
+            }
             break;
         }
         case Role::ToolResponse: {

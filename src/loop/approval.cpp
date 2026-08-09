@@ -281,6 +281,48 @@ std::string preview_of(const std::string& tool,
     return s + ")";
 }
 
+// THE CALL AS THE MODEL WROTE IT, for the assistant message in the next prompt.
+//
+// preview_of() next door is a ONE-LINE label -- for the compaction span, the UI row and
+// the approval card -- and is not valid tool-call syntax. This is the grammar's own
+// surface form, minus the <tool_call> framing, which ChatTemplate pushes as real special
+// ids. A run's history showed prose and then a tool_response with nothing in between, so
+// the model never saw itself emit a call; it wrote a preamble sentence, recognised that
+// shape as a turn-ending answer, and stopped. Measured: across 13 plan-mode turns, every
+// turn with real prose in the answer channel made no call, and every turn that called
+// something had 1-4 tokens of prose.
+//
+// VERBATIM. Values are NOT truncated, and the first version of this got that wrong at a
+// cost worth recording: it cut any argument over 600 bytes and appended
+// "... (N bytes total; the rest is not repeated here)" inside the <parameter> block.
+//
+// A truncated argument in the history is a LIE ABOUT WHAT THE MODEL SENT, and the model
+// reads that history. Measured on a glassmorphism-redesign run: `plan`'s checklist ran
+// ~900 bytes, so every replay came back abridged; the model re-sent what it saw, elision
+// marker and all, and the 12-item checklist collapsed to two -- the whole list crushed
+// onto one line plus the marker as a second "item". It then noticed the checklist was
+// wrong and restated it, which was over 600 bytes again, which was abridged again. That
+// oscillation ran 56 `plan` calls out of 98 tool calls before the run stalled.
+//
+// The size worry that motivated the cap does not survive contact with the numbers: a call
+// cannot be larger than the generation that produced it, so max_new_tokens already bounds
+// this by construction, and replaying costs at most what emitting cost. Prompt growth
+// beyond that is compaction's job -- it summarizes whole turns, which is lossy in a way
+// the model can SEE, rather than corrupting an argument in place.
+std::string call_surface_form(const std::string& tool,
+                              const std::vector<tools::ToolParamValue>& params) {
+    if (tool.empty()) {
+        return {};
+    }
+    std::string s = "<function=" + tool + ">\n";
+    for (const tools::ToolParamValue& p : params) {
+        s += "<parameter=" + p.name + ">\n";
+        s += p.value;
+        s += "\n</parameter>\n";
+    }
+    return s + "</function>";
+}
+
 // Stated as the properties that make a call impossible, never as a list of tool names, so
 // a tool added later is filtered by what it declares rather than by whether someone
 // remembered to update a list here.
@@ -307,6 +349,9 @@ bool Agent::tool_allowed(const tools::ToolDecl& decl) const {
         return false;
     }
     if (decl.conversational_only && !policy_.conversational) {
+        return false;
+    }
+    if (decl.working_run_only && policy_.conversational) {
         return false;
     }
     return true;

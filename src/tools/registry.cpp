@@ -1940,13 +1940,39 @@ Registry::Registry(WorkspaceContext ctx)
         d.name = "plan";
         // A progress display, not a gate. Nothing in the harness reads the list to
         // decide anything; it feeds the operator's sidebar panel and the run report.
+        //
+        // THIS DESCRIPTION TOLD THE MODEL NOT TO USE THE TOOL, and it obeyed: across
+        // fifteen logged runs, `plan` was never called once, so the sidebar's checklist
+        // panel stayed empty and the operator watched an opaque run. It read "Optional:
+        // ... skip it for small tasks" -- the only description in this registry that
+        // opened by excusing itself and closed by granting permission to decline -- and it
+        // put the restate mechanic in the frame of a cost ("ticking one item means sending
+        // them all") rather than of how the tool works.
+        //
+        // It got that way in the eighth-pass loop rewrite, which deleted the grammar mask
+        // that had made `plan` the only callable tool until the run had a checklist, and
+        // softened this text in the same commit. The mask went for a good reason and is
+        // not coming back here; the description going with it was collateral. Note what
+        // the mask's own comment recorded, because it bounds what this text can achieve:
+        // with `plan` merely available and a description saying to call it first, the
+        // model did not. What is different now is the mode brief, which did not exist
+        // then -- see kWorkingDiscipline in src/loop/turn.cpp, where the instruction to
+        // open a multi-step task with a checklist actually lives. This says what the tool
+        // IS and how it behaves; the brief says when to reach for it.
         d.description =
-            "Optional: share your task list with the operator. One item per line, "
-            "prefixed '[ ] ' for open or '[x] ' for done. Restating replaces the whole "
-            "list, so ticking one item means sending them all. Useful on multi-step "
-            "missions so the operator can see where you are; skip it for small tasks.";
+            "Your task list for this mission, shown to the operator as a live checklist -- "
+            "it is the only thing that tells them what you are doing and how far along you "
+            "are. Call it EARLY on any task with more than one step, before you start the "
+            "work, listing every item you expect to do. Call it again as each one lands: "
+            "restating replaces the whole list, so send all the items every time, '[x] ' "
+            "on the ones that are done and '[ ] ' on the rest. One item per line, separated "
+            "by REAL newlines -- one string with '\\n' sequences typed into it is one item, "
+            "not a list, and is rejected.";
         d.spec.name = d.name;
         d.spec.params = {param("items", ParamType::Text, true)};
+        // Not offered to a mode that only reads, asks and hands over -- see
+        // ToolDecl::working_run_only.
+        d.working_run_only = true;
         declare(d, [](const std::vector<ToolParamValue>&, int) {
             return ToolResult::error(ErrorClass::Malformed, false,
                                      "internal: 'plan' must be handled by the loop");
