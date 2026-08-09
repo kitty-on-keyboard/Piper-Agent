@@ -187,15 +187,31 @@ class ContextStore {
     // that makes the next tool which forgets fail loudly instead of silently.
     void set_observation_budget(std::size_t n) noexcept { observation_budget_ = n; }
 
+    // How many observations this store had to cut down. Non-zero means a tool handed
+    // over more than it was allowed to -- a defect in that tool, visible to a test
+    // without the process having to die to report it.
+    [[nodiscard]] std::size_t truncated_observations() const noexcept {
+        return truncated_observations_;
+    }
+
     // The ONLY door for run facts. Everything it stores was observed through a tool
     // result in this run.
     void add_turn(TurnRecord t) {
-        // Assert in tests (assertions are on in EVERY configuration here), clamp in a
-        // real run: a run that has already produced an over-budget observation is better
-        // served by a truncated one than by an abort.
-        assert(t.observation.size() <= observation_budget_ &&
-               "observation exceeds the prompt budget; the tool layer must bound it");
+        // CLAMP. The line below used to be an assert, and the comment above it said
+        // "assert in tests, clamp in a real run" -- but assertions are on in EVERY
+        // configuration here, including the shipped sidecar, so the abort always won and
+        // the clamp was unreachable. That is not a hypothetical: read_many returned
+        // 38,768 bytes against this 32 KB budget, the assert fired, and the sidecar died
+        // mid-run and took a 19 GB loaded model with it. Three sessions ended that way
+        // before the abort was traced, because SIGABRT left no crash report.
+        //
+        // The tool layer must still bound its own results and now does
+        // (tools::kObservationBudgetBytes, one number shared by both sides). This door
+        // stays as the backstop for the next tool that forgets, and a backstop that kills
+        // the process is not a backstop. The violation is recorded rather than asserted:
+        // truncated_observations() is what a test reads to prove a tool went over.
         if (t.observation.size() > observation_budget_) {
+            ++truncated_observations_;
             t.observation.resize(observation_budget_);
             t.observation += "\n[truncated at the observation budget]\n";
         }
@@ -366,6 +382,7 @@ class ContextStore {
     // Generous by default so a caller that never sets it keeps today's behaviour; the
     // sidecar sets the real one from the workspace's budgets.
     std::size_t observation_budget_ = 1U << 20;
+    std::size_t truncated_observations_ = 0;
 };
 
 } // namespace lmp::context

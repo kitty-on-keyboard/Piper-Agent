@@ -33,6 +33,7 @@ Registry make_registry(const std::string& root) {
     ctx.max_read_bytes = 1U << 20;
     ctx.max_model_read_bytes = 16384;
     ctx.max_result_bytes = 8192;
+    ctx.max_observation_bytes = lmp::tools::kObservationBudgetBytes;
     ctx.spool_dir = root + "/.spool";
     ctx.shell_wall_clock_seconds = 20;
     return Registry(std::move(ctx));
@@ -1074,6 +1075,58 @@ TEST(replace_nomatch_lists_nearest_candidates_as_diagnostics_only) {
              std::string("def alpha():\n    return 1\n\n"
                          "def beta():\n    return 2\n\n"
                          "def gamma():\n    return 3\n"));
+}
+
+// FOUR FILES THAT EACH FIT DO NOT ADD UP TO ONE THAT DOES.
+//
+// Every part of a read_many is already inside max_model_read_bytes; nothing bounded their
+// SUM, so four large files produced one observation several times the context store's
+// budget. That store asserted on the total, and because assertions are on in every
+// configuration here the assert was an abort: measured 2026-08-08, read_many returned
+// 38,768 bytes against a 32 KB budget and the sidecar died mid-run, taking a 19 GB loaded
+// model with it. Three sessions ended that way and left no crash report, because SIGABRT
+// does not produce one here.
+//
+// The assertion in the store is now a clamp, so this can no longer kill a session. This
+// test is what keeps it from silently costing content instead: the bound belongs in the
+// tool, which is the layer that knows what it read.
+TEST(read_many_bounds_the_total_it_returns_not_just_each_file) {
+    const std::string root = temp_dir();
+    // An explicit, small budget rather than the shipped one. What is under test is that
+    // the aggregate is bounded AT ALL -- tie it to the production number and the test
+    // silently stops exercising anything the day that number is tuned upward, which is
+    // exactly what happened when 128 KB replaced 32 KB.
+    WorkspaceContext ctx;
+    ctx.root = root;
+    ctx.max_read_bytes = 1U << 20;
+    ctx.max_model_read_bytes = 16384;
+    ctx.max_result_bytes = 8192;
+    ctx.max_observation_bytes = 8192; // four 4 KB files cannot fit
+    ctx.spool_dir = root + "/.spool";
+    ctx.shell_wall_clock_seconds = 20;
+    Registry reg(std::move(ctx));
+
+    const std::string body(4U << 10, 'x');
+    for (const char* name : {"a.txt", "b.txt", "c.txt", "d.txt"}) {
+        REQUIRE(reg.execute("write_file", args({{"path", name}, {"content", body}}), 1).ok());
+    }
+
+    const ToolResult batch = reg.execute(
+        "read_many", args({{"paths", "a.txt\nb.txt\nc.txt\nd.txt"}}), 1);
+    REQUIRE(batch.ok());
+    CHECK(batch.summary.size() <= std::size_t{8192});
+    // Truncated, and it SAYS it truncated -- a silent cut is a model reasoning about a
+    // file it believes it read in full.
+    CHECK(batch.summary.find("read_many truncated") != std::string::npos);
+    // The first file still arrives intact; bounding is not the same as returning nothing.
+    CHECK(batch.summary.find("=== a.txt ===") != std::string::npos);
+}
+
+// The shipped numbers have to be consistent with each other, which is the invariant whose
+// absence caused the abort: read_many could produce 96 KB into a 32 KB budget.
+TEST(the_shipped_observation_budget_fits_a_full_read_many) {
+    const std::size_t widest = lmp::tools::kReadManyMaxPaths * (24U << 10);
+    CHECK(lmp::tools::kObservationBudgetBytes >= widest);
 }
 
 TEST(read_many_reads_up_to_four_paths) {

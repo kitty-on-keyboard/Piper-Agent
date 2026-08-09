@@ -115,6 +115,42 @@ bool wire_working_set(std::size_t& previous) {
 // this was verified by loading a model and reading two numbers, and that was not enough.
 std::size_t g_cache_limit = 0;
 
+// PUT MLX'S SAFETY VALVE BELOW THE CLIFF INSTEAD OF ABOVE IT.
+//
+// MLX's memory limit defaults to 1.5x the device's max recommended working set
+// (mlx/memory.h). On this 48 GB machine that is ~60 GB -- MORE THAN THE MACHINE HAS. The
+// limit exists so that an allocation which cannot be satisfied raises instead of running
+// the system out of memory, and at 60 GB it can never do that: the OS reaches its own
+// limit first and kills the process, which is uncatchable, unreportable, and exactly what
+// has been happening.
+//
+// Setting it to the working set the device actually reports moves the valve to the right
+// side of the cliff. An over-large allocation now throws, generate() catches it and the
+// turn fails with MLX's own message naming the size it wanted; the model stays loaded and
+// the run reports instead of vanishing.
+//
+// THIS IS NOT THE CACHE CAP THAT WAS REVERTED. That one bounded what the allocator
+// RETAINS -- 4.75 GB against 18 GB observed -- and forced reclaim on every allocation in
+// steady state, which is where the slowdown came from. This changes nothing in steady
+// state: the cache limit follows the memory limit and lands at ~40 GB, far above the
+// ~18 GB high-water mark ever measured, so nothing is reclaimed that would not have been.
+// Only the edge changes, and only from "killed" to "reported".
+void set_memory_ceiling() {
+    if (!mx::metal::is_available()) {
+        return;
+    }
+    const auto& info = mx::device_info();
+    const auto it = info.find("max_recommended_working_set_size");
+    if (it == info.end()) {
+        return;
+    }
+    if (const auto* working_set = std::get_if<std::size_t>(&it->second)) {
+        mx::set_memory_limit(*working_set);
+        mx::set_cache_limit(*working_set);
+        g_cache_limit = *working_set;
+    }
+}
+
 MemoryReport mlx_memory_report() {
     return {mx::get_active_memory(), mx::get_cache_memory(), mx::get_peak_memory()};
 }
@@ -170,6 +206,7 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
                        "safetensors)"};
     }
     impl_->wired = wire_working_set(impl_->prev_wired_limit);
+    set_memory_ceiling();
     spec_ = config.speculative;
     loaded_ = true;
     return {true, {}};
@@ -408,6 +445,36 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
 
 GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
                                const CancelToken& cancel) {
+    // AN MLX EXCEPTION MUST NOT TAKE THE PROCESS DOWN WITH IT.
+    //
+    // MLX throws when an allocation cannot be satisfied ("allocations will result in an
+    // exception", mlx/memory.h) and NOTHING in this tree caught it -- not here, not in the
+    // loop, not in main. An uncaught throw is std::terminate, which kills the sidecar and
+    // takes ~20 GB of loaded weights with it, ends the run with no run_end, and leaves the
+    // operator with a dead process and no sentence explaining it.
+    //
+    // A turn that cannot allocate is a turn that failed. That is an ordinary GenResult and
+    // the loop already knows how to carry one: BackendError ends the run with the reason
+    // in the report, the model stays loaded, and the next request still has somewhere to
+    // go. Catching by reference and reporting what() also puts MLX's own words -- which
+    // name the size it could not get -- in front of whoever reads the trace.
+    try {
+        return generate_impl(task, sink, cancel);
+    } catch (const std::exception& e) {
+        GenResult r;
+        r.status = GenStatus::BackendError;
+        r.error = std::string("MLX threw during generation: ") + e.what();
+        return r;
+    } catch (...) {
+        GenResult r;
+        r.status = GenStatus::BackendError;
+        r.error = "MLX threw a non-standard exception during generation";
+        return r;
+    }
+}
+
+GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
+                                    const CancelToken& cancel) {
     GenResult r;
     if (!loaded_) {
         r.error = "MlxBackend: no model loaded";
