@@ -27,6 +27,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -57,6 +58,18 @@ struct TurnRecord {
     std::string assistant_text;
     std::string tool_name;        // empty when the turn was text-only
     std::string tool_args_summary;
+    // The call itself, in the grammar's surface form, so the next prompt shows the
+    // assistant EMITTING it rather than a tool result appearing out of nowhere. Distinct
+    // from tool_args_summary, which is a one-line preview for the compaction span and the
+    // UI. Empty on a text-only turn.
+    std::string tool_call_text;
+    // The workspace path this observation is a SNAPSHOT OF, for whole-file reads. Empty
+    // otherwise.
+    //
+    // Byte identity cannot answer "is an earlier copy of this file still in the prompt,
+    // and is it now wrong?" -- by construction it answers only the opposite question. A
+    // path can. See ContextStore::stale_copies_of_path.
+    std::string observed_path;
     std::string observation;      // the tool result summary -- an OBSERVED fact
     bool observation_is_error = false;
     std::uint64_t first_event_seq = 0; // provenance into the event log
@@ -259,6 +272,86 @@ class ContextStore {
         });
     }
 
+    // THE OBSERVED BYTES, WITHOUT THE NOTES THE HARNESS STAPLED TO THEM.
+    //
+    // Every note the loop appends to a tool result opens its own line with `[Note:`, and a
+    // numbered-line read summary cannot produce that sequence itself -- every content line
+    // begins with digits and a tab. So one cut answers all of them at once, whichever note
+    // a given copy happens to carry.
+    //
+    // WHY THE CUT IS NEEDED. The comparison below is between a stored snapshot and the
+    // current read. The caller hands over a `current` with notes stripped; the stored copy
+    // keeps whatever note was appended the turn it was recorded. So the two sides were
+    // never the same kind of string, and the difference the harness had written itself read
+    // as a difference in the file.
+    //
+    // MEASURED, run 3 of 2026-08-09, on a file the run never wrote to. Reads one and two
+    // compared equal and were silent, as intended. On the THIRD read, copy two -- carrying
+    // the repeat note -- compared unequal, and the model was told: "1 earlier copy of this
+    // same file appears higher up in this conversation and is OUT OF DATE -- the file has
+    // been edited since." Nothing had edited it. The appended note then made that read's
+    // summary differ from the previous one, so observation_is_new() called a byte-identical
+    // re-read new, and the inert-turn counter that exists to see this exact loop reset on
+    // it: turn 23 counted as inert and turn 24, the same read again, did not.
+    static std::string_view observed_bytes(const std::string& observation) {
+        const std::size_t note = observation.find("\n[Note:");
+        return std::string_view(observation).substr(
+            0, note == std::string::npos ? observation.size() : note);
+    }
+
+    // EARLIER SNAPSHOTS OF `path` THAT ARE NO LONGER TRUE -- observations of the same file
+    // whose bytes differ from `current`, because the run has edited it since.
+    //
+    // This is the question byte identity was chosen specifically not to ask, and the cost
+    // of not asking it was the whole re-read loop. `supersede_duplicate_observation` above
+    // reasons: "identical bytes cannot be stale: if the file changed, the new observation
+    // differs and nothing collapses. There is no rule to get wrong." True, and safe -- and
+    // it means every snapshot the run edits past is kept FOREVER, presented in exactly the
+    // same shape as the current one. A model holding four copies of one file, all labelled
+    // alike and three of them wrong, cannot tell which is the file; reading it again is
+    // the rational move, and that read appends a fifth copy.
+    //
+    // MEASURED, one 25-turn run: DashboardWindow.swift read SIX times with three small
+    // edits between, the prompt climbing 41,849 -> 61,398 tokens while the edit receipts
+    // said, correctly and in as many words, "this is the whole change, so you do not need
+    // to read the file back to see it". The run ended stalled with 8 of 10 items open.
+    //
+    // BOTH SIDES OF THE COMPARISON ARE THE OBSERVED BYTES, never the harness notes stapled
+    // to them -- see observed_bytes(). The caller strips notes from `current` and the stored
+    // copies keep theirs, so an asymmetric test called a file edited on the strength of a
+    // note the harness wrote itself.
+    [[nodiscard]] std::size_t stale_copies_of_path(const std::string& path,
+                                                   const std::string& current) const {
+        if (path.empty()) {
+            return 0;
+        }
+        const std::string_view live = observed_bytes(current);
+        return static_cast<std::size_t>(
+            std::count_if(recent_.begin(), recent_.end(), [&](const TurnRecord& t) {
+                return t.observed_path == path && observed_bytes(t.observation) != live;
+            }));
+    }
+
+    // Replace those stale snapshots with `replacement`. Rewrites history, so the caller
+    // pays a full re-prefill and must decide the trade -- see Agent::collapse_duplicate_read.
+    std::size_t supersede_stale_copies_of_path(const std::string& path,
+                                               const std::string& current,
+                                               const std::string& replacement) {
+        if (path.empty()) {
+            return 0;
+        }
+        std::size_t superseded = 0;
+        const std::string_view live = observed_bytes(current);
+        for (TurnRecord& t : recent_) {
+            if (t.observed_path == path && observed_bytes(t.observation) != live) {
+                t.observation = replacement;
+                t.observed_path.clear(); // it is no longer a snapshot of anything
+                ++superseded;
+            }
+        }
+        return superseded;
+    }
+
     std::size_t supersede_duplicate_observation(const std::string& observation,
                                                 const std::string& replacement) {
         if (observation.empty()) {
@@ -268,6 +361,11 @@ class ContextStore {
         for (TurnRecord& t : recent_) {
             if (t.observation == observation) {
                 t.observation = replacement;
+                // A record whose observation is now a POINTER is not a snapshot of a file
+                // any more, so the stale-copy pass must not find it and overwrite this
+                // message with its own. Clearing it here rather than ordering the two
+                // calls carefully is what makes them commute.
+                t.observed_path.clear();
                 ++collapsed;
             }
         }

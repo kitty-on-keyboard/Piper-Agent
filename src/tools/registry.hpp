@@ -95,6 +95,14 @@ struct ToolDecl {
     // not a tool call in a run nobody is watching -- it is a turn spent producing text
     // that will be read by the loop and thrown away.
     bool conversational_only = false;
+    // The mirror of the above: this tool only means anything in a mode that CARRIES OUT
+    // work over many turns. `plan` is the case -- its checklist is a progress display, and
+    // progress is what a conversational mode does not make: it reads, asks, and hands over.
+    // A plan-mode run that writes one is spending a turn on a panel it will never tick,
+    // and leaving it stale afterwards. Measured once the `plan` description started telling
+    // the model to call it early: turn 1 of a 7-turn plan run went on a 4-item checklist
+    // that ended the run still reading 0/4.
+    bool working_run_only = false;
 };
 
 // Everything a tool invocation may touch. Registry opens `root` as a descriptor-rooted

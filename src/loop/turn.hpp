@@ -128,10 +128,14 @@ struct ModePolicy {
     [[nodiscard]] static ModePolicy for_mode(Mode m) noexcept;
 };
 
-// What this mode is, in words the model reads. Empty for Agent: the persona already
-// describes an agent, and a paragraph restating it would cost tokens on every prompt to
-// say nothing new.
-[[nodiscard]] std::string_view mode_brief(Mode m) noexcept;
+// What this mode is, in words the model reads.
+//
+// Debug and Agent share one block of working discipline -- verifying, editing, getting
+// unstuck -- under their own openings, which is why this returns a std::string rather than
+// a view. Both modes write code and both fail the same ways when they are not told how, so
+// the text has ONE home: a lesson measured in either run reaches both. Plan mode does not
+// take it; nothing there can build or edit.
+[[nodiscard]] std::string mode_brief(Mode m);
 
 // Exactly one repeat detector, and it is a DETECTOR / annotator -- not an authority for
 // mutable workspace state.

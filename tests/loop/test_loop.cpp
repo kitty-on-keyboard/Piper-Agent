@@ -100,6 +100,54 @@ TEST(plan_mode_cannot_execute_or_write) {
     CHECK(!agent.conversational);
 }
 
+// DEBUG MODE IS AN IMPLEMENTATION RUN, so it gets the same working discipline agent mode
+// gets. It had the policy already -- writes, execution, tier 1 -- and none of the text,
+// and a measured pair of runs against one SwiftUI layout bug showed what the gap cost:
+// agent mode fixed it, debug mode landed one edit in seventeen turns and stopped. The
+// failures were the ones this block names (whole-file rewrite from a stale copy, the same
+// diagnosis written out four times), so the fix was to stop copying the text into one mode
+// and share it. This pins the sharing: a lesson added for either mode must reach both.
+TEST(debug_and_agent_share_the_working_discipline) {
+    const std::string debug = mode_brief(Mode::Debug);
+    const std::string agent = mode_brief(Mode::Agent);
+    const std::string plan = mode_brief(Mode::Plan);
+
+    for (const std::string_view marker :
+         {"## The checklist", "## Verifying", "## Editing", "## Getting unstuck",
+          // The ONE instruction anywhere in the prompt to call `plan`. Fifteen logged runs
+          // called it zero times while nothing said to and its own description said to skip
+          // it; if this line goes, the operator's checklist panel goes empty again.
+          "CALLING `plan`", "BUILD OR TEST AFTER YOU EDIT", "REPEATING YOURSELF IS THE SIGNAL",
+          "Prefer targeted edits"}) {
+        CHECK(debug.find(marker) != std::string::npos);
+        CHECK(agent.find(marker) != std::string::npos);
+        // Plan mode cannot build or edit; the discipline would be advice about tools it
+        // does not have.
+        CHECK(plan.find(marker) == std::string::npos);
+    }
+
+    // The checklist instruction reaches the two modes that can act on it and NOT the one
+    // that cannot. Plan mode reads, asks and hands over; a checklist it will never tick is
+    // a turn spent on a stale panel, which is exactly what a 7-turn plan run did once the
+    // `plan` description started telling the model to call it early.
+    CHECK(ModePolicy::for_mode(Mode::Plan).conversational);
+    {
+        tools::WorkspaceContext ws;
+        ws.root = "/tmp";
+        tools::Registry reg(ws);
+        const tools::ToolDecl* d = reg.find("plan");
+        REQUIRE(d != nullptr);
+        CHECK(d->working_run_only);
+    }
+
+    // And it is still DEBUG mode: the diagnosis weighting is what the mode is for, and it
+    // is the half agent mode does not carry.
+    CHECK(debug.find("# Debug mode") != std::string::npos);
+    CHECK(debug.find("## Diagnosing") != std::string::npos);
+    CHECK(debug.find("A LIST OF SUSPECTS IS NOT A DIAGNOSIS") != std::string::npos);
+    CHECK(agent.find("## Diagnosing") == std::string::npos);
+}
+
 // --- exactly one repeat detector, and it is a cache -------------------------
 
 TEST(repeat_detection_keys_on_tool_and_arguments) {

@@ -116,6 +116,12 @@ struct HitlThresholds {
 [[nodiscard]] std::string preview_of(const std::string& tool,
                                      const std::vector<tools::ToolParamValue>& params);
 
+// The same call in the GRAMMAR'S surface form, for the assistant message in the next
+// prompt -- so the run's transcript shows it emitting calls instead of tool results
+// appearing after messages that called nothing. See the note on the definition.
+[[nodiscard]] std::string call_surface_form(const std::string& tool,
+                                            const std::vector<tools::ToolParamValue>& params);
+
 // Returns true to allow. Injected so tests script it; the UI supplies the real one.
 //
 // `command` is the shell command verbatim, or empty for a call that is not one (a write,
@@ -440,6 +446,12 @@ class Agent {
     // and the operator should not have to guess which they got.
     bool inert_streak_had_tool_call_ = false;
     std::size_t executed_tool_calls_in_run_ = 0;
+    // Generations attempted this run, and the only input other than config_.seed to the
+    // per-turn sampler seed. Counts ATTEMPTS rather than completed turns -- a turn refused
+    // before it reached the backend leaves a gap in the sequence, which is harmless, and
+    // the alternative (only counting successes) would hand two different turns the same
+    // seed after any refusal. See seed_for_turn in agent.cpp.
+    std::uint64_t turns_generated_ = 0;
 };
 
 } // namespace lmp::loop
