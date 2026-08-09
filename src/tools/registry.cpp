@@ -1266,7 +1266,11 @@ Registry::Registry(WorkspaceContext ctx)
         d.description = "Replace exactly one occurrence of old_text with new_text. "
                         "Whitespace-tolerant matching; refuses when the match is "
                         "ambiguous (listing candidate sites) or absent, and the file "
-                        "is left untouched in both cases.";
+                        "is left untouched in both cases. On success it returns the "
+                        "applied hunk with the file's current line numbers, so you can "
+                        "see exactly what changed and where WITHOUT reading the file "
+                        "back — if the hunk shows the edit landed somewhere you did not "
+                        "intend, send a corrected replace_in_file rather than re-reading.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
                          param("old_text", ParamType::Text, true),
@@ -1386,8 +1390,13 @@ Registry::Registry(WorkspaceContext ctx)
                     "old_text matched in " + *get(p, "path") +
                     " but new_text is identical to it, so the file is unchanged.");
             }
+            // THE APPLIED HUNK, not a receipt. "replaced one occurrence in <path>" told the
+            // model that something happened and nothing about what, which left re-reading
+            // the file as its only way to find out -- see edit_diagnostics::applied_hunk
+            // for the run that spent six reads and half its budget doing exactly that.
             return measured_edit(
-                ToolResult::okay("replaced one occurrence in " + *get(p, "path")),
+                ToolResult::okay(edit_diagnostics::format_applied(*get(p, "path"), f.bytes,
+                                                                  g.result)),
                 contiguous_edit_bytes(f.bytes, g.result));
         });
     }
@@ -1402,7 +1411,9 @@ Registry::Registry(WorkspaceContext ctx)
             "the last read_file/read_slice (or this tool's own preimage read); all hunks "
             "for a file apply or none do. Prefer this for multi-hunk edits; keep "
             "replace_in_file for a single old_text→new_text swap. Pass the patch as raw "
-            "multiline text in `patch`.";
+            "multiline text in `patch`. On success it returns the applied hunk for each "
+            "UPDATED file with that file's current line numbers, so you can see what "
+            "changed without reading the files back.";
         d.spec.name = d.name;
         d.spec.params = {param("patch", ParamType::Text, true)};
         d.mutates_workspace = true;
@@ -1479,6 +1490,14 @@ Registry::Registry(WorkspaceContext ctx)
 
             std::size_t bytes_changed = 0;
             std::vector<std::string> ok_paths;
+            // Per-file hunks, for the same reason replace_in_file carries one: a list of
+            // paths says a patch landed, not what it did to them. Bounded twice over --
+            // each hunk by applied_hunk, and the number of hunks by kPatchHunkFiles, since
+            // a patch may touch far more files than a model needs echoed back.
+            static constexpr std::size_t kPatchHunkFiles = 4;
+            std::string hunks;
+            std::size_t hunks_shown = 0;
+            std::size_t hunks_suppressed = 0;
             for (const apply_patch::FileChange& ch : applied.changes) {
                 const fsx::ContainedPath& resolved = resolved_by_path.at(ch.path);
                 fsx::WritePrecondition pre;
@@ -1517,6 +1536,20 @@ Registry::Registry(WorkspaceContext ctx)
                     bytes_changed += before == snapshot.end()
                                          ? ch.new_content.size()
                                          : contiguous_edit_bytes(before->second, ch.new_content);
+                    // A file the patch CREATED needs no hunk: its whole content is the
+                    // model's own new_content, already in the prompt as the call's
+                    // argument. Echoing it back is the prompt bloat this change exists to
+                    // reduce. An UPDATED file is the case the model cannot see.
+                    if (before != snapshot.end()) {
+                        if (hunks_shown < kPatchHunkFiles) {
+                            hunks += "\n";
+                            hunks += edit_diagnostics::format_applied(ch.path, before->second,
+                                                                      ch.new_content);
+                            ++hunks_shown;
+                        } else {
+                            ++hunks_suppressed;
+                        }
+                    }
                 }
                 ok_paths.push_back(ch.path);
             }
@@ -1534,6 +1567,11 @@ Registry::Registry(WorkspaceContext ctx)
                     summary += ", ";
                 }
                 summary += ok_paths[i];
+            }
+            summary += hunks;
+            if (hunks_suppressed > 0) {
+                summary += "\n(" + std::to_string(hunks_suppressed) +
+                           " further updated file(s) applied; hunks not shown)";
             }
             ToolResult r = measured_edit(ToolResult::okay(std::move(summary)), bytes_changed);
             r.structured_json = "[";

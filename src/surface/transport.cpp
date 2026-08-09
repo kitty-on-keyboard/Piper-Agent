@@ -8,9 +8,71 @@
 namespace lmp::surface {
 namespace {
 
-// Finds "key" as a top-level-ish JSON string field and returns its value. Minimal on
-// purpose: the reader thread needs the method and an id, nothing more, and a full
-// parser on the hot control path is a dependency the cancel guarantee does not need.
+// UTF-8 encode one code point. \uXXXX is the one JSON escape that is not a single byte,
+// and dropping it would put the letter u and four hex digits into the value.
+void append_utf8(std::string& out, unsigned int cp) {
+    if (cp < 0x80U) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800U) {
+        out.push_back(static_cast<char>(0xC0U | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
+    } else if (cp < 0x10000U) {
+        out.push_back(static_cast<char>(0xE0U | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80U | ((cp >> 6) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
+    } else {
+        out.push_back(static_cast<char>(0xF0U | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80U | ((cp >> 12) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | ((cp >> 6) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | (cp & 0x3FU)));
+    }
+}
+
+// Four hex digits at `at`, or -1. Does not advance the caller's cursor.
+[[nodiscard]] int hex4(std::string_view s, std::size_t at) {
+    if (at + 4 > s.size()) {
+        return -1;
+    }
+    int value = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const char c = s[at + i];
+        int digit = 0;
+        if (c >= '0' && c <= '9') {
+            digit = c - '0';
+        } else if (c >= 'a' && c <= 'f') {
+            digit = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'F') {
+            digit = c - 'A' + 10;
+        } else {
+            return -1;
+        }
+        value = value * 16 + digit;
+    }
+    return value;
+}
+
+// Finds "key" as a top-level-ish JSON string field and returns its value.
+//
+// THE ESCAPES ARE DECODED. `\n` IS A NEWLINE, NOT THE LETTER n.
+//
+// This used to skip the backslash and push the character after it verbatim, which is
+// correct for exactly two escapes -- \" and \\, where the escaped byte IS the intended
+// byte -- and silently wrong for every other one. \n became `n`, \t became `t`, \r became
+// `r`, and \uXXXX became `uXXXX`.
+//
+// MEASURED, in the shipped log (events.jsonl, run_id 5): a 5,000-character plan handed
+// from plan mode to agent mode arrived as ONE RUN-ON LINE, every newline replaced by a
+// letter n -- `"Plan\n\n## Overview"` reaching the model as `Plannn## Overview`. Every
+// heading, bullet and phase boundary in the plan was destroyed on the way in, and the
+// run that had to follow it flailed and ended having written 118 bytes. This is upstream
+// of the prompt, the context store and the loop: they were all faithfully carrying
+// mangled text.
+//
+// The comment this replaces said "minimal on purpose: the reader thread needs the method
+// and an id, nothing more". That stopped being true when start_mission began reading
+// `mission`, `model_dir` and `workspace_root` through here, and steering messages after
+// it -- an id and a method have no escapes worth decoding, which is why nothing noticed.
+// The scope grew and the parser did not, which is the whole defect.
 std::string extract_string(std::string_view message, std::string_view key) {
     const std::string needle = "\"" + std::string(key) + "\"";
     std::size_t at = message.find(needle);
@@ -30,11 +92,63 @@ std::string extract_string(std::string_view message, std::string_view key) {
     ++at;
     std::string out;
     while (at < message.size() && message[at] != '"') {
-        if (message[at] == '\\' && at + 1 < message.size()) {
+        if (message[at] != '\\') {
+            out.push_back(message[at]);
             ++at;
+            continue;
         }
-        out.push_back(message[at]);
-        ++at;
+        if (at + 1 >= message.size()) {
+            break; // trailing backslash at end of input; nothing to escape
+        }
+        const char esc = message[at + 1];
+        at += 2;
+        switch (esc) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case 'u': {
+                const int hi = hex4(message, at);
+                if (hi < 0) {
+                    // Malformed: keep the bytes rather than invent a character.
+                    out.append("\\u");
+                    break;
+                }
+                at += 4;
+                unsigned int cp = static_cast<unsigned int>(hi);
+                // A surrogate PAIR is one code point in two escapes; a lone surrogate is
+                // not encodable, and U+FFFD says so rather than emitting invalid UTF-8.
+                if (cp >= 0xD800U && cp <= 0xDBFFU) {
+                    if (at + 1 < message.size() && message[at] == '\\' &&
+                        message[at + 1] == 'u') {
+                        const int lo = hex4(message, at + 2);
+                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                            at += 6;
+                            cp = 0x10000U + ((cp - 0xD800U) << 10) +
+                                 (static_cast<unsigned int>(lo) - 0xDC00U);
+                        } else {
+                            cp = 0xFFFDU;
+                        }
+                    } else {
+                        cp = 0xFFFDU;
+                    }
+                } else if (cp >= 0xDC00U && cp <= 0xDFFFU) {
+                    cp = 0xFFFDU; // orphaned low surrogate
+                }
+                append_utf8(out, cp);
+                break;
+            }
+            default:
+                // Not a JSON escape at all. Keep both bytes: inventing one byte from two
+                // is what the old code did, and it is how `\n` became `n`.
+                out.push_back('\\');
+                out.push_back(esc);
+                break;
+        }
     }
     return out;
 }

@@ -204,4 +204,166 @@ struct Candidate {
     return out;
 }
 
+// --- the applied hunk ------------------------------------------------------------------
+//
+// WHAT A SUCCESSFUL EDIT ACTUALLY CHANGED, in the same `<line>\t<text>` form read_file
+// uses, so the model can anchor its next edit on these numbers without reading the file
+// back.
+//
+// WHY THIS EXISTS. replace_in_file's success path used to return one sentence -- "replaced
+// one occurrence in <path>" -- with no line, no diff, and no context, while its FAILURE
+// paths returned nearest-match snippets and candidate line numbers. So a model that had
+// just edited and wanted to know WHAT it edited had exactly one route: read the whole file
+// back and diff it by hand against a copy thousands of tokens up the context.
+//
+// MEASURED, on the ResMon run that ended at turn 22 of 200 (events.jsonl, run_id 5): a
+// model edited DesignTokens.swift, got the one-sentence receipt, and then read that same
+// file SIX times, byte-identical every time, writing nothing further. Every re-read was
+// detected (`repeat_reread`, prior_count 1..5, unchanged=1) and answered with a note
+// asking it to stop. It was not looping for want of being told; it was reconstructing the
+// diff the tool declined to give it. Half the run and 25% of the final prompt went on it.
+//
+// The same lesson is already learned twenty lines away in registry.cpp, where an edit whose
+// new_text equals its old_text gets its own message rather than a plain "replaced", with
+// the note that reporting it as a replacement "is how a run spends four turns re-applying
+// it". This is that fix for the case where the edit DID apply -- to the wrong site.
+//
+// BOUNDED ON PURPOSE. The failure this is fixing is partly a context-size failure, so a
+// receipt that can print a whole file would trade one prompt-bloat bug for another. Three
+// context lines, forty changed lines, and a hard byte ceiling; anything past that elides
+// with a count, because a model that needs more than forty lines of diff to know where its
+// edit landed is better served by reading the file deliberately.
+struct AppliedHunk {
+    std::size_t line = 0;    // 1-based first changed line; 0 when nothing changed
+    std::size_t removed = 0; // lines removed
+    std::size_t added = 0;   // lines added
+    std::string text;        // rendered hunk, bounded; empty when nothing changed
+};
+
+namespace detail {
+
+inline constexpr std::size_t kHunkContextLines = 3;
+inline constexpr std::size_t kHunkMaxChangedLines = 40;
+inline constexpr std::size_t kHunkMaxLineChars = 200;
+inline constexpr std::size_t kHunkMaxChars = 4000;
+
+inline void append_hunk_line(std::string& out, char sign, std::size_t number,
+                             std::string_view text) {
+    out += sign;
+    out += std::to_string(number);
+    out += '\t';
+    if (text.size() > kHunkMaxLineChars) {
+        out.append(text.data(), kHunkMaxLineChars);
+        out += "  ... (+";
+        out += std::to_string(text.size() - kHunkMaxLineChars);
+        out += " chars)";
+    } else {
+        out.append(text.data(), text.size());
+    }
+    out += '\n';
+}
+
+} // namespace detail
+
+// Line numbers: removed lines carry their number in the PRE-image, added and trailing
+// context lines carry theirs in the POST-image -- which is the file as it stands now, and
+// therefore the numbering any follow-up edit has to use.
+[[nodiscard]] inline AppliedHunk applied_hunk(std::string_view before,
+                                              std::string_view after) {
+    AppliedHunk h;
+    if (before == after) {
+        return h;
+    }
+    std::vector<std::string_view> bl;
+    std::vector<std::string_view> al;
+    detail::split_lines(before, bl);
+    detail::split_lines(after, al);
+    const std::size_t bn = bl.size();
+    const std::size_t an = al.size();
+
+    std::size_t p = 0;
+    while (p < bn && p < an && bl[p] == al[p]) {
+        ++p;
+    }
+    std::size_t s = 0;
+    while (s < bn - p && s < an - p && bl[bn - 1 - s] == al[an - 1 - s]) {
+        ++s;
+    }
+    h.removed = bn - p - s;
+    h.added = an - p - s;
+    if (h.removed == 0 && h.added == 0) {
+        // Byte-level difference inside identical lines (a line-ending change, say).
+        // Nothing to show as a hunk; the caller still reports the byte count.
+        return h;
+    }
+    h.line = p + 1;
+
+    // Leading context is common to both images, so its numbering is the same in each.
+    const std::size_t ctx_begin = p > detail::kHunkContextLines ? p - detail::kHunkContextLines : 0;
+    for (std::size_t i = ctx_begin; i < p; ++i) {
+        detail::append_hunk_line(h.text, ' ', i + 1, bl[i]);
+    }
+
+    // Elide the middle rather than either end: the first changed lines say where the edit
+    // landed and the last say where it stopped, and those are the two facts being sought.
+    const std::size_t changed = h.removed + h.added;
+    const bool elide = changed > detail::kHunkMaxChangedLines;
+    const std::size_t head = elide ? detail::kHunkMaxChangedLines / 2 : changed;
+    const std::size_t tail = elide ? detail::kHunkMaxChangedLines - head : 0;
+
+    std::size_t emitted = 0;
+    const auto want = [&](std::size_t index) {
+        return !elide || index < head || index >= changed - tail;
+    };
+    for (std::size_t i = 0; i < h.removed; ++i) {
+        if (want(emitted)) {
+            detail::append_hunk_line(h.text, '-', p + i + 1, bl[p + i]);
+        } else if (emitted == head) {
+            h.text += "   ... (" + std::to_string(changed - head - tail) + " more changed lines)\n";
+        }
+        ++emitted;
+    }
+    for (std::size_t i = 0; i < h.added; ++i) {
+        if (want(emitted)) {
+            detail::append_hunk_line(h.text, '+', p + i + 1, al[p + i]);
+        } else if (emitted == head) {
+            h.text += "   ... (" + std::to_string(changed - head - tail) + " more changed lines)\n";
+        }
+        ++emitted;
+    }
+
+    for (std::size_t i = 0; i < detail::kHunkContextLines && an - s + i < an; ++i) {
+        detail::append_hunk_line(h.text, ' ', an - s + i + 1, al[an - s + i]);
+    }
+
+    if (h.text.size() > detail::kHunkMaxChars) {
+        h.text.resize(detail::kHunkMaxChars);
+        h.text += "\n   ... (hunk truncated)\n";
+    }
+    return h;
+}
+
+// The success-path receipt. Names the file, the line, and what moved -- and says the file
+// state is already in hand, because a guarantee the model is not told about buys nothing.
+[[nodiscard]] inline std::string format_applied(std::string_view path,
+                                                std::string_view before,
+                                                std::string_view after) {
+    const AppliedHunk h = applied_hunk(before, after);
+    std::string out = "edited ";
+    out.append(path.data(), path.size());
+    if (h.line == 0) {
+        return out;
+    }
+    out += " at line ";
+    out += std::to_string(h.line);
+    out += " (-";
+    out += std::to_string(h.removed);
+    out += "/+";
+    out += std::to_string(h.added);
+    out += " lines). Applied hunk, with the file's CURRENT line numbers -- this is the "
+           "whole change, so you do not need to read the file back to see it:\n";
+    out += h.text;
+    return out;
+}
+
 } // namespace edit_diagnostics

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/platform/fs.hpp"
+#include "src/tools/edit_diagnostics.hpp"
 #include "src/tools/registry.hpp"
 #include "src/tools/symbol_index.hpp"
 #include "src/tools/text_view.hpp"
@@ -831,6 +832,86 @@ TEST(replacing_text_with_itself_is_reported_as_no_change) {
                                         1);
     CHECK(real.ok());
     CHECK(!real.mutation_was_noop);
+}
+
+// THE REGRESSION. A successful replace_in_file used to return "replaced one occurrence in
+// <path>" and nothing else -- no line, no diff -- so a model could not tell whether its
+// edit had landed where it meant it to without reading the whole file back. On the ResMon
+// run that ended at turn 22 of 200, one that had not, it read the same file SIX times.
+//
+// The case below is that run in miniature: the model means to make `extension View` public
+// and sends an old_text that matches a DIFFERENT site. The write succeeds either way. The
+// only thing that separates "it worked" from "it went to the wrong place" is the hunk.
+TEST(a_successful_edit_reports_where_it_landed) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "T.swift"},
+                              {"content", "struct A {\n"
+                                          "    func alpha() {}\n"
+                                          "}\n"
+                                          "\n"
+                                          "extension View {\n"
+                                          "    func beta() {}\n"
+                                          "}\n"}}),
+                        1)
+                .ok());
+
+    const ToolResult r = reg.execute("replace_in_file",
+                                     args({{"path", "T.swift"},
+                                           {"old_text", "struct A {"},
+                                           {"new_text", "public struct A {"}}),
+                                     1);
+    REQUIRE(r.ok());
+
+    // WHERE, by line, and what moved. Each of these fails on the bare receipt.
+    CHECK(r.summary.find("at line 1") != std::string::npos);
+    CHECK(r.summary.find("-1\tstruct A {") != std::string::npos);
+    CHECK(r.summary.find("+1\tpublic struct A {") != std::string::npos);
+
+    // And the fact the model actually needed: line 1 is the ONLY line that moved, so the
+    // site it meant to change is demonstrably untouched. A receipt saying "replaced one
+    // occurrence" is equally true here and carries none of this.
+    CHECK(r.summary.find("(-1/+1 lines)") != std::string::npos);
+    CHECK(r.summary.find("public extension View") == std::string::npos);
+    CHECK(r.summary.find("-5\t") == std::string::npos);
+    CHECK(r.summary.find("+5\t") == std::string::npos);
+}
+
+// The receipt must not become the bloat it exists to prevent. A 300-line replacement is
+// summarized, not printed: the failure being fixed is half a prompt spent on duplicated
+// file content, and an unbounded diff would reintroduce it through the other door.
+TEST(the_applied_hunk_is_bounded) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    std::string before = "head\n";
+    std::string after = "head\n";
+    for (int i = 0; i < 300; ++i) {
+        before += "old line " + std::to_string(i) + "\n";
+        after += "new line " + std::to_string(i) + "\n";
+    }
+    before += "tail\n";
+    after += "tail\n";
+    REQUIRE(reg.execute("write_file", args({{"path", "big.txt"}, {"content", before}}), 1)
+                .ok());
+
+    const ToolResult r =
+        reg.execute("replace_in_file",
+                    args({{"path", "big.txt"},
+                          {"old_text", "old line 0"},
+                          {"new_text", "new line 0"}}),
+                    1);
+    REQUIRE(r.ok());
+    CHECK(r.summary.size() < 2048);
+
+    // A genuinely large hunk elides its middle and says how much it dropped.
+    const edit_diagnostics::AppliedHunk h =
+        edit_diagnostics::applied_hunk(before, after);
+    CHECK(h.line == 2);
+    CHECK(h.removed == 300);
+    CHECK(h.added == 300);
+    CHECK(h.text.size() < 5000);
+    CHECK(h.text.find("more changed lines") != std::string::npos);
 }
 
 // The no-op check runs BEFORE the sink, so an empty edit never reaches the editor. Routing

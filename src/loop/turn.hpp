@@ -56,6 +56,9 @@ struct TurnResult {
         std::string tool_name;
         std::vector<tools::ToolParamValue> params;
         tools::ToolResult result;
+        // See TurnResult::produced_new_information. Batched calls carry it too, because a
+        // turn is only inert when EVERY call in it was.
+        bool produced_new_information = false;
     };
 
     Outcome outcome = Outcome::BackendError;
@@ -65,6 +68,14 @@ struct TurnResult {
     // it as though the model had concluded. The distinction is a fact about what the
     // harness did, which is exactly what a TurnResult is for.
     bool cut_for_looping = false;
+    // Did this call's observation tell the run something it did not already have?
+    //
+    // False when the bytes are identical to a previous call's -- the same fact the
+    // `repeat_reread` event reports as `unchanged` -- and false by default, so a turn that
+    // executed nothing (TextOnly, LengthCapped) is not credited with information. It is
+    // the loop's measure of PROGRESS, and the reason a run can now end on "produced
+    // nothing new for N turns" rather than only on "narrated twice in a row".
+    bool produced_new_information = false;
     std::string assistant_text;
     std::string reasoning;      // peeled off, surfaced separately, never in the answer
     std::string tool_name;
