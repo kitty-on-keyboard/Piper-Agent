@@ -193,8 +193,16 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
             out.push_back({Role::User, t.user_text});
             continue;
         }
-        if (!t.assistant_text.empty()) {
-            out.push_back({Role::Assistant, t.assistant_text});
+        // THE ASSISTANT TURN INCLUDES ITS CALL. Without this the transcript read
+        // `assistant: <prose>` then `tool_response: <result>` -- a tool result arriving
+        // after a message that called nothing -- and a run never saw itself make a call.
+        //
+        // MEASURED, plan mode, 13 turns: every turn whose answer channel held real prose
+        // (13-29 tokens) ended with NO call, and every turn that made a call held 1-4
+        // tokens of prose. The model was reproducing the shape of its own history, where
+        // an assistant message with prose in it is a message that ends the turn.
+        if (!t.assistant_text.empty() || !t.tool_call_text.empty()) {
+            out.push_back({Role::Assistant, t.assistant_text, t.tool_call_text});
         }
         if (!t.observation.empty()) {
             out.push_back({Role::ToolResponse, t.observation});

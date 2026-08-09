@@ -31,6 +31,17 @@ enum class Role : std::uint8_t { System, User, Assistant, ToolResponse };
 struct Message {
     Role role = Role::User;
     std::string content;
+    // THE CALL THE ASSISTANT MADE, as the `<function=...>` body without its framing
+    // specials, which append_message pushes as real tokens. Assistant role only; empty on
+    // a text-only turn.
+    //
+    // History used to carry the assistant's PROSE and the tool's RESPONSE and nothing in
+    // between, so a run's own transcript showed tool results arriving after assistant
+    // messages that contained no call -- the model never saw itself calling anything. See
+    // ContextStore::render, and the measurement in agent.cpp's call_surface_form.
+    // Defaulted so the many two-field brace inits stay valid: a message that is not an
+    // assistant tool call should not have to say so.
+    std::string tool_call = {};
 };
 
 class ChatTemplate {
