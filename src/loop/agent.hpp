@@ -349,7 +349,16 @@ class Agent {
     [[nodiscard]] bool can_run_in_parallel(const std::string& name) const;
     [[nodiscard]] bool adopt_readonly_result(const std::string& name,
                                              const std::vector<tools::ToolParamValue>& params,
-                                             const tools::ToolResult& result);
+                                             tools::ToolResult& result);
+    // Did this call's bytes differ from what the same call returned last time? Must be
+    // asked BEFORE record_call() folds the result into the detector. One definition for
+    // both dispatch paths and for the loop's progress measure.
+    [[nodiscard]] bool observation_is_new(const std::string& name,
+                                          const std::vector<tools::ToolParamValue>& params,
+                                          const tools::ToolResult& result) const;
+    // Did this turn move the run forward -- write bytes, or learn something? The inverse
+    // is an INERT turn, and consecutive inert turns are what ends a run.
+    [[nodiscard]] static bool turn_made_progress(const TurnResult& turn) noexcept;
     // Records one executed call in the repeat cache, with what it returned and where the
     // write counter stood. One helper so the primary and the batched calls cannot be
     // recorded differently -- the batching hole in the old detector was measured: three
@@ -391,22 +400,45 @@ class Agent {
     std::size_t could_not_run_streak_ = 0;
     std::size_t same_diag_streak_ = 0;
     std::string last_primary_diag_fp_;
-    // How many CONSECUTIVE text-only turns each mode nudges before it accepts the ending.
-    // Any executed tool call resets the count, so these bound "said it would act and did
-    // not" IN A ROW, not narration across the run.
+    // How many CONSECUTIVE INERT TURNS each mode nudges before it accepts the ending.
     //
-    // Plan mode gets two. One was too few: a run that had just read four files and said it
-    // would read the rest was nudged once, said it again, and was ended at turn 12 of 200
-    // with no plan and no question.
+    // WHAT CHANGED, AND WHY IT HAD TO. This counted consecutive TEXT-ONLY turns and reset
+    // on any executed tool call. Both halves were wrong, in opposite directions, and one
+    // run showed both:
     //
-    // An implementation run gets one, and until 2026-08-08 it got none -- the first text
-    // turn ended the run outright, so a model that said "let me read the remaining files"
-    // was recorded as a COMPLETED run that had written nothing. One rather than two
-    // because there, unlike in plan mode, a text-only turn legitimately IS the ending most
-    // of the time, and every nudge is a turn spent on a run that was already finished.
+    //   * A run that repeated itself forever was INVISIBLE. Its shape was
+    //     `text, read, read, text, read, read, ...` where every read came back
+    //     byte-identical -- and each read reset the counter, so the ending could never
+    //     fire. It ended at turn 22 of 200 only because two text turns happened to land
+    //     back to back. Half the run produced nothing and 25% of the final prompt was five
+    //     copies of one file.
+    //   * A run that was plainly WORKING was killed. Three re-runs of the same mission all
+    //     died on two narration turns in a row, one with 23 turns of budget left and edits
+    //     still landing.
+    //
+    // The counter now measures PROGRESS instead of prose. A turn is inert when it wrote no
+    // bytes AND produced no observation the run did not already have -- which makes a
+    // text-only turn one case of inertness rather than the only thing watched. Anything
+    // that writes or learns resets it. See turn_made_progress().
+    //
+    // AN IMPLEMENTATION RUN GETS THREE, up from one. One was tuned against a counter that
+    // reset on any tool call, where a single call proved nothing; against this counter
+    // three consecutive turns of neither writing nor learning is a real stall, and the
+    // three re-runs above show that fewer kills working runs. The cost is two extra turns
+    // on a run that genuinely finished, which is the price of not ending one that had not.
+    //
+    // Plan mode keeps two, unchanged. There a text turn is never the wanted output, the
+    // existing value was already measured against a run ended at turn 12 with no plan and
+    // no question, and plan mode is the mode currently working -- so it inherits the
+    // better signal without a retuning it did not ask for.
     static constexpr std::size_t kPlanNudgesBeforeEnding = 2;
-    static constexpr std::size_t kRunNudgesBeforeEnding = 1;
-    std::size_t unhandled_text_turns_ = 0;
+    static constexpr std::size_t kRunNudgesBeforeEnding = 3;
+    std::size_t inert_turns_ = 0;
+    // Did the current inert streak contain a tool call that ran and achieved nothing? It
+    // separates the two endings: a run that only narrated is HANDING BACK (`ended`), and
+    // one that kept calling tools to no effect is STALLED. Same count, different fact,
+    // and the operator should not have to guess which they got.
+    bool inert_streak_had_tool_call_ = false;
     std::size_t executed_tool_calls_in_run_ = 0;
 };
 
