@@ -87,6 +87,12 @@ class MlxBackend final : public InferenceBackend {
     void reset_cache();
 
   private:
+    // The real generate. `generate()` is a try/catch around this and nothing else: MLX
+    // throws when it cannot allocate, and an uncaught throw is std::terminate -- the
+    // sidecar dies, ~20 GB of weights go with it, and the run ends with no report at all.
+    [[nodiscard]] GenResult generate_impl(const InferenceTask& task, TokenSink& sink,
+                                          const CancelToken& cancel);
+
     struct Impl; // holds the mx graph objects; keeps mlx headers out of this header
     std::unique_ptr<Impl> impl_;
     const platform::Clock& clock_;
