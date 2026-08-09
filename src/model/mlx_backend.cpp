@@ -94,9 +94,66 @@ bool wire_working_set(std::size_t& previous) {
     return false;
 }
 
+// CAP WHAT THE ALLOCATOR RETAINS, because its default cannot be reached on this machine
+// without the process being killed first.
+//
+// MLX's cache limit DEFAULTS TO THE MEMORY LIMIT, which itself defaults to 1.5x the
+// device's max recommended working set (mlx/memory.h). On a 48 GB M5 Pro whose working set
+// is ~40 GB, that is a licence to retain ~60 GB of freed buffers on top of a model that is
+// already ~20 GB and WIRED by wire_working_set() -- and wired pages cannot be paged out,
+// so the kernel's only move is to kill the process.
+//
+// Measured 2026-08-08 from this repo's own unload_model events, which report both numbers:
+//
+//     active_before=20094499192  cache_before=18080928258   (~38 GB, one run)
+//     active_before=21000551296  cache_before=16568548522   (~38 GB, another)
+//
+// A run that then read two large files back to back died between one turn's tool_result
+// and the next turn's prompt, with NO crash report and nothing in the unified log -- the
+// signature of a kill rather than a fault.
+//
+// Capping the cache cannot change any result. The cache is pure retention: reclaiming it
+// costs a re-allocation, never a wrong answer. What it buys is that MLX reclaims on the
+// next allocation instead of growing until the machine gives out.
+//
+// The size is derived, not picked: whatever the device says it can work with, minus what
+// the model is already holding, minus room for one prefill's activations -- then a third
+// of what remains, clamped. Conservative on purpose; the failure this prevents is fatal
+// and the cost of being too small is a few extra allocations.
+std::size_t g_cache_limit = 0;
+
+void bound_allocator_cache() {
+    if (!mx::metal::is_available()) {
+        return;
+    }
+    const auto& info = mx::device_info();
+    const auto it = info.find("max_recommended_working_set_size");
+    if (it == info.end()) {
+        return;
+    }
+    const auto* working_set = std::get_if<std::size_t>(&it->second);
+    if (working_set == nullptr) {
+        return;
+    }
+    constexpr std::size_t kActivationHeadroom = 6UL << 30; // one large prefill
+    constexpr std::size_t kMinCache = 512UL << 20;
+    constexpr std::size_t kMaxCache = 6UL << 30;
+
+    const std::size_t active = mx::get_active_memory();
+    std::size_t budget = 0;
+    if (*working_set > active + kActivationHeadroom) {
+        budget = (*working_set - active - kActivationHeadroom) / 3;
+    }
+    const std::size_t limit = std::min(kMaxCache, std::max(kMinCache, budget));
+    mx::set_cache_limit(limit);
+    g_cache_limit = limit;
+}
+
 MemoryReport mlx_memory_report() {
     return {mx::get_active_memory(), mx::get_cache_memory(), mx::get_peak_memory()};
 }
+
+std::size_t mlx_cache_limit() { return g_cache_limit; }
 
 MlxBackend::MlxBackend(const platform::Clock& clock) : clock_(clock) {}
 
@@ -147,6 +204,7 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
                        "safetensors)"};
     }
     impl_->wired = wire_working_set(impl_->prev_wired_limit);
+    bound_allocator_cache();
     spec_ = config.speculative;
     loaded_ = true;
     return {true, {}};
@@ -546,8 +604,10 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
 
 struct MlxBackend::Impl {};
 
-// Nothing is allocated without MLX, so there is nothing to report and nothing to free.
+// Nothing is allocated without MLX, so there is nothing to report, nothing to free, and
+// no allocator cache to put a ceiling on.
 MemoryReport mlx_memory_report() { return {}; }
+std::size_t mlx_cache_limit() { return 0; }
 
 MlxBackend::MlxBackend(const platform::Clock& clock) : clock_(clock) {}
 MlxBackend::~MlxBackend() = default;

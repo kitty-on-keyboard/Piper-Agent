@@ -724,12 +724,27 @@ void notify_model(const char* state, const std::string& model_dir,
 // work was over would tell the operator nothing they had not already worked out.
 [[nodiscard]] surface::ModelLoad ensure_model(surface::Session& session,
                                               const std::string& model_dir,
+                                              platform::EventLogWriter& log,
                                               const platform::Clock& clock) {
     if (session.holds(model_dir)) {
         return {true, {}, 0.0};
     }
     notify_model(protocol::modelstate_values::kLoading, model_dir);
     const surface::ModelLoad loaded = surface::load_model(session, model_dir, clock);
+    // The memory the load left behind, and the cache ceiling that now bounds it. Logged
+    // because the only reason we know the allocator cache reached 18 GB on top of a 20 GB
+    // model -- and took the process down with it -- is that `unload_model` happened to
+    // report both numbers at the END of a session. A run that dies mid-way never gets
+    // there, so the same facts have to be on the record at the start.
+    if (loaded.ok) {
+        const model::MemoryReport m = model::mlx_memory_report();
+        platform::Event ev;
+        ev.kind = "model_memory";
+        ev.fields = {{"active", std::to_string(m.active)},
+                     {"cache", std::to_string(m.cache)},
+                     {"cache_limit", std::to_string(model::mlx_cache_limit())}};
+        log.append(ev, clock);
+    }
     // `model_dir` names the checkpoint the status is ABOUT, on the failure too: "which
     // path did that come from" is the first question a load error raises, and a client
     // that had to remember what it asked for could only ever guess at an unsolicited one.
@@ -874,7 +889,7 @@ bool start_mission(const std::string& id, const std::string& message,
     // precondition -- a headless client that only knows lmp/start keeps working. The
     // difference is that the wait is now narrated: ensure_model says `loading` before it
     // blocks, and the run_end below carries the loader's own words when it cannot.
-    const surface::ModelLoad loaded = ensure_model(session, model_dir, clock);
+    const surface::ModelLoad loaded = ensure_model(session, model_dir, log, clock);
     if (!loaded.ok) {
         end_run(id, loaded.error);
         return false;
@@ -1000,13 +1015,14 @@ bool start_mission(const std::string& id, const std::string& message,
 // "this checkpoint has no safetensors" is an ordinary answer to a reasonable question --
 // the request was well-formed and was serviced. A protocol error would say the opposite.
 void handle_load_model(const std::string& id, const std::string& message,
-                       surface::Session& session, const platform::Clock& clock) {
+                       surface::Session& session, platform::EventLogWriter& log,
+                       const platform::Clock& clock) {
     const std::string model_dir = surface::string_field(message, "model_dir");
     if (model_dir.empty()) {
         reply_error(id, "lmp/load_model requires a non-empty 'model_dir'");
         return;
     }
-    const surface::ModelLoad loaded = ensure_model(session, model_dir, clock);
+    const surface::ModelLoad loaded = ensure_model(session, model_dir, log, clock);
     reply_result(id, R"({"loaded":)" + std::string(loaded.ok ? "true" : "false") +
                          R"(,"model_dir":)" + json_escape(loaded.ok ? model_dir : "") +
                          R"(,"error":)" + json_escape(loaded.error) + "}");
@@ -1094,7 +1110,7 @@ bool dispatch_one(const std::string& message, surface::Session& session,
         return false;
     }
     if (method == "lmp/load_model") {
-        handle_load_model(id, message, session, clock);
+        handle_load_model(id, message, session, log, clock);
         return false;
     }
     if (method == "lmp/unload_model") {
