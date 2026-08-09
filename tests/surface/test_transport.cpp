@@ -146,6 +146,38 @@ TEST(an_approval_reply_is_matched_by_request_id_not_by_arrival_order) {
     CHECK(surface::bool_field(reply, "approved"));
 }
 
+// THE MISSION ARRIVES WITH ITS NEWLINES, or the plan is one run-on line.
+//
+// The old extractor skipped the backslash and pushed the next byte verbatim, which is
+// right for \" and \\ and wrong for everything else. In the shipped log a 5,000-character
+// plan handed from plan mode to agent mode reached the model as `Plannn## Overview` --
+// every newline turned into the letter n, every heading and bullet destroyed.
+TEST(a_string_field_decodes_its_json_escapes) {
+    const std::string msg =
+        R"({"mission":"# Plan\n\n## Overview\nline\twith\ttabs\r\n- bullet"})";
+    const std::string got = surface::string_field(msg, "mission");
+
+    CHECK_EQ(got, std::string("# Plan\n\n## Overview\nline\twith\ttabs\r\n- bullet"));
+    // The regression, stated as the thing that must NOT be there.
+    CHECK(got.find("Plannn") == std::string::npos);
+    CHECK(got.find("linetwith") == std::string::npos);
+
+    // The two that were already right must stay right -- and an embedded quote must not
+    // end the string early, which is the reason the backslash skip existed at all.
+    CHECK_EQ(surface::string_field(R"({"k":"a\"b\\c"})", "k"), std::string("a\"b\\c"));
+    CHECK_EQ(surface::string_field(R"({"k":"a\"b","after":"x"})", "after"),
+             std::string("x"));
+
+    // \uXXXX, including a surrogate pair, is one code point rather than six literal bytes.
+    CHECK_EQ(surface::string_field(R"({"k":"café"})", "k"), std::string("café"));
+    CHECK_EQ(surface::string_field(R"({"k":"🚀"})", "k"), std::string("\U0001F680"));
+    // A lone surrogate is not encodable; U+FFFD says so rather than emitting bad UTF-8.
+    CHECK_EQ(surface::string_field(R"({"k":"\ud83d!"})", "k"), std::string("�!"));
+    // Malformed escapes keep their bytes rather than inventing a character.
+    CHECK_EQ(surface::string_field(R"({"k":"\uZZZZ"})", "k"), std::string("\\uZZZZ"));
+    CHECK_EQ(surface::string_field(R"({"k":"\q"})", "k"), std::string("\\q"));
+}
+
 TEST(a_numeric_setting_falls_back_to_the_value_the_caller_already_holds) {
     // The sampling block carries Qwen3's recommended operating point (S5.9). A missing
     // field must therefore keep the caller's pinned default, NOT collapse to zero --
