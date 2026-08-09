@@ -819,16 +819,25 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
             result = dispatch_call(calls[i].name, params[i], ran);
         }
 
+        // ASKED HERE, BEFORE record_call FOLDS THIS RESULT IN. Both dispatch paths have
+        // finished with the call and neither has touched the detector yet, so this is the
+        // one point where "did this differ from last time" is still answerable -- and the
+        // one point both paths pass through, so a batched call is measured exactly like a
+        // solitary one.
+        const bool fresh = ran && observation_is_new(calls[i].name, params[i], result);
+
         if (i == 0) {
             turn.tool_name = calls[0].name;
             turn.tool_params = params[0];
             turn.tool_result = std::move(result);
+            turn.produced_new_information = fresh;
             turn.outcome = classify_turn(turn.generation, grammar, ran, !ran);
         } else {
             TurnResult::ExtraCall extra;
             extra.tool_name = calls[i].name;
             extra.params = params[i];
             extra.result = std::move(result);
+            extra.produced_new_information = fresh;
             turn.extra_calls.push_back(std::move(extra));
         }
     }
@@ -863,30 +872,94 @@ bool Agent::can_run_in_parallel(const std::string& name) const {
            !decl->remote;
 }
 
+// DID THIS TURN MOVE THE RUN FORWARD?
+//
+// Two ways, and a turn needs only one of them:
+//
+//   WROTE  -- bytes_changed > 0. A no-op edit (`old_text` matched but `new_text` was
+//             identical to it, or a patch that produced no byte change) reports ok with
+//             zero bytes and is NOT progress. A real run spent three consecutive turns on
+//             exactly those.
+//   LEARNED -- an observation whose bytes differ from the last time this call was made.
+//
+// A turn that did neither is INERT. That includes every text-only turn, which is how the
+// old text-only ending is subsumed rather than sitting alongside this one: narrating is
+// simply the case of being inert without calling anything.
+//
+// BATCHED CALLS ARE OR-ED, not just the first one: a turn that re-read one file and wrote
+// another has done work, and charging it as inert because the front call was a repeat
+// would be the same batching hole that once hid three reads a turn from the detector.
+//
+// Refused and length-capped turns are neither -- see the caller, which leaves the count
+// alone for them. A tool the human declined is not the model failing to progress, and a
+// generation cut at the token cap never got to choose.
+bool Agent::turn_made_progress(const TurnResult& turn) noexcept {
+    if (turn.outcome != Outcome::ToolCallExecuted) {
+        return false;
+    }
+    if (turn.tool_result.bytes_changed > 0 || turn.produced_new_information) {
+        return true;
+    }
+    for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
+        if (extra.result.bytes_changed > 0 || extra.produced_new_information) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// IS THIS OBSERVATION NEW? One definition, used by both dispatch paths and by the loop.
+//
+// "New" means the bytes differ from what this exact call returned last time. It is
+// deliberately byte identity and nothing cleverer: a file that changed produces different
+// bytes, and no invalidation rule is needed to say so. Callers must ask BEFORE
+// record_call() folds this result into the detector, which is why every use sits on the
+// execution path rather than after it.
+//
+// A call with no prior is new by definition. A FAILED call is treated as new -- an error
+// is information, and two identical failures in a row are caught by the inert-turn count
+// rather than by pretending the second one said nothing.
+bool Agent::observation_is_new(const std::string& name,
+                               const std::vector<tools::ToolParamValue>& params,
+                               const tools::ToolResult& result) const {
+    if (!result.ok() || !observes_workspace(name)) {
+        return true;
+    }
+    const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
+    return prior == nullptr || !prior->last_ok ||
+           prior->last_summary != without_cache_note(result.summary);
+}
+
 // The tail dispatch_call would have run for such a call, minus everything the eligibility
 // test already proved unreachable: no deliverable to record (nothing was written), no
 // approval. What remains is the executed flag and the event, and BOTH must happen here on
 // the agent thread, in call order.
+//
+// `result` is non-const because a repeat has to be ANNOTATED here exactly as the serial
+// path annotates it. It used to be a const reference, so this path emitted `repeat_reread`
+// and then could not append kRepeatNote -- a re-read batched behind another call got no
+// note at all, while the same re-read sent alone got one.
 bool Agent::adopt_readonly_result(const std::string& name,
                                   const std::vector<tools::ToolParamValue>& params,
-                                  const tools::ToolResult& result) {
+                                  tools::ToolResult& result) {
     // Annotate before collapse so the prior observation is still byte-identical to the
     // fresh result when measuring redundant re-reads.
     const std::size_t prior_seen = repeats_.seen_count(name, params);
     if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
-        const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
-        const bool unchanged = prior != nullptr && prior->last_ok &&
-                               prior->last_summary == without_cache_note(result.summary);
+        const bool unchanged = !observation_is_new(name, params, result);
         emit("repeat_reread",
              {{"tool", name},
               {"prior_count", std::to_string(prior_seen)},
               {"unchanged", unchanged ? "1" : "0"},
               {"read_bytes", std::to_string(result.bytes_read)}});
-        if (unchanged && result.bytes_read > 0) {
-            emit("redundant_read_bytes",
-                 {{"tool", name},
-                  {"bytes", std::to_string(result.bytes_read)},
-                  {"path", param_value(params, "path")}});
+        if (unchanged) {
+            if (result.bytes_read > 0) {
+                emit("redundant_read_bytes",
+                     {{"tool", name},
+                      {"bytes", std::to_string(result.bytes_read)},
+                      {"path", param_value(params, "path")}});
+            }
+            result.summary += kRepeatNote;
         }
     }
     // Same duplicate collapse as the serial path. Safe here for the same reason this path
@@ -1068,8 +1141,6 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // Prior count for annotation after revalidation. Workspace observations always
     // re-execute; RepeatDetector is not an authority for mutable state.
     const std::size_t prior_seen = repeats_.seen_count(name, params);
-    const RepeatDetector::SeenCall* prior =
-        observes_workspace(name) ? repeats_.previous(name, params) : nullptr;
 
     // First touch of a path: record whether its syntax check was ALREADY failing, using
     // what is on disk right now -- which is the pre-image, so nothing has to be
@@ -1112,8 +1183,7 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
 
     // Annotate a revalidated repeat; never withhold the fresh bytes.
     if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
-        const bool unchanged = prior != nullptr && prior->last_ok &&
-                               prior->last_summary == without_cache_note(result.summary);
+        const bool unchanged = !observation_is_new(name, params, result);
         emit("repeat_reread",
              {{"tool", name},
               {"prior_count", std::to_string(prior_seen)},
@@ -1438,7 +1508,8 @@ void Agent::record_call(const std::string& tool,
 
 RunReport Agent::run(const model::CancelToken& cancel) {
     RunReport report;
-    unhandled_text_turns_ = 0;
+    inert_turns_ = 0;
+    inert_streak_had_tool_call_ = false;
     executed_tool_calls_in_run_ = 0;
     const auto started = clock_.mono();
     // Run-scoped so shell / git / MCP observe the same token from every execute(),
@@ -1581,8 +1652,15 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // back.
         if (turn.outcome == Outcome::ToolCallExecuted) {
             ++executed_tool_calls_in_run_;
-            unhandled_text_turns_ = 0;
             record_call(turn.tool_name, turn.tool_params, turn.tool_result);
+        }
+        // PROGRESS RESETS THE STREAK -- not merely having called something. Measured
+        // before the ending check below, and after record_call only because the answer was
+        // computed on the execution path, where the detector had not yet been updated.
+        const bool progressed = turn_made_progress(turn);
+        if (progressed) {
+            inert_turns_ = 0;
+            inert_streak_had_tool_call_ = false;
         }
         for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
             record_call(extra.tool_name, extra.params, extra.result);
@@ -1636,17 +1714,33 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             run_operator_check("post_write");
         }
 
-        // A text-only turn is the model's final answer, and the run ends on it. That is
-        // the whole completion story: the harness watched the model stop asking for
-        // tools, and everything else -- whether the answer is right, whether the work is
-        // done -- is the operator's judgement, informed by the operator's check when one
-        // is configured. In a conversational mode the same turn means "your move", which
-        // is a different ending with a different name.
+        // AN INERT TURN IS ONE THAT NEITHER WROTE NOR LEARNED, and a run that produces
+        // several in a row is done -- either because the model is answering (it stopped
+        // calling tools) or because it is spinning (it kept calling them to no effect).
+        // Everything else -- whether the answer is right, whether the work is finished --
+        // stays the operator's judgement, informed by the operator's check.
         //
-        // A turn the breaker CUT is neither: the model did not conclude, the harness
+        // This replaces an ending that watched TEXT-ONLY turns and reset on any executed
+        // call. That signal was wrong in both directions at once: it could not see a run
+        // repeating itself (each repeat reset the count), and it killed runs that were
+        // plainly working (two narration turns in a row, 23 turns of budget left, edits
+        // still landing). See kRunNudgesBeforeEnding for both measurements.
+        //
+        // It is still not adjudication. The harness forms no view on whether the work is
+        // right; it observes that nothing has changed and nothing has been learned for
+        // several turns running, which is the same kind of fact as the turn and wall-clock
+        // budgets -- and unlike those, it is a fact about this run rather than a ceiling.
+        //
+        // A turn the breaker CUT is exempt: the model did not conclude, the harness
         // interrupted it. The fact of the cut is already in the context; the run
         // continues, and the budgets bound a model that can produce nothing else.
-        if (turn.outcome == Outcome::TextOnly && !turn.cut_for_looping) {
+        //
+        // REFUSED and LENGTH-CAPPED turns leave the count alone rather than incrementing
+        // it. A tool the human declined is not the model failing to progress, and a
+        // generation cut at the token cap never got to choose.
+        const bool countable = turn.outcome == Outcome::TextOnly ||
+                               turn.outcome == Outcome::ToolCallExecuted;
+        if (!progressed && countable && !turn.cut_for_looping) {
             // Last look at the inbox before anything else. A human watching a run drift
             // toward an ending is exactly the human who types "keep going" -- and ending
             // the run a moment after they said it, having already read it off the pipe,
@@ -1657,39 +1751,34 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 continue;
             }
 
-            // NUDGE ONCE, IN BOTH MODES, and end only after the model has ignored it.
+            // NUDGE, and end only after the model has ignored the nudges.
             //
-            // The count is of CONSECUTIVE text turns -- any executed tool call resets it
-            // -- so this is not a budget for narration across a run, it is how many times
-            // in a row the model may say it will act without acting.
-            //
-            // Plan mode allows two, because there a text turn is never the wanted output:
-            // one was too few for a run that had read four files, said it would read the
-            // rest, was nudged, said it again, and was ended at turn 12 of 200 with no
-            // plan and no question.
-            //
-            // AN IMPLEMENTATION RUN GETS ONE, and until 2026-08-08 it got none. The
-            // comment above still holds -- a text-only turn IS how a run ends, and the
-            // harness does not judge whether the work is done -- but "here is my answer"
-            // and "let me read the remaining files" are the same shape to this loop, and
-            // reading the second as the first ends the run mid-exploration. That is not a
-            // hypothetical: a dashboard rewrite ran list_dir, find_files, read_many,
-            // read_many, said "let me read the remaining files", and was recorded as
-            // `ended` / completed=true after four turns having written ZERO bytes. A
-            // false success is worse than a stall, because nothing downstream flags it.
-            //
-            // The nudge is not adjudication. The harness still forms no view on whether
-            // the answer is right or the work finished; it declines to read one ambiguous
-            // turn as two different things, and gives the model one unmistakable chance
-            // to say which it meant. A second text turn after that IS the ending,
-            // whatever its words say. The cost is one turn on a genuinely final answer.
+            // The count is of CONSECUTIVE INERT turns -- progress resets it -- so this is
+            // not a budget for narration across a run, it is how many times in a row the
+            // model may neither write nor learn anything.
             const std::size_t allowed =
                 policy_.conversational ? kPlanNudgesBeforeEnding : kRunNudgesBeforeEnding;
-            ++unhandled_text_turns_;
-            if (unhandled_text_turns_ <= allowed) {
+            ++inert_turns_;
+            const bool spun = turn.outcome == Outcome::ToolCallExecuted;
+            inert_streak_had_tool_call_ = inert_streak_had_tool_call_ || spun;
+            const char* const why = spun ? "no_progress" : "text_only_turn";
+
+            if (inert_turns_ <= allowed) {
+                // THE NOTE SAYS WHICH FAILURE THIS IS. "Call a tool now" is the wrong
+                // advice for a model that just called one and got back bytes it already
+                // had -- and it is exactly what the old single note told it, which is how
+                // a nudge came to reinforce the re-read loop it was meant to break.
                 context::TurnRecord note;
                 note.observation =
-                    policy_.conversational
+                    spun ? "[Note: That call changed nothing and returned nothing you did not "
+                           "already have -- either the file was byte-identical to a copy already "
+                           "in this conversation, or the edit matched but wrote no bytes. Calling "
+                           "it again will produce the same result. Scroll up and use what is "
+                           "already here: make the NEXT edit, run the build to see where you "
+                           "stand, or call 'ask_question' if you need a decision from the human. "
+                           "Do not re-read a file this run has already read unless something has "
+                           "written to it since.]"
+                    : policy_.conversational
                         ? "[Note: You are in Plan mode and your last turn called no tool. Do not output "
                           "standalone text updates or commentary -- they do not reach the human. "
                           "If you were about to read something, call the tool NOW "
@@ -1700,22 +1789,30 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                         : "[Note: Your last turn called no tool. If you were about to act -- reading, "
                           "editing, or running something -- call the tool NOW; saying you will act does "
                           "not perform the action, and this run has not finished the work yet. "
-                          "If you are genuinely done and this text WAS your final answer, say so again "
-                          "and the run will end.]";
+                          "If you are genuinely done and this text WAS your final answer, say so "
+                          "plainly and the run will end shortly.]";
                 ctx_.add_turn(std::move(note));
-                emit("nudged", {{"why", "text_only_turn"},
-                                {"consecutive", std::to_string(unhandled_text_turns_)}});
+                emit("nudged", {{"why", why},
+                                {"consecutive", std::to_string(inert_turns_)}});
                 continue;
             }
             if (policy_.conversational) {
                 report.termination_reason = "awaiting_user";
-                emit("yielded", {{"why", "text_only_turn"},
-                                 {"consecutive", std::to_string(unhandled_text_turns_)}});
+                emit("yielded", {{"why", why},
+                                 {"consecutive", std::to_string(inert_turns_)}});
                 break;
             }
-            report.termination_reason = "ended";
-            emit("ended", {{"why", "text_only_turn"},
-                           {"consecutive", std::to_string(unhandled_text_turns_)}});
+            // TWO ENDINGS, ONE COUNT. A run that only ever narrated is handing back, and
+            // `ended` keeps its existing meaning -- including its eligibility for
+            // completed=true, which is decided below against the checklist and the check.
+            // A run that kept calling tools to no effect is STALLED, and stalled is never
+            // completion: it is not a reason the completed=true block below recognises, so
+            // it falls through to false without needing to say so twice.
+            report.termination_reason = inert_streak_had_tool_call_ ? "stalled" : "ended";
+            emit(report.termination_reason,
+                 {{"why", why},
+                  {"consecutive", std::to_string(inert_turns_)},
+                  {"wrote_bytes_in_run", std::to_string(ctx_.workspace_writes())}});
             break;
         }
     }
