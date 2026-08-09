@@ -94,60 +94,26 @@ bool wire_working_set(std::size_t& previous) {
     return false;
 }
 
-// CAP WHAT THE ALLOCATOR RETAINS, because its default cannot be reached on this machine
-// without the process being killed first.
+// No ceiling is put on MLX's allocator cache. One WAS, on 2026-08-08, and it is the
+// reason this comment exists rather than a call.
 //
-// MLX's cache limit DEFAULTS TO THE MEMORY LIMIT, which itself defaults to 1.5x the
-// device's max recommended working set (mlx/memory.h). On a 48 GB M5 Pro whose working set
-// is ~40 GB, that is a licence to retain ~60 GB of freed buffers on top of a model that is
-// already ~20 GB and WIRED by wire_working_set() -- and wired pages cannot be paged out,
-// so the kernel's only move is to kill the process.
+// The problem it addressed is real and still open: `unload_model` has repeatedly reported
+// ~18 GB of allocator cache on top of a ~20 GB WIRED model, and a run died with no crash
+// report at ~38 GB resident. Capping retention at a derived 4.75 GB fixed that arithmetic
+// and measurably held (active 19.51 GB, cache 0.89 GB).
 //
-// Measured 2026-08-08 from this repo's own unload_model events, which report both numbers:
+// It also made runs WORSE, which the arithmetic did not predict and which is the only
+// thing that decides. The plan run immediately after it shipped got further before the
+// change than after: prefill slowed (turns at 5-6 s time-to-first-token where the same
+// shape had been sub-500 ms), and the model stopped calling tools mid-exploration. The
+// mechanism is not established -- reclaiming buffers cannot change a number -- but the
+// correlation was direct and the user observed it across runs.
 //
-//     active_before=20094499192  cache_before=18080928258   (~38 GB, one run)
-//     active_before=21000551296  cache_before=16568548522   (~38 GB, another)
-//
-// A run that then read two large files back to back died between one turn's tool_result
-// and the next turn's prompt, with NO crash report and nothing in the unified log -- the
-// signature of a kill rather than a fault.
-//
-// Capping the cache cannot change any result. The cache is pure retention: reclaiming it
-// costs a re-allocation, never a wrong answer. What it buys is that MLX reclaims on the
-// next allocation instead of growing until the machine gives out.
-//
-// The size is derived, not picked: whatever the device says it can work with, minus what
-// the model is already holding, minus room for one prefill's activations -- then a third
-// of what remains, clamped. Conservative on purpose; the failure this prevents is fatal
-// and the cost of being too small is a few extra allocations.
+// So it is out, and the memory problem goes back to open. What stays is the measurement
+// that found it: `model_memory` at load, `unload_model` at the end. Whatever fixes this
+// next needs to be checked against a real run's BEHAVIOUR, not only against its bytes --
+// this was verified by loading a model and reading two numbers, and that was not enough.
 std::size_t g_cache_limit = 0;
-
-void bound_allocator_cache() {
-    if (!mx::metal::is_available()) {
-        return;
-    }
-    const auto& info = mx::device_info();
-    const auto it = info.find("max_recommended_working_set_size");
-    if (it == info.end()) {
-        return;
-    }
-    const auto* working_set = std::get_if<std::size_t>(&it->second);
-    if (working_set == nullptr) {
-        return;
-    }
-    constexpr std::size_t kActivationHeadroom = 6UL << 30; // one large prefill
-    constexpr std::size_t kMinCache = 512UL << 20;
-    constexpr std::size_t kMaxCache = 6UL << 30;
-
-    const std::size_t active = mx::get_active_memory();
-    std::size_t budget = 0;
-    if (*working_set > active + kActivationHeadroom) {
-        budget = (*working_set - active - kActivationHeadroom) / 3;
-    }
-    const std::size_t limit = std::min(kMaxCache, std::max(kMinCache, budget));
-    mx::set_cache_limit(limit);
-    g_cache_limit = limit;
-}
 
 MemoryReport mlx_memory_report() {
     return {mx::get_active_memory(), mx::get_cache_memory(), mx::get_peak_memory()};
@@ -204,7 +170,6 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
                        "safetensors)"};
     }
     impl_->wired = wire_working_set(impl_->prev_wired_limit);
-    bound_allocator_cache();
     spec_ = config.speculative;
     loaded_ = true;
     return {true, {}};
