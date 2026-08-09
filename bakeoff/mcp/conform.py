@@ -5,23 +5,113 @@ Feeds newline-delimited JSON-RPC at a candidate server on stdin and grades the
 stdout stream against the MCP spec. Each check is independent so one failure
 does not mask the rest.
 """
-import json, subprocess, sys, time
+import json, queue, subprocess, sys, threading, time
 
 TIMEOUT = 6.0
+#: How long to keep listening after the expected replies, for a message that
+#: should not exist -- a response to a notification, a stray log line.
+QUIET = 0.4
+#: How long a server gets to exit once stdin closes, before it is killed.
+EXIT_TIMEOUT = 3.0
 
 
 def run(binary, lines):
-    """Send `lines` (list of raw strings) and collect stdout lines."""
+    """Send `lines` (list of raw strings) and collect stdout lines.
+
+    **stdin stays open until the replies are in.** This used to be one
+    `communicate()` call, which writes the payload and immediately closes stdin
+    -- and a stdio server is entitled to read EOF as "the client is gone" and
+    begin shutting down. The Python MCP SDK does exactly that, so every reply
+    the server had not already produced was graded as a protocol violation.
+
+    That did not make the harness pessimistic, it made it nondeterministic:
+    five consecutive runs against one unchanged Python-SDK server scored 10, 6,
+    9, 10 and 7 out of 12. What was really being measured was whether the
+    server won a race against its own stdin EOF, which is not a spec behaviour.
+
+    EOF is still exercised -- afterwards, deliberately, once the replies have
+    been read -- so a server that hangs at EOF is still killed and still noticed.
+    """
     p = subprocess.Popen([binary], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True, bufsize=1)
-    payload = "".join(l + "\n" for l in lines)
+
+    inbox = queue.Queue()
+
+    def pump():
+        for line in p.stdout:
+            inbox.put(line)
+        inbox.put(_EOS)
+
+    threading.Thread(target=pump, daemon=True).start()
+
+    expected = sum(1 for l in lines if _has_id(l))
     try:
-        out, _ = p.communicate(payload, timeout=TIMEOUT)
+        p.stdin.write("".join(l + "\n" for l in lines))
+        p.stdin.flush()
+    except (BrokenPipeError, ValueError):
+        pass  # the server is already gone; whatever it said is still graded
+
+    got, replies, ended = [], 0, False
+    deadline = time.time() + TIMEOUT
+    while replies < expected:
+        line = _take(inbox, deadline - time.time())
+        if line is _EOS:
+            ended = True
+            break
+        if line is None:  # nothing more within the budget
+            break
+        got.append(line)
+        replies += _has_id(line)
+    timed_out = replies < expected
+
+    # A short listen for a message that should not be there at all: the
+    # notification checks are exactly the ones with no reply to wait for.
+    end = time.time() + QUIET
+    while not ended:
+        line = _take(inbox, end - time.time())
+        if line is None or line is _EOS:
+            ended = line is _EOS
+            break
+        got.append(line)
+
+    try:
+        p.stdin.close()
+    except (BrokenPipeError, ValueError):
+        pass
+    try:
+        p.wait(timeout=EXIT_TIMEOUT)
     except subprocess.TimeoutExpired:
         p.kill()
-        out, _ = p.communicate()
-        return [l for l in out.splitlines() if l.strip()], True
-    return [l for l in out.splitlines() if l.strip()], False
+        p.wait()
+    while True:  # anything written on the way out
+        line = _take(inbox, 0.1)
+        if line is None or line is _EOS:
+            break
+        got.append(line)
+
+    # rstrip so a reported line reads the same as it did when this collected
+    # the whole stream and split it.
+    return [l.rstrip("\n") for l in got if l.strip()], timed_out
+
+
+#: Sentinel distinguishing "the server closed stdout" from "nothing arrived in
+#: time". Conflating them is what made the first draft of this fix wrong.
+_EOS = object()
+
+
+def _has_id(line):
+    try:
+        return "id" in json.loads(line)
+    except Exception:
+        return False
+
+
+def _take(inbox, timeout):
+    """One line, `_EOS` at end of stream, or None if nothing arrived in time."""
+    try:
+        return inbox.get(timeout=max(timeout, 0.01))
+    except queue.Empty:
+        return None
 
 
 def objs(lines):
