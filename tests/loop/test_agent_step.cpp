@@ -2790,4 +2790,156 @@ TEST(transitional_text_turn_after_tool_call_nudges_and_continues_in_plan_mode) {
     CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
 }
 
+// An identical shell result is not new information. Treating every successful shell as
+// fresh let a verify step reset the inert counter on every turn and hide a thrash loop
+// of re-read / rebuild / re-read. Measured: a glassmorphism run ended stalled after 39
+// tool calls because each `swift build` looked like progress.
+TEST(identical_shell_does_not_reset_the_inert_streak) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_identical_shell_inert";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    (void)::system(("printf 'same\\n' > " + root + "/f.swift").c_str());
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nf.swift\n</parameter>\n</function>\n";
+    const std::string shell_body =
+        "<function=shell>\n<parameter=command>\necho ok\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body, "inspect"));
+    backend.enqueue_response(call_turn(tok, shell_body, "verify"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(call_turn(tok, shell_body, "verify again"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(text_turn(tok, "t", "should not be reached if stall fires"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("finish the dashboard");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_exec = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    agent.set_approver([](const std::string&, const std::string&, const std::string&,
+                          const tools::RiskHint&) { return true; });
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK(report.iterations < 8);
+}
+
+// A run that restates its checklist between every real edit is not working -- it is
+// performing progress. The inert counter alone cannot see it because each edit resets
+// the streak; the plan-spin counter does not reset on an edit, only on a turn that did
+// something else entirely. Three plan-only turns in a row ends the run.
+TEST(plan_restatements_between_edits_end_the_run_as_stalled) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_plan_spin_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    (void)::system(("printf 'let x = 1\\n' > " + root + "/f.swift").c_str());
+
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
+    const std::string edit_body =
+        "<function=replace_in_file>\n<parameter=path>\nf.swift\n</parameter>\n"
+        "<parameter=old_text>\nlet x = 1\n</parameter>\n"
+        "<parameter=new_text>\nlet x = 2\n</parameter>\n</function>\n";
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nf.swift\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    // The thrash pattern: plan, edit, plan, read, plan, plan, plan -- the run should
+    // end on the third consecutive plan-only turn, not after the budget.
+    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
+    backend.enqueue_response(call_turn(tok, edit_body, "editing"));
+    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
+    backend.enqueue_response(call_turn(tok, read_body, "checking"));
+    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
+    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
+    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
+    backend.enqueue_response(text_turn(tok, "t", "should not be reached"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("finish the dashboard");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    agent.set_approver([](const std::string&, const std::string&, const std::string&,
+                          const tools::RiskHint&) { return true; });
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK(report.iterations < 8);
+}
+
+// A run that makes many tiny edits in a row without ever running a build or closing a
+// checklist item is polishing, not finishing. The micro-edit counter exists to say so
+// before the turn budget does.
+TEST(many_micro_edits_without_a_build_warns_the_model) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_micro_edit_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    (void)::system(("printf 'let x = 1\\n' > " + root + "/f.swift").c_str());
+
+    const std::string edit_body_a =
+        "<function=replace_in_file>\n<parameter=path>\nf.swift\n</parameter>\n"
+        "<parameter=old_text>\nlet x = 1\n</parameter>\n"
+        "<parameter=new_text>\nlet x = 2\n</parameter>\n</function>\n";
+    const std::string edit_body_b =
+        "<function=replace_in_file>\n<parameter=path>\nf.swift\n</parameter>\n"
+        "<parameter=old_text>\nlet x = 2\n</parameter>\n"
+        "<parameter=new_text>\nlet x = 1\n</parameter>\n</function>\n";
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nf.swift\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    // Five micro-edits in a row, each followed by a read. The run should warn on the
+    // fifth and keep going -- the warning is a nudge, not an ending.
+    for (int i = 0; i < 5; ++i) {
+        backend.enqueue_response(call_turn(tok, i % 2 == 0 ? edit_body_a : edit_body_b, "editing"));
+        backend.enqueue_response(call_turn(tok, read_body, "checking"));
+    }
+    // The warning lands after the fifth edit; the model then gets two more turns to
+    // show it heard the nudge before the run ends on a text turn.
+    backend.enqueue_response(text_turn(tok, "t", "heard the warning, wrapping up"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+    // Extra responses in case the harness nudges or the model needs another turn.
+    backend.enqueue_response(text_turn(tok, "t", "still here"));
+    backend.enqueue_response(text_turn(tok, "t", "final answer"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("finish the dashboard");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    agent.set_approver([](const std::string&, const std::string&, const std::string&,
+                          const tools::RiskHint&) { return true; });
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // The run should have ended on the final text turn, not stalled.
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    CHECK(report.iterations >= 10);
+}
+
 

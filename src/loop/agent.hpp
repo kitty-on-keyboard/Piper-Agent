@@ -445,6 +445,16 @@ class Agent {
     // one that kept calling tools to no effect is STALLED. Same count, different fact,
     // and the operator should not have to guess which they got.
     bool inert_streak_had_tool_call_ = false;
+    // Consecutive turns that called only `plan` and nothing else. A run that restates
+    // its checklist turn after turn is not making progress, and the inert counter alone
+    // cannot see it because any real edit between two `plan` calls resets the streak.
+    // Measured: 9 plan calls in a 39-turn run, each one resetting the clock on the
+    // thrash it was meant to interrupt.
+    std::size_t consecutive_plan_only_turns_ = 0;
+    // Consecutive turns whose only write was a small edit. A run that makes many tiny
+    // edits without ever closing a checklist item or running a build is polishing, not
+    // finishing; the counter exists to say so before the turn budget does.
+    std::size_t consecutive_micro_edit_turns_ = 0;
     std::size_t executed_tool_calls_in_run_ = 0;
     // Generations attempted this run, and the only input other than config_.seed to the
     // per-turn sampler seed. Counts ATTEMPTS rather than completed turns -- a turn refused

@@ -1098,6 +1098,17 @@ bool Agent::observation_is_new(const std::string& name,
         return false;
     }
     if (!observes_workspace(name)) {
+        // A shell or MCP call that ran to completion is not "new information" just
+        // because it is not a read. A repeated `swift build` that prints the same
+        // success line teaches the run nothing; treating it as fresh let a verify
+        // step reset the inert counter on every turn and hide a thrash loop.
+        // Measured: 39 tool calls, 11 writes, 9 plan restatements, ended stalled
+        // because each build looked like progress.
+        if (name == "shell" || name == "run_command") {
+            const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
+            return prior == nullptr || !prior->last_ok ||
+                   prior->last_summary != without_cache_note(result.summary);
+        }
         return true;
     }
     const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
@@ -1889,6 +1900,37 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             inert_turns_ = 0;
             inert_streak_had_tool_call_ = false;
         }
+
+        // A turn that called only `plan` is not progress, and a run that keeps doing it
+        // is not working -- it is performing progress for the operator's panel. The
+        // inert counter alone cannot see it because any real edit between two `plan`
+        // calls resets the streak; this counter does not reset on an edit, only on a
+        // turn that did something else entirely.
+        const bool plan_only_turn =
+            turn.outcome == Outcome::ToolCallExecuted && turn.extra_calls.empty() &&
+            is_display_only(turn.tool_name);
+        if (plan_only_turn) {
+            ++consecutive_plan_only_turns_;
+        } else if (turn.outcome != Outcome::ToolCallExecuted ||
+                   !is_display_only(turn.tool_name)) {
+            consecutive_plan_only_turns_ = 0;
+        }
+
+        // A turn whose only write was a small edit is not the same as a turn that moved
+        // the run toward done. A run that makes many tiny edits without ever closing a
+        // checklist item or running a build is polishing, not finishing; this counter
+        // exists to say so before the turn budget does.
+        const bool micro_edit_turn =
+            turn.outcome == Outcome::ToolCallExecuted && turn.extra_calls.empty() &&
+            turn.tool_result.bytes_changed > 0 &&
+            turn.tool_result.bytes_changed <= 64 &&
+            (turn.tool_name == "replace_in_file" || turn.tool_name == "write_file");
+        if (micro_edit_turn) {
+            ++consecutive_micro_edit_turns_;
+        } else if (turn.outcome == Outcome::ToolCallExecuted &&
+                   turn.tool_result.bytes_changed > 64) {
+            consecutive_micro_edit_turns_ = 0;
+        }
         for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
             record_call(extra.tool_name, extra.params, extra.result);
         }
@@ -1935,6 +1977,51 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         if (halted_) {
             report.termination_reason = halt_reason_;
             break;
+        }
+
+        // A RUN THAT KEEPS RESTATING ITS CHECKLIST IS NOT WORKING. The inert counter
+        // cannot see it because any real edit between two `plan` calls resets the
+        // streak; this counter does not reset on an edit, only on a turn that did
+        // something else entirely. Two in a row is a warning; three ends the run.
+        if (consecutive_plan_only_turns_ >= 2 && !policy_.conversational) {
+            context::TurnRecord note;
+            note.observation =
+                "[Note: You have restated the plan " +
+                std::to_string(consecutive_plan_only_turns_) +
+                " turns in a row without doing any of it. The panel already shows the "
+                "list; calling `plan` again changes nothing. Pick the next open item "
+                "and do it NOW -- make the edit, run the build, or call `ask_question` "
+                "if you are blocked. The run will end if the next turn is also only a "
+                "plan update.]";
+            ctx_.add_turn(std::move(note));
+            emit("plan_spin_warning",
+                 {{"consecutive", std::to_string(consecutive_plan_only_turns_)}});
+        }
+        if (consecutive_plan_only_turns_ >= 3 && !policy_.conversational) {
+            report.termination_reason = "stalled";
+            emit("stalled",
+                 {{"why", "plan_spin"},
+                  {"consecutive_plan_only",
+                   std::to_string(consecutive_plan_only_turns_)},
+                  {"wrote_bytes_in_run", std::to_string(ctx_.workspace_writes())}});
+            break;
+        }
+
+        // A RUN THAT ONLY POLISHES IS NOT FINISHING. Many tiny edits in a row without
+        // a build, a closed checklist item, or a larger change is the shape of a run
+        // that has lost the plot. The threshold is high enough that a real fix --
+        // which often lands as a few small edits -- does not trip it.
+        if (consecutive_micro_edit_turns_ >= 5 && !policy_.conversational) {
+            context::TurnRecord note;
+            note.observation =
+                "[Note: You have made " +
+                std::to_string(consecutive_micro_edit_turns_) +
+                " small edits in a row without running a build or closing a checklist "
+                "item. Stop polishing and verify the whole: run the build, then either "
+                "close the item you are on or call `ask_question` if you are blocked.]";
+            ctx_.add_turn(std::move(note));
+            emit("micro_edit_warning",
+                 {{"consecutive", std::to_string(consecutive_micro_edit_turns_)}});
         }
 
         // Compaction, not eviction (S8.3) -- and only when the BUDGET says so.
