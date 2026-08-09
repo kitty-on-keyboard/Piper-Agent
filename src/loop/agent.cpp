@@ -10,6 +10,7 @@
 
 #include "src/loop/parallel_calls.hpp"
 #include "src/loop/token_stream.hpp"
+#include "src/model/mlx_backend.hpp"
 #include "src/platform/fs.hpp"
 #include "src/tools/apply_patch.hpp"
 #include "src/tools/log_triage.hpp"
@@ -539,6 +540,19 @@ void Agent::emit(const std::string& kind, std::vector<platform::EventField> fiel
 TurnResult Agent::step(const model::CancelToken& cancel) {
     TurnResult turn;
 
+    // PHASE MARKERS EXIST BECAUSE A CRASH LEAVES NO OTHER TRACE.
+    //
+    // The sidecar has twice died with the event log ending on a `turn` and no `run_end`,
+    // no crash report, and nothing in the unified log. append() is an unbuffered write(2)
+    // per event, so that really is the last thing that happened -- the process dies
+    // somewhere between recording one turn and emitting the next `prompt`, and until now
+    // that whole span was one dark gap.
+    //
+    // These split the gap into named steps at the cost of three writes per turn. They are
+    // cheap enough to leave on: a syscall against a turn that spends seconds on the GPU
+    // does not register, and the alternative is another crash that says nothing.
+    emit("phase", {{"at", "render_begin"}});
+
     // --- prompt assembly ---------------------------------------------------
     const model::ChatTemplate tmpl(tok_);
     const std::vector<model::Message> messages = ctx_.render("");
@@ -590,6 +604,20 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     emit("prompt", {{"tokens", std::to_string(task.prompt.size())},
                     {"messages", std::to_string(messages.size())},
                     {"compactions", std::to_string(ctx_.compaction_count())}});
+
+    // What MLX is holding as this turn's generation begins -- the number that decides
+    // whether the next allocation is the one that does not come back. `unload_model`
+    // reports the same three at the end of a session, which is exactly when a run that
+    // died never gets to.
+    {
+        const model::MemoryReport mem = model::mlx_memory_report();
+        emit("memory", {{"at", "pre_generate"},
+                        {"active", std::to_string(mem.active)},
+                        {"cache", std::to_string(mem.cache)},
+                        {"peak", std::to_string(mem.peak)},
+                        {"prompt_tokens", std::to_string(task.prompt.size())}});
+    }
+    emit("phase", {{"at", "generate_begin"}});
 
     // --- constrained generation --------------------------------------------
     //
