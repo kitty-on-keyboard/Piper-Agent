@@ -90,6 +90,7 @@ void ensure_registry(Session& session, const std::string& workspace,
     wctx.max_read_bytes = 4U << 20;
     wctx.max_model_read_bytes = 24U << 10;
     wctx.max_result_bytes = 8192;
+    wctx.max_observation_bytes = tools::kObservationBudgetBytes;
     wctx.spool_dir = workspace + "/.lmp_spool";
     wctx.shell_wall_clock_seconds = 300;
     // Registry first, then host: the old registry's handlers are what keep the old

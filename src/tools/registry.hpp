@@ -111,9 +111,49 @@ struct WorkspaceContext {
     // want a file view wider than a shell summary.
     std::size_t max_model_read_bytes;
     std::size_t max_result_bytes; // model-facing summary budget, pre-compaction
+    // THE MOST ANY ONE TOOL RESULT MAY HAND THE CONTEXT STORE, aggregate.
+    //
+    // The per-file budget above bounds ONE file; nothing bounded a tool that returns
+    // several. read_many concatenates up to four of them, so 4 x max_model_read_bytes
+    // could arrive at a context whose observation budget is 32 KB -- and ContextStore's
+    // add_turn asserts on exactly that, which in a build with assertions on (all of them,
+    // here) is an abort. Measured 2026-08-08: read_many returned 38,768 bytes, the assert
+    // fired, and the sidecar died mid-run taking a 19 GB model with it.
+    //
+    // Kept in the workspace rather than as a constant in read_many so it can be set from
+    // the same number the context store is given, and the two cannot drift apart again.
+    std::size_t max_observation_bytes;
     std::string spool_dir;        // oversized output lands here (S14)
     int shell_wall_clock_seconds;
 };
+
+// Cap on paths inside one read_many call. Matches TurnGrammar::kMaxCallsPerTurn so a
+// batched primitive cannot outrun the multi-call surface the model already has.
+//
+// In the header rather than the .cpp because the observation budget below is SIZED from
+// it, and a constant that another constant depends on has to be visible to the test that
+// checks the two still agree.
+inline constexpr std::size_t kReadManyMaxPaths = 4;
+
+// The observation budget, in one place because two copies of it drifted apart and the
+// gap was an abort. ContextStore::add_turn is given this number and clamps anything
+// larger; the workspace is given it so the tool layer can truncate before it gets there.
+//
+// SIZED FROM WHAT read_many CAN ACTUALLY PRODUCE, which is the relationship that was
+// missing. read_many returns up to kReadManyMaxPaths (4) files of up to
+// max_model_read_bytes (24 KB) each -- 96 KB -- into a budget that was 32 KB. A four-file
+// read could not fit by construction, so the tool did the IO and the store threw a third
+// of it away, and the reads that motivated the cap in the first place measured 27-38 KB.
+// 128 KB is 4 x 24 KB plus room for the "=== path ===" headers and a truncation note.
+//
+// WHAT IT COSTS, because this is not free: an observation this size is ~32k tokens,
+// about a third of the 96k context budget, so three maximal reads fill the window and
+// force a compaction -- and a compaction is a full re-prefill, which has been measured at
+// 22x TTFT. The bet is that reading four files intact once beats reading them truncated
+// and going back for the rest, which is what the 32 KB budget actually bought. If
+// compaction rate gets worse, this number is the first thing to look at, and lowering
+// kReadManyMaxPaths is the other side of the same dial.
+inline constexpr std::size_t kObservationBudgetBytes = 128U << 10;
 
 // Where cross-session memory lives, and how much of it there is.
 //
