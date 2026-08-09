@@ -1,3 +1,10 @@
+/** ~/Library/Logs/LM_Pipe/sidecar-stderr.log, created on first use. */
+function stderrLogPath(): string {
+  const dir = join(homedir(), "Library", "Logs", "LM_Pipe");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, "sidecar-stderr.log");
+}
+
 // Protocol client: spawns the sidecar and speaks lmp/* over stdio (spec S4, S12.3).
 //
 // Framing is symmetric with the C++ side (src/surface/transport.cpp): newline-delimited
@@ -6,6 +13,9 @@
 
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
+import { appendFileSync, mkdirSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import {
   PROTOCOL_VERSION,
   RunSettings,
@@ -75,6 +85,19 @@ export class SidecarClient extends EventEmitter {
 
     proc.stdout?.on("data", (chunk: Buffer) => this.onStdout(chunk));
     proc.stderr?.on("data", (chunk: Buffer) => {
+      // PERSISTED, not just tailed. The 40-line buffer below is what a notification can
+      // show; it lives in this process and dies with the window. When the sidecar is
+      // KILLED there is no crash report and nothing in the unified log, so MLX's own
+      // last words on stderr -- an allocation failure, a Metal error -- are the only
+      // account of the end, and they have to outlive the reader.
+      //
+      // Appended synchronously and best-effort: a stderr sink that can itself throw
+      // during a crash is worse than none.
+      try {
+        appendFileSync(stderrLogPath(), chunk);
+      } catch {
+        /* the tail below still works */
+      }
       for (const line of chunk.toString("utf8").split("\n")) {
         if (line.length === 0) continue;
         this.stderrTail.push(line);

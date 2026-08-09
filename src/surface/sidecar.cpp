@@ -4,7 +4,10 @@
 // lmp/* over stdio, and exits on stdin EOF so a dead parent never orphans a process
 // holding ~19 GB of weights.
 
+#include <execinfo.h>
 #include <unistd.h>
+
+#include <csignal>
 
 #include <cstdint>
 #include <cstdio>
@@ -1136,6 +1139,42 @@ bool dispatch_one(const std::string& message, surface::Session& session,
 
 } // namespace
 
+// THE ONE QUESTION A FATAL-SIGNAL HANDLER ANSWERS: fault or kill?
+//
+// The sidecar has died twice with the event log ending mid-turn, no crash report, and
+// nothing in the unified log. Those three facts together are the signature of SIGKILL --
+// which is what the kernel sends when memory runs out, and which by definition cannot be
+// caught, reported, or traced. But they are ALSO what a fault would look like if crash
+// reporting were simply not configured for this binary, and the two have opposite fixes.
+//
+// So: if the process dies of a fault, this fires and the log carries `fatal_signal` with
+// a backtrace naming the frame. If the process dies and the log carries NOTHING, it was
+// killed from outside and memory is the story. Either way the next crash says which,
+// instead of leaving both possible.
+//
+// async-signal-safety: backtrace_symbols_fd and write are safe; the log's append is not,
+// so this writes to the log's fd through the same write(2) the writer uses and does not
+// touch its state. Then the default handler is restored and the signal re-raised, so the
+// process still dies exactly as it would have -- this observes, it does not rescue.
+int g_log_fd = -1;
+
+extern "C" void fatal_signal_handler(int sig) {
+    if (g_log_fd >= 0) {
+        char line[160];
+        const int n = std::snprintf(line, sizeof(line),
+                                    "{\"kind\":\"fatal_signal\",\"signal\":%d}\n", sig);
+        if (n > 0) {
+            const ssize_t w = ::write(g_log_fd, line, static_cast<std::size_t>(n));
+            (void)w;
+        }
+        void* frames[32];
+        const int depth = ::backtrace(frames, 32);
+        ::backtrace_symbols_fd(frames, depth, g_log_fd);
+    }
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
 int main() {
     platform::SystemClock clock;
     platform::EventLogWriter log;
@@ -1150,6 +1189,15 @@ int main() {
     std::filesystem::create_directories(std::filesystem::path(log_path).parent_path(), ec);
 
     const platform::OpenResult opened = log.open({log_path, 32U * 1024 * 1024, 4});
+    if (opened.ok) {
+        // Armed as soon as there is somewhere to report to, and before a model is loaded
+        // -- the deaths under investigation happen deep in a run, but a fault during load
+        // would be just as silent.
+        g_log_fd = log.fd_for_signal_handler();
+        for (const int sig : {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE}) {
+            std::signal(sig, fatal_signal_handler);
+        }
+    }
     if (!opened.ok) {
         // Refused loudly (S13). No silent fallback to "run without a trace".
         std::fprintf(stderr, "lmp: cannot open event log at %s: %s\n", log_path.c_str(),
