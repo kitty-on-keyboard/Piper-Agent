@@ -134,6 +134,12 @@ class EventLogWriter {
     void close();
 
     [[nodiscard]] bool is_open() const noexcept { return fd_ >= 0; }
+    // The raw descriptor, for a FATAL-SIGNAL HANDLER and nothing else. append() is not
+    // async-signal-safe -- it allocates, formats and mutates the sequence counter -- so a
+    // handler that called it could deadlock on a malloc lock the faulting thread already
+    // holds, and lose the very report it exists to write. write(2) on this fd is safe.
+    // Ordinary callers use append(); reaching for this anywhere else is a mistake.
+    [[nodiscard]] int fd_for_signal_handler() const noexcept { return fd_; }
     [[nodiscard]] std::uint64_t events_written() const noexcept { return next_seq_ - 1; }
     [[nodiscard]] std::size_t bytes_in_current_file() const noexcept { return cur_bytes_; }
     [[nodiscard]] std::uint64_t rotations() const noexcept { return rotations_; }
