@@ -226,9 +226,34 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
         return {false, config.model_dir + ": model load failed (missing config.json or "
                        "safetensors)"};
     }
+    spec_ = config.speculative;
+    if (!config.draft_model_dir.empty()) {
+        // Upstream reports MTP crashing against the MoE target (mlx-vlm #1317), and the
+        // head we ship is split from the dense 27B. Refuse the pairing rather than inherit
+        // a failure that surfaces at first generation.
+        if (!impl_->model.is_dense()) {
+            const std::string why = config.draft_model_dir +
+                                    ": an MTP draft head is only supported on the dense "
+                                    "target (model_type qwen3_5 / qwen3_5_text)";
+            impl_.reset();
+            mx::clear_cache();
+            return {false, why};
+        }
+        // A hard failure, not a warning. The operator asked for a drafter; running without
+        // one would be slower than requested and say nothing about why.
+        if (!impl_->model.load_mtp(config.draft_model_dir)) {
+            const std::string why =
+                config.draft_model_dir +
+                ": not a usable MTP draft head (needs config.json with model_type "
+                "qwen3_5_mtp and block_size >= 2, plus fc / norm / layers.0 tensors)";
+            impl_.reset();
+            mx::clear_cache();
+            return {false, why};
+        }
+        spec_.mtp_block_size = static_cast<std::size_t>(impl_->model.mtp_block_size());
+    }
     impl_->wired = wire_working_set(impl_->prev_wired_limit);
     set_memory_ceiling();
-    spec_ = config.speculative;
     loaded_ = true;
     return {true, {}};
 }
@@ -351,6 +376,68 @@ class MlxSpecForward final : public SpecForward {
         // the caches is the silent-stale-context failure S5.10 exists to prevent.
         ledger_.truncate_to(ledger_mark_);
     }
+
+    // ---- the MTP head ----------------------------------------------------------------
+    //
+    // These cross the GPU/host boundary once per drafted token, because the seam is
+    // float-vector shaped so the bookkeeping above it can be proved without a GPU. It is a
+    // ~20 KB round trip against a step that reads ~14 GB of weights, so the trade is
+    // heavily in favour of being able to test the part that fails silently.
+
+    [[nodiscard]] bool has_mtp() const override { return model_.has_mtp(); }
+
+    void last_hidden(std::vector<std::vector<float>>& rows) override {
+        rows.clear();
+        const std::optional<mx::array>& h = model_.last_hidden();
+        if (!h.has_value()) {
+            return;
+        }
+        mx::array host = mx::astype(*h, mx::float32);
+        mx::eval(host);
+        const int seq = static_cast<int>(host.shape()[1]);
+        const int width = static_cast<int>(host.shape()[2]);
+        const float* data = host.data<float>();
+        rows.reserve(static_cast<std::size_t>(seq));
+        for (int s = 0; s < seq; ++s) {
+            rows.emplace_back(data + static_cast<std::ptrdiff_t>(s) * width,
+                              data + static_cast<std::ptrdiff_t>(s + 1) * width);
+        }
+    }
+
+    void mtp_step(TokenId tok, std::span<const float> hidden,
+                  std::vector<float>& out_hidden) override {
+        out_hidden.clear();
+        if (!model_.has_mtp() || hidden.empty()) {
+            return;
+        }
+        const std::array<TokenId, 1> ids_buf{tok};
+        mx::array ids = mx::array(ids_buf.data(), {1, 1}, mx::int32);
+        mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
+                                mx::float32);
+        mx::array next = mx::astype(model_.mtp_forward(ids, h), mx::float32);
+        mx::eval(next);
+        const float* data = next.data<float>();
+        out_hidden.assign(data, data + next.size());
+    }
+
+    void mtp_logits(std::span<const float> hidden, std::vector<float>& row) override {
+        row.clear();
+        if (!model_.has_mtp() || hidden.empty()) {
+            return;
+        }
+        mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
+                                mx::float32);
+        // The TARGET's head. The MTP checkpoint ships none, which is also why a drafted
+        // token is not free -- this projection is the most expensive tensor either model
+        // touches, ~0.7 GB at 4-bit against the head body's ~0.15 GB.
+        mx::array logits = mx::astype(model_.logits_from_hidden_public(h), mx::float32);
+        mx::eval(logits);
+        const float* data = logits.data<float>();
+        row.assign(data, data + logits.size());
+    }
+
+    void mtp_trim(std::size_t n) override { model_.mtp_trim(static_cast<int>(n)); }
+    void mtp_reset() override { model_.mtp_reset(); }
 
   private:
     mx::array impl_forward_all(const mx::array& ids) { return model_.forward_logits_all(ids); }

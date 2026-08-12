@@ -102,6 +102,10 @@
         "type": "string"
       },
       {
+        "name": "draft_model_dir",
+        "type": "string"
+      },
+      {
         "name": "workspace_root",
         "type": "string"
       },
