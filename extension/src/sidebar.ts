@@ -361,7 +361,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (err) return this.fail(err);
     // No await on the view: model_status carries `loading` before this settles, which is
     // the only progress there is to show for a load that owns the sidecar for a minute.
-    const reply = await this.client.loadModel(dir);
+    const reply = await this.client.loadModel(dir, this.host.settings().draft_model_dir);
     if (reply.loaded !== true) this.fail(reply.error || `could not load ${dir}`);
   }
 
@@ -390,7 +390,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.fail(NO_MODEL);
       return false;
     }
-    const reply = await this.client.loadModel(dir);
+    const reply = await this.client.loadModel(dir, this.host.settings().draft_model_dir);
     if (reply.loaded !== true) {
       this.fail(reply.error || `could not load ${dir}`);
       return false;

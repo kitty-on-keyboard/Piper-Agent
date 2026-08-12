@@ -187,8 +187,14 @@ export class SidecarClient extends EventEmitter {
    *  the operator had no way to say WHEN it happened and no way to see that it was --
    *  the sidebar just read "Thinking" for a minute. Progress arrives as model_status
    *  notifications; this promise settles only once the load is over. */
-  loadModel(modelDir: string): Promise<Reply<LoadModelResult>> {
-    return this.request("lmp/load_model", { model_dir: modelDir });
+  loadModel(modelDir: string, draftModelDir = ""): Promise<Reply<LoadModelResult>> {
+    // The draft head travels WITH the load. The session compares both directories when
+    // deciding whether a load is a no-op, so omitting it here would load without a
+    // drafter and then make the first mission reload all 15 GB to attach one.
+    return this.request("lmp/load_model", {
+      model_dir: modelDir,
+      draft_model_dir: draftModelDir,
+    });
   }
 
   /** Gives the memory back without killing the process. The conversation goes with it. */
