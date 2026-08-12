@@ -34,6 +34,10 @@ lmp_add_test(test_backend_seam SOURCES test_backend_seam.cpp LABELS gate LINK lm
 # The speculative block algebra runs in the GATE: SpecForward is an interface precisely so
 # that "which positions were committed, what does the cache hold" is testable with no GPU.
 lmp_add_test(test_speculative SOURCES test_speculative.cpp LABELS gate LINK lmp_model)
+# The MTP head's bookkeeping, for the same reason: seed carry, cache trim on partial
+# acceptance and the token/hidden pairing all fail SILENTLY as a sagging acceptance rate.
+# A scripted fake is the only thing that separates that from a drafter simply being weak.
+lmp_add_test(test_mtp_proposer SOURCES test_mtp_proposer.cpp LABELS gate LINK lmp_model)
 # The cross-turn cache decision, for the same reason: an off-by-one there decodes fluent
 # wrong text rather than crashing, so the algebra is pure and asserted with no GPU.
 lmp_add_test(test_kv_reuse SOURCES test_kv_reuse.cpp LABELS gate LINK lmp_model)

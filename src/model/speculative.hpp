@@ -160,10 +160,15 @@ class DraftProposer {
                                                        std::size_t max_draft,
                                                        SpecForward& fwd) = 0;
 
-    // How many of the proposed tokens survived verification, so a stateful drafter can
-    // roll its own cache back to match. Called after EVERY speculative block, including
-    // full acceptance (accepted == drafted).
-    virtual void settle(std::size_t /*accepted*/, std::size_t /*drafted*/, SpecForward&) {}
+    // How many of the proposed tokens survived, and what the block actually emits (those
+    // accepted drafts followed by the bonus token). Called after EVERY speculative block,
+    // including full acceptance and total rejection (where `committed` is empty).
+    //
+    // The bonus token is in here because a grafted drafter needs it: to seed the next
+    // round it must forward the tokens it did not already have, and the bonus is the last
+    // of them. Passing only a count would leave it seeding from a token it never saw.
+    virtual void settle(std::size_t /*accepted*/, std::span<const TokenId> /*committed*/,
+                        SpecForward&) {}
 
     virtual void reset() {}
 };
