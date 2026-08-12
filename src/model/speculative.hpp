@@ -101,6 +101,71 @@ class SpecForward {
     // full-attention layers move an index, the gated-delta layers restore a snapshot.
     virtual void checkpoint() = 0;
     virtual void restore() = 0;
+
+    // ---- the grafted-drafter path (MTP) ---------------------------------------------
+    //
+    // An MTP head is not a second model: it is one layer plus an fc that consumes
+    // concat(embedding, hidden), and it borrows the TARGET's embedding table and LM head.
+    // So it needs hidden states, which the logits-only methods above cannot carry.
+    //
+    // These are primitives on purpose. Everything stateful about MTP -- carrying the seed
+    // token and hidden across rounds, trimming its cache when only part of a draft is
+    // accepted, keeping its positions straight -- lives in MtpProposer, ABOVE this seam,
+    // because that bookkeeping is where the bug lands and it does not announce itself: get
+    // it wrong and nothing crashes, the acceptance rate just quietly sags and looks like a
+    // model that drafts poorly. Above the seam a scripted fake can prove it in the gate.
+    //
+    // Defaulted so a target without an MTP head, and the gate's own fakes, need not care.
+
+    // Does this target have an MTP head loaded and bound?
+    [[nodiscard]] virtual bool has_mtp() const { return false; }
+
+    // Hidden rows produced by the most recent forward_all / forward_last, one per
+    // position forwarded. Row i is the final-normed hidden state AFTER tokens[i] -- the
+    // same state the LM head consumes, which is what the reference feeds the MTP head.
+    virtual void last_hidden(std::vector<std::vector<float>>& rows) { rows.clear(); }
+
+    // One MTP step: (token, hidden) -> next hidden, appending one position to the MTP
+    // head's own KV cache. `hidden` is a row from last_hidden or a previous mtp_step.
+    virtual void mtp_step(TokenId /*tok*/, std::span<const float> /*hidden*/,
+                          std::vector<float>& out_hidden) {
+        out_hidden.clear();
+    }
+
+    // The TARGET's LM head applied to an MTP hidden row. The MTP checkpoint ships no
+    // lm_head of its own, which is also why a drafted token is not free: this is the
+    // single most expensive tensor either model touches.
+    virtual void mtp_logits(std::span<const float> /*hidden*/, std::vector<float>& row) {
+        row.clear();
+    }
+
+    // Drop the last n positions from the MTP head's cache, and clear it entirely.
+    virtual void mtp_trim(std::size_t /*n*/) {}
+    virtual void mtp_reset() {}
+};
+
+// What a draft proposer has to do, so the history-matching proposer and the MTP head are
+// interchangeable and the gate exercises both through one path.
+class DraftProposer {
+  public:
+    virtual ~DraftProposer() = default;
+
+    // Everything the model has actually seen. Cheap; the prompt once, then committed
+    // tokens as they land. A grafted drafter may ignore it -- its state comes from hidden.
+    virtual void ingest(std::span<const TokenId> tokens) = 0;
+
+    // Propose up to max_draft tokens. `fwd` is the target: a grafted drafter runs through
+    // its hidden-state primitives, a history drafter never touches it.
+    [[nodiscard]] virtual std::vector<TokenId> propose(std::span<const TokenId> context,
+                                                       std::size_t max_draft,
+                                                       SpecForward& fwd) = 0;
+
+    // How many of the proposed tokens survived verification, so a stateful drafter can
+    // roll its own cache back to match. Called after EVERY speculative block, including
+    // full acceptance (accepted == drafted).
+    virtual void settle(std::size_t /*accepted*/, std::size_t /*drafted*/, SpecForward&) {}
+
+    virtual void reset() {}
 };
 
 struct SpecStep {
@@ -139,13 +204,13 @@ class SpeculativeDecoder {
   private:
     [[nodiscard]] std::vector<TokenId> propose(std::span<const TokenId> context,
                                                const std::function<bool(TokenId)>& is_special,
-                                               const TokenMask* mask) const;
+                                               const TokenMask* mask, SpecForward& fwd);
 
     SamplingParams params_;
     SpecConfig config_;
     Sampler sampler_;
     SpecVerifier verifier_;
-    std::unique_ptr<draft::SuffixProposer> proposer_;
+    std::unique_ptr<DraftProposer> proposer_;
     SpecStats stats_;
 };
 
