@@ -196,12 +196,33 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
         return {false, "model_dir is required and empty (S7.5)"};
     }
     impl_ = std::make_unique<Impl>();
-    if (!impl_->model.load(config.model_dir)) {
+    // load() reports absence by returning false, but it can also THROW: mx::load_safetensors
+    // on a dtype this MLX cannot parse, or WeightStore::get on a checkpoint whose tensor
+    // names we do not know. generate() has always caught its own throws; this path did not,
+    // so an unfamiliar checkpoint terminated the sidecar with no report at all -- the one
+    // failure mode that tells the operator nothing. Report it like any other load failure.
+    bool ok = false;
+    std::string threw;
+    try {
+        ok = impl_->model.load(config.model_dir);
+    } catch (const std::exception& e) {
+        threw = e.what();
+    } catch (...) {
+        threw = "unknown exception";
+    }
+    if (!ok) {
+        const std::string why = impl_->model.load_error();
         // A load that got part way still allocated, and those buffers are in MLX's cache
         // exactly as a successful load's would be. Giving them back here matters most on
         // the reload path, where the caller is about to try a different checkpoint.
         impl_.reset();
         mx::clear_cache();
+        if (!threw.empty()) {
+            return {false, config.model_dir + ": model load failed: " + threw};
+        }
+        if (!why.empty()) {
+            return {false, config.model_dir + ": " + why};
+        }
         return {false, config.model_dir + ": model load failed (missing config.json or "
                        "safetensors)"};
     }
