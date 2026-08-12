@@ -17,7 +17,7 @@ double ms_since(const platform::Clock& clock, platform::MonoTime start) {
 } // namespace
 
 ModelLoad load_model(Session& session, const std::string& model_dir,
-                     const platform::Clock& clock) {
+                     const std::string& draft_model_dir, const platform::Clock& clock) {
     const platform::MonoTime started = clock.mono();
     if (model_dir.empty()) {
         return {false, "model_dir is required and empty (S7.5: no defaultable input)", 0.0};
@@ -43,9 +43,10 @@ ModelLoad load_model(Session& session, const std::string& model_dir,
     session.backend.reset();
     session.tok.reset();
     session.model_dir.clear();
+    session.draft_model_dir.clear();
 
     auto backend = std::make_unique<model::MlxBackend>(clock);
-    const model::LoadStatus backend_status = backend->load({model_dir, ""});
+    const model::LoadStatus backend_status = backend->load({model_dir, draft_model_dir});
     if (!backend_status.ok) {
         return {false, "model_load_failed: " + backend_status.error,
                 ms_since(clock, started)};
@@ -54,6 +55,7 @@ ModelLoad load_model(Session& session, const std::string& model_dir,
     session.tok = std::move(tok);
     session.backend = std::move(backend);
     session.model_dir = model_dir;
+    session.draft_model_dir = draft_model_dir;
     session.model_max_sequence_tokens =
         static_cast<std::int32_t>(model::load_max_position_embeddings(model_dir));
     return {true, {}, ms_since(clock, started)};

@@ -29,6 +29,7 @@ export interface McpServerSettings {
 
 export interface RunSettings {
   model_dir: string;
+  draft_model_dir: string;
   workspace_root: string;
   mode: Mode;
   sampling: SamplingSettings;

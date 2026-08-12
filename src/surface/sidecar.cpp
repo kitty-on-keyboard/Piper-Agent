@@ -727,13 +727,15 @@ void notify_model(const char* state, const std::string& model_dir,
 // work was over would tell the operator nothing they had not already worked out.
 [[nodiscard]] surface::ModelLoad ensure_model(surface::Session& session,
                                               const std::string& model_dir,
+                                              const std::string& draft_model_dir,
                                               platform::EventLogWriter& log,
                                               const platform::Clock& clock) {
-    if (session.holds(model_dir)) {
+    if (session.holds(model_dir, draft_model_dir)) {
         return {true, {}, 0.0};
     }
     notify_model(protocol::modelstate_values::kLoading, model_dir);
-    const surface::ModelLoad loaded = surface::load_model(session, model_dir, clock);
+    const surface::ModelLoad loaded =
+        surface::load_model(session, model_dir, draft_model_dir, clock);
     // The memory the load left behind, and the cache ceiling that now bounds it. Logged
     // because the only reason we know the allocator cache reached 18 GB on top of a 20 GB
     // model -- and took the process down with it -- is that `unload_model` happened to
@@ -874,6 +876,8 @@ bool start_mission(const std::string& id, const std::string& message,
                    const platform::Clock& clock) {
     const std::string mission = surface::string_field(message, "mission");
     const std::string model_dir = surface::string_field(message, "model_dir");
+    // Optional. Empty means no draft head, which is the default and the reference path.
+    const std::string draft_model_dir = surface::string_field(message, "draft_model_dir");
     const std::string workspace = surface::string_field(message, "workspace_root");
     if (mission.empty() || model_dir.empty() || workspace.empty()) {
         reply_error(id, "mission, model_dir and workspace_root are all required and "
@@ -892,7 +896,7 @@ bool start_mission(const std::string& id, const std::string& message,
     // precondition -- a headless client that only knows lmp/start keeps working. The
     // difference is that the wait is now narrated: ensure_model says `loading` before it
     // blocks, and the run_end below carries the loader's own words when it cannot.
-    const surface::ModelLoad loaded = ensure_model(session, model_dir, log, clock);
+    const surface::ModelLoad loaded = ensure_model(session, model_dir, draft_model_dir, log, clock);
     if (!loaded.ok) {
         end_run(id, loaded.error);
         return false;
@@ -1025,7 +1029,8 @@ void handle_load_model(const std::string& id, const std::string& message,
         reply_error(id, "lmp/load_model requires a non-empty 'model_dir'");
         return;
     }
-    const surface::ModelLoad loaded = ensure_model(session, model_dir, log, clock);
+    const std::string draft_model_dir = surface::string_field(message, "draft_model_dir");
+    const surface::ModelLoad loaded = ensure_model(session, model_dir, draft_model_dir, log, clock);
     reply_result(id, R"({"loaded":)" + std::string(loaded.ok ? "true" : "false") +
                          R"(,"model_dir":)" + json_escape(loaded.ok ? model_dir : "") +
                          R"(,"error":)" + json_escape(loaded.error) + "}");

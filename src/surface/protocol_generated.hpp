@@ -128,6 +128,7 @@ inline void append_value(std::string& out, const McpServerSettings& v) {
 
 struct RunSettings {
     std::string model_dir;
+    std::string draft_model_dir;
     std::string workspace_root;
     std::string mode;
     SamplingSettings sampling;
@@ -150,6 +151,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += "{";
     out += "\"model_dir\":";
     append_value(out, v.model_dir);
+    out += ",";
+    out += "\"draft_model_dir\":";
+    append_value(out, v.draft_model_dir);
     out += ",";
     out += "\"workspace_root\":";
     append_value(out, v.workspace_root);
