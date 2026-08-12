@@ -23,6 +23,35 @@ constexpr float kDeterministicDrafter = 1.0F;
 // shaped against the same window or they are not the rows sequential decoding would use.
 constexpr std::size_t kRecentWindow = 64;
 
+// The history-matching proposer, behind DraftProposer. It is stateless across a block --
+// it matches a suffix and returns a continuation -- so settle() has nothing to undo.
+class SuffixDraftProposer final : public DraftProposer {
+  public:
+    void ingest(std::span<const TokenId> tokens) override {
+        impl_.ingest(std::span<const draft::TokenId>(tokens.data(), tokens.size()));
+    }
+
+    [[nodiscard]] std::vector<TokenId> propose(std::span<const TokenId> context,
+                                               std::size_t max_draft, SpecForward&) override {
+        // The LENGTH is the proposer's decision, not the caller's. Its stop rule is
+        // cumulative acceptance probability against draft_cost_ratio; max_draft is only a
+        // ceiling. NOTE that ratio was fitted to the MoE's expert-bandwidth cost model
+        // (docs/MOE_ROUTING_FINDINGS.md) and does not describe a dense target, where
+        // verifying k positions costs about one weight read regardless of k.
+        const draft::Proposal pr = impl_.propose(
+            std::span<const draft::TokenId>(context.data(), context.size()), max_draft);
+        std::vector<TokenId> out;
+        out.reserve(pr.tokens.size());
+        for (draft::TokenId t : pr.tokens) {
+            out.push_back(static_cast<TokenId>(t));
+        }
+        return out;
+    }
+
+  private:
+    draft::SuffixProposer impl_;
+};
+
 } // namespace
 
 SpeculativeDecoder::SpeculativeDecoder(const SamplingParams& params, SpecConfig config)
@@ -31,7 +60,7 @@ SpeculativeDecoder::SpeculativeDecoder(const SamplingParams& params, SpecConfig 
       // from the verifier rather than the sampler, so the two must not be the same
       // stream -- and a fixed seed still makes a run reproducible.
       verifier_(params.seed ^ 0x5EC0DE5EC0DE5EC0ULL),
-      proposer_(std::make_unique<draft::SuffixProposer>()) {}
+      proposer_(std::make_unique<SuffixDraftProposer>()) {}
 
 SpeculativeDecoder::~SpeculativeDecoder() = default;
 
@@ -39,25 +68,22 @@ void SpeculativeDecoder::observe(std::span<const TokenId> tokens) {
     if (!config_.enabled || tokens.empty()) {
         return;
     }
-    proposer_->ingest(std::span<const draft::TokenId>(tokens.data(), tokens.size()));
+    proposer_->ingest(tokens);
 }
 
 std::vector<TokenId> SpeculativeDecoder::propose(
     std::span<const TokenId> context, const std::function<bool(TokenId)>& is_special,
-    const TokenMask* mask) const {
-    if (context.empty()) {
+    const TokenMask* mask, SpecForward& fwd) {
+    // A grafted drafter proposes from the target's hidden state, so an empty context is
+    // not by itself a reason to skip -- only a history drafter needs one.
+    if (context.empty() && !fwd.has_mtp()) {
         return {};
     }
-    // The LENGTH is the proposer's decision, not ours. Its stop rule is cumulative
-    // acceptance probability against draft_cost_ratio, which is the only policy the MoE
-    // routing measurements found that beats sequential decoding; max_draft is a ceiling.
-    const draft::Proposal pr = proposer_->propose(
-        std::span<const draft::TokenId>(context.data(), context.size()), config_.max_draft);
+    const std::vector<TokenId> raw = proposer_->propose(context, config_.max_draft, fwd);
 
     std::vector<TokenId> out;
-    out.reserve(pr.tokens.size());
-    for (draft::TokenId t : pr.tokens) {
-        const auto id = static_cast<TokenId>(t);
+    out.reserve(raw.size());
+    for (const TokenId id : raw) {
         // Truncate, never skip. A draft is a contiguous continuation; dropping a token
         // from the middle would propose a sequence the model was never going to produce.
         //
@@ -92,7 +118,7 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
     }
 
     const std::vector<TokenId> drafted =
-        (config_.enabled && may_speculate) ? propose(context, is_special, mask)
+        (config_.enabled && may_speculate) ? propose(context, is_special, mask, fwd)
                                            : std::vector<TokenId>{};
 
     if (drafted.empty()) {
@@ -175,11 +201,17 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
         verifier_.verify(std::span<const TokenId>(draft_idx), std::span<const float>(ones),
                          std::span<const std::span<const float>>(row_spans));
     if (r.accepted.empty()) {
+        // Nothing survived. A stateful drafter still appended to its own cache while
+        // proposing, so it has to be told, or its cache outruns the target's by exactly
+        // the drafts nobody kept -- a drift that never throws and only shows up as
+        // steadily worse proposals.
+        proposer_->settle(0, drafted.size(), fwd);
         out.no_legal_token = true;
         return out;
     }
 
     const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
+    proposer_->settle(m, drafted.size(), fwd);
     for (std::size_t i = 0; i < m; ++i) {
         out.committed.push_back(drafted[i]);
     }
