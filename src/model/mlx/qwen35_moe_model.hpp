@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -239,10 +240,15 @@ public:
     // a shared one. Same SwiGLU and same quantized `linear` the shared expert already
     // uses, so nothing new reaches the weight store or the kernels.
     mx::array forward_dense_mlp(int layer, const mx::array& x) const {
-        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".mlp.";
         if (ablation() == Ablate::mlp) {
             return mx::zeros_like(x);
         }
+        return dense_mlp_at(prefix_ + "layers." + std::to_string(layer) + ".mlp.", x);
+    }
+
+    // Prefix-addressed so the MTP head's identically-shaped MLP reuses it rather than
+    // carrying a second copy of the same three matmuls.
+    mx::array dense_mlp_at(const std::string& p, const mx::array& x) const {
         return weights_.linear(lmp::model::mlxl::swiglu(weights_.linear(x, p + "gate_proj"),
                                                         weights_.linear(x, p + "up_proj")),
                                p + "down_proj");
@@ -281,11 +287,95 @@ public:
     // operator is told WHICH of the load preconditions failed.
     [[nodiscard]] const std::string& load_error() const noexcept { return load_error_; }
 
+    // ---- the MTP head ----------------------------------------------------------------
+    //
+    // A separate checkpoint, merged into THIS store under an "mtp." prefix. It carries one
+    // decoder layer, an fc over concat(embedding, hidden), two pre-fc norms and a final
+    // norm -- and no embedding table and no lm_head, because it borrows the target's.
+    //
+    // Loaded after sanitize_weights() on purpose: that pass DROPS keys containing "mtp.",
+    // which is correct for a target checkpoint that ships MTP tensors inline and would
+    // otherwise delete exactly what we just merged.
+    bool load_mtp(const std::string& mtp_dir) {
+        mtp_loaded_ = false;
+        mtp_block_size_ = load_mtp_block_size(mtp_dir);
+        if (mtp_block_size_ < 2) {
+            return false;
+        }
+        if (!weights_.load_directory_merged(mtp_dir, "mtp.")) {
+            mtp_block_size_ = 0;
+            return false;
+        }
+        // Refuse rather than discover it mid-generation: the head is addressed by key, so
+        // a checkpoint laid out differently fails at the first draft, not at load.
+        for (const char* key : {"mtp.fc", "mtp.norm.weight", "mtp.pre_fc_norm_hidden.weight",
+                                "mtp.pre_fc_norm_embedding.weight",
+                                "mtp.layers.0.self_attn.q_proj"}) {
+            if (!weights_.has(key)) {
+                mtp_block_size_ = 0;
+                return false;
+            }
+        }
+        mtp_cache_ = KVCache{};
+        mtp_loaded_ = true;
+        return true;
+    }
+
+    [[nodiscard]] bool is_dense() const noexcept { return ffn_ == FfnKind::Dense; }
+    [[nodiscard]] bool has_mtp() const noexcept { return mtp_loaded_; }
+    [[nodiscard]] int mtp_block_size() const noexcept { return mtp_block_size_; }
+
+    // One MTP position: (token, target hidden) -> next hidden, appending to the head's own
+    // KV cache. `hidden` is [1, n, hidden]; `token_ids` is [1, n].
+    //
+    // The concatenation order is EMBEDDING FIRST. It matches the reference and it is not
+    // checkable by shape -- both halves are `hidden` wide, so getting it backwards
+    // produces a running model whose drafts are noise.
+    mx::array mtp_forward(const mx::array& token_ids, const mx::array& hidden) {
+        const int seq_len = static_cast<int>(token_ids.shape()[1]);
+        const mx::array e = embed_tokens(token_ids);
+        mx::array h = mx::concatenate({rms_norm(e, "mtp.pre_fc_norm_embedding.weight"),
+                                       rms_norm(hidden, "mtp.pre_fc_norm_hidden.weight")},
+                                      -1);
+        h = weights_.linear(h, "mtp.fc");
+
+        const std::string p = "mtp.layers.0.";
+        const mx::array attn_in = rms_norm(h, p + "input_layernorm.weight");
+        h = mx::add(h, forward_self_attn(p + "self_attn.", attn_in, mtp_cache_, seq_len));
+        const mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
+        h = mx::add(h, dense_mlp_at(p + "mlp.", mlp_in));
+        return rms_norm(h, "mtp.norm.weight");
+    }
+
+    // The head's cache is its own; the target's rollback never touches it, so partial
+    // acceptance has to trim it explicitly (MtpProposer owns that decision).
+    void mtp_trim(int n) {
+        if (n > 0) {
+            mtp_cache_.truncate_to(mtp_cache_.offset > n ? mtp_cache_.offset - n : 0);
+        }
+    }
+    void mtp_reset() { mtp_cache_ = KVCache{}; }
+
+    // The final-normed hidden from the most recent forward, which is what the head
+    // consumes and what the LM head consumes. Captured only while an MTP head is loaded:
+    // holding it otherwise would keep a [1, seq, 5120] array alive for nothing.
+    [[nodiscard]] const std::optional<mx::array>& last_hidden() const noexcept {
+        return last_hidden_;
+    }
+
+    [[nodiscard]] mx::array logits_from_hidden_public(const mx::array& h) const {
+        return logits_from_hidden(h);
+    }
+
 private:
     std::string prefix_;
     Qwen35MoeConfig cfg_{};
     FfnKind ffn_{FfnKind::Moe};
     std::string load_error_;
+    bool mtp_loaded_ = false;
+    int mtp_block_size_ = 0;
+    KVCache mtp_cache_{};
+    std::optional<mx::array> last_hidden_;
     WeightStore weights_;
     std::vector<KVCache> kv_caches_;
     std::vector<SsmCache> ssm_caches_;
@@ -375,7 +465,11 @@ private:
             }
         }
 
-        return rms_norm(h, prefix_ + "norm.weight");
+        mx::array out = rms_norm(h, prefix_ + "norm.weight");
+        if (mtp_loaded_) {
+            last_hidden_ = out;
+        }
+        return out;
     }
 
     [[nodiscard]] mx::array embed_tokens(const mx::array& ids) const {

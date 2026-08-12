@@ -34,7 +34,7 @@ TEST(an_empty_model_dir_is_refused_rather_than_defaulted) {
     // S7.5: no security-relevant input gets a default. An empty model_dir that fell
     // through to "some checkpoint" would be the whole rule going the wrong way.
     Session session;
-    const ModelLoad r = load_model(session, "", clock_);
+    const ModelLoad r = load_model(session, "", "", clock_);
     CHECK(!r.ok);
     CHECK(!r.error.empty());
     CHECK(!session.model_ready());
@@ -42,7 +42,7 @@ TEST(an_empty_model_dir_is_refused_rather_than_defaulted) {
 
 TEST(a_missing_checkpoint_refuses_with_the_loaders_own_words) {
     Session session;
-    const ModelLoad r = load_model(session, "/nonexistent/checkpoint", clock_);
+    const ModelLoad r = load_model(session, "/nonexistent/checkpoint", "", clock_);
     CHECK(!r.ok);
     // The path is IN the message. A load failure is nearly always a fixable statement
     // about what is on disk, and "load failed" with the path paraphrased away is the one
@@ -56,7 +56,7 @@ TEST(a_failed_load_leaves_no_half_loaded_session) {
     // that generates fluent nonsense instead of failing. model_ready() is both halves,
     // and holds() is what the sidecar asks before deciding whether a load will block.
     Session session;
-    (void)load_model(session, "/nonexistent/checkpoint", clock_);
+    (void)load_model(session, "/nonexistent/checkpoint", "", clock_);
     CHECK(!session.model_ready());
     CHECK(session.model_dir.empty());
     CHECK(!session.holds("/nonexistent/checkpoint"));

@@ -178,6 +178,40 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
     return cfg.hidden_size > 0 && cfg.num_hidden_layers > 0;
 }
 
+// The MTP head's block size, or 0 when the directory is not a usable MTP checkpoint.
+//
+// A round drafts block_size - 1 tokens, which is why the Qwen3.6-27B MTP card advertises
+// "block size 2" while its own config.json says 3. Both describe something true; the
+// config is what code must read, since it is the number the reference loop counts against.
+//
+// model_type is checked, not assumed: pointing this at the TARGET directory would
+// otherwise load 16 GB of the wrong tensors under an mtp. prefix and fail much later.
+inline int load_mtp_block_size(const std::string& model_dir) {
+    const std::string path = model_dir + "/config.json";
+    std::ifstream in(path);
+    if (!in) {
+        return 0;
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    const std::string json = buf.str();
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element root;
+    if (parser.parse(json).get(root)) {
+        return 0;
+    }
+    std::string_view mt;
+    if (root["model_type"].get_string().get(mt) || mt != "qwen3_5_mtp") {
+        return 0;
+    }
+    int64_t block = 0;
+    if (root["block_size"].get_int64().get(block) || block < 2) {
+        return 0;
+    }
+    return static_cast<int>(block);
+}
+
 // The checkpoint's sequence ceiling, or 0 when config.json is missing / unparseable /
 // omits the field. Safe to call without loading weights. Prefer
 // model::load_max_position_embeddings (model_limits.hpp) from call sites outside this
