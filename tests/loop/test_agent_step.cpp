@@ -2263,6 +2263,116 @@ TEST(plan_still_reads_a_plain_markdown_checklist) {
     CHECK(ctx.checklist()[1].done);
 }
 
+// A NUMBERED plan's ticks landed in the label instead of the state. The marker was only
+// looked for at the head of the line, so `1. [x] Explore` -- an ordered list with a
+// checkbox, which is what a model writes when told to number its plan AND to mark done
+// items '[x]' -- parsed as an UNCHECKED item whose text began "[x]".
+//
+// MEASURED, run 4 of 2026-08-12: six `plan` calls, one more item ticked each time, and all
+// six logged `open=8` of 8. The operator watched a checklist that never moved while the
+// run worked through it. The ordinal stays in the text -- the model numbered its own plan
+// and the panel does not number for it.
+TEST(plan_ticks_a_numbered_item_whose_marker_follows_the_number) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        "1. [x] Explore the workspace\n"
+        "2. [x] Rewrite DashboardWindow.swift\n"
+        "3. Fix MemoryGaugeView.swift\n"
+        "4) [ ] Fix the sparkline\n"
+        "</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix the layout");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 4);
+    CHECK(ctx.checklist()[0].text == "1. Explore the workspace");
+    CHECK(ctx.checklist()[0].done);
+    CHECK(ctx.checklist()[1].text == "2. Rewrite DashboardWindow.swift");
+    CHECK(ctx.checklist()[1].done);
+    CHECK(ctx.checklist()[2].text == "3. Fix MemoryGaugeView.swift");
+    CHECK(!ctx.checklist()[2].done);
+    CHECK(ctx.checklist()[3].text == "4) Fix the sparkline");
+    CHECK(!ctx.checklist()[3].done);
+    // The whole point: two of four are ticked, so the panel moves.
+    CHECK(ctx.open_checklist_items() == 2);
+}
+
+// A one-item numbered plan is not an unsplit list. `holds_a_whole_list` rejects a single
+// item that carries a second checkbox marker -- and while the marker after an ordinal was
+// left in the TEXT, `1. [x] Ship it` was exactly that shape, so a legitimate one-item plan
+// was refused with "the list arrived unsplit".
+TEST(plan_accepts_a_single_numbered_ticked_item) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body = "<function=plan>\n<parameter=items>\n"
+                             "1. [x] Ship it\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("ship it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 1);
+    CHECK(ctx.checklist()[0].text == "1. Ship it");
+    CHECK(ctx.checklist()[0].done);
+    CHECK(ctx.open_checklist_items() == 0);
+}
+
+// A decimal is not an ordinal, and a number with nothing behind it is not an item. Both
+// are the ways a digit-led line gets eaten by a parser that is too eager about numbering.
+TEST(plan_does_not_mistake_a_decimal_for_a_checklist_number) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body = "<function=plan>\n<parameter=items>\n"
+                             "1.5x the sparkline sample rate\n"
+                             "2. [x] Cap the gauge\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("tune it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 2);
+    CHECK(ctx.checklist()[0].text == "1.5x the sparkline sample rate");
+    CHECK(!ctx.checklist()[0].done);
+    CHECK(ctx.checklist()[1].text == "2. Cap the gauge");
+    CHECK(ctx.checklist()[1].done);
+}
+
 // The OTHER JSON shape: not an array, one string with the list joined up inside it. Nothing
 // decoded it, so the quotes and the two-character `\n` sequences reached the line parser as
 // text and the whole plan became one item.

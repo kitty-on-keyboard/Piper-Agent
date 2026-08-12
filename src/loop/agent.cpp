@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert> // the emit() field-name guard
+#include <cctype> // ordinal_width's digit test
 #include <chrono>
 #include <cstdlib> // getenv/atoi, for the LMP_TRACE_TEXT gate
 #include <memory>
@@ -268,9 +269,49 @@ std::string unquote_json_string(const std::string& raw) {
     return decode_json_escapes(std::string_view(raw).substr(open + 1, close - open - 1));
 }
 
-// One item per line: an optional `- `/`* ` bullet, an optional `[ ]`/`[x]` marker, then the
-// text. Tolerant of prose-ish markdown, because refusing a checklist over a dash would be
+// `12. ` / `12) ` at `i`, or 0 when there is no ordinal there. Digits only: a line that
+// opens with the word "Step" is text, and guessing at prose is how a parser starts eating
+// item labels.
+std::size_t ordinal_width(const std::string& line, std::size_t i) {
+    std::size_t j = i;
+    while (j < line.size() && std::isdigit(static_cast<unsigned char>(line[j])) != 0) {
+        ++j;
+    }
+    if (j == i || j >= line.size() || (line[j] != '.' && line[j] != ')')) {
+        return 0;
+    }
+    ++j;
+    // The separator has to be followed by space or the item text; `1.5x faster` is not an
+    // ordinal, and neither is a bare `1.` with nothing after it.
+    if (j >= line.size() || (line[j] != ' ' && line[j] != '\t')) {
+        return 0;
+    }
+    while (j < line.size() && (line[j] == ' ' || line[j] == '\t')) {
+        ++j;
+    }
+    return j - i;
+}
+
+// One item per line: an optional `- `/`* ` bullet, an optional `1. ` ordinal, an optional
+// `[ ]`/`[x]` marker, then the text -- with the ordinal and the marker accepted in either
+// order. Tolerant of prose-ish markdown, because refusing a checklist over a dash would be
 // theatre.
+//
+// THE NUMBERED LIST NOBODY COULD TICK. The marker was only ever looked for at the head of
+// the line, so `1. [x] Explore the workspace` -- an ordered list with a checkbox, which is
+// what a model writes when it is told to number its plan AND to mark items '[x]' -- parsed
+// as an UNCHECKED item whose text began "[x]". Every tick the model sent landed in the
+// label instead of the state.
+//
+// MEASURED, run 4 of 2026-08-12: six `plan` calls, ticking one more item each time, and
+// all six logged `open=8` out of 8. The operator watched a checklist that never moved
+// while the run worked through it, and the panel only filled in at the end because the
+// final restate happened to lead with the marker. Nothing was wrong with the model's
+// bookkeeping; we were parsing its ticks into the text.
+//
+// Two passes, because `[x] 1. Item` and `1. [x] Item` are both in the wild and a fixed
+// order only ever fixes one of them. The ordinal STAYS in the text -- the model numbered
+// its own plan and the panel does not number for it.
 std::vector<context::ChecklistItem> parse_checklist_lines(const std::string& source) {
     std::vector<context::ChecklistItem> items;
     std::size_t at = 0;
@@ -286,17 +327,33 @@ std::vector<context::ChecklistItem> parse_checklist_lines(const std::string& sou
             continue;
         }
         bool done = false;
-        if (line.compare(i, 3, "[x]") == 0 || line.compare(i, 3, "[X]") == 0) {
-            done = true;
-            i += 3;
-        } else if (line.compare(i, 3, "[ ]") == 0) {
-            i += 3;
+        // Kept so the item reads the way the model wrote it; only the marker is consumed.
+        std::string ordinal;
+        for (int pass = 0; pass < 2; ++pass) {
+            if (line.compare(i, 3, "[x]") == 0 || line.compare(i, 3, "[X]") == 0) {
+                done = true;
+                i += 3;
+                break;
+            }
+            if (line.compare(i, 3, "[ ]") == 0) {
+                i += 3;
+                break;
+            }
+            if (pass != 0) {
+                break; // one ordinal, then the marker; `1. 2. x` is text, not two numbers
+            }
+            const std::size_t ord = ordinal_width(line, i);
+            if (ord == 0) {
+                break;
+            }
+            ordinal = line.substr(i, ord);
+            i += ord;
         }
         const std::size_t text_at = line.find_first_not_of(" \t", i);
         if (text_at == std::string::npos) {
-            continue;
+            continue; // a marker or a number with nothing after it is not an item
         }
-        items.push_back({line.substr(text_at), done});
+        items.push_back({ordinal + line.substr(text_at), done});
     }
     return items;
 }
