@@ -1,8 +1,8 @@
 // The Dual-Layer Fiber Soundwave Logo Engine for Piper Agent
 //
 // Dual-Layer Architecture:
-// 1. Layer 1 (svg-layer-ribbon): Pristine continuous fluid ribbon 'P' for Idle Standby.
-// 2. Layer 2 (svg-layer-bars): 4 dynamic fiber soundwave equalizer bars for Thinking & Executing states.
+// 1. Layer 1 (svg-layer-ribbon): Pristine continuous fluid ribbon 'P' for Idle Standby ONLY.
+// 2. Layer 2 (svg-layer-bars): 4 dynamic fiber soundwave equalizer bars for Thinking & Executing states ONLY.
 
 const ORB_SIZE = 34;
 
@@ -30,33 +30,59 @@ export function orbStyles(): string {
   position: absolute;
   top: 0;
   left: 0;
-  transition: opacity 0.4s ease;
+  transition: opacity 0.3s ease;
 }
 
-.svg-layer-ribbon { opacity: 1; }
-.svg-layer-bars { opacity: 0; }
+/* Standby Only: Solid Ribbon 'P' */
+body:not(.busy) .svg-layer-ribbon {
+  opacity: 1 !important;
+  display: block !important;
+  animation: quietRibbonBreath 2.8s ease-in-out infinite alternate;
+}
 
-body.busy .svg-layer-ribbon { opacity: 0; }
-body.busy .svg-layer-bars { opacity: 1; }
+body:not(.busy) .svg-layer-bars {
+  opacity: 0 !important;
+  display: none !important;
+  animation: none !important;
+}
 
-.sw-svg.svg-layer-ribbon {
-  animation: quietRibbonBreath 3s ease-in-out infinite alternate;
+/* Active Only: Dynamic Soundwave Equalizer Bars */
+body.busy .svg-layer-ribbon {
+  opacity: 0 !important;
+  display: none !important;
+  animation: none !important;
+}
+
+body.busy .svg-layer-bars {
+  opacity: 1 !important;
+  display: block !important;
 }
 
 @keyframes quietRibbonBreath {
-  0% { opacity: 0.85; filter: drop-shadow(0 0 2px rgba(20, 184, 166, 0.3)); }
-  100% { opacity: 1; filter: drop-shadow(0 0 10px rgba(6, 182, 212, 0.85)); }
+  0% {
+    filter: drop-shadow(0 0 3px rgba(20, 184, 166, 0.5));
+    transform: scale(0.97);
+  }
+  50% {
+    filter: drop-shadow(0 0 10px rgba(6, 182, 212, 0.85));
+    transform: scale(1.03);
+  }
+  100% {
+    filter: drop-shadow(0 0 14px rgba(139, 92, 246, 0.95));
+    transform: scale(1.0);
+  }
 }
 
 .sw-bar {
-  transform-origin: bottom;
+  transform-box: fill-box;
+  transform-origin: center bottom;
   transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-body.busy .sw-1 { animation: soundwaveFlow 0.8s ease-in-out infinite alternate 0.0s; }
-body.busy .sw-2 { animation: soundwaveFlow 0.8s ease-in-out infinite alternate 0.2s; }
-body.busy .sw-3 { animation: soundwaveFlow 0.8s ease-in-out infinite alternate 0.4s; }
-body.busy .sw-4 { animation: soundwaveFlow 0.8s ease-in-out infinite alternate 0.1s; }
+body.busy .sw-1 { animation: soundwaveFlow 0.75s ease-in-out infinite alternate 0.0s; }
+body.busy .sw-2 { animation: soundwaveFlow 0.75s ease-in-out infinite alternate 0.2s; }
+body.busy .sw-3 { animation: soundwaveFlow 0.75s ease-in-out infinite alternate 0.4s; }
+body.busy .sw-4 { animation: soundwaveFlow 0.75s ease-in-out infinite alternate 0.1s; }
 
 body.executing .sw-1 { animation: rapidPulse 0.3s ease-in-out infinite alternate 0.0s; }
 body.executing .sw-2 { animation: rapidPulse 0.3s ease-in-out infinite alternate 0.1s; }
@@ -64,13 +90,13 @@ body.executing .sw-3 { animation: rapidPulse 0.3s ease-in-out infinite alternate
 body.executing .sw-4 { animation: rapidPulse 0.3s ease-in-out infinite alternate 0.05s; }
 
 @keyframes soundwaveFlow {
-  0% { transform: scaleY(0.4); }
-  100% { transform: scaleY(1.35); }
+  0% { transform: scaleY(0.3); }
+  100% { transform: scaleY(1.45); }
 }
 
 @keyframes rapidPulse {
-  0% { transform: scaleY(0.3); }
-  100% { transform: scaleY(1.45); }
+  0% { transform: scaleY(0.2); }
+  100% { transform: scaleY(1.6); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -124,10 +150,11 @@ export function orbScript(): string {
 (function () {
   window.__orb = {
     state: function (s) {
-      if (s === 'busy' || s === 'thinking') {
+      var st = (s || '').toString().toLowerCase();
+      if (st === 'busy' || st === 'thinking') {
         document.body.classList.add('busy');
         document.body.classList.remove('executing');
-      } else if (s === 'executing') {
+      } else if (st === 'executing' || st === 'tool' || st === 'running') {
         document.body.classList.add('busy', 'executing');
       } else {
         document.body.classList.remove('busy', 'executing');

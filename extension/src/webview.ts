@@ -67,15 +67,20 @@ body {
 
 .wordmark {
   font-family: ${FONT_STACK};
-  font-size: 1.05rem;
+  font-size: 1.35rem;
   font-weight: 700;
   letter-spacing: -0.03em;
   color: var(--fg);
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  gap: 0;
 }
-.brand-piper {
+.wordmark #orb {
+  --orb-size: 32px;
+  margin-right: -7px;
+}
+.brand-iper {
   display: inline-flex;
   align-items: center;
 }
@@ -100,24 +105,37 @@ body {
   -webkit-text-fill-color: transparent;
   font-weight: 800;
   letter-spacing: 0.01em;
+  margin-left: 5px;
 }
 
 /* --- header ------------------------------------------------------------- */
 #head {
   position: sticky; top: 0; z-index: 5;
-  padding: 12px var(--pad) 10px;
+  padding: 6px var(--pad) 8px;
   background: var(--vscode-sideBar-background);
   border-bottom: 1px solid var(--line);
 }
-#mission {
-  font-size: 13px; font-weight: 590; letter-spacing: -.01em;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden;
+#headRow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 0 6px;
 }
-#mission:empty::before { content: "No run yet"; color: var(--faint); font-weight: 400; }
+#headText {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+#mission {
+  display: none !important;
+}
 #status {
-  display: flex; align-items: center; gap: 7px;
-  margin-top: 6px; font-size: 11px; color: var(--dim);
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  margin-top: 4px; font-size: 11px; color: var(--dim);
   min-height: 16px;
 }
 /* The mode the RUN IN FLIGHT was started with. Not the segmented control's value, which
@@ -538,14 +556,17 @@ button.ghost {
    to the editor's own settings, so the drawer and the Settings UI are the same state
    rather than two copies that drift. */
 #gear, #histBtn {
-  position: absolute; top: 10px;
-  width: 24px; height: 24px; padding: 0; border-radius: 6px;
-  background: transparent; color: var(--dim); font-size: 13px;
+  position: absolute; top: 8px;
+  width: 30px; height: 30px; padding: 0; border-radius: 8px;
+  background: var(--surface); color: var(--fg); font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.18s var(--ease);
+  z-index: 10;
 }
 #gear { right: 10px; }
-#histBtn { right: 38px; font-size: 14px; }
-#gear:hover, #histBtn:hover { background: var(--surface-hi); color: var(--fg); }
-#gear.on, #histBtn.on { background: var(--surface-hi); color: var(--fg); }
+#histBtn { right: 50px; font-size: 17px; }
+#gear:hover, #histBtn:hover { background: var(--surface-hi); color: var(--accent); transform: scale(1.08); }
+#gear.on, #histBtn.on { background: var(--surface-hi); color: var(--accent); }
 #head { position: sticky; }
 #drawer {
   display: none; padding: 10px 0 2px; border-top: 1px solid var(--line); margin-top: 10px;
@@ -747,16 +768,15 @@ body.busy #send { display: none; }
 function markup(): string {
   return `
 <div id="head">
-  <button id="gear" title="Settings">⚙</button>
   <button id="histBtn" title="Run history">◷</button>
+  <button id="gear" title="Settings">⚙</button>
   <div id="headRow">
-    ${orbMarkup()}
     <div id="headText">
       <div class="wordmark">
-        <span class="brand-piper">P<span class="teal-i-wrapper"><span class="teal-dot-single"></span>ı</span>per</span>
+        ${orbMarkup()}
+        <span class="brand-iper"><span class="teal-i-wrapper"><span class="teal-dot-single"></span>ı</span>per</span>
         <span class="brand-agent">Agent</span>
       </div>
-      <div id="mission"></div>
       <div id="status"><span id="statusText">Idle</span><span id="modeNow"></span></div>
     </div>
   </div>
