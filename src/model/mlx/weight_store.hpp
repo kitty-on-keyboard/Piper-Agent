@@ -70,6 +70,35 @@ public:
         return true;
     }
 
+    // Load an ADDITIONAL checkpoint into this store under `prefix`, keeping everything
+    // already here. The MTP head ships as its own directory but has to share the target's
+    // store: it carries no embedding table and no lm_head, and its one decoder layer is
+    // addressed by the same forward_self_attn the target uses, which resolves weights by
+    // key. Giving it a separate store would mean duplicating that path.
+    //
+    // Quantization falls through to this store's defaults (4-bit, group 64, affine),
+    // which is what the MTP checkpoint's own config declares; lookup_quant still infers
+    // per-tensor bits from shape where a tensor disagrees.
+    bool load_directory_merged(const std::string& model_dir, const std::string& prefix) {
+        namespace fs = std::filesystem;
+        std::vector<mx::array> eval_buf;
+        for (const auto& entry : fs::directory_iterator(model_dir)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".safetensors") {
+                continue;
+            }
+            auto loaded = mx::load_safetensors(entry.path().string());
+            for (auto& [key, tensor] : loaded.first) {
+                eval_buf.push_back(tensor);
+                weights_.emplace(prefix + key, std::move(tensor));
+            }
+        }
+        if (eval_buf.empty()) {
+            return false;
+        }
+        mx::eval(eval_buf);
+        return true;
+    }
+
     [[nodiscard]] bool has(const std::string& key) const {
         return weights_.find(key) != weights_.end();
     }

@@ -25,6 +25,9 @@ function settingsFromConfig(): RunSettings {
   const mode = cfg.get<"plan" | "debug" | "agent">("mode", "agent");
   return {
     model_dir: cfg.get<string>("modelDir", ""),
+    // Optional MTP draft head. Empty is the default and the reference path; a bad one
+    // fails the load rather than quietly generating without it.
+    draft_model_dir: cfg.get<string>("draftModelDir", ""),
     workspace_root: root,
     mode,
     sampling: {

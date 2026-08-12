@@ -34,6 +34,7 @@ namespace lmp::surface {
 
 struct Session {
     std::string model_dir;
+    std::string draft_model_dir;
     std::string workspace;
     // From the checkpoint's text_config.max_position_embeddings. 0 when unknown (no
     // model loaded yet, or the field was absent). Copied into AgentConfig at run start
@@ -71,8 +72,11 @@ struct Session {
     // Whether a load of `dir` would be a no-op. The caller needs this BEFORE calling
     // load_model, because loading blocks for tens of seconds and the surface has to be
     // told that is about to happen -- afterwards is too late to say "working on it".
-    [[nodiscard]] bool holds(const std::string& dir) const noexcept {
-        return model_ready() && model_dir == dir;
+    // Both halves, because swapping ONLY the drafter still changes what generates: a
+    // no-op here would leave the previous head bound while the client believes it changed.
+    [[nodiscard]] bool holds(const std::string& dir,
+                             const std::string& draft_dir = {}) const noexcept {
+        return model_ready() && model_dir == dir && draft_model_dir == draft_dir;
     }
 };
 
@@ -91,7 +95,10 @@ struct ModelLoad {
 // BLOCKS for as long as the checkpoint takes. Emits nothing: the caller owns the wire
 // and brackets this with the model_status notifications, because a progress message
 // that could only be sent after the work finished would not be progress.
+// `draft_model_dir` is optional; when set it must be an MTP draft head matching the
+// target, and a bad one FAILS the load rather than quietly generating without it.
 [[nodiscard]] ModelLoad load_model(Session& session, const std::string& model_dir,
+                                   const std::string& draft_model_dir,
                                    const platform::Clock& clock);
 
 // Gives the memory back. The conversation goes with it -- a ContextStore whose weights

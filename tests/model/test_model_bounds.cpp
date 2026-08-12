@@ -156,6 +156,38 @@ TEST(nested_model_type_selects_the_matching_graph) {
     }
 }
 
+// The MTP head is a SEPARATE directory from the target, so the obvious operator mistake
+// is pointing draftModelDir at the target. That must be refused by inspection: accepting
+// it would merge 16 GB of the wrong tensors under an mtp. prefix and fail much later,
+// after the load appeared to succeed.
+TEST(mtp_block_size_accepts_only_a_real_mtp_checkpoint) {
+    const auto write_cfg = [](const std::string& body) {
+        const std::string root = temp_dir();
+        std::ofstream out(root + "/config.json");
+        out << body;
+        return root;
+    };
+
+    CHECK_EQ(mlxl::load_mtp_block_size(
+                 write_cfg(R"({"model_type":"qwen3_5_mtp","block_size":3})")),
+             3);
+
+    // The target's own config -- the mistake this guard exists for.
+    CHECK_EQ(mlxl::load_mtp_block_size(
+                 write_cfg(R"({"model_type":"qwen3_5","text_config":{"hidden_size":5120}})")),
+             0);
+    CHECK_EQ(mlxl::load_mtp_block_size(
+                 write_cfg(R"({"model_type":"qwen3_5_moe","block_size":3})")),
+             0);
+    // block_size 1 would draft nothing; treat it as unusable rather than load weights.
+    CHECK_EQ(mlxl::load_mtp_block_size(
+                 write_cfg(R"({"model_type":"qwen3_5_mtp","block_size":1})")),
+             0);
+    CHECK_EQ(mlxl::load_mtp_block_size(write_cfg(R"({"model_type":"qwen3_5_mtp"})")), 0);
+    CHECK_EQ(mlxl::load_mtp_block_size(write_cfg(R"(not json)")), 0);
+    CHECK_EQ(mlxl::load_mtp_block_size("/nonexistent/mtp"), 0);
+}
+
 TEST(rope_parameters_still_overrides_the_config_level) {
     const std::string root = temp_dir();
     REQUIRE(!root.empty());

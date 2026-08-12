@@ -4,6 +4,7 @@
 #include <array>
 
 #include "bakeoff/draft_proposer/suffix_proposer.hpp"
+#include "src/model/mtp_proposer.hpp"
 
 namespace lmp::model {
 
@@ -60,7 +61,11 @@ SpeculativeDecoder::SpeculativeDecoder(const SamplingParams& params, SpecConfig 
       // from the verifier rather than the sampler, so the two must not be the same
       // stream -- and a fixed seed still makes a run reproducible.
       verifier_(params.seed ^ 0x5EC0DE5EC0DE5EC0ULL),
-      proposer_(std::make_unique<SuffixDraftProposer>()) {}
+      proposer_(config.mtp_block_size >= 2
+                    ? std::unique_ptr<DraftProposer>(
+                          std::make_unique<MtpProposer>(config.mtp_block_size))
+                    : std::unique_ptr<DraftProposer>(
+                          std::make_unique<SuffixDraftProposer>())) {}
 
 SpeculativeDecoder::~SpeculativeDecoder() = default;
 

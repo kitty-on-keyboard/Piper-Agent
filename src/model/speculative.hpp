@@ -69,6 +69,12 @@ struct SpecConfig {
     // Upper bound only -- the proposer decides the actual length, and the measurements
     // above say a constant would ship a regression.
     std::size_t max_draft = 8;
+    // Non-zero when the target carries an MTP head, carrying that head's block size.
+    // Drafting then goes through the head instead of history matching, and the fixed
+    // length is correct rather than a regression: the "adaptive or nothing" measurements
+    // above describe expert scattering on the MoE, and a dense target verifies k positions
+    // for about one weight read regardless of k.
+    std::size_t mtp_block_size = 0;
 };
 
 struct SpecStats {
