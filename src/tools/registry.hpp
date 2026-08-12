@@ -36,6 +36,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <parsephony/toolcall.hpp>
@@ -443,5 +444,11 @@ class Registry {
 // it did not. Exactly the shape of the hole that put `irreversible` on ToolDecl in the
 // first place: the apparatus was watching the tool the run had stopped using.
 [[nodiscard]] bool would_overwrite_existing(const std::string& root, const std::string& rel);
+
+// A model-supplied `expected_version` reduced to the bare lowercase hex the write path
+// compares. Accepts what read_file DISPLAYS -- `[content_version sha256=<hex>]` -- in
+// whole or in part, because that is where the model copies the value from. Exposed for
+// tests; see the definition in memory_file.cpp for what it cost to learn.
+[[nodiscard]] std::string normalize_content_version(std::string_view supplied);
 
 } // namespace lmp::tools
