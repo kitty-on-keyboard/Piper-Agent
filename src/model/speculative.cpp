@@ -205,23 +205,30 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
         // proposing, so it has to be told, or its cache outruns the target's by exactly
         // the drafts nobody kept -- a drift that never throws and only shows up as
         // steadily worse proposals.
-        proposer_->settle(0, drafted.size(), fwd);
+        proposer_->settle(0, {}, fwd);
         out.no_legal_token = true;
         return out;
     }
 
     const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
-    proposer_->settle(m, drafted.size(), fwd);
     for (std::size_t i = 0; i < m; ++i) {
         out.committed.push_back(drafted[i]);
     }
     // The final token is an index into the row at position m, not a token id.
     const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
     if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
+        proposer_->settle(0, {}, fwd);
         out.no_legal_token = true;
         return out;
     }
     out.committed.push_back(dists[m].ids[tail_idx]);
+
+    // Settle here, and not a line earlier: a grafted drafter seeds the next round by
+    // forwarding the tokens it did not already hold, and the last of those is the bonus
+    // token, which only exists now. It also reads the hidden rows from the verification
+    // pass above, so this must precede the forward_last / restore below -- those replace
+    // what fwd.last_hidden() reports.
+    proposer_->settle(m, std::span<const TokenId>(out.committed), fwd);
 
     stats_.accepted_drafts += m;
     stats_.committed += out.committed.size();
