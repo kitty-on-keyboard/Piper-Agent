@@ -5,10 +5,33 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include <simdjson.h>
 
 namespace lmp::model::mlxl {
+
+// Which FFN the checkpoint carries. The Qwen3.5/3.6 generation ships one hybrid
+// linear-attention backbone with two FFN shapes: routed experts (35B-A3B) and a plain
+// gated MLP (27B). Everything else -- the layer schedule, output-gated attention,
+// QK-norm, the gated-delta block, the weight prefix -- is common to both, so this is the
+// only axis the model graph has to branch on.
+enum class FfnKind { Unknown, Moe, Dense };
+
+// An allowlist, not a substring test: an unrecognised checkpoint must be REFUSED at load
+// rather than silently run through whichever graph happens to be the default. Both the
+// nested `text_config.model_type` spellings and the root ones are accepted, because the
+// loader prefers the nested value and the two disagree (`qwen3_5` at the root vs
+// `qwen3_5_text` nested, and likewise for the MoE).
+[[nodiscard]] inline FfnKind ffn_kind_for(std::string_view model_type) noexcept {
+    if (model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text") {
+        return FfnKind::Moe;
+    }
+    if (model_type == "qwen3_5" || model_type == "qwen3_5_text") {
+        return FfnKind::Dense;
+    }
+    return FfnKind::Unknown;
+}
 
 struct Qwen35MoeConfig {
     std::string model_type{"qwen3_5_moe_text"};
@@ -42,6 +65,8 @@ struct Qwen35MoeConfig {
     [[nodiscard]] bool is_linear_layer(int layer_idx) const noexcept {
         return (layer_idx + 1) % full_attention_interval != 0;
     }
+
+    [[nodiscard]] FfnKind ffn_kind() const noexcept { return ffn_kind_for(model_type); }
 };
 
 inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig& cfg) {
@@ -114,6 +139,7 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
             cfg.max_position_embeddings = static_cast<int>(root_max);
         }
     }
+    (void)get_i("intermediate_size", cfg.intermediate_size);
     (void)get_i("moe_intermediate_size", cfg.moe_intermediate_size);
     (void)get_i("shared_expert_intermediate_size", cfg.shared_expert_intermediate_size);
     (void)get_i("num_experts", cfg.num_experts);
@@ -128,6 +154,15 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
     (void)get_b("tie_word_embeddings", cfg.tie_word_embeddings);
     (void)get_b("norm_topk_prob", cfg.norm_topk_prob);
 
+    // Both keys can sit at this level (stock HF exports, transformers < 4.5x) or inside a
+    // rope_parameters sub-object (newer exports). Read this level first so a root-level
+    // rope_theta is not lost, then let the sub-object override where it exists. Reading
+    // only the sub-object silently left the base at the hardcoded default, which is
+    // invisible while a checkpoint happens to ship that same value and turns into
+    // fluent-but-wrong output that degrades with sequence length once one does not.
+    (void)get_f("rope_theta", cfg.rope_theta);
+    (void)get_f("partial_rotary_factor", cfg.partial_rotary_factor);
+
     simdjson::dom::element rope_params;
     if (!text_cfg["rope_parameters"].get(rope_params)) {
         double partial = static_cast<double>(cfg.partial_rotary_factor);
@@ -138,8 +173,6 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
         if (!rope_params["rope_theta"].get_double().get(theta)) {
             cfg.rope_theta = static_cast<float>(theta);
         }
-    } else {
-        (void)get_f("partial_rotary_factor", cfg.partial_rotary_factor);
     }
 
     return cfg.hidden_size > 0 && cfg.num_hidden_layers > 0;
