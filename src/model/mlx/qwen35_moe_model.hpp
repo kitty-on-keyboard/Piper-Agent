@@ -36,7 +36,19 @@ class Qwen35MoeModel {
 public:
     bool load(const std::string& model_dir) {
         prefix_ = "language_model.model.";
+        load_error_.clear();
         if (!load_qwen35_moe_config(model_dir, cfg_)) {
+            return false;
+        }
+        // Refuse an unrecognised architecture BEFORE reading ~16 GB of weights. The
+        // alternative is what this path used to do: build the MoE graph regardless, then
+        // fail on a missing expert tensor at the first token with the whole checkpoint
+        // already resident and wired.
+        ffn_ = cfg_.ffn_kind();
+        if (ffn_ == FfnKind::Unknown) {
+            load_error_ = "unsupported architecture: model_type=\"" + cfg_.model_type +
+                          "\" (this build knows qwen3_5 / qwen3_5_text dense and "
+                          "qwen3_5_moe / qwen3_5_moe_text)";
             return false;
         }
         if (!weights_.load_directory(model_dir)) {
@@ -223,6 +235,25 @@ public:
         return mx::add(y, mx::multiply(shared_gate, shared));
     }
 
+    // The dense generation's FFN: one gated MLP where the MoE has 256 routed experts plus
+    // a shared one. Same SwiGLU and same quantized `linear` the shared expert already
+    // uses, so nothing new reaches the weight store or the kernels.
+    mx::array forward_dense_mlp(int layer, const mx::array& x) const {
+        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".mlp.";
+        if (ablation() == Ablate::mlp) {
+            return mx::zeros_like(x);
+        }
+        return weights_.linear(lmp::model::mlxl::swiglu(weights_.linear(x, p + "gate_proj"),
+                                                        weights_.linear(x, p + "up_proj")),
+                               p + "down_proj");
+    }
+
+    // The single axis the two checkpoints differ on. Classified once at load(), which
+    // refuses anything it does not recognise, so this cannot silently pick a graph.
+    mx::array forward_ffn(int layer, const mx::array& x) const {
+        return ffn_ == FfnKind::Dense ? forward_dense_mlp(layer, x) : forward_moe(layer, x);
+    }
+
     mx::array forward_linear_layer(int layer, const mx::array& x, int seq_len) {
         const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
         mx::array h = rms_norm(x, p + "input_layernorm.weight");
@@ -234,7 +265,7 @@ public:
             h = mx::add(x, attn_out);
         }
         mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        return mx::add(h, forward_moe(layer, mlp_in));
+        return mx::add(h, forward_ffn(layer, mlp_in));
     }
 
     mx::array forward_full_attn_layer(int layer, const mx::array& x, int seq_len) {
@@ -243,12 +274,18 @@ public:
         mx::array attn_out = forward_self_attn(p + "self_attn.", h, kv_caches_[static_cast<std::size_t>(layer)], seq_len);
         h = mx::add(x, attn_out);
         mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        return mx::add(h, forward_moe(layer, mlp_in));
+        return mx::add(h, forward_ffn(layer, mlp_in));
     }
+
+    // Set when load() refuses; empty otherwise. MlxBackend surfaces it verbatim so the
+    // operator is told WHICH of the load preconditions failed.
+    [[nodiscard]] const std::string& load_error() const noexcept { return load_error_; }
 
 private:
     std::string prefix_;
     Qwen35MoeConfig cfg_{};
+    FfnKind ffn_{FfnKind::Moe};
+    std::string load_error_;
     WeightStore weights_;
     std::vector<KVCache> kv_caches_;
     std::vector<SsmCache> ssm_caches_;

@@ -6,11 +6,13 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/loop/token_stream.hpp"
 #include "src/model/backend.hpp"
 #include "src/model/grammar.hpp"
+#include "src/model/mlx/qwen35_moe_config.hpp"
 #include "src/model/model_limits.hpp"
 #include "src/model/qwen_tokenizer.hpp"
 
@@ -68,6 +70,111 @@ TEST(max_position_embeddings_is_read_from_text_config) {
     }
     CHECK_EQ(load_max_position_embeddings(root), 4096);
     CHECK_EQ(load_max_position_embeddings(root + "/missing"), 0);
+}
+
+// A stock HF export puts rope_theta at the config level; newer ones nest it under
+// rope_parameters. Reading only the nested form left the base at the hardcoded 1e7 with
+// no error -- and 1e7 is what our own checkpoints happen to ship, so nothing showed it.
+// A checkpoint on a different base would rotate positions wrong and decode fluent text
+// that rots with sequence length, which no other assertion in this suite would catch.
+TEST(rope_theta_is_read_when_it_sits_at_the_config_level) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream out(root + "/config.json");
+        out << R"({
+  "text_config": {
+    "hidden_size": 128,
+    "num_hidden_layers": 2,
+    "vocab_size": 256,
+    "rope_theta": 1000000.0,
+    "partial_rotary_factor": 1.0
+  }
+})";
+    }
+    mlxl::Qwen35MoeConfig cfg;
+    REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+    CHECK(cfg.rope_theta == 1000000.0F);
+    CHECK(cfg.partial_rotary_factor == 1.0F);
+}
+
+// The FFN is the one axis the 3.5/3.6 generation's two checkpoints differ on, and picking
+// the wrong graph is not a crash -- it is a missing-weight throw at the first token, after
+// ~16 GB is resident. An allowlist rather than a substring test, so a checkpoint nobody
+// has seen is REFUSED instead of being run through whichever branch matches loosely.
+TEST(ffn_kind_classifies_known_model_types_and_refuses_the_rest) {
+    using lmp::model::mlxl::FfnKind;
+    using lmp::model::mlxl::ffn_kind_for;
+
+    // Nested text_config spellings (what the loader actually reads) and root spellings.
+    CHECK(ffn_kind_for("qwen3_5_moe_text") == FfnKind::Moe);
+    CHECK(ffn_kind_for("qwen3_5_moe") == FfnKind::Moe);
+    CHECK(ffn_kind_for("qwen3_5_text") == FfnKind::Dense);
+    CHECK(ffn_kind_for("qwen3_5") == FfnKind::Dense);
+
+    CHECK(ffn_kind_for("llama") == FfnKind::Unknown);
+    CHECK(ffn_kind_for("") == FfnKind::Unknown);
+    // Substring matching would call these Moe/Dense; the allowlist must not.
+    CHECK(ffn_kind_for("qwen3_5_moe_text_v2") == FfnKind::Unknown);
+    CHECK(ffn_kind_for("qwen4_5") == FfnKind::Unknown);
+}
+
+// A config with no model_type at all must keep behaving exactly as it did before dispatch
+// existed -- i.e. as the MoE -- or every checkpoint predating this change changes graph.
+TEST(absent_model_type_still_selects_the_moe_graph) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream out(root + "/config.json");
+        out << R"({"text_config":{"hidden_size":128,"num_hidden_layers":2,"vocab_size":256}})";
+    }
+    mlxl::Qwen35MoeConfig cfg;
+    REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+    CHECK(cfg.ffn_kind() == mlxl::FfnKind::Moe);
+}
+
+// The real 27B ships model_type "qwen3_5_text" nested under text_config, and the real
+// 35B-A3B ships "qwen3_5_moe_text". Assert both end-to-end through the parser.
+TEST(nested_model_type_selects_the_matching_graph) {
+    for (const auto& [mt, want] :
+         std::vector<std::pair<std::string, mlxl::FfnKind>>{
+             {"qwen3_5_text", mlxl::FfnKind::Dense},
+             {"qwen3_5_moe_text", mlxl::FfnKind::Moe}}) {
+        const std::string root = temp_dir();
+        REQUIRE(!root.empty());
+        {
+            std::ofstream out(root + "/config.json");
+            out << R"({"text_config":{"model_type":")" << mt
+                << R"(","hidden_size":5120,"num_hidden_layers":64,"vocab_size":248320,)"
+                << R"("intermediate_size":17408}})";
+        }
+        mlxl::Qwen35MoeConfig cfg;
+        REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+        CHECK(cfg.model_type == mt);
+        CHECK(cfg.ffn_kind() == want);
+        CHECK_EQ(cfg.intermediate_size, 17408);
+    }
+}
+
+TEST(rope_parameters_still_overrides_the_config_level) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream out(root + "/config.json");
+        out << R"({
+  "text_config": {
+    "hidden_size": 128,
+    "num_hidden_layers": 2,
+    "vocab_size": 256,
+    "rope_theta": 1000000.0,
+    "rope_parameters": { "rope_theta": 5000000.0, "partial_rotary_factor": 0.5 }
+  }
+})";
+    }
+    mlxl::Qwen35MoeConfig cfg;
+    REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+    CHECK(cfg.rope_theta == 5000000.0F);
+    CHECK(cfg.partial_rotary_factor == 0.5F);
 }
 
 TEST(think_budget_force_transitions_so_tools_keep_room) {

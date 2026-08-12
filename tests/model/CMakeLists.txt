@@ -56,8 +56,10 @@ target_compile_definitions(test_grammar PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_
 
 # Model sequence ceiling parsing + think-budget sink (P0 §4). Needs the mini vocab for
 # the GrammarSink walk; config.json parsing needs no checkpoint.
+# simdjson is explicit here (as in test_spec_cache) because this TU includes
+# qwen35_moe_config.hpp directly to assert the RoPE parse; lmp_model keeps it PRIVATE.
 lmp_add_test(test_model_bounds SOURCES test_model_bounds.cpp LABELS gate LINK lmp_model lmp_loop
-             TIMEOUT 120)
+             simdjson TIMEOUT 120)
 add_dependencies(test_model_bounds lmp_mini_vocab)
 target_compile_definitions(test_model_bounds PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
 
