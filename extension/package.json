@@ -47,7 +47,7 @@
       "activitybar": [
         {
           "id": "lmPipe",
-          "title": "LM_Pipe",
+          "title": " ",
           "icon": "resources/icon.svg"
         }
       ]
@@ -57,7 +57,7 @@
         {
           "type": "webview",
           "id": "lmPipe.sidebar",
-          "name": "Agent"
+          "name": ""
         }
       ]
     },
@@ -72,7 +72,7 @@
         "lmPipe.draftModelDir": {
           "type": "string",
           "default": "",
-          "description": "Optional smaller Qwen for speculative decoding. Empty disables it."
+          "description": "Optional absolute path to a Qwen MTP draft head (model_type qwen3_5_mtp), e.g. Qwen3.6-27B-MTP-4bit. NOT a smaller chat model \u2014 it is a head split from the target and only works with the matching dense checkpoint. Empty disables speculative decoding; a path that is not a usable head fails the load rather than generating without it."
         },
         "lmPipe.quantization": {
           "type": "string",
