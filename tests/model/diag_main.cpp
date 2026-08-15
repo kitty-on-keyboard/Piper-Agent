@@ -971,6 +971,82 @@ int cmd_specrun(int rounds) {
     return 0;
 }
 
+// Every BYTE offset of a tool call, asking: from here, is ANY token in the vocabulary
+// legal?
+//
+// This is the search the earlier ones missed. `specgrammar` walked TOKEN states along a
+// well-formed stream; but token boundaries do not align with the grammar's literal
+// boundaries, so a token can leave the automaton at any byte offset inside a required
+// literal -- including offsets whose remaining suffix no token in the vocabulary starts
+// with. The mask allows the token that lands there (it is legal at the moment it is
+// fed); the position AFTER it has nothing, and constrained decode ends the run.
+//
+// Scanning offsets rather than tokens enumerates those states directly and cheaply.
+int cmd_deadends() {
+    QwenTokenizer tok;
+    const LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    const std::size_t V = tok.vocab_size();
+    std::vector<parsephony::ToolSpec> tools;
+    {
+        parsephony::ToolSpec s;
+        s.name = "read_file";
+        parsephony::ParamSpec p;
+        p.name = "path";
+        p.required = true;
+        s.params.push_back(p);
+        tools.push_back(s);
+    }
+    parsephony::Vocab vocab;
+    vocab.tokens.resize(V);
+    vocab.special.assign(V, 0);
+    for (std::size_t i = 0; i < V; ++i) {
+        vocab.tokens[i] = std::string(tok.token_bytes(static_cast<TokenId>(i)));
+    }
+    parsephony::TokenMaskT<parsephony::ToolCallGuard> engine(vocab);
+
+    const std::vector<std::string> calls = {
+        "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+        "tools/blender_vehicles/render_truck.py\n</parameter>\n</function>\n",
+        // A path with characters that tokenize awkwardly against the terminator.
+        "<tool_call>\n<function=read_file>\n<parameter=path>\n"
+        "game/scripts/vehicle/vehicle_catalog.gd\n</parameter>\n</function>\n",
+    };
+
+    int dead = 0;
+    for (const std::string& call : calls) {
+        parsephony::ToolCallGuard g(tools);
+        for (std::size_t i = 0; i <= call.size(); ++i) {
+            const std::vector<std::uint64_t> words = engine.compute(g);
+            bool any = false;
+            for (const std::uint64_t w : words) {
+                if (w != 0) {
+                    any = true;
+                    break;
+                }
+            }
+            if (!any && !g.complete()) {
+                std::printf("  [DEAD END] %zu bytes in, at ...%s|%s\n", i,
+                            call.substr(i >= 24 ? i - 24 : 0, i >= 24 ? 24 : i).c_str(),
+                            call.substr(i, 16).c_str());
+                ++dead;
+            }
+            if (i == call.size()) {
+                break;
+            }
+            if (g.feed(std::string_view(&call[i], 1)) != parsephony::Error::Ok) {
+                std::printf("  guard refused byte %zu ('%c')\n", i, call[i]);
+                break;
+            }
+        }
+    }
+    std::printf("  %d dead-end byte offset(s) across %zu call shapes\n", dead, calls.size());
+    return dead == 0 ? 0 : 1;
+}
+
 // --- bench -----------------------------------------------------------------
 
 // What a speculative block's VERIFICATION pass costs, against the single-token step it
@@ -1176,6 +1252,9 @@ int main(int argc, char** argv) {
     if (cmd == "verify") {
         return cmd_verify(argc > 2 ? std::atoi(argv[2]) : 4,
                           argc > 3 ? std::atoi(argv[3]) : 547);
+    }
+    if (cmd == "deadends") {
+        return cmd_deadends();
     }
     if (cmd == "specrun") {
         return cmd_specrun(argc > 2 ? std::atoi(argv[2]) : 5);
