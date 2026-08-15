@@ -973,7 +973,13 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           {"spec_blocks", std::to_string(turn.generation.spec_blocks)},
           {"spec_drafted", std::to_string(turn.generation.spec_drafted)},
           {"spec_accepted", std::to_string(turn.generation.spec_accepted)},
-          {"spec_abandoned", std::to_string(turn.generation.spec_abandoned)}});
+          {"spec_abandoned", std::to_string(turn.generation.spec_abandoned)},
+          // THE BACKEND'S OWN ACCOUNT OF WHY IT STOPPED, which until now went nowhere.
+          // `status` said BackendError and the string that explains it -- the only thing
+          // carrying the state the failure happened in -- was dropped on the floor. Two
+          // runs were spent reading zeros out of the other fields and inferring, when the
+          // backend had already written down the answer and nobody was recording it.
+          {"error", turn.generation.error}});
 
     // THE SHAPE OF WHAT WAS SAID, always, even when the text itself is not traced. Three
     // integers per turn, and they separate the two failures that `tokens=4096 status=1`
