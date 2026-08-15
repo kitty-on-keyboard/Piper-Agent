@@ -110,11 +110,39 @@ class MaskSource {
     // True when mask() depends only on state that drafted-but-uncommitted tokens cannot
     // move -- so one snapshot of it is valid for a whole speculative block.
     //
-    // Speculative decoding needs the mask at positions the model has not committed yet,
-    // and TurnGrammar can neither be rolled back nor copied. This is the honest way out:
-    // a source that says false is decoded one token at a time. Defaults to false so a new
-    // MaskSource is conservative by omission rather than by accident.
+    // A source that is neither block-stable nor checkpointable is decoded one token at a
+    // time. Defaults to false so a new MaskSource is conservative by omission rather than
+    // by accident.
     [[nodiscard]] virtual bool mask_is_block_stable() const { return false; }
+
+    // --- speculation over a mask that is NOT block-stable ------------------------------
+    //
+    // The other way to speculate: let the decoder walk this source forward over a draft,
+    // reading the mask at each position, and then put it back. That covers the states
+    // where the legal set moves with every token -- inside a tool call, where the mask is
+    // the whole point and where roughly half of an agent's generated tokens live.
+    //
+    // This was originally believed impossible ("TurnGrammar can neither be rolled back nor
+    // copied") and the belief was never priced. It is wrong on both counts for the grammar
+    // that matters: parsephony's ToolCallGuard is 272 bytes, is required to be copyable,
+    // and is already copied once per CANDIDATE TOKEN by the mask engine; the rest of
+    // TurnGrammar's state is append-only, so rolling back is recording three sizes. The
+    // mask itself re-derives in 0.0007 ms -- 0.004% of a forward pass (`lmp_diag toolmask`).
+    //
+    // Contract: checkpoint() then any number of probe_advance() calls, each reading mask()
+    // afterwards, then rollback() to exactly the checkpointed state. NOT reentrant -- one
+    // checkpoint outstanding at a time -- and mask() returns a reference that the next
+    // probe_advance() may invalidate, so a caller keeping more than one must copy.
+    [[nodiscard]] virtual bool can_checkpoint() const { return false; }
+    virtual void checkpoint() {}
+    virtual void rollback() {}
+
+    // Advance over one drafted token. False when the token is not legal here, which
+    // truncates the draft rather than proposing a continuation the grammar forbids.
+    virtual bool probe_advance(TokenId id) {
+        (void)id;
+        return false;
+    }
 
     // True when `id` could move this source out of its current block-stable state, so a
     // speculative draft must be truncated before it. Defaults to TRUE -- conservative by

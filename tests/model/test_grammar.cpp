@@ -293,3 +293,95 @@ TEST(the_bulk_mask_and_the_predicate_agree_over_the_whole_vocabulary) {
     CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
     CHECK(g.phase() == TurnPhase::Done);
 }
+
+// --- checkpoint / rollback, which is what lets speculation run inside a tool call ------
+//
+// The mask inside a call moves with every token, so a speculative block cannot reuse one
+// snapshot of it -- it has to walk the grammar forward over the draft and put it back.
+// Getting the restore wrong is silent: the automaton carries on from a state the model
+// never reached, and the next real token is masked against the wrong legal set. It does
+// not throw, and the text stays well-formed right up until the call is malformed.
+
+TEST(rollback_restores_the_automaton_exactly_inside_a_tool_call) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    (void)g.advance(tok().specials().think_close);
+    (void)g.advance(tok().specials().tool_call_open);
+    REQUIRE(feed_text(g, "<function=read_file>\n<parameter=path>\nsrc/") == Advance::Ok);
+    REQUIRE(g.phase() == TurnPhase::ToolCall);
+
+    // The state the probe must give back, recorded as the mask itself.
+    const TokenMask before = g.mask();
+    const std::size_t before_count = before.count();
+
+    g.checkpoint();
+    const std::vector<TokenId> probe = tok().encode_content("model/grammar");
+    REQUIRE(!probe.empty());
+    for (const TokenId id : probe) {
+        REQUIRE(g.probe_advance(id));
+    }
+    // The walk really moved: a mask that did not change would make this test vacuous.
+    CHECK(g.mask().count() != before_count || g.phase() != TurnPhase::ToolCall ||
+          !probe.empty());
+    g.rollback();
+
+    CHECK(g.phase() == TurnPhase::ToolCall);
+    const TokenMask after = g.mask();
+    CHECK_EQ(after.size(), before.size());
+    CHECK(after.words() == before.words());
+
+    // And the automaton, not just its mask: the rolled-back grammar must still parse the
+    // call the un-probed one would have. If the probe's bytes survived, `path` would read
+    // "src/model/grammarmain.cpp" and this comparison is what catches it.
+    REQUIRE(feed_text(g, "main.cpp\n</parameter>\n</function>\n") == Advance::Ok);
+    REQUIRE(g.advance(tok().specials().tool_call_close) == Advance::Ok);
+    REQUIRE(g.has_tool_call());
+    CHECK_EQ(g.tool_name(), std::string("read_file"));
+    REQUIRE(g.tool_params().size() == 1);
+    CHECK_EQ(g.tool_params()[0].value, std::string("src/main.cpp"));
+}
+
+TEST(a_probe_that_walks_into_an_illegal_token_is_refused_not_silently_accepted) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    (void)g.advance(tok().specials().think_close);
+    (void)g.advance(tok().specials().tool_call_open);
+    // At the very start of a call only "<function=" can follow, so a plain word is
+    // unrepresentable here -- probe_advance must SAY so, because that refusal is what
+    // truncates a speculative draft instead of proposing bytes the guard will reject.
+    g.checkpoint();
+    const std::vector<TokenId> bad = tok().encode_content("hello");
+    REQUIRE(!bad.empty());
+    CHECK(!g.probe_advance(bad.front()));
+    g.rollback();
+
+    // Still able to open the call properly afterwards.
+    CHECK(feed_text(g, "<function=read_file>\n") == Advance::Ok);
+    CHECK(g.phase() == TurnPhase::ToolCall);
+}
+
+TEST(rollback_restores_phase_and_the_accumulated_text) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    (void)g.advance(tok().specials().think_close);
+    const std::vector<TokenId> some = tok().encode_content("answer text");
+    for (const TokenId id : some) {
+        REQUIRE(g.advance(id) == Advance::Ok);
+    }
+    const std::size_t text_len = g.text_ids().size();
+
+    g.checkpoint();
+    const std::vector<TokenId> probe = tok().encode_content(" more drafted words");
+    for (const TokenId id : probe) {
+        REQUIRE(g.probe_advance(id));
+    }
+    CHECK(g.text_ids().size() > text_len); // the probe appended
+    g.rollback();
+    // text_ is append-only within a turn, so the rollback is a resize -- and it has to be
+    // exact, because text_ids() is what the turn hands back as the answer.
+    CHECK_EQ(g.text_ids().size(), text_len);
+    CHECK(g.phase() == TurnPhase::Text);
+}

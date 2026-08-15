@@ -535,13 +535,19 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
             r.status = GenStatus::Cancelled;
             return r;
         }
-        const TokenMask* mask = task.mask != nullptr ? &task.mask->mask() : nullptr;
-        const bool may_speculate = task.mask == nullptr || task.mask->mask_is_block_stable();
+        // Block-stable OR checkpointable. The second is what puts tool-call bodies in
+        // scope: their mask moves per token, so the decoder walks the grammar over the
+        // draft instead of reusing one snapshot. Measured on this agent's own log, 47%
+        // of generated tokens are inside a tool call -- decoding all of them one at a
+        // time capped what speculation could ever be worth at roughly 1.15x.
+        const bool may_speculate = task.mask == nullptr ||
+                                   task.mask->mask_is_block_stable() ||
+                                   task.mask->can_checkpoint();
 
         const auto t_s0 = clock.mono();
         // ledger.ids() is the exact history the model consumed, which is what the
         // proposer must match against -- not the prompt, and not the emitted text.
-        SpecStep st = decoder.step(mask, recent, std::span<const TokenId>(ledger.ids()),
+        SpecStep st = decoder.step(task.mask, recent, std::span<const TokenId>(ledger.ids()),
                                    may_speculate, is_special, fwd);
         r.forward_ms += ms_between(t_s0, clock.mono());
 
@@ -590,6 +596,13 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     r.decode_tok_per_s =
         decode_ms > 0 ? static_cast<double>(r.tokens_generated) / (decode_ms / 1000.0) : 0.0;
     const SpecStats& s = decoder.stats();
+    // Carried on the result, not only printed to stderr: stderr is a diagnostic driver's
+    // channel, and under the editor it goes nowhere anyone reads. These three reach the
+    // event log, which is the only place a REAL run can be asked whether the draft head
+    // was doing anything.
+    r.spec_blocks = s.blocks;
+    r.spec_drafted = s.drafted;
+    r.spec_accepted = s.accepted_drafts;
     // Printed, not silently accumulated: a speculative run whose acceptance rate is on the
     // floor is slower than not speculating, and that has to be visible without a profiler.
     std::fprintf(stderr,

@@ -54,7 +54,12 @@ struct InferenceTask {
     // once per step rather than probed id by id. Null means unconstrained. ScriptedBackend
     // and ReplayBackend ignore it: their tokens are the script's business, and the loop's
     // sink still classifies them.
-    const MaskSource* mask = nullptr;
+    //
+    // NON-CONST because speculation walks it: to verify a draft inside a tool call the
+    // decoder checkpoints the source, advances it over the drafted tokens to read the
+    // mask at each, and rolls it back. The state is restored exactly, so this is const in
+    // effect and not in type -- `mutable` would have hidden a real mutation instead.
+    MaskSource* mask = nullptr;
     // Token index at which the STABLE part of this prompt ends -- everything except the
     // live-state block, which changes every turn. The backend snapshots its caches there
     // so the next turn can roll back to it instead of re-prefilling the whole context
@@ -103,6 +108,14 @@ struct GenResult {
     // it stays 0 across a multi-turn run, the mechanism is not firing and the complexity
     // is not paying for itself.
     std::size_t prefill_reused_tokens = 0;
+    // Speculation, for exactly the same reason. Whether a draft head is loaded and
+    // actually firing was, until this existed, unanswerable from a real run: nothing in
+    // the log recorded it, and it had to be inferred from the resident-memory plateau in
+    // `model_memory`. Zero blocks with a head loaded means speculation is off or never
+    // triggering; blocks with a low accept ratio means it is running at a loss.
+    std::uint64_t spec_blocks = 0;
+    std::uint64_t spec_drafted = 0;
+    std::uint64_t spec_accepted = 0;
 };
 
 class InferenceBackend {

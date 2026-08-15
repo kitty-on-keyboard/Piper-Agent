@@ -33,6 +33,32 @@ void TurnGrammar::reset() {
                             : std::make_unique<parsephony::ToolCallGuard>(tools_);
 }
 
+void TurnGrammar::checkpoint() {
+    // A copy of the automaton, and sizes for everything else. ToolCallGuard is 272 bytes
+    // and its two accumulators are copy-on-write, so this is a handful of refcount bumps
+    // -- the mask engine already makes the same copy once per candidate token.
+    mark_.guard = guard_ ? std::make_unique<parsephony::ToolCallGuard>(*guard_) : nullptr;
+    mark_.phase = phase_;
+    mark_.think = think_.size();
+    mark_.text = text_.size();
+    mark_.calls = calls_.size();
+    mark_.held = true;
+}
+
+void TurnGrammar::rollback() {
+    if (!mark_.held) {
+        return;
+    }
+    guard_ = mark_.guard ? std::make_unique<parsephony::ToolCallGuard>(*mark_.guard) : nullptr;
+    phase_ = mark_.phase;
+    // Append-only within a turn, so truncation is the exact inverse of the probe's
+    // advances. resize() never grows here: a probe only ever appends.
+    think_.resize(mark_.think);
+    text_.resize(mark_.text);
+    calls_.resize(mark_.calls);
+    mark_.held = false;
+}
+
 bool TurnGrammar::force_end_think() noexcept {
     if (phase_ != TurnPhase::Think) {
         return false;
