@@ -78,7 +78,15 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // 21 -> 22: `find_files`, search by file NAME. `search` reads contents, and a model
     // looking for a project's Swift files reaches for search(".swift"), gets no matches --
     // correctly, no line contains that string -- and concludes the files are not there.
-    CHECK_EQ(reg.decls().size(), std::size_t{22});
+    //
+    // 22 -> 23: `finish`, the ending a WORKING run had no way to ask for -- the same
+    // argument as `ask_user`/`exit_plan_mode` above, applied to the mode those two skip.
+    // Declared here, executed by the loop, because it ends the run. Before it, a finished
+    // run had to be inferred from the inert counter: three nudges and a fourth turn at
+    // best, and unbounded at worst, since a nudge that provoked any tool call which
+    // learned something reset that counter.
+    CHECK_EQ(reg.decls().size(), std::size_t{23});
+    CHECK(reg.find("finish") != nullptr);
     CHECK(reg.find("find_files") != nullptr);
     CHECK(reg.find("ask_user") != nullptr);
     CHECK(reg.find("ask_question") != nullptr);

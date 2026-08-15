@@ -54,32 +54,83 @@ std::string capped(std::string s) {
 // Full CoT stays on the thinking stream (S5.7); this is continuity, not a dump.
 constexpr std::size_t kWorkingNoteCap = 512;
 
+// THE NOTE IS THE DECISION THE REASONING ARRIVED AT, NEVER ITS OPENING.
+//
+// This used to be "the whole block if it fits, else the trailing 512 bytes", which made
+// the cap the only thing that ever removed a preamble. Tool-turn reasoning is short --
+// 105, 256 and 220 chars on the three tool turns of the run that produced this -- so the
+// block almost always fit, and what landed in history was the whole think INCLUDING its
+// opening restatement of the mission:
+//
+//     turn 0: "The user wants me to fix two bugs in calc.py: add() subtracts and mul()
+//              adds. Let me read the file first."
+//
+// Qwen opens a think block by restating the task, so one paraphrase of the mission was
+// appended to history per tool turn. By turn 3 the model was reading three assistant
+// messages that each restated the ask, and reproducing that shape in its own output --
+// re-deriving the mission every turn instead of continuing from where it stood. Measured
+// on that run: 145 tokens of 5461, so the cost was never context size. The cost was the
+// run talking about the task instead of doing it.
+//
+// Taking the last paragraph -- or the final sentence when the block has no paragraph
+// break -- keeps the part that says what to do next ("Let me read the file first") and
+// drops the part that says what was already asked.
 std::string working_note_from_reasoning(std::string_view reasoning) {
+    const auto is_space = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
     std::size_t begin = 0;
-    while (begin < reasoning.size() &&
-           (reasoning[begin] == ' ' || reasoning[begin] == '\t' || reasoning[begin] == '\n' ||
-            reasoning[begin] == '\r')) {
+    while (begin < reasoning.size() && is_space(reasoning[begin])) {
         ++begin;
     }
     std::size_t end = reasoning.size();
-    while (end > begin && (reasoning[end - 1] == ' ' || reasoning[end - 1] == '\t' ||
-                           reasoning[end - 1] == '\n' || reasoning[end - 1] == '\r')) {
+    while (end > begin && is_space(reasoning[end - 1])) {
         --end;
     }
     if (begin >= end) {
         return {};
     }
-    std::string_view body = reasoning.substr(begin, end - begin);
-    if (body.size() <= kWorkingNoteCap) {
-        return std::string(body);
+    const std::string_view body = reasoning.substr(begin, end - begin);
+
+    std::size_t start = 0;
+    const std::size_t para = body.rfind("\n\n");
+    if (para != std::string_view::npos) {
+        start = para + 2;
+    } else {
+        // No paragraph break, so the unit is the final sentence. Scanned BACKWARDS: a
+        // think block written as a numbered list is all one paragraph, and scanning
+        // forwards would hand back its first item rather than the one it ended on.
+        for (std::size_t i = body.size(); i-- > 0;) {
+            const char c = body[i];
+            if (c != '.' && c != '!' && c != '?' && c != '\n') {
+                continue;
+            }
+            std::size_t j = i + 1;
+            while (j < body.size() && is_space(body[j])) {
+                ++j;
+            }
+            // Trailing terminators have nothing after them; keep looking for the one that
+            // actually opens the closing sentence.
+            if (j < body.size()) {
+                start = j;
+                break;
+            }
+        }
     }
-    std::size_t start = body.size() - kWorkingNoteCap;
-    // Prefer a clean cut at a newline inside the window; otherwise take the tail.
-    const std::size_t nl = body.find('\n', start);
-    if (nl != std::string_view::npos && nl + 1 < body.size()) {
-        start = nl + 1;
+    while (start < body.size() && is_space(body[start])) {
+        ++start;
     }
-    return std::string(body.substr(start));
+
+    std::string_view note = body.substr(start);
+    // A block that is one unbroken sentence leaves nothing to cut; carry it as it is
+    // rather than returning empty, which would drop the turn out of the next prompt.
+    if (note.empty()) {
+        note = body;
+    }
+    if (note.size() > kWorkingNoteCap) {
+        note = note.substr(note.size() - kWorkingNoteCap);
+    }
+    return std::string(note);
 }
 
 bool is_blank(std::string_view s) {
@@ -1351,6 +1402,39 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // Refused rather than silently ignored: filtered out of the grammar, so unreachable by
     // sampling and reachable by a synthesized call, and "the loop quietly stopped" is not
     // an outcome worth leaving a path to.
+    // The completion ending. Handled here with the other run-enders rather than in the
+    // registry, for the reason the block above gives: it halts the loop, and the registry
+    // has no way to say so.
+    //
+    // `ended` and not a reason of its own, deliberately. The completed=true block already
+    // recognises `ended` and decides the claim against the checklist and the operator
+    // check; a new reason would have had to be added there too, and the only thing it
+    // would carry is HOW the run stopped talking -- which the `finish` event records
+    // anyway. What the operator sees is unchanged: same ending, reached in one turn
+    // instead of four.
+    if (name == "finish") {
+        if (policy_.conversational) {
+            return tools::ToolResult::refused(
+                "'finish' is only available in a mode that carries out work; a run that "
+                "plans ends with 'exit_plan_mode'");
+        }
+        const std::string summary = param_value(params, "summary");
+        if (summary.empty()) {
+            return tools::ToolResult::error(tools::ErrorClass::Malformed, true,
+                                            "'finish' needs a non-empty 'summary'");
+        }
+        executed = true;
+        halted_ = true;
+        halt_reason_ = "ended";
+        emit("finish", {{"summary", summary}});
+        // Through the answer channel, because it IS the answer -- the run's last words to
+        // the human, and the panel has nowhere else to show them.
+        if (observer_.on_token) {
+            observer_.on_token("answer", summary);
+        }
+        return tools::ToolResult::okay("reported the work finished; the run stops here");
+    }
+
     if (name == "ask_user" || name == "ask_question" || name == "exit_plan_mode") {
         if (name == "exit_plan_mode" && !policy_.conversational) {
             return tools::ToolResult::refused(
@@ -2167,7 +2251,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                            "in this conversation, or the edit matched but wrote no bytes. Calling "
                            "it again will produce the same result. Scroll up and use what is "
                            "already here: make the NEXT edit, run the build to see where you "
-                           "stand, or call 'ask_question' if you need a decision from the human. "
+                           "stand, call `finish` if the work is actually done, or call "
+                           "'ask_question' if you need a decision from the human. "
                            "Do not re-read a file this run has already read unless something has "
                            "written to it since.]"
                     : policy_.conversational
@@ -2181,8 +2266,9 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                         : "[Note: Your last turn called no tool. If you were about to act -- reading, "
                           "editing, or running something -- call the tool NOW; saying you will act does "
                           "not perform the action, and this run has not finished the work yet. "
-                          "If you are genuinely done and this text WAS your final answer, say so "
-                          "plainly and the run will end shortly.]";
+                          "If you are genuinely done, call `finish` with a summary of what you "
+                          "changed and how you know it works. Saying you are finished in text does "
+                          "not end the run; `finish` does.]";
                 ctx_.add_turn(std::move(note));
                 emit("nudged", {{"why", why},
                                 {"consecutive", std::to_string(inert_turns_)}});
