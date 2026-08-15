@@ -2053,6 +2053,42 @@ Registry::Registry(WorkspaceContext ctx)
                 "internal: 'exit_plan_mode' must be handled by the loop");
         });
     }
+    // --- finish ---------------------------------------------------------------
+    //
+    // The ending a working run had no way to ask for. Every other termination is something
+    // that HAPPENS to a run -- a budget, a stall, a question -- and a run that simply
+    // finished had to be inferred from several turns of it saying so. Measured before this
+    // existed: the work landed on turn 2 and the run ended on turn 6, because the inert
+    // counter needs three nudges plus a fourth turn. Worse, a nudge that provoked any
+    // tool call which learned something RESET that counter, so a finished run could
+    // ping-pong between narrating and re-verifying until the turn budget ran out -- one
+    // did, at 12 of 12 turns with `max_turns` on a mission it had completed.
+    //
+    // It reports; it does not adjudicate. Calling this ends the run as `ended`, which is
+    // the same reason a run that narrated its way out already gets, and `completed` is
+    // still decided afterwards against the model's own checklist and the operator check.
+    // The model saying it is done does not make the report say the work is right.
+    {
+        ToolDecl d;
+        d.name = "finish";
+        d.description =
+            "Report that the mission is done and end the run. Call this the moment you have "
+            "nothing left to do -- not a turn later, and instead of writing a message that "
+            "says you are finished, which does not end anything. Give `summary` the "
+            "handback: what you changed, and how you know it works. Do not call it while "
+            "any part of the work is unstarted, unverified, or blocked -- to act, call the "
+            "tool that acts; to raise something you cannot decide alone, call "
+            "`ask_question`. Your checklist is checked against this: items still open are "
+            "reported to the human as unfinished.";
+        d.spec.name = d.name;
+        d.spec.params = {param("summary", ParamType::Text, true)};
+        // Plan mode ends with `exit_plan_mode`; there is no work there to declare finished.
+        d.working_run_only = true;
+        declare(d, [](const std::vector<ToolParamValue>&, int) {
+            return ToolResult::error(ErrorClass::Malformed, false,
+                                     "internal: 'finish' must be handled by the loop");
+        });
+    }
 }
 
 } // namespace lmp::tools

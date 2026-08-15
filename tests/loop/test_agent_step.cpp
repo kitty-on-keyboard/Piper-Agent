@@ -241,6 +241,153 @@ TEST(a_tool_turn_with_empty_answer_keeps_a_working_note_from_think) {
     CHECK(note_in_prompt);
 }
 
+// THE NOTE MUST NOT CARRY THE MISSION BACK INTO HISTORY.
+//
+// Qwen opens a think block by restating the task, and the note used to be the WHOLE block
+// whenever it fit the 512-byte cap -- which is almost every tool turn, since tool-turn
+// reasoning is short. History therefore accumulated one paraphrase of the mission per tool
+// turn, and by the third the model was reading its own restatements and re-deriving the
+// ask every turn instead of continuing from where it stood. Measured on the run that
+// produced this: three notes, each opening with "The user wants me to...".
+//
+// The note is the closing decision now, which is the part that carries the run forward.
+TEST(a_working_note_carries_the_decision_not_the_restated_mission) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string preamble = "The user wants me to fix the view in the project.";
+    const std::string decision = "Let me read the file first.";
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, preamble + " " + decision));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix the project");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    bool saw_call_turn = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.tool_name != "list_dir") {
+            continue;
+        }
+        saw_call_turn = true;
+        CHECK(rec.assistant_text.find(decision) != std::string::npos);
+        CHECK(rec.assistant_text.find(preamble) == std::string::npos);
+    }
+    CHECK(saw_call_turn);
+}
+
+// A think block with no sentence boundary at all has no preamble to cut, and cutting it to
+// nothing would drop the turn out of the next prompt entirely -- which is the failure the
+// working note exists to prevent. It survives whole.
+TEST(a_working_note_with_no_sentence_boundary_survives_whole) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string note = "tokens exist; next fix the view";
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, note));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix the project");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    bool saw_note = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.tool_name == "list_dir" && rec.assistant_text.find(note) != std::string::npos) {
+            saw_note = true;
+        }
+    }
+    CHECK(saw_note);
+}
+
+// THE ENDING A FINISHED RUN CAN ASK FOR.
+//
+// Without `finish`, a run that had done the work ended by exhausting the inert counter:
+// three nudges and a fourth turn at BEST. At worst it never ended at all -- a nudge that
+// provoked any tool call which learned something reset the counter, and one measured run
+// ping-ponged between narrating and re-verifying until `max_turns` at 12 of 12.
+TEST(finish_ends_the_run_on_the_turn_it_is_called) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=finish>\n<parameter=summary>\nfixed the view and ran the tests\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "the work is done"));
+    // Queued deliberately: if the loop does not stop it takes this one, and the iteration
+    // count says so where an assertion on the reason alone would not.
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    CHECK_EQ(report.iterations, 1);
+    // Same ending as a run that narrated its way out, so the same completed= claim: the
+    // model answered and left nothing open on its own checklist. `finish` reports; it does
+    // not adjudicate.
+    CHECK(report.completed);
+}
+
+// `finish` needs its handback. An empty summary ends nothing, because a run that stopped
+// with no last words to the human is the outcome this tool exists to replace.
+TEST(finish_without_a_summary_does_not_end_the_run) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=finish>\n<parameter=summary>\n\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "the work is done"));
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK(report.iterations > 1);
+}
+
 // A RE-READ AFTER AN EDIT MUST SAY WHICH COPY IS THE FILE.
 //
 // The context is append-only, so every whole-file read leaves a snapshot in it. Once the
@@ -2263,6 +2410,116 @@ TEST(plan_still_reads_a_plain_markdown_checklist) {
     CHECK(ctx.checklist()[1].done);
 }
 
+// A NUMBERED plan's ticks landed in the label instead of the state. The marker was only
+// looked for at the head of the line, so `1. [x] Explore` -- an ordered list with a
+// checkbox, which is what a model writes when told to number its plan AND to mark done
+// items '[x]' -- parsed as an UNCHECKED item whose text began "[x]".
+//
+// MEASURED, run 4 of 2026-08-12: six `plan` calls, one more item ticked each time, and all
+// six logged `open=8` of 8. The operator watched a checklist that never moved while the
+// run worked through it. The ordinal stays in the text -- the model numbered its own plan
+// and the panel does not number for it.
+TEST(plan_ticks_a_numbered_item_whose_marker_follows_the_number) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        "1. [x] Explore the workspace\n"
+        "2. [x] Rewrite DashboardWindow.swift\n"
+        "3. Fix MemoryGaugeView.swift\n"
+        "4) [ ] Fix the sparkline\n"
+        "</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix the layout");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 4);
+    CHECK(ctx.checklist()[0].text == "1. Explore the workspace");
+    CHECK(ctx.checklist()[0].done);
+    CHECK(ctx.checklist()[1].text == "2. Rewrite DashboardWindow.swift");
+    CHECK(ctx.checklist()[1].done);
+    CHECK(ctx.checklist()[2].text == "3. Fix MemoryGaugeView.swift");
+    CHECK(!ctx.checklist()[2].done);
+    CHECK(ctx.checklist()[3].text == "4) Fix the sparkline");
+    CHECK(!ctx.checklist()[3].done);
+    // The whole point: two of four are ticked, so the panel moves.
+    CHECK(ctx.open_checklist_items() == 2);
+}
+
+// A one-item numbered plan is not an unsplit list. `holds_a_whole_list` rejects a single
+// item that carries a second checkbox marker -- and while the marker after an ordinal was
+// left in the TEXT, `1. [x] Ship it` was exactly that shape, so a legitimate one-item plan
+// was refused with "the list arrived unsplit".
+TEST(plan_accepts_a_single_numbered_ticked_item) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body = "<function=plan>\n<parameter=items>\n"
+                             "1. [x] Ship it\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("ship it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 1);
+    CHECK(ctx.checklist()[0].text == "1. Ship it");
+    CHECK(ctx.checklist()[0].done);
+    CHECK(ctx.open_checklist_items() == 0);
+}
+
+// A decimal is not an ordinal, and a number with nothing behind it is not an item. Both
+// are the ways a digit-led line gets eaten by a parser that is too eager about numbering.
+TEST(plan_does_not_mistake_a_decimal_for_a_checklist_number) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body = "<function=plan>\n<parameter=items>\n"
+                             "1.5x the sparkline sample rate\n"
+                             "2. [x] Cap the gauge\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("tune it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 2);
+    CHECK(ctx.checklist()[0].text == "1.5x the sparkline sample rate");
+    CHECK(!ctx.checklist()[0].done);
+    CHECK(ctx.checklist()[1].text == "2. Cap the gauge");
+    CHECK(ctx.checklist()[1].done);
+}
+
 // The OTHER JSON shape: not an array, one string with the list joined up inside it. Nothing
 // decoded it, so the quotes and the two-character `\n` sequences reached the line parser as
 // text and the whole plan became one item.
@@ -2623,6 +2880,32 @@ TEST(debug_mode_offers_writes_but_never_delete_file) {
     CHECK(agent.tools_guidance().find("\"ask_question\"") != std::string::npos);
     // Leaving plan mode, though, still means nothing outside plan mode.
     CHECK(agent.tools_guidance().find("\"exit_plan_mode\"") == std::string::npos);
+    // And the mirror of that: declaring the work finished means nothing in a mode that
+    // does no work, so `finish` is offered here and withheld from plan mode below.
+    CHECK(agent.tools_guidance().find("\"finish\"") != std::string::npos);
+}
+
+// `finish` is the working-run ending, so plan mode -- which ends with `exit_plan_mode` --
+// must not be offered it. Withheld from the grammar rather than refused after the fact:
+// a plan run that "finished" would be claiming work it is not allowed to do.
+TEST(plan_mode_is_not_offered_finish) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "x", "y"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    CHECK(agent.tools_guidance().find("\"finish\"") == std::string::npos);
+    CHECK(agent.tools_guidance().find("\"exit_plan_mode\"") != std::string::npos);
 }
 
 // After compaction drops the full observation into a span summary, a re-read must return
