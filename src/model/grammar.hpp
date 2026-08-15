@@ -94,12 +94,22 @@ class TurnGrammar final : public MaskSource {
 
     // Think and Text mask by PHASE, not by history: outside a tool call the legal set is
     // a cached bitset of "everything except a handful of structural ids", and only a
-    // structural (special) token moves the phase. Inside a tool call parsephony's mask is
-    // state-dependent per token, so a block-wide snapshot would be wrong -- speculation
-    // falls back to one-at-a-time there. See src/model/speculative.hpp.
+    // structural (special) token moves the phase, so one snapshot covers a whole block.
     [[nodiscard]] bool mask_is_block_stable() const final {
         return phase_ == TurnPhase::Think || phase_ == TurnPhase::Text;
     }
+
+    // Inside a tool call the mask moves with every token, so a block-wide snapshot would
+    // be wrong -- but the state behind it is cheap to save and restore, which is what
+    // lets speculation run there anyway (see MaskSource's note, and S5.6).
+    //
+    // The whole snapshot is one enum, three sizes and a 272-byte guard copy: think_,
+    // text_ and calls_ are append-only within a turn, so rolling them back is resizing,
+    // exactly as the KV cache rolls back by moving `offset`.
+    [[nodiscard]] bool can_checkpoint() const final { return true; }
+    void checkpoint() final;
+    void rollback() final;
+    bool probe_advance(TokenId id) final { return advance(id) != Advance::Rejected; }
 
     // Only a structural id moves the phase, so only a structural id ends the block.
     [[nodiscard]] bool is_block_boundary(TokenId id) const final { return is_structural(id); }
@@ -154,6 +164,18 @@ class TurnGrammar final : public MaskSource {
     [[nodiscard]] bool at_call_cap() const noexcept {
         return calls_.size() >= kMaxCallsPerTurn;
     }
+
+    // The checkpoint, for speculation. `guard` is a COPY, not a borrowed pointer: the
+    // probe walks the live guard forward and the saved one has to be untouched by that.
+    struct Checkpoint {
+        std::unique_ptr<parsephony::ToolCallGuard> guard;
+        TurnPhase phase = TurnPhase::Think;
+        std::size_t think = 0;
+        std::size_t text = 0;
+        std::size_t calls = 0;
+        bool held = false;
+    };
+    Checkpoint mark_;
 
     // --- mask caches ---------------------------------------------------------
     // Outside a call there are only a few distinct states (phase x saw_tool_call_),

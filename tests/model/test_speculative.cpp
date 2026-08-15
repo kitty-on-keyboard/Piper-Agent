@@ -489,3 +489,161 @@ TEST(a_deferred_prefix_leaves_the_cache_behind_the_emitted_tokens_but_never_ahea
     // If it never lagged, nothing was deferred and this test proved nothing.
     CHECK(lagged);
 }
+
+// --- speculating where the mask is NOT block-stable ------------------------------------
+//
+// A mask whose legal set moves with every token -- the shape TurnGrammar has inside a
+// tool call, where roughly half of an agent's generated tokens live. A block there cannot
+// reuse one snapshot of the mask; the decoder has to walk this source forward over the
+// draft, read the mask at each position, and put it back.
+//
+// The failure this guards is silent. Shape a drafted position against the wrong mask and
+// the verifier still returns a token, the text still reads well, and the distribution has
+// quietly stopped being the one ordinary decoding would have produced.
+class WalkingMask final : public MaskSource {
+  public:
+    explicit WalkingMask(std::size_t vocab) : vocab_(vocab) { rebuild(); }
+
+    [[nodiscard]] const TokenMask& mask() const override { return m_; }
+    [[nodiscard]] bool mask_is_block_stable() const override { return false; }
+    [[nodiscard]] bool is_block_boundary(TokenId) const override { return false; }
+
+    [[nodiscard]] bool can_checkpoint() const override { return true; }
+    void checkpoint() override {
+        saved_ = pos_;
+        ++checkpoints;
+    }
+    void rollback() override {
+        pos_ = saved_;
+        rebuild();
+        ++rollbacks;
+    }
+    bool probe_advance(TokenId id) override {
+        if (!m_.allows(id)) {
+            return false;
+        }
+        ++pos_;
+        rebuild();
+        return true;
+    }
+
+    // What the loop's sink does for a token the model actually committed.
+    void commit(TokenId) {
+        ++pos_;
+        rebuild();
+    }
+
+    std::size_t checkpoints = 0;
+    std::size_t rollbacks = 0;
+
+  private:
+    // Banned ids live in 30..59, and repetitive_sequence() only ever emits 7..12 and
+    // 20..23 -- so the mask moves on every token without ever forbidding the continuation
+    // the scripted model is going to produce. A mask that banned a needed token would
+    // make this test measure "generation is impossible" rather than "the walk is right".
+    [[nodiscard]] TokenId banned() const {
+        return static_cast<TokenId>(30 + (pos_ % 30));
+    }
+    void rebuild() {
+        m_.reset(vocab_);
+        m_.allow_all();
+        m_.deny(banned());
+    }
+
+    std::size_t vocab_;
+    std::size_t pos_ = 0;
+    std::size_t saved_ = 0;
+    TokenMask m_;
+};
+
+TEST(a_walked_mask_speculates_and_still_commits_the_deterministic_sequence) {
+    const std::vector<TokenId> seq = repetitive_sequence(400);
+    const std::size_t start = 100;
+
+    ScriptForward fwd(seq, start);
+    fwd.mtp = true;
+    SpecConfig cfg;
+    cfg.enabled = true;
+    cfg.mtp_block_size = 3;
+
+    SpeculativeDecoder dec(deterministic_params(), cfg);
+    WalkingMask src(kVocab);
+    std::vector<TokenId> history(seq.begin(), seq.begin() + static_cast<long>(start));
+    std::vector<TokenId> emitted;
+    std::vector<TokenId> recent;
+    dec.seed(fwd.initial_row());
+
+    while (emitted.size() < 60) {
+        SpecStep st = dec.step(&src, recent, std::span<const TokenId>(history), true,
+                               [](TokenId) { return false; }, fwd);
+        REQUIRE(!st.no_legal_token);
+        REQUIRE(!st.committed.empty());
+        for (TokenId t : st.committed) {
+            emitted.push_back(t);
+            history.push_back(t);
+            recent.push_back(t);
+            if (recent.size() > 64) {
+                recent.erase(recent.begin());
+            }
+            src.commit(t); // the sink's job in the real loop
+        }
+        dec.observe(std::span<const TokenId>(st.committed));
+    }
+    emitted.resize(60);
+
+    // The headline, unchanged by any of this: one correct continuation.
+    const std::vector<TokenId> expect(seq.begin() + static_cast<long>(start),
+                                      seq.begin() + static_cast<long>(start) + 60);
+    CHECK(emitted == expect);
+
+    // It really speculated -- a source that reported itself unspeculatable would decode
+    // one at a time and pass the check above without exercising anything.
+    CHECK(dec.stats().blocks > 0);
+    // And every walk was put back: an unbalanced checkpoint leaves the grammar ahead of
+    // the model, which is the silent failure this whole path risks.
+    CHECK(src.checkpoints > 0);
+    CHECK_EQ(src.checkpoints, src.rollbacks);
+}
+
+TEST(a_walked_mask_leaves_the_source_exactly_where_the_committed_tokens_put_it) {
+    // The invariant behind the one above: after a block, the source must sit at exactly
+    // the committed tokens -- not at the drafted ones, and not one short.
+    const std::vector<TokenId> seq = repetitive_sequence(400);
+    const std::size_t start = 100;
+
+    ScriptForward fwd(seq, start);
+    fwd.mtp = true;
+    SpecConfig cfg;
+    cfg.enabled = true;
+    cfg.mtp_block_size = 3;
+
+    SpeculativeDecoder dec(deterministic_params(), cfg);
+    WalkingMask src(kVocab);
+    std::vector<TokenId> history(seq.begin(), seq.begin() + static_cast<long>(start));
+    std::vector<TokenId> emitted;
+    std::vector<TokenId> recent;
+    dec.seed(fwd.initial_row());
+
+    for (int block = 0; block < 20; ++block) {
+        const TokenMask snapshot_before = src.mask();
+        SpecStep st = dec.step(&src, recent, std::span<const TokenId>(history), true,
+                               [](TokenId) { return false; }, fwd);
+        REQUIRE(!st.no_legal_token);
+        // step() must hand the source back untouched; only commit() below moves it.
+        CHECK(src.mask().words() == snapshot_before.words());
+        for (TokenId t : st.committed) {
+            emitted.push_back(t);
+            history.push_back(t);
+            recent.push_back(t);
+            if (recent.size() > 64) {
+                recent.erase(recent.begin());
+            }
+            src.commit(t);
+        }
+        dec.observe(std::span<const TokenId>(st.committed));
+    }
+    const std::vector<TokenId> expect(seq.begin() + static_cast<long>(start),
+                                      seq.begin() + static_cast<long>(start) +
+                                          static_cast<long>(emitted.size()));
+    CHECK(emitted == expect);
+}

@@ -156,6 +156,38 @@ void SpeculativeDecoder::seed(std::vector<float> row) {
     pending_.clear();
 }
 
+std::size_t SpeculativeDecoder::walk_masks(MaskSource& src, std::vector<TokenId>& drafted) {
+    probe_n_ = 0;
+    const auto capture = [this](const TokenMask& m) {
+        if (probe_masks_.size() <= probe_n_) {
+            probe_masks_.resize(probe_n_ + 1);
+        }
+        // Assignment, not push_back: vector::operator= reuses the destination's capacity,
+        // so a steady state of blocks allocates nothing.
+        probe_masks_[probe_n_] = m;
+        ++probe_n_;
+    };
+
+    src.checkpoint();
+    capture(src.mask());
+    for (std::size_t i = 0; i < drafted.size(); ++i) {
+        // Refused by the mask, or refused by the automaton -- either way the draft ends
+        // here. Truncate rather than skip: a draft is a contiguous continuation, and the
+        // verifier stops at the first rejection anyway.
+        if (!probe_masks_[i].allows(drafted[i]) || !src.probe_advance(drafted[i])) {
+            drafted.resize(i);
+            break;
+        }
+        capture(src.mask());
+    }
+    src.rollback();
+    return probe_n_;
+}
+
+const TokenMask* SpeculativeDecoder::mask_at(std::size_t i, const TokenMask* fallback) const {
+    return i < probe_n_ ? &probe_masks_[i] : fallback;
+}
+
 void SpeculativeDecoder::flush(SpecForward& fwd) {
     if (pending_.empty()) {
         return;
@@ -164,11 +196,17 @@ void SpeculativeDecoder::flush(SpecForward& fwd) {
     pending_.clear();
 }
 
-SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<TokenId>& recent,
+SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& recent,
                                   std::span<const TokenId> context, bool may_speculate,
                                   const std::function<bool(TokenId)>& is_special,
                                   SpecForward& fwd) {
     SpecStep out;
+    probe_n_ = 0;
+    const TokenMask* mask = src != nullptr ? &src->mask() : nullptr;
+    // Where the mask moves with every token, the draft has to be checked position by
+    // position rather than all against the current one -- a token legal two positions in
+    // is generally not legal now, and vice versa.
+    const bool walking = src != nullptr && !src->mask_is_block_stable() && src->can_checkpoint();
 
     // A prefix left from the previous block can only ride along under a proposer that
     // drafts from its own state; anything else needs the target caught up first.
@@ -179,9 +217,21 @@ SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<Token
     // Drafted BEFORE the row is shaped, which the deferred path requires: with a prefix
     // outstanding there is no row yet to shape. Safe to reorder because distribution() is
     // const and consumes no randomness, and a grafted proposer reads only hidden state.
-    const std::vector<TokenId> drafted =
-        (config_.enabled && may_speculate) ? propose(context, is_special, mask, fwd)
-                                           : std::vector<TokenId>{};
+    std::vector<TokenId> drafted =
+        (config_.enabled && may_speculate)
+            // propose() gets no mask when walking: its check is against ONE mask, which
+            // is exactly the assumption that does not hold here. walk_masks() truncates.
+            ? propose(context, is_special, walking ? nullptr : mask, fwd)
+            : std::vector<TokenId>{};
+
+    if (walking && !drafted.empty()) {
+        walk_masks(*src, drafted);
+        // Re-point at the CAPTURED copy of the current mask. `mask` was a reference into
+        // the grammar's cache, and inside a tool call that cache holds exactly one mask
+        // and rebuilds it on every mask() call -- so the walk just invalidated it. The
+        // copy at position 0 is the same mask and outlives the block.
+        mask = mask_at(0, mask);
+    }
 
     // No block to fold the prefix into, so it has to be paid for on its own.
     if (drafted.empty()) {
@@ -245,9 +295,9 @@ SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<Token
     std::vector<TokenDist> dists;
     dists.reserve(drafted.size() + 1);
     if (prefix == 0) {
-        dists.push_back(sampler_.distribution(row_, mask, recent));
+        dists.push_back(sampler_.distribution(row_, mask_at(0, mask), recent));
     } else if (prefix - 1 < rows.size()) {
-        dists.push_back(sampler_.distribution(rows[prefix - 1], mask, recent));
+        dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
     }
     if (dists.empty() || dists.front().empty()) {
         proposer_->settle(0, {}, prefix, fwd);
@@ -265,7 +315,10 @@ SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<Token
         if (recent_i.size() > kRecentWindow) {
             recent_i.erase(recent_i.begin());
         }
-        dists.push_back(sampler_.distribution(rows[prefix + i], mask, recent_i));
+        // Position i + 1 of the block: the mask the grammar would have had after
+        // drafted[0..i]. Identical to `mask` for a block-stable source, and the whole
+        // reason a block can run inside a tool call for one that had to be walked.
+        dists.push_back(sampler_.distribution(rows[prefix + i], mask_at(i + 1, mask), recent_i));
     }
 
     // Map into the verifier's index space: each row is dense over that position's

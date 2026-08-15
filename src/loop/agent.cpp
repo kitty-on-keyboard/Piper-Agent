@@ -966,7 +966,13 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           {"prefill_reused_tokens",
            std::to_string(turn.generation.prefill_reused_tokens)},
           {"ttft_ms", std::to_string(turn.generation.ttft_ms)},
-          {"decode_tok_per_s", std::to_string(turn.generation.decode_tok_per_s)}});
+          {"decode_tok_per_s", std::to_string(turn.generation.decode_tok_per_s)},
+          // Speculation, per turn. Without these, "is the draft head doing anything?" is
+          // not answerable from a real run -- it had to be inferred from the resident
+          // memory plateau. spec_blocks=0 with a head loaded means it never fired.
+          {"spec_blocks", std::to_string(turn.generation.spec_blocks)},
+          {"spec_drafted", std::to_string(turn.generation.spec_drafted)},
+          {"spec_accepted", std::to_string(turn.generation.spec_accepted)}});
 
     // THE SHAPE OF WHAT WAS SAID, always, even when the text itself is not traced. Three
     // integers per turn, and they separate the two failures that `tokens=4096 status=1`
