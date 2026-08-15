@@ -323,6 +323,24 @@ bool speculative_env_override(bool from_config) {
     return from_config;
 }
 
+// Where a speculative block's wall time actually goes. `lmp_diag verify` prices the
+// verification pass on its own; this prices everything wrapped around it, because the
+// first end-to-end measurement of speculation on this dense checkpoint came in BELOW
+// plain decode (16.2 vs 17.4 tok/s) while the verification pass was only 1.25x of a
+// single-token step at 65% acceptance. Those two facts cannot both be the whole story,
+// and a phase breakdown is the only thing that says which one is lying.
+struct SpecPhases {
+    double checkpoint_ms = 0;
+    double restore_ms = 0;
+    double verify_ms = 0;
+    double forward_last_ms = 0;
+    std::uint64_t forward_last_positions = 0;
+    double hidden_ms = 0;
+    double mtp_step_ms = 0;
+    double mtp_logits_ms = 0;
+    std::uint64_t mtp_logits_calls = 0;
+};
+
 // The model, as src/model/speculative.hpp needs to see it. Everything MLX-shaped lives
 // here so the block algebra itself stays testable without a GPU.
 class MlxSpecForward final : public SpecForward {
@@ -330,12 +348,15 @@ class MlxSpecForward final : public SpecForward {
     MlxSpecForward(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger)
         : model_(model), ledger_(ledger) {}
 
+    [[nodiscard]] const SpecPhases& phases() const noexcept { return phases_; }
+
     void forward_all(std::span<const TokenId> tokens,
                      std::vector<std::vector<float>>& rows) override {
         rows.clear();
         if (tokens.empty()) {
             return;
         }
+        Phase _p(phases_.verify_ms);
         mx::array ids = mx::array(tokens.data(), {1, static_cast<int>(tokens.size())}, mx::int32);
         // The opt-in all-position path: verification needs a row per drafted position,
         // and forward_logits() would slice all but the last away.
@@ -358,6 +379,8 @@ class MlxSpecForward final : public SpecForward {
         if (tokens.empty()) {
             return;
         }
+        Phase _p(phases_.forward_last_ms);
+        phases_.forward_last_positions += tokens.size();
         mx::array ids = mx::array(tokens.data(), {1, static_cast<int>(tokens.size())}, mx::int32);
         mx::array logits = impl_forward_last(ids);
         mx::eval(logits);
@@ -366,11 +389,13 @@ class MlxSpecForward final : public SpecForward {
     }
 
     void checkpoint() override {
+        Phase _p(phases_.checkpoint_ms);
         mark_ = model_.checkpoint();
         ledger_mark_ = ledger_.size();
     }
 
     void restore() override {
+        Phase _p(phases_.restore_ms);
         model_.restore(mark_);
         // Exactly the same position the caches went back to. A ledger that disagreed with
         // the caches is the silent-stale-context failure S5.10 exists to prevent.
@@ -392,6 +417,7 @@ class MlxSpecForward final : public SpecForward {
         if (!h.has_value()) {
             return;
         }
+        Phase _p(phases_.hidden_ms);
         mx::array host = mx::astype(*h, mx::float32);
         mx::eval(host);
         const int seq = static_cast<int>(host.shape()[1]);
@@ -410,6 +436,7 @@ class MlxSpecForward final : public SpecForward {
         if (!model_.has_mtp() || hidden.empty()) {
             return;
         }
+        Phase _p(phases_.mtp_step_ms);
         const std::array<TokenId, 1> ids_buf{tok};
         mx::array ids = mx::array(ids_buf.data(), {1, 1}, mx::int32);
         mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
@@ -425,6 +452,8 @@ class MlxSpecForward final : public SpecForward {
         if (!model_.has_mtp() || hidden.empty()) {
             return;
         }
+        Phase _p(phases_.mtp_logits_ms);
+        ++phases_.mtp_logits_calls;
         mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
                                 mx::float32);
         // The TARGET's head. The MTP checkpoint ships none, which is also why a drafted
@@ -443,10 +472,25 @@ class MlxSpecForward final : public SpecForward {
     mx::array impl_forward_all(const mx::array& ids) { return model_.forward_logits_all(ids); }
     mx::array impl_forward_last(const mx::array& ids) { return model_.forward_logits(ids); }
 
+    // Accumulates into one phase counter for the lifetime of the scope. Wall time, not
+    // GPU time: every one of these phases ends in an mx::eval, so the barrier is inside
+    // the scope and the host clock sees the real cost.
+    struct Phase {
+        double& sink;
+        std::chrono::steady_clock::time_point t0{std::chrono::steady_clock::now()};
+        explicit Phase(double& s) : sink(s) {}
+        ~Phase() {
+            sink += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+        }
+    };
+
     mlxl::Qwen35MoeModel& model_;
     KvCacheLedger& ledger_;
     mlxl::Qwen35MoeModel::CacheCheckpoint mark_{};
     std::size_t ledger_mark_ = 0;
+    SpecPhases phases_{};
 };
 
 // The speculative decode loop. Separate from generate() so the plain path keeps the exact
@@ -546,6 +590,18 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
                  100.0 * s.acceptance_rate(),
                  static_cast<unsigned long long>(s.committed),
                  static_cast<unsigned long long>(s.fallbacks));
+    // Per BLOCK, not per run: the question a phase breakdown has to answer is "what does
+    // one block cost and where", and a run total hides that behind the block count.
+    const SpecPhases& p = fwd.phases();
+    const double nb = s.blocks > 0 ? static_cast<double>(s.blocks) : 1.0;
+    std::fprintf(stderr,
+                 "  [spec] per block: verify=%.1fms forward_last=%.1fms (%.1f pos) "
+                 "mtp_logits=%.1fms (%.1f calls) mtp_step=%.1fms hidden=%.1fms "
+                 "checkpoint=%.1fms restore=%.1fms\n",
+                 p.verify_ms / nb, p.forward_last_ms / nb,
+                 static_cast<double>(p.forward_last_positions) / nb, p.mtp_logits_ms / nb,
+                 static_cast<double>(p.mtp_logits_calls) / nb, p.mtp_step_ms / nb,
+                 p.hidden_ms / nb, p.checkpoint_ms / nb, p.restore_ms / nb);
     return r;
 }
 
