@@ -385,3 +385,78 @@ TEST(rollback_restores_phase_and_the_accumulated_text) {
     CHECK_EQ(g.text_ids().size(), text_len);
     CHECK(g.phase() == TurnPhase::Text);
 }
+
+// --- the closer is not always one token ------------------------------------------------
+//
+// Reproduces the exact turn that ended a run: a read_file call on FRICTION.md whose
+// `</tool_call>` the model spelled out as five ordinary tokens instead of emitting the
+// single special id. The guard's own literal is `</function>\n</tool_call>`, so every
+// byte of the closer is a legal continuation while the model is part way through it --
+// the mask offers `<`, `/`, `tool`, `_call`, `>` and the model takes them.
+//
+// Before the fix the guard completed and nothing noticed: the call was never recorded and
+// the phase stayed ToolCall, so the next mask() ran the engine on a COMPLETE guard, got
+// nothing, and denied the special closer too (permitted() re-feeds bytes already
+// consumed). An empty mask is reported as "the grammar and the vocabulary disagree" and
+// the run ends.
+
+TEST(a_tool_call_closed_by_ordinary_tokens_still_closes) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    (void)g.advance(tok().specials().think_close);
+    REQUIRE(g.advance(tok().specials().tool_call_open) == Advance::Ok);
+
+    // Everything up to and including `</function>\n`, then the closer SPELLED OUT.
+    REQUIRE(feed_text(g, "<function=read_file>\n<parameter=path>\nFRICTION.md\n"
+                         "</parameter>\n</function>\n") == Advance::Ok);
+    REQUIRE(g.phase() == TurnPhase::ToolCall);
+    REQUIRE(feed_text(g, "</tool_call>") == Advance::Ok);
+
+    // The call is closed, recorded, and the turn is back in Text -- exactly as if the
+    // single `</tool_call>` id had been used.
+    CHECK(g.phase() == TurnPhase::Text);
+    REQUIRE(g.has_tool_call());
+    CHECK_EQ(g.tool_name(), std::string("read_file"));
+    REQUIRE(g.tool_params().size() == 1);
+    CHECK_EQ(g.tool_params()[0].value, std::string("FRICTION.md"));
+
+    // And the state is decodable: something is legal here. An empty mask at this point
+    // is the failure this test exists for.
+    CHECK(g.mask().any());
+    CHECK(g.mask().count() > 0);
+
+    // The turn still ends the normal way.
+    CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
+}
+
+TEST(the_mask_never_empties_while_a_call_is_closed_either_way) {
+    // Both spellings, checked at every step: no state along either path may leave the
+    // sampler with nothing to choose from.
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    for (int spelled = 0; spelled < 2; ++spelled) {
+        TurnGrammar g(tok(), tools);
+        (void)g.advance(tok().specials().think_close);
+        REQUIRE(g.advance(tok().specials().tool_call_open) == Advance::Ok);
+        std::vector<TokenId> body = tok().encode_content(
+            "<function=read_file>\n<parameter=path>\nFRICTION.md\n</parameter>\n</function>\n");
+        if (spelled == 1) {
+            for (const TokenId id : tok().encode_content("</tool_call>")) {
+                body.push_back(id);
+            }
+        }
+        for (const TokenId id : body) {
+            CHECK(g.mask().any());
+            REQUIRE(g.advance(id) != Advance::Rejected);
+        }
+        if (spelled == 0) {
+            CHECK(g.mask().any());
+            REQUIRE(g.advance(tok().specials().tool_call_close) == Advance::Ok);
+        }
+        CHECK(g.phase() == TurnPhase::Text);
+        CHECK(g.mask().any());
+        REQUIRE(g.has_tool_call());
+        CHECK_EQ(g.tool_params()[0].value, std::string("FRICTION.md"));
+    }
+}
