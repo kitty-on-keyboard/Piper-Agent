@@ -568,8 +568,27 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
 
         if (st.no_legal_token) {
             r.status = GenStatus::BackendError;
-            r.error = "constrained decode: no legal token -- the grammar and the "
-                      "vocabulary disagree, which is a build defect";
+            // SELF-DESCRIBING, because three separate theories about this failure were
+            // wrong and each cost a run to disprove. The ids are the point: with them the
+            // exact state is reconstructible offline, which no amount of scanning the
+            // grammar from the outside has managed.
+            std::string tail;
+            const std::vector<TokenId>& ids = ledger.ids();
+            for (std::size_t i = ids.size() > 32 ? ids.size() - 32 : 0; i < ids.size(); ++i) {
+                tail += std::to_string(ids[i]);
+                tail += ' ';
+            }
+            r.error = "constrained decode: no legal token. mask_allows=" +
+                      std::to_string(task.mask != nullptr ? task.mask->mask().count() : 0) +
+                      " block_stable=" +
+                      std::to_string(task.mask != nullptr && task.mask->mask_is_block_stable()) +
+                      " checkpointable=" +
+                      std::to_string(task.mask != nullptr && task.mask->can_checkpoint()) +
+                      " may_speculate=" + std::to_string(may_speculate) +
+                      " generated=" + std::to_string(r.tokens_generated) +
+                      " blocks=" + std::to_string(decoder.stats().blocks) +
+                      " abandoned=" + std::to_string(decoder.stats().abandoned) +
+                      " last_ids=[" + tail + "]";
             return r;
         }
 
