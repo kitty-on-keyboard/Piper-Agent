@@ -69,6 +69,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 using lmp::diag::ms;
+using lmp::diag::draft_dir;
 using lmp::diag::qwen_dir;
 #if LMP_HAVE_MLX
 using lmp::diag::cmd_blocks;
@@ -519,6 +520,57 @@ int cmd_mask() {
 
 // --- bench -----------------------------------------------------------------
 
+// What a speculative block's VERIFICATION pass costs, against the single-token step it
+// has to beat. This is the whole economics of speculation and it was never measured.
+//
+// A block spends one forward_logits_all over k positions and commits at most k tokens, so
+// speculation only pays when that pass costs less than k single-token steps. The naive
+// assumption is that it costs about ONE -- decode is bandwidth-bound on weights, and k
+// extra rows flowing through the same weights are nearly free. That assumption holds for
+// a pure-attention model. It does NOT obviously hold here: this checkpoint is HYBRID
+// (full_attention_interval 4, so 3 of every 4 layers are linear attention), and
+// gated_delta_update runs a different kernel at S>1 than the fast recurrence it runs at
+// S=1. If that path is superlinear in S, speculation is buying tokens at a loss.
+//
+// Prints ms, ms-per-position, and the ratio against T=1 -- the last is the number that
+// decides whether a draft is worth proposing at all.
+int cmd_verify(int max_k) {
+    mlxl::Qwen35MoeModel model;
+    if (!model.load(qwen_dir())) {
+        std::printf("model load failed\n");
+        return 1;
+    }
+    std::printf("  verification pass cost by block width (prompt 547, 10 iters each)\n");
+    double base = 0.0;
+    for (int k = 1; k <= max_k; ++k) {
+        // A fresh cache per width, so every k is measured at the same context length
+        // rather than inheriting the previous k's appended tokens.
+        model.reset_cache();
+        std::vector<int32_t> prompt(547, 100);
+        mx::array ids = mx::array(prompt.data(), {1, static_cast<int>(prompt.size())}, mx::int32);
+        mx::array warm = model.forward_logits(ids);
+        mx::eval(warm);
+
+        std::vector<int32_t> block(static_cast<std::size_t>(k), 42);
+        const int iters = 10;
+        const auto t0 = Clock::now();
+        for (int i = 0; i < iters; ++i) {
+            mx::array b = mx::array(block.data(), {1, k}, mx::int32);
+            mx::array logits = model.forward_logits_all(b);
+            mx::eval(logits);
+        }
+        const double per = ms(t0, Clock::now()) / iters;
+        if (k == 1) {
+            base = per;
+        }
+        std::printf("    k=%-2d  %7.2f ms/pass   %6.2f ms/position   %.2fx of k=1"
+                    "   break-even accept >= %.0f%%\n",
+                    k, per, per / k, per / base,
+                    100.0 * ((per / base) - 1.0) / static_cast<double>(k > 1 ? k - 1 : 1));
+    }
+    return 0;
+}
+
 int cmd_bench(int runs, int prompt_tokens, int max_new) {
     QwenTokenizer tok;
     LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
@@ -530,12 +582,13 @@ int cmd_bench(int runs, int prompt_tokens, int max_new) {
     lmp::platform::SystemClock clock;
     MlxBackend backend(clock);
     auto t_load0 = Clock::now();
-    st = backend.load({qwen_dir(), ""});
+    st = backend.load({qwen_dir(), draft_dir()});
     if (!st.ok) {
         std::printf("model load fail: %s\n", st.error.c_str());
         return 1;
     }
-    std::printf("model load: %.1f s\n", ms(t_load0, Clock::now()) / 1000.0);
+    std::printf("model load: %.1f s%s\n", ms(t_load0, Clock::now()) / 1000.0,
+                draft_dir()[0] != '\0' ? "  [MTP draft head loaded]" : "  [plain decode]");
 
     // A prompt of the requested length, built from real text so the tokenizer does not
     // collapse it into a handful of repeated ids.
@@ -659,6 +712,9 @@ int main(int argc, char** argv) {
         return cmd_blocks(argc > 2 ? std::atoi(argv[2]) : 1);
     }
 #endif
+    if (cmd == "verify") {
+        return cmd_verify(argc > 2 ? std::atoi(argv[2]) : 4);
+    }
     if (cmd == "bench") {
         const int runs = argc > 2 ? std::atoi(argv[2]) : 3;
         const int prompt_tokens = argc > 3 ? std::atoi(argv[3]) : 512;

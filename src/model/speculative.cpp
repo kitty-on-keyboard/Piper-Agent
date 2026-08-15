@@ -24,6 +24,14 @@ constexpr float kDeterministicDrafter = 1.0F;
 // shaped against the same window or they are not the rows sequential decoding would use.
 constexpr std::size_t kRecentWindow = 64;
 
+// The most committed-but-unforwarded tokens a block may carry in (see `pending_`).
+//
+// A safety valve, not a tuning knob. The prefix resets to one token on every fully
+// accepted block, so in practice it sits at one to three; this only bounds the tail of an
+// unlucky streak, because the prefix widens the verification pass and that pass is the
+// one thing in the block that is not free. Past this, pay the forward and start over.
+constexpr std::size_t kMaxDeferred = 16;
+
 // The history-matching proposer, behind DraftProposer. It is stateless across a block --
 // it matches a suffix and returns a continuation -- so settle() has nothing to undo.
 class SuffixDraftProposer final : public DraftProposer {
@@ -108,28 +116,49 @@ std::vector<TokenId> SpeculativeDecoder::propose(
     return out;
 }
 
-SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* mask,
-                                  const std::vector<TokenId>& recent,
+void SpeculativeDecoder::seed(std::vector<float> row) {
+    row_ = std::move(row);
+    pending_.clear();
+}
+
+void SpeculativeDecoder::flush(SpecForward& fwd) {
+    if (pending_.empty()) {
+        return;
+    }
+    fwd.forward_last(std::span<const TokenId>(pending_), row_);
+    pending_.clear();
+}
+
+SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<TokenId>& recent,
                                   std::span<const TokenId> context, bool may_speculate,
                                   const std::function<bool(TokenId)>& is_special,
                                   SpecForward& fwd) {
     SpecStep out;
 
-    // The distribution for the next position, shaped exactly as the plain path shapes it.
-    const TokenDist dist0 = sampler_.distribution(logits, mask, recent);
-    if (dist0.empty()) {
-        out.no_legal_token = true;
-        return out;
+    // A prefix left from the previous block can only ride along under a proposer that
+    // drafts from its own state; anything else needs the target caught up first.
+    if (!proposer_->can_draft_deferred() || pending_.size() >= kMaxDeferred) {
+        flush(fwd);
     }
 
+    // Drafted BEFORE the row is shaped, which the deferred path requires: with a prefix
+    // outstanding there is no row yet to shape. Safe to reorder because distribution() is
+    // const and consumes no randomness, and a grafted proposer reads only hidden state.
     const std::vector<TokenId> drafted =
         (config_.enabled && may_speculate) ? propose(context, is_special, mask, fwd)
                                            : std::vector<TokenId>{};
 
+    // No block to fold the prefix into, so it has to be paid for on its own.
     if (drafted.empty()) {
+        flush(fwd);
         // Ordinary decoding. Draws from the verifier's stream too, so that turning
         // speculation on or off does not silently change which stream the plain steps
         // consume -- the distribution is identical either way, the sequence is not.
+        const TokenDist dist0 = sampler_.distribution(row_, mask, recent);
+        if (dist0.empty()) {
+            out.no_legal_token = true;
+            return out;
+        }
         const std::span<const float> row(dist0.probs.data(), dist0.probs.size());
         const std::array<std::span<const float>, 1> rows{row};
         const SpecResult r =
@@ -144,7 +173,7 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
             return out;
         }
         out.committed.push_back(dist0.ids[idx]);
-        fwd.forward_last(std::span<const TokenId>(out.committed), out.next_logits);
+        fwd.forward_last(std::span<const TokenId>(out.committed), row_);
         ++stats_.fallbacks;
         return out;
     }
@@ -154,20 +183,44 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
     stats_.drafted += drafted.size();
     out.speculated = true;
 
+    // The prefix rides in front of the drafts, in ONE pass. Position j-1 of that pass is
+    // the row the first draft is verified against -- the row a trailing forward_last used
+    // to be run to obtain, at the price of a whole extra read of the weights.
+    const std::size_t prefix = pending_.size();
+    std::vector<TokenId> input;
+    input.reserve(prefix + drafted.size());
+    input.insert(input.end(), pending_.begin(), pending_.end());
+    input.insert(input.end(), drafted.begin(), drafted.end());
+
     fwd.checkpoint();
     std::vector<std::vector<float>> rows;
-    fwd.forward_all(std::span<const TokenId>(drafted), rows);
+    fwd.forward_all(std::span<const TokenId>(input), rows);
 
-    // One shaped distribution per drafted position, plus the row we already had. The
-    // repetition penalty is built from the PROVISIONAL history: verification at position
-    // i only happens if drafted[0..i-1] were accepted, so `recent` extended by exactly
-    // that prefix is the history the sequential path would have had. Anything else would
-    // verify against a row the model would never have produced.
+    // One shaped distribution per drafted position, plus the row for the position the
+    // first draft sits at. With no prefix that is the row carried from the last block;
+    // with one it is rows[prefix - 1], produced by the pass above. The repetition penalty
+    // is built from the PROVISIONAL history: verification at position i only happens if
+    // drafted[0..i-1] were accepted, so `recent` extended by exactly that prefix is the
+    // history the sequential path would have had. Anything else would verify against a
+    // row the model would never have produced.
+    //
+    // `recent` already contains the deferred tokens -- the caller pushes every committed
+    // token into its window as it is emitted, whether or not the target has consumed it
+    // yet -- so the shaping here is the same either way.
     std::vector<TokenDist> dists;
     dists.reserve(drafted.size() + 1);
-    dists.push_back(dist0);
+    if (prefix == 0) {
+        dists.push_back(sampler_.distribution(row_, mask, recent));
+    } else if (prefix - 1 < rows.size()) {
+        dists.push_back(sampler_.distribution(rows[prefix - 1], mask, recent));
+    }
+    if (dists.empty() || dists.front().empty()) {
+        proposer_->settle(0, {}, prefix, fwd);
+        out.no_legal_token = true;
+        return out;
+    }
     std::vector<TokenId> recent_i = recent;
-    for (std::size_t i = 0; i < drafted.size() && i < rows.size(); ++i) {
+    for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
         recent_i.push_back(drafted[i]);
         // The SAME bounded window the sequential loop keeps. The repetition penalty is
         // applied once per OCCURRENCE in this list, so an unbounded window would penalise
@@ -177,7 +230,7 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
         if (recent_i.size() > kRecentWindow) {
             recent_i.erase(recent_i.begin());
         }
-        dists.push_back(sampler_.distribution(rows[i], mask, recent_i));
+        dists.push_back(sampler_.distribution(rows[prefix + i], mask, recent_i));
     }
 
     // Map into the verifier's index space: each row is dense over that position's
@@ -210,7 +263,7 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
         // proposing, so it has to be told, or its cache outruns the target's by exactly
         // the drafts nobody kept -- a drift that never throws and only shows up as
         // steadily worse proposals.
-        proposer_->settle(0, {}, fwd);
+        proposer_->settle(0, {}, prefix, fwd);
         out.no_legal_token = true;
         return out;
     }
@@ -222,7 +275,7 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
     // The final token is an index into the row at position m, not a token id.
     const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
     if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
-        proposer_->settle(0, {}, fwd);
+        proposer_->settle(0, {}, prefix, fwd);
         out.no_legal_token = true;
         return out;
     }
@@ -233,29 +286,51 @@ SpecStep SpeculativeDecoder::step(std::vector<float>& logits, const TokenMask* m
     // token, which only exists now. It also reads the hidden rows from the verification
     // pass above, so this must precede the forward_last / restore below -- those replace
     // what fwd.last_hidden() reports.
-    proposer_->settle(m, std::span<const TokenId>(out.committed), fwd);
+    proposer_->settle(m, std::span<const TokenId>(out.committed), prefix, fwd);
 
     stats_.accepted_drafts += m;
     stats_.committed += out.committed.size();
 
-    // Leave the cache holding exactly the committed tokens, and produce the row for the
-    // position after them.
+    // Where the cache is left, and who pays for the next row.
     //
-    // Full acceptance is the cheap case: the cache already holds every drafted token, so
-    // only the bonus token -- which was sampled, never forwarded -- is missing.
+    // Full acceptance is the cheap case: the pass consumed the prefix and every draft, so
+    // only the bonus token -- sampled, never forwarded -- is outstanding.
     //
-    // Partial acceptance cannot simply drop the tail. The full-attention layers could
-    // (their rollback is an index), but the gated-delta layers hold a recurrence with no
-    // per-token history, so the only reachable earlier state is the checkpoint. Restore to
-    // it and re-forward the survivors. That costs one extra pass of m+1 positions; folding
-    // it into the NEXT block's forward as a pending prefix would remove even that, and is
-    // the first optimisation to reach for if this shows up in a profile.
-    if (m == drafted.size()) {
+    // Partial acceptance cannot simply drop the rejected tail. The full-attention layers
+    // could (their rollback is an index), but the gated-delta layers hold a recurrence
+    // with no per-token history, so the only reachable earlier state is the checkpoint --
+    // which sits BEFORE the prefix as well. Everything that rode in comes back out.
+    //
+    // DEFERRING is the point of all this. The alternative, taken whenever the proposer
+    // cannot draft without the target, is to forward the outstanding tokens now purely to
+    // obtain a row -- and on a dense target that is a full read of the weights for one
+    // row, as expensive as the verification pass it follows. So when the proposer carries
+    // its own seed, nothing is forwarded here at all: the tokens go into `pending_` and
+    // ride in front of the next block's verification, which was going to run regardless.
+    const bool full = (m == drafted.size());
+    const bool defer = proposer_->can_draft_deferred() &&
+                       (full || pending_.size() + out.committed.size() <= kMaxDeferred);
+    if (defer) {
+        if (full) {
+            pending_.assign(1, out.committed.back());
+        } else {
+            fwd.restore();
+            pending_.insert(pending_.end(), out.committed.begin(), out.committed.end());
+        }
+        // No row until the next pass produces one; holding a stale one would let a caller
+        // shape a distribution for a position the target has not reached.
+        row_.clear();
+    } else if (full) {
         const std::span<const TokenId> tail(&out.committed.back(), 1);
-        fwd.forward_last(tail, out.next_logits);
+        fwd.forward_last(tail, row_);
+        pending_.clear();
     } else {
         fwd.restore();
-        fwd.forward_last(std::span<const TokenId>(out.committed), out.next_logits);
+        // The prefix went back out with the rejected tail, so it is replayed too.
+        std::vector<TokenId> replay = pending_;
+        replay.insert(replay.end(), out.committed.begin(), out.committed.end());
+        fwd.forward_last(std::span<const TokenId>(replay), row_);
+        pending_.clear();
     }
     return out;
 }

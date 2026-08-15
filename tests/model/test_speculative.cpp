@@ -39,17 +39,24 @@ class ScriptForward final : public SpecForward {
                      std::vector<std::vector<float>>& rows) override {
         rows.clear();
         ++forward_all_calls;
+        hidden_.clear();
         for (std::size_t i = 0; i < tokens.size(); ++i) {
+            hidden_.push_back({static_cast<float>(pos_)});
             ++pos_;
             consumed_.push_back(tokens[i]);
             rows.push_back(row_for(pos_));
         }
         max_batch = std::max(max_batch, tokens.size());
+        verified_since_read_ = true;
     }
 
     void forward_last(std::span<const TokenId> tokens, std::vector<float>& row) override {
         ++forward_last_calls;
+        // An ordinary step breaks the head's chain: the next round has no seed.
+        primed_ = false;
+        hidden_.clear();
         for (TokenId t : tokens) {
+            hidden_.push_back({static_cast<float>(pos_)});
             ++pos_;
             consumed_.push_back(t);
         }
@@ -68,6 +75,50 @@ class ScriptForward final : public SpecForward {
         ++restores;
     }
 
+    // --- the grafted-drafter path, off unless `mtp` is set --------------------------
+    //
+    // A PERFECT head, on purpose: it drafts exactly the continuation the target would
+    // produce, so every block is fully accepted and the test drives the full-acceptance
+    // deferral branch -- the one where nothing at all is forwarded after verification.
+    //
+    // It predicts by position rather than by chaining hidden tags, and the discriminator
+    // is `verified_since_read_`: propose() reads last_hidden() BEFORE this round's
+    // verification pass, settle() reads it after. The two want different cursors -- the
+    // drafts start at the target's current position, while the seed is for the position
+    // after the bonus token, which the target has not forwarded. Modelling that with tag
+    // arithmetic alone is off by one at one site or the other, which is exactly the
+    // hazard MtpProposer's header warns about.
+    [[nodiscard]] bool has_mtp() const override { return mtp; }
+
+    void last_hidden(std::vector<std::vector<float>>& rows) override {
+        rows = hidden_;
+        if (verified_since_read_) {
+            // settle(): the seed is for the position after the BONUS token, and the bonus
+            // is the one thing the verification pass did not forward.
+            draft_cursor_ = pos_ + 1;
+            verified_since_read_ = false;
+            primed_ = true;
+        } else if (!primed_) {
+            // A cold round -- no seed to continue from, so drafting opens at the target's
+            // own position.
+            draft_cursor_ = pos_;
+        }
+        // Otherwise the cursor runs on from where settle left it. A seeded round's first
+        // draft was already produced there, and pos_ cannot be used to recompute it: with
+        // a deferred prefix the target deliberately lags the committed tokens.
+    }
+
+    void mtp_step(TokenId, std::span<const float> h, std::vector<float>& out) override {
+        out = {h.empty() ? 0.0F : h[0]};
+        ++mtp_steps;
+    }
+
+    void mtp_logits(std::span<const float>, std::vector<float>& row) override {
+        row = row_for(draft_cursor_++);
+    }
+
+    void mtp_trim(std::size_t n) override { mtp_trimmed += n; }
+
     // The row the loop starts from: the distribution for the position after `start`.
     [[nodiscard]] std::vector<float> initial_row() const { return row_for(pos_); }
     [[nodiscard]] std::size_t pos() const noexcept { return pos_; }
@@ -78,6 +129,9 @@ class ScriptForward final : public SpecForward {
     std::size_t checkpoints = 0;
     std::size_t restores = 0;
     std::size_t max_batch = 0;
+    std::size_t mtp_steps = 0;
+    std::size_t mtp_trimmed = 0;
+    bool mtp = false;
 
   private:
     [[nodiscard]] std::vector<float> row_for(std::size_t position) const {
@@ -95,6 +149,10 @@ class ScriptForward final : public SpecForward {
     std::size_t mark_ = 0;
     std::size_t mark_consumed_ = 0;
     std::vector<TokenId> consumed_;
+    std::vector<std::vector<float>> hidden_;
+    std::size_t draft_cursor_ = 0;
+    bool verified_since_read_ = false;
+    bool primed_ = false;
 };
 
 // Repetitive on purpose: SuffixProposer only proposes where it has matched history with
@@ -144,8 +202,9 @@ void run(SpecForward& fwd, std::vector<float> logits, std::size_t want, bool may
          std::vector<TokenId>& history, RunOut& out) {
     // `recent` is the backend's bounded window of GENERATED tokens, not the whole history.
     std::vector<TokenId> recent;
+    dec.seed(std::move(logits));
     while (out.emitted.size() < want) {
-        SpecStep st = dec.step(logits, nullptr, recent, std::span<const TokenId>(history),
+        SpecStep st = dec.step(nullptr, recent, std::span<const TokenId>(history),
                                may_speculate, is_special, fwd);
         REQUIRE(!st.no_legal_token);
         REQUIRE(!st.committed.empty()); // the floor
@@ -158,7 +217,6 @@ void run(SpecForward& fwd, std::vector<float> logits, std::size_t want, bool may
             }
         }
         dec.observe(std::span<const TokenId>(st.committed));
-        logits = std::move(st.next_logits);
     }
     out.emitted.resize(want);
     out.stats = dec.stats();
@@ -234,11 +292,11 @@ TEST(the_cache_ends_holding_exactly_the_committed_tokens) {
     std::vector<TokenId> history(seq.begin(), seq.begin() + static_cast<long>(start));
     dec.observe(std::span<const TokenId>(history));
 
-    std::vector<float> logits = fwd.initial_row();
+    dec.seed(fwd.initial_row());
     std::vector<TokenId> emitted;
     std::vector<TokenId> recent;
     for (int block = 0; block < 40; ++block) {
-        SpecStep st = dec.step(logits, nullptr, recent, std::span<const TokenId>(history), true,
+        SpecStep st = dec.step(nullptr, recent, std::span<const TokenId>(history), true,
                                [](TokenId) { return false; }, fwd);
         REQUIRE(!st.no_legal_token);
         for (TokenId t : st.committed) {
@@ -250,10 +308,11 @@ TEST(the_cache_ends_holding_exactly_the_committed_tokens) {
             }
         }
         dec.observe(std::span<const TokenId>(st.committed));
-        logits = std::move(st.next_logits);
 
         // The scripted model's position advances by exactly one per consumed token, so
-        // this is the cache offset the real backend would hold.
+        // this is the cache offset the real backend would hold. It holds for this fake
+        // because it reports no MTP head, so the decoder never defers a forward -- with a
+        // deferred prefix the cache legitimately lags the emitted tokens by pending_.
         CHECK_EQ(fwd.pos(), start + emitted.size());
         CHECK_EQ(fwd.consumed().size(), emitted.size());
         CHECK(fwd.consumed() == emitted);
@@ -333,4 +392,100 @@ TEST(speculation_is_off_by_default) {
     CHECK(got.emitted == expect);
     CHECK_EQ(got.stats.blocks, std::uint64_t{0});
     CHECK_EQ(fwd.forward_all_calls, std::size_t{0});
+}
+
+// --- the deferred prefix -------------------------------------------------------------
+//
+// A block used to end by forwarding its own tail purely to obtain the next row. On a
+// dense target that is a full read of the weights for ONE row -- measured at 62.6 ms
+// against the 60.9 ms the entire 3-position verification pass cost, which is why
+// speculation benchmarked below plain decode. The tail is now carried and prepended to
+// the next block's verification pass instead.
+//
+// The risk in that is not a crash. It is committing a token from the wrong position, or
+// pairing the drafter against a hidden row from the block before, and both keep producing
+// fluent text. So the assertion that matters is the same one the rest of this file makes:
+// against a deterministic model there is exactly one correct continuation.
+
+TEST(deferring_the_forward_does_not_change_what_is_committed) {
+    const std::vector<TokenId> seq = repetitive_sequence(400);
+    const std::size_t start = 100;
+
+    ScriptForward fwd(seq, start);
+    fwd.mtp = true;
+    SpecConfig cfg;
+    cfg.enabled = true;
+    cfg.mtp_block_size = 3; // 2 drafts a round
+
+    SpeculativeDecoder dec(deterministic_params(), cfg);
+    std::vector<TokenId> history(seq.begin(), seq.begin() + static_cast<long>(start));
+    RunOut got;
+    run(fwd, fwd.initial_row(), 60, true, [](TokenId) { return false; }, dec, history, got);
+
+    // The headline: identical to what ordinary decoding produces.
+    const std::vector<TokenId> expect(seq.begin() + static_cast<long>(start),
+                                      seq.begin() + static_cast<long>(start) + 60);
+    CHECK(got.emitted == expect);
+    CHECK(got.stats.blocks > 0);
+
+    // The head is perfect here, so every block is fully accepted and NOTHING is forwarded
+    // after verification. The single forward_last is the cold start: the first step has no
+    // hidden state to draft from, so it decodes one token the ordinary way.
+    CHECK_EQ(fwd.forward_last_calls, std::size_t{1});
+    CHECK_EQ(got.stats.accepted_drafts, got.stats.drafted);
+
+    // And the prefix really did ride along: a round drafts 2, so a batch of 3 can only be
+    // a deferred token in front of them.
+    CHECK_EQ(fwd.max_batch, std::size_t{3});
+}
+
+TEST(a_deferred_prefix_leaves_the_cache_behind_the_emitted_tokens_but_never_ahead) {
+    // The invariant that replaces "the cache holds exactly what was emitted". Deferral
+    // means the target legitimately lags -- by exactly the tokens not yet forwarded -- but
+    // it must never hold a token that was not committed, and never hold them out of order.
+    // A cache that ran AHEAD would be the silent-stale-context failure S5.10 exists for.
+    const std::vector<TokenId> seq = repetitive_sequence(400);
+    const std::size_t start = 100;
+
+    ScriptForward fwd(seq, start);
+    fwd.mtp = true;
+    SpecConfig cfg;
+    cfg.enabled = true;
+    cfg.mtp_block_size = 3;
+
+    SpeculativeDecoder dec(deterministic_params(), cfg);
+    std::vector<TokenId> history(seq.begin(), seq.begin() + static_cast<long>(start));
+    std::vector<TokenId> emitted;
+    std::vector<TokenId> recent;
+    dec.seed(fwd.initial_row());
+
+    bool lagged = false;
+    for (int block = 0; block < 30; ++block) {
+        SpecStep st = dec.step(nullptr, recent, std::span<const TokenId>(history), true,
+                               [](TokenId) { return false; }, fwd);
+        REQUIRE(!st.no_legal_token);
+        for (TokenId t : st.committed) {
+            emitted.push_back(t);
+            history.push_back(t);
+            recent.push_back(t);
+            if (recent.size() > 64) {
+                recent.erase(recent.begin());
+            }
+        }
+        dec.observe(std::span<const TokenId>(st.committed));
+
+        // consumed() is what the target actually forwarded, and it must be a PREFIX of
+        // what was emitted -- never longer, never divergent.
+        REQUIRE(fwd.consumed().size() <= emitted.size());
+        const std::vector<TokenId> prefix(emitted.begin(),
+                                          emitted.begin() +
+                                              static_cast<long>(fwd.consumed().size()));
+        CHECK(fwd.consumed() == prefix);
+        CHECK_EQ(fwd.pos(), start + fwd.consumed().size());
+        if (fwd.consumed().size() < emitted.size()) {
+            lagged = true;
+        }
+    }
+    // If it never lagged, nothing was deferred and this test proved nothing.
+    CHECK(lagged);
 }
