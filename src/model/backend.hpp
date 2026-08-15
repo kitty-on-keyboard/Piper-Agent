@@ -116,6 +116,12 @@ struct GenResult {
     std::uint64_t spec_blocks = 0;
     std::uint64_t spec_drafted = 0;
     std::uint64_t spec_accepted = 0;
+    // Blocks discarded because the position they would have committed at had no legal
+    // token. This condition used to END THE RUN ("the grammar and the vocabulary
+    // disagree"); it now costs one ordinary token instead. Non-zero here is the signal
+    // that the dead-end path is real and being hit -- and the only evidence that will
+    // confirm or refute why tool-call speculation failed the first time it shipped.
+    std::uint64_t spec_abandoned = 0;
 };
 
 class InferenceBackend {
