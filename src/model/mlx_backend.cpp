@@ -535,14 +535,30 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
             r.status = GenStatus::Cancelled;
             return r;
         }
-        // Block-stable OR checkpointable. The second is what puts tool-call bodies in
-        // scope: their mask moves per token, so the decoder walks the grammar over the
-        // draft instead of reusing one snapshot. Measured on this agent's own log, 47%
-        // of generated tokens are inside a tool call -- decoding all of them one at a
-        // time capped what speculation could ever be worth at roughly 1.15x.
+        // Block-stable, or checkpointable AND opted in.
+        //
+        // The second arm puts tool-call bodies in scope -- their mask moves per token, so
+        // the decoder walks the grammar over the draft instead of reusing one snapshot --
+        // and 47% of this agent's generated tokens are inside a call, so it is worth
+        // roughly a third of what speculation can ever deliver.
+        //
+        // IT IS OFF BY DEFAULT BECAUSE IT SHIPPED A REGRESSION. Enabling it produced the
+        // first `no_legal_token` backend error in this project's entire logged history --
+        // two of them, both within six minutes of the build landing, against a prompt
+        // that had run to completion many times before. The constrained-decode path
+        // aborts the whole run when the shaped distribution comes back empty, so the
+        // failure is loud and total rather than a slow turn. Root cause not yet found;
+        // until it is, correctness outranks the third.
+        //
+        // LMP_SPEC_IN_TOOLCALLS=1 re-enables it for debugging, on one binary, without a
+        // rebuild -- which is what a reproduction needs.
+        const bool spec_in_tool_calls = [] {
+            const char* s = std::getenv("LMP_SPEC_IN_TOOLCALLS");
+            return s != nullptr && std::atoi(s) != 0;
+        }();
         const bool may_speculate = task.mask == nullptr ||
                                    task.mask->mask_is_block_stable() ||
-                                   task.mask->can_checkpoint();
+                                   (spec_in_tool_calls && task.mask->can_checkpoint());
 
         const auto t_s0 = clock.mono();
         // ledger.ids() is the exact history the model consumed, which is what the
