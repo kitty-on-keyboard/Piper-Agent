@@ -160,6 +160,20 @@ class DraftProposer {
     // tokens as they land. A grafted drafter may ignore it -- its state comes from hidden.
     virtual void ingest(std::span<const TokenId> tokens) = 0;
 
+    // May the target's forward be DEFERRED underneath this proposer -- that is, can it
+    // draft the next round without the target having consumed the tokens committed since
+    // the last verification pass?
+    //
+    // Only a proposer carrying its own forward state can. The MTP head can: settle()
+    // leaves it holding a seed token and hidden, one prediction ahead, so it needs
+    // nothing from the target to start the next round. A history matcher cannot: it
+    // matches against the ledger, and the ledger only holds what the target consumed, so
+    // a deferred prefix would leave it proposing the continuation of a stale suffix.
+    //
+    // False by default, which keeps the deferral off for anything that has not thought
+    // about it. See SpeculativeDecoder's `pending_` for what it buys.
+    [[nodiscard]] virtual bool can_draft_deferred() const { return false; }
+
     // Propose up to max_draft tokens. `fwd` is the target: a grafted drafter runs through
     // its hidden-state primitives, a history drafter never touches it.
     [[nodiscard]] virtual std::vector<TokenId> propose(std::span<const TokenId> context,
@@ -173,8 +187,16 @@ class DraftProposer {
     // The bonus token is in here because a grafted drafter needs it: to seed the next
     // round it must forward the tokens it did not already have, and the bonus is the last
     // of them. Passing only a count would leave it seeding from a token it never saw.
+    //
+    // `prefix` is how many leading positions of the verification forward were
+    // already-committed tokens riding along rather than drafts (see `pending_`). It
+    // shifts where this round's hidden rows start: with a prefix, the row that predicted
+    // drafted[0] is rows[prefix - 1], and with none it is the row captured at propose().
+    // Getting it wrong does not throw and does not corrupt the output -- the verifier
+    // still guarantees the distribution -- it just pairs the head against states the
+    // target never reached, and reads as a drafter that has quietly gone mediocre.
     virtual void settle(std::size_t /*accepted*/, std::span<const TokenId> /*committed*/,
-                        SpecForward&) {}
+                        std::size_t /*prefix*/, SpecForward&) {}
 
     virtual void reset() {}
 };
@@ -183,9 +205,6 @@ struct SpecStep {
     // Tokens to emit, in order. Never empty on success -- the verification pass always
     // yields at least one token, which is speculative decoding's guaranteed floor.
     std::vector<TokenId> committed;
-    // The logits row for the position after the last committed token, ready for the next
-    // step. The cache is left holding every committed token.
-    std::vector<float> next_logits;
     bool no_legal_token = false;
     bool speculated = false;
 };
@@ -201,14 +220,20 @@ class SpeculativeDecoder {
     // prompt once and with committed tokens as they land.
     void observe(std::span<const TokenId> tokens);
 
-    // Advance one block. `logits` is the row for the next position and is consumed
-    // (shaped in place, as the plain sampler consumes it). `context` is the token history
-    // the proposer matches against. `may_speculate` is the caller's grammar-phase gate;
-    // `is_special` truncates the draft before anything that could change the phase.
-    SpecStep step(std::vector<float>& logits, const TokenMask* mask,
-                  const std::vector<TokenId>& recent, std::span<const TokenId> context,
-                  bool may_speculate, const std::function<bool(TokenId)>& is_special,
-                  SpecForward& fwd);
+    // The row for the first position, from prefill. Call once before the first step().
+    //
+    // The decoder owns the row from then on, and does NOT hand it back between steps.
+    // It cannot: with a deferred prefix the row for the next position does not exist yet
+    // -- producing it is exactly the forward pass being deferred. A caller that kept
+    // passing a row in would be asserting the target had consumed something it had not.
+    void seed(std::vector<float> row);
+
+    // Advance one block. `context` is the token history the proposer matches against.
+    // `may_speculate` is the caller's grammar-phase gate; `is_special` truncates the
+    // draft before anything that could change the phase.
+    SpecStep step(const TokenMask* mask, const std::vector<TokenId>& recent,
+                  std::span<const TokenId> context, bool may_speculate,
+                  const std::function<bool(TokenId)>& is_special, SpecForward& fwd);
 
     [[nodiscard]] const SpecStats& stats() const noexcept { return stats_; }
 
@@ -217,12 +242,34 @@ class SpeculativeDecoder {
                                                const std::function<bool(TokenId)>& is_special,
                                                const TokenMask* mask, SpecForward& fwd);
 
+    // Consume the deferred prefix: forward it, leaving `row_` valid and `pending_` empty.
+    void flush(SpecForward& fwd);
+
     SamplingParams params_;
     SpecConfig config_;
     Sampler sampler_;
     SpecVerifier verifier_;
     std::unique_ptr<DraftProposer> proposer_;
     SpecStats stats_;
+
+    // The row for the current position. Valid only while `pending_` is empty.
+    std::vector<float> row_;
+
+    // COMMITTED TOKENS THE TARGET HAS NOT FORWARDED YET, and the reason this class holds
+    // state across steps at all.
+    //
+    // A block used to end by forwarding its own tail purely to obtain the next row. On a
+    // dense target that is a SECOND FULL WEIGHT READ for one logits row: measured at 62.6
+    // ms against the 60.9 ms the whole 3-position verification pass cost, i.e. 43% of the
+    // block, which is why speculation benchmarked BELOW plain decode (16.5 vs 17.4 tok/s)
+    // at a healthy 65% acceptance. A 1-token forward is not cheaper than a 3-token one --
+    // both read all 15 GB -- so the fix is to not do it at all: carry the tail here and
+    // prepend it to the NEXT block's verification pass, which was going to run anyway.
+    //
+    // Bounded by kMaxDeferred: it resets to one token whenever a block is fully accepted,
+    // and grows only on partial acceptance, but a long unlucky streak must not widen the
+    // verification pass without limit.
+    std::vector<TokenId> pending_;
 };
 
 } // namespace lmp::model

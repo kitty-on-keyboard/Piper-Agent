@@ -32,6 +32,12 @@
 //     time and prepended here. Off by one in either direction still runs, still decodes
 //     fluent text, and just quietly stops being worth doing.
 //
+//     UNLESS the block carried a deferred prefix. Then the verification pass began with
+//     already-committed tokens, and the row that predicted drafted[0] is inside its own
+//     output at rows[prefix - 1] -- h_current is a row from the block before and must not
+//     be used. `prefix` on settle() is what distinguishes the two, and it is why the
+//     captured h_current is only ever consulted when prefix is zero.
+//
 // Ported from mlx-vlm 0.6.12, speculative/drafters/qwen3_5_mtp.
 //
 #include <cstddef>
@@ -53,11 +59,18 @@ class MtpProposer final : public DraftProposer {
     // The head drafts from hidden state; token history tells it nothing.
     void ingest(std::span<const TokenId>) override {}
 
+    // A seeded head is one prediction ahead of the target: settle() left it holding the
+    // token and hidden for the position after everything committed, so it can open the
+    // next round without the target having forwarded any of it. That is precisely the
+    // condition under which the decoder may defer the target's pass. Unseeded -- cold, or
+    // after a settle that could not chain -- it needs the target's own hidden and cannot.
+    [[nodiscard]] bool can_draft_deferred() const override { return has_seed_; }
+
     [[nodiscard]] std::vector<TokenId> propose(std::span<const TokenId> context,
                                                std::size_t max_draft,
                                                SpecForward& fwd) override;
 
-    void settle(std::size_t accepted, std::span<const TokenId> committed,
+    void settle(std::size_t accepted, std::span<const TokenId> committed, std::size_t prefix,
                 SpecForward& fwd) override;
 
     void reset() override;

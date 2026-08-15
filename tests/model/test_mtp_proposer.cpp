@@ -119,7 +119,7 @@ TEST(a_full_round_seeds_the_next_one_so_it_pays_for_one_step_fewer) {
     fwd.report = {tag(20.0F), tag(21.0F)};
     const std::vector<TokenId> committed{first[0], first[1], 99};
     fwd.steps.clear();
-    p.settle(2, std::span<const TokenId>(committed), fwd);
+    p.settle(2, std::span<const TokenId>(committed), 0, fwd);
 
     // Nothing to trim on full acceptance, and the head catches up on the bonus token only
     // -- the two accepted drafts it had already forwarded must NOT be replayed.
@@ -151,7 +151,7 @@ TEST(partial_acceptance_trims_exactly_the_positions_the_target_did_not_keep) {
     fwd.report = {tag(20.0F), tag(21.0F), tag(22.0F)};
     fwd.steps.clear();
     const std::vector<TokenId> committed{drafted[0], 99};
-    p.settle(1, std::span<const TokenId>(committed), fwd);
+    p.settle(1, std::span<const TokenId>(committed), 0, fwd);
 
     // Appended 3, kept 1 -> exactly 2 come back off. Trimming the wrong count is the
     // defect that never surfaces: the head stays ahead of the target for the rest of the
@@ -180,7 +180,7 @@ TEST(total_rejection_trims_everything_and_drops_the_seed) {
     REQUIRE(fwd.steps.size() == 2);
 
     fwd.steps.clear();
-    p.settle(0, {}, fwd); // nothing survived, no bonus
+    p.settle(0, {}, 0, fwd); // nothing survived, no bonus
 
     REQUIRE(fwd.trims.size() == 1);
     CHECK_EQ(fwd.trims[0], std::size_t{2});
@@ -221,7 +221,7 @@ TEST(a_target_without_an_mtp_head_drafts_nothing) {
     const std::vector<TokenId> context{42};
     CHECK(p.propose(context, 8, fwd).empty());
     // settle must be inert too, not reach through a head that is not there.
-    p.settle(0, {}, fwd);
+    p.settle(0, {}, 0, fwd);
 }
 
 TEST(no_hidden_row_means_no_draft_rather_than_a_guess) {
@@ -231,4 +231,66 @@ TEST(no_hidden_row_means_no_draft_rather_than_a_guess) {
     const std::vector<TokenId> context{42};
     CHECK(p.propose(context, 8, fwd).empty());
     CHECK(fwd.steps.empty());
+}
+
+TEST(a_deferred_prefix_shifts_which_hidden_rows_the_drafts_pair_against) {
+    // When the block carries committed-but-unforwarded tokens, the verification pass
+    // begins with THEM, so the row that predicted drafted[0] is inside this pass at
+    // rows[prefix - 1] -- not the h_current captured at propose(), which belongs to an
+    // earlier block. Pairing against the wrong row does not throw and does not corrupt
+    // the output; the head simply drafts from a state the target never reached and
+    // acceptance sags, which reads as a mediocre drafter rather than as a defect.
+    FakeMtp fwd;
+    fwd.report = {tag(7.0F)};
+    MtpProposer p(3); // 2 drafts
+
+    const std::vector<TokenId> context{42};
+    const std::vector<TokenId> drafted = p.propose(context, 8, fwd);
+    REQUIRE(drafted.size() == 2);
+
+    // A pass over [p0, p1, d0, d1]: two deferred tokens in front of the two drafts.
+    // Rows 0 and 1 follow the deferred tokens; row 1 is the one that predicted d0.
+    fwd.report = {tag(50.0F), tag(51.0F), tag(52.0F), tag(53.0F)};
+    fwd.steps.clear();
+    const std::vector<TokenId> committed{drafted[0], drafted[1], 99};
+    p.settle(2, std::span<const TokenId>(committed), 2, fwd);
+
+    // Full acceptance, so the head only catches up on the bonus. The bonus pairs with
+    // verify[accepted] == verify[2], which with prefix 2 is rows[2 - 1 + 2] == rows[3].
+    CHECK(fwd.trims.empty());
+    REQUIRE(fwd.steps.size() == 1);
+    CHECK_EQ(fwd.steps[0].tok, TokenId{99});
+    CHECK(fwd.steps[0].hidden_tag == 53.0F);
+}
+
+TEST(a_deferred_prefix_pairs_a_partially_accepted_draft_against_its_own_row) {
+    // The same shift, on the branch where it is easiest to get wrong: only the first
+    // draft survived, so the head has to be trimmed AND caught up, and the row the bonus
+    // pairs with sits one past the surviving draft rather than at the end of the pass.
+    FakeMtp fwd;
+    fwd.report = {tag(7.0F)};
+    MtpProposer p(4); // 3 drafts
+
+    const std::vector<TokenId> context{42};
+    const std::vector<TokenId> drafted = p.propose(context, 8, fwd);
+    REQUIRE(drafted.size() == 3);
+    REQUIRE(fwd.steps.size() == 3);
+
+    // A pass over [p0, d0, d1, d2]: one deferred token, then the three drafts.
+    fwd.report = {tag(60.0F), tag(61.0F), tag(62.0F), tag(63.0F)};
+    fwd.steps.clear();
+    const std::vector<TokenId> committed{drafted[0], 99};
+    p.settle(1, std::span<const TokenId>(committed), 1, fwd);
+
+    // Appended 3, kept 1 -> 2 come back off, exactly as with no prefix.
+    REQUIRE(fwd.trims.size() == 1);
+    CHECK_EQ(fwd.trims[0], std::size_t{2});
+
+    // verify[i] == rows[prefix - 1 + i] == rows[i], so the bonus at verify[1] is rows[1]
+    // -- the row AFTER the one surviving draft. rows[2] and rows[3] follow drafts the
+    // target rejected, and seeding from either would build the next round on a
+    // continuation that never happened.
+    REQUIRE(fwd.steps.size() == 1);
+    CHECK_EQ(fwd.steps[0].tok, TokenId{99});
+    CHECK(fwd.steps[0].hidden_tag == 61.0F);
 }

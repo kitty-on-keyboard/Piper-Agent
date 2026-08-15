@@ -507,6 +507,9 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     // The proposer matches against history, so it has to have seen the prompt: an agent
     // turn reuses the tool output and the code it just read, which is the whole premise.
     decoder.observe(std::span<const TokenId>(task.prompt));
+    // The prefill row. Handed over once: from here the decoder owns the row, because a
+    // block that defers its forward has no row to hand back.
+    decoder.seed(std::move(logits_host));
 
     const auto is_special = [&task](TokenId id) {
         return task.mask != nullptr && task.mask->is_block_boundary(id);
@@ -528,9 +531,8 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         const auto t_s0 = clock.mono();
         // ledger.ids() is the exact history the model consumed, which is what the
         // proposer must match against -- not the prompt, and not the emitted text.
-        SpecStep st = decoder.step(logits_host, mask, recent,
-                                   std::span<const TokenId>(ledger.ids()), may_speculate,
-                                   is_special, fwd);
+        SpecStep st = decoder.step(mask, recent, std::span<const TokenId>(ledger.ids()),
+                                   may_speculate, is_special, fwd);
         r.forward_ms += ms_between(t_s0, clock.mono());
 
         if (st.no_legal_token) {
@@ -569,7 +571,6 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
             }
         }
         decoder.observe(std::span<const TokenId>(st.committed));
-        logits_host = std::move(st.next_logits);
     }
 
     if (r.status != GenStatus::Complete) {
