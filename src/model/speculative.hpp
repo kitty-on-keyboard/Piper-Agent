@@ -228,10 +228,13 @@ class SpeculativeDecoder {
     // passing a row in would be asserting the target had consumed something it had not.
     void seed(std::vector<float> row);
 
-    // Advance one block. `context` is the token history the proposer matches against.
-    // `may_speculate` is the caller's grammar-phase gate; `is_special` truncates the
-    // draft before anything that could change the phase.
-    SpecStep step(const TokenMask* mask, const std::vector<TokenId>& recent,
+    // Advance one block. `src` is the constrained-decoding source, taken whole rather
+    // than as a single mask: where its mask is not block-stable the decoder walks it over
+    // the draft to derive the mask at each position, which is what lets a block run
+    // inside a tool call. May be null (unconstrained decode). `context` is the token
+    // history the proposer matches against; `may_speculate` is the caller's gate; and
+    // `is_special` truncates the draft before anything that could change the phase.
+    SpecStep step(MaskSource* src, const std::vector<TokenId>& recent,
                   std::span<const TokenId> context, bool may_speculate,
                   const std::function<bool(TokenId)>& is_special, SpecForward& fwd);
 
@@ -244,6 +247,16 @@ class SpeculativeDecoder {
 
     // Consume the deferred prefix: forward it, leaving `row_` valid and `pending_` empty.
     void flush(SpecForward& fwd);
+
+    // Walk `src` over `drafted`, capturing the mask at each drafted position plus the
+    // bonus position after them, and TRUNCATING `drafted` at the first token the grammar
+    // refuses. Leaves `src` exactly where it found it. Returns the number of masks
+    // captured, which is drafted.size() + 1 unless the walk truncated.
+    std::size_t walk_masks(MaskSource& src, std::vector<TokenId>& drafted);
+
+    // The mask for position i of the block, or `fallback` when the walk did not run
+    // (a block-stable source needs only one).
+    [[nodiscard]] const TokenMask* mask_at(std::size_t i, const TokenMask* fallback) const;
 
     SamplingParams params_;
     SpecConfig config_;
@@ -270,6 +283,13 @@ class SpeculativeDecoder {
     // and grows only on partial acceptance, but a long unlucky streak must not widen the
     // verification pass without limit.
     std::vector<TokenId> pending_;
+
+    // One mask per position of the current block, when the source had to be walked.
+    // A member rather than a local so the bitsets keep their capacity across blocks:
+    // each is a vocabulary-wide bitset (~31 KB here) and a block needs up to five.
+    // `probe_n_` is how many are live; the vector itself is never shrunk.
+    std::vector<TokenMask> probe_masks_;
+    std::size_t probe_n_ = 0;
 };
 
 } // namespace lmp::model
