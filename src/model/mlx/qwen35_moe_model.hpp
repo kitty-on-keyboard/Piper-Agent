@@ -308,10 +308,29 @@ public:
         }
         // Refuse rather than discover it mid-generation: the head is addressed by key, so
         // a checkpoint laid out differently fails at the first draft, not at load.
-        for (const char* key : {"mtp.fc", "mtp.norm.weight", "mtp.pre_fc_norm_hidden.weight",
-                                "mtp.pre_fc_norm_embedding.weight",
-                                "mtp.layers.0.self_attn.q_proj"}) {
+        //
+        // TWO KINDS OF KEY, AND THEY ARE NOT INTERCHANGEABLE. A norm is a single tensor
+        // named in full. A linear is addressed by its BASE, and `linear()` resolves that
+        // base to `.weight` (plus `.scales` / `.biases` when the tensor is quantized) --
+        // there is no tensor at the bare base itself.
+        //
+        // Testing a base with has() therefore asks for a key no checkpoint on disk
+        // contains. A real 4-bit head ships fc.weight, fc.scales and fc.biases and no
+        // bare `fc`, so this refused EVERY quantized head it was ever handed --
+        // Qwen3.8-27B-MTP-4bit among them -- and reported it as "not a usable MTP draft
+        // head", which reads as a bad checkpoint rather than a bad check. It passed in
+        // testing because the fixtures build unquantized heads, where `linear()` also
+        // wants `.weight` and the base is still not a key. The check was never right; it
+        // was only never exercised against a file.
+        for (const char* key : {"mtp.norm.weight", "mtp.pre_fc_norm_hidden.weight",
+                                "mtp.pre_fc_norm_embedding.weight"}) {
             if (!weights_.has(key)) {
+                mtp_block_size_ = 0;
+                return false;
+            }
+        }
+        for (const char* base : {"mtp.fc", "mtp.layers.0.self_attn.q_proj"}) {
+            if (!weights_.has(std::string(base) + ".weight")) {
                 mtp_block_size_ = 0;
                 return false;
             }

@@ -89,7 +89,7 @@ std::vector<TokenId> MtpProposer::propose(std::span<const TokenId> context,
 }
 
 void MtpProposer::settle(std::size_t accepted, std::span<const TokenId> committed,
-                         SpecForward& fwd) {
+                         std::size_t prefix, SpecForward& fwd) {
     if (!fwd.has_mtp()) {
         return;
     }
@@ -113,15 +113,29 @@ void MtpProposer::settle(std::size_t accepted, std::span<const TokenId> committe
         return;
     }
 
-    // Verification hidden rows: row 0 is h_current_ (captured at propose, since the
-    // verification forward replaced it), row i+1 is the target's hidden after drafted[i].
+    // Verification hidden rows, indexed so that verify[i] is the target's hidden at the
+    // position that PREDICTED drafted[i].
+    //
+    // Without a prefix the pass covered the drafts alone, so its row i is the hidden
+    // AFTER drafted[i] -- one position too late to pair with drafted[i] itself -- and the
+    // missing first row is h_current_, captured at propose() before this pass replaced it.
+    //
+    // With a prefix the pass began with `prefix` already-committed tokens, so the row that
+    // predicted drafted[0] is inside this pass at rows[prefix - 1], and h_current_ belongs
+    // to an older block. Both forms yield drafted.size() + 1 entries.
     std::vector<std::vector<float>> rows;
     fwd.last_hidden(rows);
     std::vector<const std::vector<float>*> verify;
     verify.reserve(rows.size() + 1);
-    verify.push_back(&h_current_);
-    for (const std::vector<float>& r : rows) {
-        verify.push_back(&r);
+    if (prefix == 0) {
+        verify.push_back(&h_current_);
+        for (const std::vector<float>& r : rows) {
+            verify.push_back(&r);
+        }
+    } else {
+        for (std::size_t i = prefix - 1; i < rows.size(); ++i) {
+            verify.push_back(&rows[i]);
+        }
     }
 
     // Catch the head up on everything the target committed that it has not already
