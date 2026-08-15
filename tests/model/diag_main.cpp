@@ -518,6 +518,93 @@ int cmd_mask() {
     return 0;
 }
 
+// What the mask costs INSIDE a tool call, which is the one number that decides whether
+// speculation can be extended there.
+//
+// Today speculation is gated on `mask_is_block_stable()` -- true only in Think and Text,
+// where the legal set is a cached per-phase bitset. Inside a tool call parsephony's mask
+// is state-dependent per token, so verifying k drafted positions needs k+1 masks rather
+// than one, each computed by advancing a COPY of the grammar over the draft.
+//
+// That copy is not the problem: ToolCallGuard is 272 bytes, is documented copyable, and
+// the mask engine already copies it once per candidate token (mask.hpp:151). The question
+// is only what re-deriving the mask costs per position. Against a ~60 ms forward pass a
+// few hundred microseconds is free and a few milliseconds is not.
+//
+// Measured on the real tokenizer and the real guard; loads no weights, so it is safe to
+// run beside a live sidecar.
+int cmd_toolmask(int k) {
+    QwenTokenizer tok;
+    const LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::vector<parsephony::ToolSpec> tools;
+    parsephony::ToolSpec s;
+    s.name = "read_file";
+    parsephony::ParamSpec p;
+    p.name = "path";
+    p.required = true;
+    s.params.push_back(p);
+    tools.push_back(s);
+
+    TurnGrammar g(tok, tools);
+    // Into the tool-call phase the way a real turn gets there.
+    if (g.advance(tok.specials().think_close) == Advance::Rejected ||
+        g.advance(tok.specials().tool_call_open) == Advance::Rejected) {
+        std::printf("could not open a tool call\n");
+        return 1;
+    }
+    // A realistic body: the guard is past the framing and inside a parameter value, which
+    // is where a decode spends nearly all of its in-call tokens.
+    const std::vector<TokenId> body = tok.encode_content("<function=read_file>\n<parameter=path>\nsrc/model/");
+    for (const TokenId id : body) {
+        if (g.advance(id) == Advance::Rejected) {
+            break;
+        }
+    }
+    std::printf("  phase inside call = %d (2 == ToolCall), mask allows %zu ids\n",
+                static_cast<int>(g.phase()), g.mask().count());
+
+    // One position, warm: what the sampler pays today for every in-call token.
+    const std::vector<TokenId> more = tok.encode_content("qwen35_moe_model.hpp");
+    const int iters = 200;
+    auto t0 = Clock::now();
+    for (int i = 0; i < iters; ++i) {
+        const TokenMask& m = g.mask();
+        if (m.size() == 0) {
+            return 1;
+        }
+    }
+    const double warm = ms(t0, Clock::now()) / iters;
+    std::printf("  mask(), warm (same state)   : %8.4f ms\n", warm);
+
+    // The speculative shape: advance over k fresh tokens, taking a mask at each. Every
+    // step lands on a state the cache has not seen, so this is the cold path k times --
+    // the honest cost of verifying a k-token draft inside a call.
+    auto t1 = Clock::now();
+    int rounds = 0;
+    for (int r = 0; r < 50; ++r) {
+        for (int i = 0; i < k && i < static_cast<int>(more.size()); ++i) {
+            if (g.advance(more[static_cast<std::size_t>(i)]) == Advance::Rejected) {
+                break;
+            }
+            const TokenMask& m = g.mask();
+            if (m.size() == 0) {
+                return 1;
+            }
+        }
+        ++rounds;
+    }
+    const double per_block = ms(t1, Clock::now()) / rounds;
+    std::printf("  %d advance+mask (a block)    : %8.4f ms   (%.4f ms/position)\n", k,
+                per_block, per_block / k);
+    std::printf("\n  => against a ~60 ms forward pass that is %.2f%% of a block\n",
+                100.0 * per_block / 60.0);
+    return 0;
+}
+
 // --- bench -----------------------------------------------------------------
 
 // What a speculative block's VERIFICATION pass costs, against the single-token step it
@@ -534,22 +621,30 @@ int cmd_mask() {
 //
 // Prints ms, ms-per-position, and the ratio against T=1 -- the last is the number that
 // decides whether a draft is worth proposing at all.
-int cmd_verify(int max_k) {
+int cmd_verify(int max_k, int ctx) {
     mlxl::Qwen35MoeModel model;
     if (!model.load(qwen_dir())) {
         std::printf("model load failed\n");
         return 1;
     }
-    std::printf("  verification pass cost by block width (prompt 547, 10 iters each)\n");
+    std::printf("  verification pass cost by block width (context %d, 10 iters each)\n", ctx);
     double base = 0.0;
     for (int k = 1; k <= max_k; ++k) {
         // A fresh cache per width, so every k is measured at the same context length
         // rather than inheriting the previous k's appended tokens.
         model.reset_cache();
-        std::vector<int32_t> prompt(547, 100);
-        mx::array ids = mx::array(prompt.data(), {1, static_cast<int>(prompt.size())}, mx::int32);
-        mx::array warm = model.forward_logits(ids);
-        mx::eval(warm);
+        // CHUNKED, like the real prefill path. A single 28k-token pass builds a
+        // [1, heads, 28000, 28000] attention score buffer and asks Metal for 37.6 GB --
+        // which is what this measurement did on its first run, and it is a property of
+        // the instrument, not of the model.
+        const int chunk = 2048;
+        std::vector<int32_t> prompt(static_cast<std::size_t>(ctx), 100);
+        for (int off = 0; off < ctx; off += chunk) {
+            const int n = std::min(chunk, ctx - off);
+            mx::array ids = mx::array(prompt.data() + off, {1, n}, mx::int32);
+            mx::array warm = model.forward_logits(ids);
+            mx::eval(warm);
+        }
 
         std::vector<int32_t> block(static_cast<std::size_t>(k), 42);
         const int iters = 10;
@@ -713,7 +808,11 @@ int main(int argc, char** argv) {
     }
 #endif
     if (cmd == "verify") {
-        return cmd_verify(argc > 2 ? std::atoi(argv[2]) : 4);
+        return cmd_verify(argc > 2 ? std::atoi(argv[2]) : 4,
+                          argc > 3 ? std::atoi(argv[3]) : 547);
+    }
+    if (cmd == "toolmask") {
+        return cmd_toolmask(argc > 2 ? std::atoi(argv[2]) : 3);
     }
     if (cmd == "bench") {
         const int runs = argc > 2 ? std::atoi(argv[2]) : 3;
