@@ -125,20 +125,13 @@ Advance TurnGrammar::advance_text(TokenId id) {
 }
 
 Advance TurnGrammar::advance_tool_call(TokenId id) {
-    // </tool_call> is a single vocab id; the guard expects its bytes and completes on
-    // them. Everything inside the call is ordinary tokens fed as bytes.
+    // Everything inside the call is ordinary tokens fed as bytes.
     std::string_view bytes = tok_.token_bytes(id);
     if (id == tok_.specials().tool_call_close) {
         if (guard_->feed(bytes) != parsephony::Error::Ok || !guard_->complete()) {
             return Advance::Rejected;
         }
-        // Copied out NOW: the guard is reset before the next call, and a reference into
-        // it would dangle the moment the model opens another one.
-        calls_.push_back({guard_->tool_name(), guard_->params()});
-        // Back to Text rather than Done. The turn ends on <|im_end|>, which is what
-        // Qwen's own template emits after a call -- so the common single-call turn pays
-        // one extra token, and a batched turn pays nothing.
-        phase_ = TurnPhase::Text;
+        close_call();
         return Advance::Ok;
     }
     if (is_structural(id)) {
@@ -147,7 +140,36 @@ Advance TurnGrammar::advance_tool_call(TokenId id) {
     if (guard_->feed(bytes) != parsephony::Error::Ok) {
         return Advance::Rejected;
     }
+    // THE CLOSER IS NOT ALWAYS ONE TOKEN, and assuming it was is what ended runs.
+    //
+    // `</tool_call>` has a vocab id of its own and the model usually emits it. It does
+    // not have to. The guard's own literal is `</function>\n</tool_call>`, so while the
+    // model is part way through it every byte of the closer is a legal continuation and
+    // the mask offers all of them -- so `<`, `/`, `tool`, `_call`, `>` as five ordinary
+    // tokens is a legal spelling, and the model does produce it.
+    //
+    // Without this the guard completed and nothing noticed: `calls_` never received the
+    // parsed call and the phase stayed ToolCall. The next mask() then ran the engine on
+    // a COMPLETE guard, which allows nothing, and denied the special `</tool_call>` too
+    // -- permitted() re-feeds its bytes to a copy, and those bytes were already consumed.
+    // An empty mask is reported as "the grammar and the vocabulary disagree", and the run
+    // ends. Observed on a real turn closing a read_file call on FRICTION.md.
+    //
+    // Completion is the event, not the token that usually carries it.
+    if (guard_->complete()) {
+        close_call();
+    }
     return Advance::Ok;
+}
+
+void TurnGrammar::close_call() {
+    // Copied out NOW: the guard is reset before the next call, and a reference into it
+    // would dangle the moment the model opens another one.
+    calls_.push_back({guard_->tool_name(), guard_->params()});
+    // Back to Text rather than Done. The turn ends on <|im_end|>, which is what Qwen's
+    // own template emits after a call -- so the common single-call turn pays one extra
+    // token, and a batched turn pays nothing.
+    phase_ = TurnPhase::Text;
 }
 
 Advance TurnGrammar::advance(TokenId id) {

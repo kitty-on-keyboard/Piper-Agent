@@ -145,6 +145,9 @@ class TurnGrammar final : public MaskSource {
     [[nodiscard]] Advance advance_think(TokenId id);
     [[nodiscard]] Advance advance_text(TokenId id);
     [[nodiscard]] Advance advance_tool_call(TokenId id);
+    // Record the parsed call and return to Text. Reached from either spelling of the
+    // closer: the single `</tool_call>` id, or ordinary tokens that complete the guard.
+    void close_call();
     [[nodiscard]] bool is_structural(TokenId id) const noexcept;
     [[nodiscard]] std::vector<TokenId> structural_ids() const;
     void build_structural_mask() const;
