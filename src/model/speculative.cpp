@@ -179,6 +179,32 @@ std::size_t SpeculativeDecoder::walk_masks(MaskSource& src, std::vector<TokenId>
             break;
         }
         capture(src.mask());
+
+        // A POSITION WITH NO LEGAL TOKEN CANNOT BE VERIFIED INTO, and this is the bug
+        // that took tool-call speculation down.
+        //
+        // The mask is one token deep: it answers "is this id legal here", not "does this
+        // id leave a continuation". Single-token decoding is protected by the model
+        // sampling sensibly, but a DRAFTER guesses, and a wrong guess can walk the
+        // automaton into a state no token in the vocabulary can leave -- a state the
+        // model itself would never have reached, and which no scan of the well-formed
+        // stream finds.
+        //
+        // The block then shapes a distribution there and it comes back empty. That empty
+        // row is not caught as "nothing accepted", because SpecVerifier always pushes a
+        // token (its documented floor, so a decode loop cannot hang); it surfaces one
+        // line later as `tail_idx >= dists[m].ids.size()`, which is vacuously true when
+        // ids is empty. The decoder reads that as "the grammar and the vocabulary
+        // disagree", reports a build defect, and ends the run.
+        //
+        // Every position the block may land on -- including the bonus at index
+        // drafted.size() -- has to have something legal in it. So stop the draft here and
+        // drop the empty mask: shorter draft, same answer, no dead end to fall into.
+        if (!probe_masks_[probe_n_ - 1].any()) {
+            --probe_n_;
+            drafted.resize(i);
+            break;
+        }
     }
     src.rollback();
     return probe_n_;
@@ -194,6 +220,38 @@ void SpeculativeDecoder::flush(SpecForward& fwd) {
     }
     fwd.forward_last(std::span<const TokenId>(pending_), row_);
     pending_.clear();
+}
+
+SpecStep SpeculativeDecoder::decode_one(const TokenMask* mask,
+                                        const std::vector<TokenId>& recent, SpecForward& fwd) {
+    SpecStep out;
+    // Draws from the verifier's stream too, so that turning speculation on or off does
+    // not silently change which stream the plain steps consume -- the distribution is
+    // identical either way, the sequence is not.
+    const TokenDist dist0 = sampler_.distribution(row_, mask, recent);
+    if (dist0.empty()) {
+        // Genuinely nothing legal here. This IS the build defect the caller reports: the
+        // ordinary path reached it with no speculation involved.
+        out.no_legal_token = true;
+        return out;
+    }
+    const std::span<const float> row(dist0.probs.data(), dist0.probs.size());
+    const std::array<std::span<const float>, 1> rows{row};
+    const SpecResult r =
+        verifier_.verify({}, {}, std::span<const std::span<const float>>(rows));
+    if (r.accepted.empty()) {
+        out.no_legal_token = true;
+        return out;
+    }
+    const auto idx = static_cast<std::size_t>(r.accepted.front());
+    if (idx >= dist0.ids.size()) {
+        out.no_legal_token = true;
+        return out;
+    }
+    out.committed.push_back(dist0.ids[idx]);
+    fwd.forward_last(std::span<const TokenId>(out.committed), row_);
+    ++stats_.fallbacks;
+    return out;
 }
 
 SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& recent,
@@ -236,31 +294,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     // No block to fold the prefix into, so it has to be paid for on its own.
     if (drafted.empty()) {
         flush(fwd);
-        // Ordinary decoding. Draws from the verifier's stream too, so that turning
-        // speculation on or off does not silently change which stream the plain steps
-        // consume -- the distribution is identical either way, the sequence is not.
-        const TokenDist dist0 = sampler_.distribution(row_, mask, recent);
-        if (dist0.empty()) {
-            out.no_legal_token = true;
-            return out;
-        }
-        const std::span<const float> row(dist0.probs.data(), dist0.probs.size());
-        const std::array<std::span<const float>, 1> rows{row};
-        const SpecResult r =
-            verifier_.verify({}, {}, std::span<const std::span<const float>>(rows));
-        if (r.accepted.empty()) {
-            out.no_legal_token = true;
-            return out;
-        }
-        const auto idx = static_cast<std::size_t>(r.accepted.front());
-        if (idx >= dist0.ids.size()) {
-            out.no_legal_token = true;
-            return out;
-        }
-        out.committed.push_back(dist0.ids[idx]);
-        fwd.forward_last(std::span<const TokenId>(out.committed), row_);
-        ++stats_.fallbacks;
-        return out;
+        return decode_one(mask, recent, fwd);
     }
 
     // --- the speculative block ---------------------------------------------------
@@ -300,9 +334,16 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
     }
     if (dists.empty() || dists.front().empty()) {
+        // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
+        // not be able to turn a decodable step into a dead one. Undo the verification
+        // forward, tell the drafter nothing survived, pay for the deferred prefix, and
+        // take one token the ordinary way -- which is the reference path and answers for
+        // itself whether there is genuinely nothing legal here.
+        fwd.restore();
         proposer_->settle(0, {}, prefix, fwd);
-        out.no_legal_token = true;
-        return out;
+        ++stats_.abandoned;
+        flush(fwd);
+        return decode_one(mask_at(0, mask), recent, fwd);
     }
     std::vector<TokenId> recent_i = recent;
     for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
@@ -351,9 +392,16 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         // proposing, so it has to be told, or its cache outruns the target's by exactly
         // the drafts nobody kept -- a drift that never throws and only shows up as
         // steadily worse proposals.
+        // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
+        // not be able to turn a decodable step into a dead one. Undo the verification
+        // forward, tell the drafter nothing survived, pay for the deferred prefix, and
+        // take one token the ordinary way -- which is the reference path and answers for
+        // itself whether there is genuinely nothing legal here.
+        fwd.restore();
         proposer_->settle(0, {}, prefix, fwd);
-        out.no_legal_token = true;
-        return out;
+        ++stats_.abandoned;
+        flush(fwd);
+        return decode_one(mask_at(0, mask), recent, fwd);
     }
 
     const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
@@ -363,9 +411,16 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     // The final token is an index into the row at position m, not a token id.
     const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
     if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
+        // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
+        // not be able to turn a decodable step into a dead one. Undo the verification
+        // forward, tell the drafter nothing survived, pay for the deferred prefix, and
+        // take one token the ordinary way -- which is the reference path and answers for
+        // itself whether there is genuinely nothing legal here.
+        fwd.restore();
         proposer_->settle(0, {}, prefix, fwd);
-        out.no_legal_token = true;
-        return out;
+        ++stats_.abandoned;
+        flush(fwd);
+        return decode_one(mask_at(0, mask), recent, fwd);
     }
     out.committed.push_back(dists[m].ids[tail_idx]);
 

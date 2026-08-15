@@ -542,19 +542,18 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         // and 47% of this agent's generated tokens are inside a call, so it is worth
         // roughly a third of what speculation can ever deliver.
         //
-        // IT IS OFF BY DEFAULT BECAUSE IT SHIPPED A REGRESSION. Enabling it produced the
-        // first `no_legal_token` backend error in this project's entire logged history --
-        // two of them, both within six minutes of the build landing, against a prompt
-        // that had run to completion many times before. The constrained-decode path
-        // aborts the whole run when the shaped distribution comes back empty, so the
-        // failure is loud and total rather than a slow turn. Root cause not yet found;
-        // until it is, correctness outranks the third.
+        // It shipped a regression the first time and is back on with the cause fixed: a
+        // drafted token could walk the automaton into a state no token in the vocabulary
+        // can leave, and the block then shaped an empty distribution there and reported
+        // it as a build defect. walk_masks() now refuses to draft into a position with no
+        // legal token, and a block that still cannot answer is abandoned for one ordinary
+        // token rather than ending the run. See SpecStats::abandoned.
         //
-        // LMP_SPEC_IN_TOOLCALLS=1 re-enables it for debugging, on one binary, without a
-        // rebuild -- which is what a reproduction needs.
+        // LMP_SPEC_IN_TOOLCALLS=0 forces it back off on one binary, which is the control
+        // for any measurement of what it is worth.
         const bool spec_in_tool_calls = [] {
             const char* s = std::getenv("LMP_SPEC_IN_TOOLCALLS");
-            return s != nullptr && std::atoi(s) != 0;
+            return s == nullptr || std::atoi(s) != 0;
         }();
         const bool may_speculate = task.mask == nullptr ||
                                    task.mask->mask_is_block_stable() ||
@@ -619,6 +618,7 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     r.spec_blocks = s.blocks;
     r.spec_drafted = s.drafted;
     r.spec_accepted = s.accepted_drafts;
+    r.spec_abandoned = s.abandoned;
     // Printed, not silently accumulated: a speculative run whose acceptance rate is on the
     // floor is slower than not speculating, and that has to be visible without a profiler.
     std::fprintf(stderr,

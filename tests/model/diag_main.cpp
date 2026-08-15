@@ -605,6 +605,372 @@ int cmd_toolmask(int k) {
     return 0;
 }
 
+// The reproduction that was missing when tool-call speculation shipped a regression.
+//
+// Every test written for that path checked ONE rollback in isolation. What none of them
+// did was drive a REAL tokenizer's tool-call grammar through a realistic token stream
+// while probing it the way the decoder actually probes -- checkpoint, walk a draft
+// forward reading the mask at each position, roll back -- and check that the grammar is
+// still bit-identical to one that was never probed at all.
+//
+// Two grammars, same committed tokens. A is the control and is never probed; B is probed
+// at every step. They must agree on phase, on the mask, and on what they parsed. And
+// neither may ever produce an EMPTY mask, which is the condition that aborts a run with
+// "no legal token".
+int cmd_specgrammar(int depth) {
+    QwenTokenizer tok;
+    const LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::vector<parsephony::ToolSpec> tools;
+    {
+        parsephony::ToolSpec s;
+        s.name = "read_file";
+        parsephony::ParamSpec p;
+        p.name = "path";
+        p.required = true;
+        s.params.push_back(p);
+        tools.push_back(s);
+    }
+
+    // A real call, of the shape the failing run was emitting when it died.
+    const std::string body =
+        "<function=read_file>\n<parameter=path>\n"
+        "tools/blender_vehicles/render_truck.py\n</parameter>\n</function>\n";
+    std::vector<TokenId> stream;
+    stream.push_back(tok.specials().think_close);
+    stream.push_back(tok.specials().tool_call_open);
+    for (const TokenId id : tok.encode_content(body)) {
+        stream.push_back(id);
+    }
+    stream.push_back(tok.specials().tool_call_close);
+
+    TurnGrammar a(tok, tools); // control: never probed
+    TurnGrammar b(tok, tools); // probed at every step, exactly as the decoder does
+
+    std::printf("  %zu tokens, probe depth %d\n", stream.size(), depth);
+    int problems = 0;
+    for (std::size_t i = 0; i < stream.size(); ++i) {
+        // The mask BEFORE consuming stream[i] is what the sampler would have used.
+        const TokenMask ma = a.mask();
+        if (ma.count() == 0) {
+            std::printf("  [EMPTY MASK] control grammar at step %zu, phase %d -- this is a "
+                        "pre-existing grammar/vocabulary defect, not a rollback bug\n",
+                        i, static_cast<int>(a.phase()));
+            ++problems;
+        }
+
+        // What the decoder does before verifying a block: walk `depth` tokens forward,
+        // reading the mask at each, then put the grammar back.
+        if (b.can_checkpoint()) {
+            b.checkpoint();
+            for (int d = 0; d < depth; ++d) {
+                // A DRAFTER GUESSES, and mostly guesses wrong. Alternating the real
+                // continuation with an arbitrary id is what the decoder actually walks:
+                // the probe that gets refused half way through a multi-byte token is the
+                // interesting one, because it leaves the automaton mid-literal.
+                const std::size_t j = i + static_cast<std::size_t>(d);
+                const bool guess = (i + static_cast<std::size_t>(d)) % 2 == 1;
+                TokenId cand;
+                if (guess) {
+                    cand = static_cast<TokenId>((i * 1103515245U + d * 12345U) %
+                                                static_cast<std::size_t>(tok.vocab_size()));
+                } else if (j < stream.size()) {
+                    cand = stream[j];
+                } else {
+                    break;
+                }
+                const TokenMask here = b.mask();
+                if (!here.allows(cand) || !b.probe_advance(cand)) {
+                    break;
+                }
+            }
+            b.rollback();
+        }
+
+        const TokenMask mb = b.mask();
+        if (mb.words() != ma.words() || a.phase() != b.phase()) {
+            std::printf("  [DIVERGED] step %zu: control phase %d mask %zu allowed; probed "
+                        "phase %d mask %zu allowed\n",
+                        i, static_cast<int>(a.phase()), ma.count(),
+                        static_cast<int>(b.phase()), mb.count());
+            ++problems;
+            if (problems > 3) {
+                std::printf("  (stopping after 4)\n");
+                return 1;
+            }
+        }
+        const Advance aa = a.advance(stream[i]);
+        const Advance ab = b.advance(stream[i]);
+        if (aa != ab) {
+            std::printf("  [DIVERGED] step %zu: control advance %d, probed advance %d\n", i,
+                        static_cast<int>(aa), static_cast<int>(ab));
+            ++problems;
+        }
+        if (aa == Advance::Rejected) {
+            std::printf("  [REJECTED] step %zu -- the stream itself is not legal\n", i);
+            return 1;
+        }
+    }
+
+    // DEAD-END SEARCH. The mask is one token deep: it says "this id is legal here", not
+    // "this id leaves a continuation". A single-token decoder is protected by the model
+    // sampling sensibly; a DRAFTER walks the automaton k tokens forward on a guess, so it
+    // can land it somewhere no token in the vocabulary can leave. The position after that
+    // has an empty legal set, and an empty row reaching the verifier is what raises
+    // "no legal token" and kills the run.
+    {
+        TurnGrammar g(tok, tools);
+        std::size_t found = 0;
+        for (std::size_t i = 0; i < stream.size() && found < 5; ++i) {
+            if (g.phase() == TurnPhase::ToolCall) {
+                const TokenMask here = g.mask();
+                // checkpoint/rollback rather than replaying the stream per candidate --
+                // the same primitive the decoder uses, which turns a scan that does not
+                // finish into one that takes seconds.
+                for (std::size_t id = 0; id < tok.vocab_size() && found < 5; ++id) {
+                    if (!here.allows(static_cast<TokenId>(id))) {
+                        continue;
+                    }
+                    g.checkpoint();
+                    const Advance a2 = g.advance(static_cast<TokenId>(id));
+                    const bool dead = a2 != Advance::Rejected &&
+                                      g.phase() == TurnPhase::ToolCall &&
+                                      g.mask().count() == 0;
+                    g.rollback();
+                    if (dead) {
+                        std::printf("  [DEAD END] step %zu: token %zu (%.24s) is ALLOWED but "
+                                    "leaves an EMPTY mask\n",
+                                    i, id,
+                                    std::string(tok.token_bytes(static_cast<TokenId>(id)))
+                                        .c_str());
+                        ++found;
+                    }
+                }
+            }
+            if (g.advance(stream[i]) == Advance::Rejected) {
+                break;
+            }
+        }
+        if (found == 0) {
+            std::printf("  no dead-end tokens found on this stream\n");
+        } else {
+            problems += static_cast<int>(found);
+        }
+    }
+
+    const bool same_calls = a.has_tool_call() == b.has_tool_call() &&
+                            (!a.has_tool_call() ||
+                             (a.tool_name() == b.tool_name() &&
+                              a.tool_params().size() == b.tool_params().size() &&
+                              (a.tool_params().empty() ||
+                               a.tool_params()[0].value == b.tool_params()[0].value)));
+    if (!same_calls) {
+        std::printf("  [DIVERGED] parsed call differs: control '%s' = '%s', probed '%s' = '%s'\n",
+                    a.has_tool_call() ? a.tool_name().c_str() : "-",
+                    (a.has_tool_call() && !a.tool_params().empty())
+                        ? a.tool_params()[0].value.c_str() : "-",
+                    b.has_tool_call() ? b.tool_name().c_str() : "-",
+                    (b.has_tool_call() && !b.tool_params().empty())
+                        ? b.tool_params()[0].value.c_str() : "-");
+        ++problems;
+    }
+    std::printf(problems == 0 ? "  OK: probing left the grammar identical throughout\n"
+                              : "  %d problem(s)\n", problems);
+    return problems == 0 ? 0 : 1;
+}
+
+// The other half of the missing reproduction: the REAL SpeculativeDecoder, driven by a
+// REAL TurnGrammar over a REAL tool-call token stream.
+//
+// `specgrammar` proves the grammar survives being probed. It cannot prove the decoder
+// uses the result correctly, because the decoder was only ever tested against a 64-token
+// fake vocabulary with no grammar at all. This closes that: if a block inside a tool call
+// can produce an empty shaped distribution, it happens here.
+int cmd_specrun(int rounds) {
+    QwenTokenizer tok;
+    const LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::vector<parsephony::ToolSpec> tools;
+    {
+        parsephony::ToolSpec s;
+        s.name = "read_file";
+        parsephony::ParamSpec p;
+        p.name = "path";
+        p.required = true;
+        s.params.push_back(p);
+        tools.push_back(s);
+    }
+    // THE MODEL'S LOGITS ROW IS WIDER THAN THE TOKENIZER'S VOCABULARY -- 248,320 against
+    // 248,077 on this checkpoint. The drafter takes an argmax over the MODEL's row, so it
+    // can legitimately return an id the tokenizer has never heard of and the mask cannot
+    // represent. Sizing this harness to the tokenizer instead of the model is what made
+    // the first three attempts at this reproduction pass.
+    const std::size_t V = 248320;
+
+    // The turn the failing run was in the middle of: think, then a read_file call.
+    std::vector<TokenId> stream;
+    for (const TokenId id : tok.encode_content("Let me read the render helper.")) {
+        stream.push_back(id);
+    }
+    stream.push_back(tok.specials().think_close);
+    stream.push_back(tok.specials().tool_call_open);
+    for (const TokenId id : tok.encode_content(
+             "<function=read_file>\n<parameter=path>\n"
+             "tools/blender_vehicles/render_truck.py\n</parameter>\n</function>\n")) {
+        stream.push_back(id);
+    }
+    stream.push_back(tok.specials().tool_call_close);
+    stream.push_back(tok.specials().im_end);
+
+    // A model that always says "the next token of the stream", plus an MTP head that
+    // drafts the same -- so acceptance is high and blocks are wide, which is the
+    // condition the regression appeared under.
+    class Fwd final : public SpecForward {
+      public:
+        Fwd(const std::vector<TokenId>& s, std::size_t vocab) : s_(s), v_(vocab) {}
+        void forward_all(std::span<const TokenId> t,
+                         std::vector<std::vector<float>>& rows) override {
+            rows.clear();
+            for (std::size_t i = 0; i < t.size(); ++i) {
+                ++pos_;
+                rows.push_back(row(pos_));
+            }
+            verified_ = true;
+        }
+        void forward_last(std::span<const TokenId> t, std::vector<float>& r) override {
+            primed_ = false;
+            for (std::size_t i = 0; i < t.size(); ++i) {
+                ++pos_;
+            }
+            r = row(pos_);
+        }
+        void checkpoint() override { mark_ = pos_; }
+        void restore() override { pos_ = mark_; }
+        [[nodiscard]] bool has_mtp() const override { return true; }
+        void last_hidden(std::vector<std::vector<float>>& rows) override {
+            rows.assign(1, std::vector<float>{1.0F});
+            if (verified_) {
+                cur_ = pos_ + 1;
+                verified_ = false;
+                primed_ = true;
+            } else if (!primed_) {
+                cur_ = pos_;
+            }
+        }
+        void mtp_step(TokenId, std::span<const float>, std::vector<float>& o) override {
+            o = {1.0F};
+        }
+        void mtp_logits(std::span<const float>, std::vector<float>& r) override {
+            // A drafter that is right most of the time and wrong the rest, which is what
+            // makes blocks PARTIALLY accepted -- and partial acceptance is what drives
+            // restore, a growing deferred prefix, and verification passes that carry a
+            // prefix in front of the drafts. A perfect drafter exercises none of it.
+            const std::size_t p = cur_++;
+            if (wrong_every_ > 0 && (p % wrong_every_) == 0) {
+                r.assign(v_, 0.0F);
+                // A PLAUSIBLE wrong guess, which is the only kind that matters. An
+                // arbitrary id is refused at position 0 and the draft is truncated before
+                // it can walk anywhere; a real MTP head proposes tokens that are legal
+                // here and wrong later, and those are what carry the automaton into
+                // states the well-formed stream never visits.
+                std::size_t id = (p % 2 == 0) ? (248077 + (p % 243)) : ((p * 7919U) % v_);
+                if (g_ != nullptr) {
+                    const TokenMask& m = g_->mask();
+                    for (std::size_t t = 0; t < m.size(); ++t) {
+                        const auto cand = static_cast<TokenId>((id + t) % m.size());
+                        if (m.allows(cand)) {
+                            id = static_cast<std::size_t>(cand);
+                            break;
+                        }
+                    }
+                }
+                r[id] = 50.0F;
+                return;
+            }
+            r = row(p);
+        }
+        std::size_t wrong_every_ = 0;
+        const TurnGrammar* g_ = nullptr;
+        [[nodiscard]] std::size_t pos() const { return pos_; }
+        [[nodiscard]] std::vector<float> row(std::size_t p) const {
+            std::vector<float> r(v_, 0.0F);
+            r[static_cast<std::size_t>(p < s_.size() ? s_[p] : s_.back())] = 50.0F;
+            return r;
+        }
+
+      private:
+        const std::vector<TokenId>& s_;
+        std::size_t v_;
+        std::size_t pos_ = 0;
+        std::size_t mark_ = 0;
+        std::size_t cur_ = 0;
+        bool verified_ = false;
+        bool primed_ = false;
+    };
+
+    for (int round = 0; round < rounds; ++round) {
+        TurnGrammar g(tok, tools);
+        Fwd fwd(stream, V);
+        SpecConfig cfg;
+        cfg.enabled = true;
+        cfg.mtp_block_size = 3;
+        SamplingParams sp;
+        sp.seed = 1234 + static_cast<std::uint64_t>(round);
+        sp.temperature = 1.0F;
+        sp.repetition_penalty = 1.0F;
+        sp.top_p = 1.0F;
+        fwd.wrong_every_ = static_cast<std::size_t>(2 + (round % 4));
+        fwd.g_ = &g;
+        SpeculativeDecoder dec(sp, cfg);
+        dec.seed(fwd.row(0));
+
+        std::vector<TokenId> emitted;
+        std::vector<TokenId> recent;
+        const auto is_special = [&g](TokenId id) { return g.is_block_boundary(id); };
+
+        for (int step = 0; step < 200 && emitted.size() < stream.size(); ++step) {
+            const bool may = g.mask_is_block_stable() || g.can_checkpoint();
+            SpecStep s = dec.step(&g, recent, std::span<const TokenId>(emitted), may,
+                                  is_special, fwd);
+            if (s.no_legal_token) {
+                std::printf("  [REPRODUCED] round %d step %d: no legal token after %zu "
+                            "emitted, grammar phase %d, mask allows %zu\n",
+                            round, step, emitted.size(), static_cast<int>(g.phase()),
+                            g.mask().count());
+                return 1;
+            }
+            for (const TokenId id : s.committed) {
+                const Advance a = g.advance(id);
+                if (a == Advance::Rejected) {
+                    std::printf("  [REPRODUCED] round %d step %d: the grammar REJECTED a "
+                                "committed token (id %d) -- it was sampled from a mask "
+                                "that allowed it, so the mask and the automaton disagree\n",
+                                round, step, static_cast<int>(id));
+                    return 1;
+                }
+                emitted.push_back(id);
+                recent.push_back(id);
+                if (recent.size() > 64) {
+                    recent.erase(recent.begin());
+                }
+                if (a == Advance::Accepted) {
+                    break;
+                }
+            }
+            dec.observe(std::span<const TokenId>(s.committed));
+        }
+    }
+    std::printf("  OK: %d round(s), no empty distribution and no rejected commit\n", rounds);
+    std::printf("  (blocks that had to be abandoned for an ordinary token: see per-round)\n");
+    return 0;
+}
+
 // --- bench -----------------------------------------------------------------
 
 // What a speculative block's VERIFICATION pass costs, against the single-token step it
@@ -810,6 +1176,12 @@ int main(int argc, char** argv) {
     if (cmd == "verify") {
         return cmd_verify(argc > 2 ? std::atoi(argv[2]) : 4,
                           argc > 3 ? std::atoi(argv[3]) : 547);
+    }
+    if (cmd == "specrun") {
+        return cmd_specrun(argc > 2 ? std::atoi(argv[2]) : 5);
+    }
+    if (cmd == "specgrammar") {
+        return cmd_specgrammar(argc > 2 ? std::atoi(argv[2]) : 3);
     }
     if (cmd == "toolmask") {
         return cmd_toolmask(argc > 2 ? std::atoi(argv[2]) : 3);

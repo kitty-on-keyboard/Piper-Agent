@@ -63,6 +63,18 @@ class TokenMask {
 
     [[nodiscard]] std::size_t size() const noexcept { return n_; }
 
+    // Is anything legal at all? Short-circuits on the first non-empty word, where count()
+    // popcounts the whole bitset -- and this is asked once per drafted position, on the
+    // hot path, only to answer "may a block verify into here".
+    [[nodiscard]] bool any() const noexcept {
+        for (std::uint64_t word : w_) {
+            if (word != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     [[nodiscard]] std::size_t count() const noexcept {
         std::size_t c = 0;
         for (std::uint64_t word : w_) {
