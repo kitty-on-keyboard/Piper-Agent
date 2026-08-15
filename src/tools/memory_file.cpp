@@ -3,6 +3,9 @@
 #include "src/pcc/store.hpp"
 #include "src/platform/fs.hpp"
 
+#include <algorithm>
+#include <cctype>
+
 // The cross-session memory file (spec S8). Split out of registry.cpp because it is the one
 // tool whose state outlives the run: every other handler there acts on the workspace
 // within a single mission, and this one writes a file the NEXT session reads. That is a
@@ -49,11 +52,81 @@ void Registry::note_read_version(const std::string& abs_path, std::string_view b
     read_versions_[abs_path] = platform::content_sha256_hex(bytes);
 }
 
+// The digest out of whatever the model copied off the screen.
+//
+// THE TOOL TOLD THE MODEL ITS OWN EDITS WERE CORRUPT. read_file ends every result with
+// `[content_version sha256=<hex>]`, so a model asked for `expected_version` copies the
+// value it was shown -- `sha256=<hex>`, prefix and all. Nothing stripped it, the compare
+// is a plain string compare against bare hex, and the conflict it raised printed both
+// sides: `expected sha256=123ae005..., current 123ae005...`. Identical digests, reported
+// as a mismatch. The model read that correctly ("hashes match but the tool detects a
+// difference"), concluded the edit tools were broken, and spent the rest of the run
+// writing Swift through shell heredocs and sed -- which is how a run loses every
+// preimage check the claim exists to provide.
+//
+// MEASURED, run 4 of 2026-08-12: eight conflicts across replace_in_file and write_file,
+// every one of them expected == current modulo this prefix, starting with the run's very
+// first edit.
+//
+// Postel on the way in, and it belongs HERE rather than at either comparison site: both
+// WritePrecondition::expected_version and EditIntent::expected_version are documented as
+// lowercase hex, and this is the single door a model-supplied value comes through. The
+// headless rename check and the editor's buffer check then both get what they promise.
+//
+// Deliberately NOT a validity gate. Something that normalises to a non-digest is left
+// alone and fails the compare as a conflict, which is the safe direction: refusing to
+// write beats writing over a preimage nobody checked.
+std::string normalize_content_version(std::string_view supplied) {
+    std::string_view v = supplied;
+    const auto trim = [&v] {
+        while (!v.empty() && (v.front() == ' ' || v.front() == '\t' || v.front() == '\r' ||
+                              v.front() == '\n' || v.front() == '"' || v.front() == '\'')) {
+            v.remove_prefix(1);
+        }
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r' ||
+                              v.back() == '\n' || v.back() == '"' || v.back() == '\'')) {
+            v.remove_suffix(1);
+        }
+    };
+    trim();
+    // `[content_version sha256=abc]` pasted back whole, brackets and label included.
+    if (!v.empty() && v.front() == '[' && v.back() == ']') {
+        v.remove_prefix(1);
+        v.remove_suffix(1);
+        trim();
+    }
+    const auto strip_prefix = [&v, &trim](std::string_view prefix) {
+        if (v.size() >= prefix.size() &&
+            std::equal(prefix.begin(), prefix.end(), v.begin(), [](char a, char b) {
+                return a == static_cast<char>(std::tolower(static_cast<unsigned char>(b)));
+            })) {
+            v.remove_prefix(prefix.size());
+            trim();
+            return true;
+        }
+        return false;
+    };
+    strip_prefix("content_version");
+    // `sha256=`, `sha256:` and a bare `sha256 ` are all the same claim.
+    if (strip_prefix("sha256")) {
+        if (!v.empty() && (v.front() == '=' || v.front() == ':')) {
+            v.remove_prefix(1);
+            trim();
+        }
+    }
+    std::string out(v);
+    // The digest is hex, so case carries no information -- but the compare is bytewise.
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
 std::string Registry::resolve_expected_version(
     const std::string& abs_path, const std::vector<ToolParamValue>& params) const {
     if (const std::string* supplied = get(params, "expected_version");
         supplied != nullptr && !supplied->empty()) {
-        return *supplied;
+        return normalize_content_version(*supplied);
     }
     const auto it = read_versions_.find(abs_path);
     return it == read_versions_.end() ? std::string() : it->second;

@@ -3,6 +3,7 @@
 
 #include <unistd.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -77,7 +78,15 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // 21 -> 22: `find_files`, search by file NAME. `search` reads contents, and a model
     // looking for a project's Swift files reaches for search(".swift"), gets no matches --
     // correctly, no line contains that string -- and concludes the files are not there.
-    CHECK_EQ(reg.decls().size(), std::size_t{22});
+    //
+    // 22 -> 23: `finish`, the ending a WORKING run had no way to ask for -- the same
+    // argument as `ask_user`/`exit_plan_mode` above, applied to the mode those two skip.
+    // Declared here, executed by the loop, because it ends the run. Before it, a finished
+    // run had to be inferred from the inert counter: three nudges and a fourth turn at
+    // best, and unbounded at worst, since a nudge that provoked any tool call which
+    // learned something reset that counter.
+    CHECK_EQ(reg.decls().size(), std::size_t{23});
+    CHECK(reg.find("finish") != nullptr);
     CHECK(reg.find("find_files") != nullptr);
     CHECK(reg.find("ask_user") != nullptr);
     CHECK(reg.find("ask_question") != nullptr);
@@ -1386,4 +1395,78 @@ TEST(edit_sink_receives_expected_version_from_prior_read) {
     CHECK(w.ok());
     CHECK(!sink_absent);
     CHECK_EQ(sink_version, version);
+}
+
+// THE CONFLICT WHOSE TWO SIDES WERE THE SAME DIGEST. read_file ends its result with
+// `[content_version sha256=<hex>]`, so a model filling in `expected_version` sends back
+// what it was shown -- prefix included. The compare is bytewise against bare hex, so the
+// claim failed and the error printed both sides: `expected sha256=123ae005..., current
+// 123ae005...`. The model read that correctly, decided the edit tools were broken, and
+// finished the run writing source through shell heredocs.
+//
+// MEASURED, run 4 of 2026-08-12: eight conflicts across replace_in_file and write_file,
+// every one identical modulo this prefix, from the run's first edit onward.
+TEST(expected_version_accepts_the_prefix_read_file_displays) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "p.txt"}, {"content", "alpha\n"}}), 1)
+                .ok());
+    const ToolResult read = reg.execute("read_file", args({{"path", "p.txt"}}), 1);
+    REQUIRE(read.ok());
+    const std::string marker = "[content_version sha256=";
+    const auto at = read.summary.find(marker);
+    REQUIRE(at != std::string::npos);
+    const auto start = at + marker.size();
+    const auto end = read.summary.find(']', start);
+    REQUIRE(end != std::string::npos);
+    const std::string hex = read.summary.substr(start, end - start);
+
+    // Exactly what the model copies off the screen.
+    const ToolResult w = reg.execute("replace_in_file",
+                                     args({{"path", "p.txt"},
+                                           {"old_text", "alpha"},
+                                           {"new_text", "beta"},
+                                           {"expected_version", "sha256=" + hex}}),
+                                     1);
+    CHECK(w.ok());
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/p.txt", 1024).bytes,
+             std::string("beta\n"));
+}
+
+// The same claim in the other shapes it arrives in, and -- the part that must not
+// regress -- a digest that is genuinely wrong still conflicts. Normalising the prefix off
+// is Postel on the way in, not a weakening of the check.
+TEST(expected_version_normalises_without_weakening_the_claim) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "q.txt"}, {"content", "one\n"}}), 1)
+                .ok());
+    const std::string hex = lmp::platform::content_sha256_hex("one\n");
+
+    std::string upper = hex;
+    for (char& c : upper) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    // Uppercase hex, the whole bracketed marker pasted back, and the bare digest.
+    CHECK_EQ(normalize_content_version(upper), hex);
+    CHECK_EQ(normalize_content_version("[content_version sha256=" + hex + "]"), hex);
+    CHECK_EQ(normalize_content_version("  sha256: " + hex + "  "), hex);
+    CHECK_EQ(normalize_content_version("\"" + hex + "\""), hex);
+    CHECK_EQ(normalize_content_version(hex), hex);
+
+    // A wrong digest is still a conflict, and the file is left alone.
+    const ToolResult stale =
+        reg.execute("replace_in_file",
+                    args({{"path", "q.txt"},
+                          {"old_text", "one"},
+                          {"new_text", "two"},
+                          {"expected_version", "sha256=" + std::string(64, 'a')}}),
+                    1);
+    CHECK(!stale.ok());
+    CHECK(stale.error_class == ErrorClass::Conflict);
+    CHECK(stale.summary.find("version conflict") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/q.txt", 1024).bytes,
+             std::string("one\n"));
 }
