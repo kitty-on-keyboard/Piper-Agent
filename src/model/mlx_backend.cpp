@@ -251,6 +251,16 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
             return {false, why};
         }
         spec_.mtp_block_size = static_cast<std::size_t>(impl_->model.mtp_block_size());
+        // A LOADED DRAFT HEAD MEANS SPECULATION IS ON. There is no other reason to name
+        // one: it is 253 MB of resident weights whose only consumer is this path, and
+        // leaving `enabled` at its default made asking for a head cost memory and deliver
+        // nothing. Nobody would have found that from the outside -- the head loads, the
+        // log says so, and decode is simply unchanged.
+        //
+        // LMP_SPECULATIVE still wins over this, in both directions, which is what keeps
+        // the A/B available on one binary: 0 forces the plain path back on with the head
+        // still loaded.
+        spec_.enabled = true;
     }
     impl_->wired = wire_working_set(impl_->prev_wired_limit);
     set_memory_ceiling();
