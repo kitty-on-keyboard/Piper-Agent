@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 
 #include "bakeoff/draft_proposer/suffix_proposer.hpp"
 #include "src/model/mtp_proposer.hpp"
@@ -26,11 +27,45 @@ constexpr std::size_t kRecentWindow = 64;
 
 // The most committed-but-unforwarded tokens a block may carry in (see `pending_`).
 //
-// A safety valve, not a tuning knob. The prefix resets to one token on every fully
-// accepted block, so in practice it sits at one to three; this only bounds the tail of an
-// unlucky streak, because the prefix widens the verification pass and that pass is the
-// one thing in the block that is not free. Past this, pay the forward and start over.
-constexpr std::size_t kMaxDeferred = 16;
+// A REAL TUNING KNOB, not the safety valve it was first written as, and the first value
+// (16) shipped a regression at long context.
+//
+// A deferred token is re-forwarded once per block until a fully accepted block clears it:
+// partial acceptance rolls the cache back past the prefix, so the prefix returns to
+// `pending_` and rides in again next block. At high acceptance that costs nothing because
+// blocks clear. At 55% acceptance roughly 70% of blocks are partial, the prefix grows,
+// and every verification pass drags it -- 146.5 ms per pass at 28k against the 88.7 ms a
+// 3-position pass costs there.
+//
+// So the cap trades two costs against each other: too low pays a forward per block, too
+// high pays width on every pass. Swept on one binary, one session, `bench 2 28000 100`:
+//
+//   cap    1      2      4      6      8     16
+//   tok/s  13.5   16.1   17.4   15.3   14.6  14.1     (plain decode is 14.8)
+//
+// 4 is the peak, and it costs nothing at short context -- 23.4 tok/s at 547 tokens
+// against 16's 23.9, inside the spread of both. 16 was 0.95x of plain at 28k; 4 is 1.18x.
+//
+// Re-sweep with LMP_MAX_DEFERRED if the draft length or the acceptance rate moves; the
+// optimum is a function of both, and of how much a pass widens with context.
+constexpr std::size_t kMaxDeferredDefault = 4;
+
+// Overridable so the cap can be swept on one binary in one session, which is how the
+// number above was found to be wrong: a deferred token is re-forwarded once per block
+// until a fully accepted block clears it, so at low acceptance the prefix grows and every
+// verification pass drags it along. Measured at 28k context, 55% acceptance: the pass
+// cost 146.5 ms against the 88.7 ms a 3-position pass costs there.
+std::size_t max_deferred() {
+    static const std::size_t v = [] {
+        const char* s = std::getenv("LMP_MAX_DEFERRED");
+        if (s == nullptr) {
+            return kMaxDeferredDefault;
+        }
+        const int n = std::atoi(s);
+        return n > 0 ? static_cast<std::size_t>(n) : kMaxDeferredDefault;
+    }();
+    return v;
+}
 
 // The history-matching proposer, behind DraftProposer. It is stateless across a block --
 // it matches a suffix and returns a continuation -- so settle() has nothing to undo.
@@ -137,7 +172,7 @@ SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<Token
 
     // A prefix left from the previous block can only ride along under a proposer that
     // drafts from its own state; anything else needs the target caught up first.
-    if (!proposer_->can_draft_deferred() || pending_.size() >= kMaxDeferred) {
+    if (!proposer_->can_draft_deferred() || pending_.size() >= max_deferred()) {
         flush(fwd);
     }
 
@@ -309,7 +344,7 @@ SpecStep SpeculativeDecoder::step(const TokenMask* mask, const std::vector<Token
     // ride in front of the next block's verification, which was going to run regardless.
     const bool full = (m == drafted.size());
     const bool defer = proposer_->can_draft_deferred() &&
-                       (full || pending_.size() + out.committed.size() <= kMaxDeferred);
+                       (full || pending_.size() + out.committed.size() <= max_deferred());
     if (defer) {
         if (full) {
             pending_.assign(1, out.committed.back());
