@@ -83,6 +83,11 @@ struct SpecStats {
     std::uint64_t accepted_drafts = 0; // proposed tokens that survived verification
     std::uint64_t committed = 0;       // tokens emitted by speculative blocks
     std::uint64_t fallbacks = 0;       // steps that decoded normally instead
+    // Blocks thrown away because they could not produce a usable answer -- the position
+    // the block would have committed at had no legal token. Counted rather than silent:
+    // this used to END THE RUN with "the grammar and the vocabulary disagree", and if it
+    // starts climbing again that is the same defect back, not a slow drafter.
+    std::uint64_t abandoned = 0;
 
     [[nodiscard]] double acceptance_rate() const noexcept {
         return drafted > 0 ? static_cast<double>(accepted_drafts) / static_cast<double>(drafted)
@@ -257,6 +262,12 @@ class SpeculativeDecoder {
     // The mask for position i of the block, or `fallback` when the walk did not run
     // (a block-stable source needs only one).
     [[nodiscard]] const TokenMask* mask_at(std::size_t i, const TokenMask* fallback) const;
+
+    // One token, the ordinary way. The reference path, and the thing a block falls back
+    // to when it cannot produce a usable answer -- speculation is an optimisation, so it
+    // must not be able to turn a decodable step into a failed run.
+    SpecStep decode_one(const TokenMask* mask, const std::vector<TokenId>& recent,
+                        SpecForward& fwd);
 
     SamplingParams params_;
     SpecConfig config_;

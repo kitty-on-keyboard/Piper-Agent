@@ -972,7 +972,8 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           // memory plateau. spec_blocks=0 with a head loaded means it never fired.
           {"spec_blocks", std::to_string(turn.generation.spec_blocks)},
           {"spec_drafted", std::to_string(turn.generation.spec_drafted)},
-          {"spec_accepted", std::to_string(turn.generation.spec_accepted)}});
+          {"spec_accepted", std::to_string(turn.generation.spec_accepted)},
+          {"spec_abandoned", std::to_string(turn.generation.spec_abandoned)}});
 
     // THE SHAPE OF WHAT WAS SAID, always, even when the text itself is not traced. Three
     // integers per turn, and they separate the two failures that `tokens=4096 status=1`
