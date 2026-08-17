@@ -111,6 +111,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     model_dir: "",
     detail: "",
     elapsed_ms: 0,
+    // No checkpoint, so nothing supports anything. The drawer reads this as "not
+    // supported here" until a real model_status says otherwise, which is the correct
+    // reading of "no model" and not a placeholder.
+    supports_reasoning_effort: false,
   };
 
   /** The mission of the run currently in flight, so run_end can file it under something
@@ -172,7 +176,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // The sidecar died. The view is mid-"Thinking" whenever this happens during a run,
     // and nothing else will ever arrive to move it off that.
     this.client.on("exit", ({ code }: { code: number | null }) => {
-      this.model = { state: "unloaded", model_dir: "", detail: "", elapsed_ms: 0 };
+      this.model = {
+        state: "unloaded", model_dir: "", detail: "", elapsed_ms: 0,
+        supports_reasoning_effort: false,
+      };
       this.currentRunId = undefined;
       this.runInFlight = false;
       this.post("model", this.model);
@@ -468,6 +475,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // The operator's check. On the drawer because it is per-project and per-run -- the
     // command that proves THIS workspace builds is not the one that proved the last.
     "verifyContract",
+    // Whether the checkpoint honours it is NOT on this channel -- it is not a setting,
+    // it is a property of the loaded model, and it arrives with model_status so the
+    // control can settle before the weights are up.
+    "reasoningEffort",
     "sampling.temperature",
     "sampling.topP",
     "sampling.topK",

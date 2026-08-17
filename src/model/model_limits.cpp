@@ -1,6 +1,9 @@
 #include "src/model/model_limits.hpp"
 
+#include <fstream>
+#include <iterator>
 #include <limits>
+#include <string_view>
 
 #include "src/model/mlx/qwen35_moe_config.hpp"
 
@@ -72,6 +75,34 @@ int max_affordable_context_tokens(std::size_t kv_per_token, std::size_t weights_
 bool checkpoint_declares_vision(const std::string& model_dir) {
     mlxl::Qwen35VisionConfig cfg;
     return mlxl::load_qwen35_vision_config(model_dir, cfg) && cfg.present;
+}
+
+// A substring search and not a parse, on purpose. The question is only whether the
+// template mentions the variable at all; answering it properly would mean evaluating
+// Jinja, and the failure mode of the cheap version is understood in both directions. A
+// checkpoint that names reasoning_effort but ignores it would get an instruction it treats
+// as ordinary system text -- harmless. The reverse, a template that honours it without
+// naming it, cannot occur: the name IS the variable the caller has to set.
+bool supports_reasoning_effort(const std::string& model_dir) {
+    constexpr std::string_view kNeedle = "reasoning_effort";
+    for (const char* rel : {"/chat_template.jinja", "/tokenizer_config.json"}) {
+        std::ifstream in(model_dir + rel, std::ios::binary);
+        if (!in) {
+            continue;
+        }
+        const std::string body((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+        if (body.find(kNeedle) != std::string::npos) {
+            return true;
+        }
+        // The file was readable and does not mention it. That is an ANSWER, not a miss,
+        // so do not fall through to the next candidate and risk a stale second copy
+        // contradicting the template the loader will actually use.
+        if (!body.empty()) {
+            return false;
+        }
+    }
+    return false;
 }
 
 } // namespace lmp::model

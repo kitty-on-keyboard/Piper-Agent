@@ -138,6 +138,15 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // Stable system: persona, mode, guidance, workspace, conventions, memory. The
     // deliverable is named in the user message that follows -- not here.
     std::string system;
+    // Ahead of the persona because the reference template opens the system message with
+    // it. Empty for `medium` and for an unset level, and an empty one contributes no
+    // separator either -- so the default prompt is byte-identical to what it was before
+    // this field existed, and an existing KV prefix is not invalidated by adding the
+    // feature.
+    if (!reasoning_brief_.empty()) {
+        system += reasoning_brief_;
+        system += "\n\n";
+    }
     system += persona_.empty() ? kPersona : persona_.c_str();
     // Immediately after the persona and before the tools, because it QUALIFIES the persona
     // -- and does so even when the operator has replaced it. A plan-mode run told "you

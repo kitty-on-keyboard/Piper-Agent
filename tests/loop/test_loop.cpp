@@ -10,6 +10,7 @@
 #include "src/loop/agent.hpp"
 #include "src/loop/token_stream.hpp"
 #include "src/loop/turn.hpp"
+#include "src/model/family_traits.hpp"
 
 #include "tests/check.hpp"
 
@@ -756,4 +757,46 @@ TEST(a_plain_user_message_attaches_nothing) {
     for (const model::Message& m : ctx.render("")) {
         CHECK(m.images.empty());
     }
+}
+
+// --- thinking level ----------------------------------------------------------
+
+// The reasoning brief opens the system message, ahead of even the persona, because that
+// is where the reference template puts it: reasoning_instructions is the first thing in
+// the system prompt and the tools block follows it.
+TEST(the_reasoning_brief_opens_the_system_prompt) {
+    context::ContextStore ctx("do the thing");
+    ctx.set_reasoning_brief("Reasoning effort is set to low. Keep your thinking brief.");
+
+    const std::vector<model::Message> msgs = ctx.render("# Tools\n\n<tools></tools>");
+    REQUIRE(!msgs.empty());
+    CHECK(msgs[0].role == model::Role::System);
+    CHECK_EQ(msgs[0].content.find("Reasoning effort is set to low."), std::size_t{0});
+    // Ahead of the tools, not merely present somewhere in the prompt.
+    CHECK(msgs[0].content.find("Reasoning effort") < msgs[0].content.find("# Tools"));
+}
+
+// THE ONE THAT PROTECTS EXISTING RUNS. `medium` and an unset level both resolve to the
+// empty brief, and an empty brief must leave the prompt BYTE-IDENTICAL -- not merely
+// similar. Anything else (a stray separator, say) would change the front of the stable
+// prefix for every existing user the moment this feature shipped, and the front of the
+// prefix is the one place a difference costs a full re-prefill rather than a partial one.
+TEST(an_empty_reasoning_brief_changes_no_byte_of_the_prompt) {
+    const char* tools = "# Tools\n\n<tools></tools>";
+
+    context::ContextStore before("do the thing");
+    const std::string untouched = before.render(tools)[0].content;
+
+    context::ContextStore after("do the thing");
+    after.set_reasoning_brief("");
+    const std::vector<model::Message> after_msgs = after.render(tools);
+    CHECK_EQ(after_msgs[0].content, untouched);
+
+    // And the level that means "say nothing" really does produce that empty brief, so
+    // the default the extension ships cannot drift away from this guarantee.
+    context::ContextStore medium("do the thing");
+    medium.set_reasoning_brief(
+        std::string(model::reasoning_instructions_for(model::ReasoningEffort::Medium)));
+    const std::vector<model::Message> medium_msgs = medium.render(tools);
+    CHECK_EQ(medium_msgs[0].content, untouched);
 }
