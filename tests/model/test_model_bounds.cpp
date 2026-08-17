@@ -11,6 +11,7 @@
 
 #include "src/loop/token_stream.hpp"
 #include "src/model/backend.hpp"
+#include "src/model/family_traits.hpp"
 #include "src/model/grammar.hpp"
 #include "src/model/mlx/qwen35_moe_config.hpp"
 #include "src/model/model_limits.hpp"
@@ -415,4 +416,77 @@ TEST(a_context_budget_the_device_cannot_hold_is_refused) {
     // More device, more context: the policy has to be monotonic in the memory available,
     // or a bigger machine would buy nothing.
     CHECK(max_affordable_context_tokens(kv, weights, working_set * 2) > affordable);
+}
+
+// The three-level thinking control. Both halves of it are guessable-and-wrong, which is
+// the reason each has a test: `high` reads as an obvious fourth level and the reference
+// template raises on it, and the two checkpoints on this machine are indistinguishable by
+// Family and differ on whether they have levels at all.
+TEST(reasoning_effort_accepts_only_the_three_levels_the_template_defines) {
+    CHECK(parse_reasoning_effort("low").has_value());
+    CHECK(parse_reasoning_effort("medium").has_value());
+    CHECK(parse_reasoning_effort("xhigh").has_value());
+    // Empty is "leave the checkpoint alone", and is the one non-level that is accepted.
+    CHECK(parse_reasoning_effort("").has_value());
+    CHECK_EQ(static_cast<int>(*parse_reasoning_effort("")),
+             static_cast<int>(ReasoningEffort::Default));
+
+    // THE ONE THAT MATTERS. Every summary of this feature lists `high` among the levels;
+    // the checkpoint's own template validates against ('xhigh','medium','low') and raises
+    // on everything else. Accepting it here would send an instruction the model never saw
+    // in training, and the run would look fine.
+    CHECK(!parse_reasoning_effort("high").has_value());
+    CHECK(!parse_reasoning_effort("XHIGH").has_value()); // case is the template's, not ours
+    CHECK(!parse_reasoning_effort("xhigh ").has_value());
+    CHECK(!parse_reasoning_effort("none").has_value());
+}
+
+TEST(medium_is_the_level_that_instructs_nothing) {
+    // Not an omission -- the template sets reasoning_instructions for xhigh and low only.
+    // This is also why `medium` is the harness default: it is byte-identical to the prompt
+    // every run produced before the setting existed.
+    CHECK(reasoning_instructions_for(ReasoningEffort::Medium).empty());
+    CHECK(reasoning_instructions_for(ReasoningEffort::Default).empty());
+    CHECK(!reasoning_instructions_for(ReasoningEffort::Low).empty());
+    CHECK(!reasoning_instructions_for(ReasoningEffort::XHigh).empty());
+    // Quoted from the checkpoint, not paraphrased: a better-worded instruction is a
+    // different instruction, and these are the words the model was tuned against.
+    CHECK(reasoning_instructions_for(ReasoningEffort::XHigh)
+              .find("Reasoning effort is set to xhigh.") == 0);
+    CHECK(reasoning_instructions_for(ReasoningEffort::Low)
+              .find("Reasoning effort is set to low.") == 0);
+}
+
+TEST(reasoning_effort_support_is_read_from_the_template_not_the_name) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    // A template that mentions it.
+    {
+        std::ofstream out(root + "/chat_template.jinja");
+        out << "{%- set resolved = reasoning_effort|default('xhigh') %}";
+    }
+    CHECK(supports_reasoning_effort(root));
+
+    // A template that does not. The directory name never changes, which is the point:
+    // Qwen3.6-35B-A3B and Qwen3.8-27B both load as Family::Qwen3 and only one has levels.
+    const std::string bare = temp_dir();
+    REQUIRE(!bare.empty());
+    {
+        std::ofstream out(bare + "/chat_template.jinja");
+        out << "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}";
+    }
+    CHECK(!supports_reasoning_effort(bare));
+
+    // The older packaging: no .jinja, template embedded in tokenizer_config.json.
+    const std::string embedded = temp_dir();
+    REQUIRE(!embedded.empty());
+    {
+        std::ofstream out(embedded + "/tokenizer_config.json");
+        out << R"({"chat_template": "{%- set e = reasoning_effort|default('xhigh') %}"})";
+    }
+    CHECK(supports_reasoning_effort(embedded));
+
+    // Nothing readable at all answers false, so an unreadable checkpoint keeps its own
+    // default rather than being handed an instruction it may not understand.
+    CHECK(!supports_reasoning_effort(root + "/missing"));
 }

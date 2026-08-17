@@ -51,4 +51,23 @@ namespace lmp::model {
 // pointed at. The caller asks first and then requests exactly what is there.
 [[nodiscard]] bool checkpoint_declares_vision(const std::string& model_dir);
 
+// Does this checkpoint's own chat template understand `reasoning_effort` -- the three-level
+// thinking control (low / medium / xhigh)?
+//
+// READ FROM THE TEMPLATE, never inferred from the directory name or from Family. Both
+// checkpoints on this machine load as Family::Qwen3 and tokenize identically, and only one
+// of them has reasoning_effort: Qwen3.8-27B does, Qwen3.6-35B-A3B has no occurrence of the
+// word anywhere in its template. A name-based guess would be right today and wrong at the
+// next checkpoint, which is the same argument checkpoint_declares_vision makes above.
+//
+// `chat_template.jinja` first, `tokenizer_config.json`'s embedded `chat_template` second --
+// both are present and agree on these two checkpoints, and the second is the older
+// packaging that some conversions still ship alone.
+//
+// FALSE WHEN NOTHING CAN BE READ, deliberately. An unreadable template leaves the
+// checkpoint on its own default rather than receiving an instruction it may not have been
+// trained on -- and for Qwen3.8 that default is xhigh, so the cost of being wrong this way
+// is a model that thinks too hard, not one that is told something it cannot parse.
+[[nodiscard]] bool supports_reasoning_effort(const std::string& model_dir);
+
 } // namespace lmp::model

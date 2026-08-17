@@ -177,6 +177,11 @@
         "type": "int"
       },
       {
+        "_comment": "How hard the model should think, as the CHECKPOINT defines it: `low`, `medium` or `xhigh`, or empty for the checkpoint's own default. Not a number and not a token cap -- Qwen3.8 implements these as one plain sentence at the top of the system prompt, and `medium` is the empty sentence, so the levels differ by the instruction given and not by any budget the harness enforces (max_new_tokens is the separate knob that does that). Only some checkpoints understand it: Qwen3.8-27B does, Qwen3.6-35B-A3B has no reasoning_effort in its template at all, so the sidecar probes the checkpoint and drops the field rather than emitting an instruction the model was never trained on. Anything outside the three words is refused at the sidecar boundary -- the reference template raises on an unknown effort, and `high` in particular LOOKS valid and is not.",
+        "name": "reasoning_effort",
+        "type": "string"
+      },
+      {
         "_comment": "THE OPERATOR'S CHECK -- the only verification the harness runs. When non-empty, the command runs verbatim after any turn that wrote a file, its output and exit status become an observation the model reads, and the run's final `completed` requires its last reading to have passed. Exit 0 is pass. Empty means no check: the run ends when the model answers. Operator-owned; the model cannot set or replace it.",
         "name": "verify_contract",
         "type": "string"
@@ -521,6 +526,11 @@
         "_comment": "How long the load took, on `ready` and `failed`. Measured, so the surface can tell the operator what a reload of THIS checkpoint on THIS machine actually costs instead of guessing at a spinner.",
         "name": "elapsed_ms",
         "type": "double"
+      },
+      {
+        "_comment": "Whether THIS checkpoint's chat template understands reasoning_effort. Sent because the surface cannot work it out -- both checkpoints here are Family::Qwen3 and only one has the levels -- and because the alternative is a control that looks live and does nothing. The sidecar already drops an unsupported effort silently and logs why; that is the right behaviour for a settings file shared across checkpoints, and exactly the wrong thing to render as an enabled button. Rides model_status rather than a reply because it is a property of the loaded checkpoint and has to survive a surface attaching late, which is the same argument `state` makes.",
+        "name": "supports_reasoning_effort",
+        "type": "bool"
       }
     ],
     "lmp/token": [
