@@ -190,7 +190,14 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // tool_response, which is Qwen's shape.
     for (const TurnRecord& t : recent_) {
         if (!t.user_text.empty()) {
-            out.push_back({Role::User, t.user_text});
+            // Images the HUMAN attached (dragged or pasted into the pane), as against
+            // the ones a tool returned below. Same MessageImage shape, same unresolved
+            // token count -- Agent::resolve_images fills both.
+            model::Message um{Role::User, t.user_text};
+            for (const std::string& p : t.observed_images) {
+                um.images.push_back({0, p});
+            }
+            out.push_back(std::move(um));
             continue;
         }
         // THE ASSISTANT TURN INCLUDES ITS CALL. Without this the transcript read
@@ -204,8 +211,16 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
         if (!t.assistant_text.empty() || !t.tool_call_text.empty()) {
             out.push_back({Role::Assistant, t.assistant_text, t.tool_call_text});
         }
-        if (!t.observation.empty()) {
-            out.push_back({Role::ToolResponse, t.observation});
+        if (!t.observation.empty() || !t.observed_images.empty()) {
+            model::Message m{Role::ToolResponse, t.observation};
+            // The pictures a tool returned ride on its response. `tokens` is left at 0
+            // here on purpose: only the caller that can preprocess the pixels knows how
+            // many pads to reserve, and rendering with 0 throws rather than silently
+            // reserving an empty run. See Agent::build_prompt.
+            for (const std::string& p : t.observed_images) {
+                m.images.push_back({0, p});
+            }
+            out.push_back(std::move(m));
         }
     }
 

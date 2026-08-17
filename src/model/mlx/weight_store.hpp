@@ -18,6 +18,13 @@
 #include "mlx/array.h"
 #include "mlx/io.h"
 #include "mlx/ops.h"
+// mx::eval lives here. This header calls it and used to rely on some other include in
+// the translation unit having pulled it in -- which held only because every existing
+// includer reached weight_store.hpp through qwen35_moe_model.hpp. Included first, it
+// failed to compile, and not with a missing-declaration error: `mx::eval(buf)` parses as
+// a DECLARATION of `buf` with type `mx::eval`, so the diagnostic was "no type named
+// 'eval'" plus a shadowing warning, several lines from the cause.
+#include "mlx/transforms.h"
 
 namespace lmp::model::mlxl {
 

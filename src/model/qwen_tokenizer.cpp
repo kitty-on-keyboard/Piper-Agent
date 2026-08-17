@@ -57,6 +57,15 @@ LoadStatus QwenTokenizer::load(const std::string& path, Family declared) {
     specials_.tool_response_close = lookup("</tool_response>");
     specials_.think_open = lookup("<think>");
     specials_.think_close = lookup("</think>");
+    // The vision specials. NOT in complete(): a text-only checkpoint has no reason to
+    // carry them, and refusing to load one over a token it will never emit would be a
+    // regression for every run that never shows the model a picture. Callers that need
+    // them check `has_vision_tokens()` -- which is what makes "this checkpoint cannot
+    // take an image" a clear answer rather than a kInvalidToken splicing itself into a
+    // prompt.
+    specials_.vision_start = lookup("<|vision_start|>");
+    specials_.vision_end = lookup("<|vision_end|>");
+    specials_.image_pad = lookup("<|image_pad|>");
     if (!specials_.complete()) {
         tok_.reset();
         return {false, "declared family Qwen3 but the structural tokens are incomplete; "

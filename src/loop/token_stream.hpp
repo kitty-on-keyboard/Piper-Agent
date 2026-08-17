@@ -144,10 +144,13 @@ class LoopBreaker {
 class GrammarSink final : public model::TokenSink {
   public:
     // `streamer` may be null, which is the non-streaming path (no observer attached).
-    // `max_think_tokens` 0 means no separate think cap (legacy / unconstrained tests).
-    GrammarSink(model::TurnGrammar& g, TokenStreamer* streamer,
-                std::size_t max_think_tokens = 0)
-        : g_(g), streamer_(streamer), max_think_tokens_(max_think_tokens) {}
+    //
+    // The think budget is NOT enforced here. It used to be, by flipping the grammar's
+    // phase from under the model -- see model::ThinkCapMask, which owns it now and forces
+    // a real `</think>` through the mask instead. A sink observes tokens; it cannot append
+    // one, so it was never the right place to end a phase.
+    GrammarSink(model::TurnGrammar& g, TokenStreamer* streamer)
+        : g_(g), streamer_(streamer) {}
 
     bool on_token(model::TokenId id) override;
 
@@ -157,14 +160,11 @@ class GrammarSink final : public model::TokenSink {
     // blurring the two is how the LengthCapped case used to read as completion.
     bool looped = false;
     std::size_t loop_repeats = 0;
-    // True when force_end_think() closed the Think phase because the think budget hit.
-    bool think_capped = false;
 
   private:
     model::TurnGrammar& g_;
     TokenStreamer* streamer_;
     LoopBreaker breaker_;
-    std::size_t max_think_tokens_ = 0;
 };
 
 } // namespace lmp::loop

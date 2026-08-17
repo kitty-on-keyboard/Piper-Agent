@@ -1,4 +1,9 @@
 #include "src/tools/mcp_host.hpp"
+#include "src/platform/event_log.hpp"
+#include <unistd.h>
+#include <system_error>
+#include <fstream>
+#include <filesystem>
 
 #include <algorithm>
 #include <cstdint>
@@ -156,10 +161,37 @@ void fill_param_constraints(const nlohmann::json& prop, parsephony::ParamSpec& p
     return rt.type;
 }
 
-// Flattens the MCP tool result's content blocks into the model-facing summary.
-[[nodiscard]] std::string summarize(const mcp::ToolResult& r) {
+// The file extension for an image block's mime type. Narrow on purpose: the decoder
+// sniffs the bytes, so this only has to be plausible enough that view_image's own
+// extension check and any human reading the spool directory agree with the content.
+[[nodiscard]] std::string extension_for_mime(std::string_view mime) {
+    if (mime == "image/png") { return "png"; }
+    if (mime == "image/jpeg" || mime == "image/jpg") { return "jpg"; }
+    if (mime == "image/gif") { return "gif"; }
+    if (mime == "image/webp") { return "webp"; }
+    if (mime == "image/bmp") { return "bmp"; }
+    if (mime == "image/tiff") { return "tiff"; }
+    if (mime == "image/heic" || mime == "image/heif") { return "heic"; }
+    return {};
+}
+
+// Flattens the MCP tool result's content blocks into the model-facing summary, SPOOLING
+// any images to disk so the model can actually be shown them.
+//
+// An MCP image arrives as base64 in a JSON block, and the rest of this codebase moves
+// images by PATH -- ToolResult::images, then a re-read at prompt time. Writing the bytes
+// into the workspace's spool directory is what joins the two, and it means an MCP
+// screenshot goes through exactly the same decode, smart-resize, patch and splice path as
+// a file the model opened itself. Nothing downstream needs to know where it came from.
+//
+// Before this, every image block became the literal text "[image content omitted]" -- so
+// a server whose whole purpose was returning a picture could describe one and never show
+// it.
+[[nodiscard]] std::string summarize(const mcp::ToolResult& r, const std::string& spool_dir,
+                                    std::vector<std::string>& images) {
     std::string out;
     if (r.content.is_array()) {
+        int index = 0;
         for (const nlohmann::json& block : r.content) {
             if (!block.is_object()) {
                 continue;
@@ -170,14 +202,42 @@ void fill_param_constraints(const nlohmann::json& prop, parsephony::ParamSpec& p
                     out += "\n";
                 }
                 out += block.value("text", std::string{});
-            } else if (!type.empty()) {
-                // Images, audio and embedded resources are not text and must not be
-                // silently dropped -- the model needs to know something came back.
-                if (!out.empty()) {
-                    out += "\n";
-                }
-                out += "[" + type + " content omitted]";
+                continue;
             }
+            if (type.empty()) {
+                continue;
+            }
+            std::string note = "[" + type + " content omitted]";
+            if (type == "image" && !spool_dir.empty()) {
+                const std::string ext =
+                    extension_for_mime(block.value("mimeType", std::string{}));
+                std::string bytes;
+                if (!ext.empty() &&
+                    platform::base64_decode(block.value("data", std::string{}), bytes) &&
+                    !bytes.empty()) {
+                    const std::string path = spool_dir + "/mcp_image_" +
+                                             std::to_string(::getpid()) + "_" +
+                                             std::to_string(index++) + "." + ext;
+                    std::error_code ec;
+                    std::filesystem::create_directories(spool_dir, ec);
+                    std::ofstream f(path, std::ios::binary);
+                    if (f && f.write(bytes.data(),
+                                     static_cast<std::streamsize>(bytes.size()))) {
+                        f.close();
+                        images.push_back(path);
+                        // The model is told the picture is THERE as well as shown it: a
+                        // path it can name in a later view_image call is worth more than
+                        // an image it can only remember.
+                        note = "[image spooled to " + path + " and shown to you]";
+                    }
+                }
+            }
+            // Audio, embedded resources and any image that could not be spooled: named,
+            // never silently dropped -- the model needs to know something came back.
+            if (!out.empty()) {
+                out += "\n";
+            }
+            out += note;
         }
     }
     if (out.empty() && r.structured.has_value()) {
@@ -411,7 +471,9 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
                 try {
                     const mcp::ToolResult r = client->call_tool(
                         remote_name, args, {}, call_timeout, std::move(cancelled));
-                    std::string text = summarize(r);
+                    std::vector<std::string> images;
+                    std::string text =
+                        summarize(r, host_registry->workspace().spool_dir, images);
                     if (r.is_error) {
                         // The tool ran and failed. That is evidence the model can act on,
                         // so it is a ToolError and not a Refused.
@@ -420,7 +482,9 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
                                                                 "error with no message"
                                                               : text);
                     }
-                    return ToolResult::okay(std::move(text));
+                    ToolResult ok = ToolResult::okay(std::move(text));
+                    ok.images = std::move(images);
+                    return ok;
                 } catch (const mcp::McpError& e) {
                     if (e.code() == mcp::to_int(mcp::ErrorCode::kRequestCancelled)) {
                         return ToolResult::cancelled(std::string("MCP call cancelled: ") +

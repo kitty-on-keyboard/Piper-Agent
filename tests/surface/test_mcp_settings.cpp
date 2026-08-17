@@ -16,6 +16,9 @@ using lmp::tools::McpServerConfig;
 
 namespace {
 
+// The FLAT shape: mcp_servers directly under params. Headless drivers send this, and it
+// is what this file used to test exclusively -- which is precisely why the parser's real
+// bug went unseen for months. Kept, because those drivers are real; no longer alone.
 std::string start_message(const std::string& servers_json) {
     return R"({"jsonrpc":"2.0","id":"1","method":"lmp/start","params":{)"
            R"("mission":"m","model_dir":"/m","workspace_root":"/w",)"
@@ -23,7 +26,63 @@ std::string start_message(const std::string& servers_json) {
            servers_json + "}}";
 }
 
+// THE SHAPE THE EXTENSION ACTUALLY SENDS. lmp/start carries StartParams -- {mission,
+// settings, image_paths} -- so every RunSettings field, mcp_servers included, is nested one
+// level deeper than the helper above pretends. See the note in parse_mcp_servers.
+std::string real_start_message(const std::string& servers_json) {
+    return R"({"jsonrpc":"2.0","id":"1","method":"lmp/start","params":{)"
+           R"("mission":"m","image_paths":[],"settings":{)"
+           R"("model_dir":"/m","workspace_root":"/w","mode":"agent",)"
+           R"("mcp_servers":)" +
+           servers_json + "}}}";
+}
+
 } // namespace
+
+// NO MCP SERVER HAD EVER CONNECTED.
+//
+// parse_mcp_servers read params.mcp_servers; the extension sends params.settings.
+// mcp_servers. The two never met, so `mcp_servers` was silently empty on every run ever
+// started from the editor -- MEASURED: a 21 MB event log spanning months contains zero
+// `mcp_server` events, and a run whose mission explicitly said "use the godoer mcp server"
+// reported 26 tools, the built-in count, and fell back to driving the CLI through the
+// shell.
+//
+// It is the ONLY reader in the sidecar that walks real JSON. Every other setting goes
+// through surface::string_field, a flat substring search that finds a nested key by
+// accident and so cannot be wrong about nesting. Being the one that has to know the shape
+// is what made this the one that could be wrong about it -- and the test agreed with the
+// parser instead of with the protocol, so both were wrong together and the gate was green.
+TEST(the_server_list_is_read_from_the_shape_the_extension_sends) {
+    std::string sig;
+    const auto servers = parse_mcp_servers(
+        real_start_message(R"([{"name":"godoer","command":"/opt/venv/bin/godoer",)"
+                           R"("args":["mcp"],"trusted":true}])"),
+        sig);
+    REQUIRE(servers.size() == 1);
+    CHECK_EQ(servers[0].name, std::string("godoer"));
+    CHECK_EQ(servers[0].command, std::string("/opt/venv/bin/godoer"));
+    REQUIRE(servers[0].args.size() == 1);
+    CHECK_EQ(servers[0].args[0], std::string("mcp"));
+    CHECK(servers[0].trusted);
+    CHECK(!sig.empty());
+
+    // `trusted` must survive the nesting too: it is the field that decides whether a tool
+    // runs outside Seatbelt with no card, and a parser that found the server but lost the
+    // flag would be the worse failure of the two.
+    std::string sig2;
+    const auto untrusted = parse_mcp_servers(
+        real_start_message(R"([{"name":"s","command":"c","trusted":false}])"), sig2);
+    REQUIRE(untrusted.size() == 1);
+    CHECK(!untrusted[0].trusted);
+
+    // An absent list is still an empty list, not a parse failure.
+    std::string sig3;
+    CHECK(parse_mcp_servers(
+              R"({"method":"lmp/start","params":{"mission":"m","settings":{"mode":"agent"}}})",
+              sig3)
+              .empty());
+}
 
 TEST(a_server_list_is_read_off_the_start_message) {
     std::string sig;
@@ -124,4 +183,36 @@ TEST(the_parser_can_return_more_than_one_and_can_return_none) {
     CHECK_EQ(two[0].name, std::string("a"));
     CHECK_EQ(two[1].name, std::string("b"));
     CHECK(parse_mcp_servers(start_message("[]"), sig).empty());
+}
+
+// --- repeated string fields ----------------------------------------------------
+//
+// `image_paths` on lmp/start and lmp/message. The string_field extractors are a substring
+// search for a scalar and cannot walk an array, so this is the parser those requests use.
+TEST(a_repeated_string_field_is_parsed_from_params_or_the_root) {
+    const std::string nested =
+        R"({"method":"lmp/message","params":{"text":"look","image_paths":["a.png","b/c.jpg"]}})";
+    const std::vector<std::string> got = lmp::surface::parse_string_array(nested, "image_paths");
+    REQUIRE(got.size() == std::size_t{2});
+    CHECK_EQ(got[0], std::string("a.png"));
+    CHECK_EQ(got[1], std::string("b/c.jpg"));
+
+    // Same message shape without the params wrapper, which is how several of these
+    // requests arrive.
+    const std::string flat = R"({"image_paths":["only.png"]})";
+    CHECK_EQ(lmp::surface::parse_string_array(flat, "image_paths").size(), std::size_t{1});
+}
+
+TEST(a_missing_or_malformed_repeated_field_is_empty_rather_than_wrong) {
+    CHECK(lmp::surface::parse_string_array(R"({"params":{}})", "image_paths").empty());
+    CHECK(lmp::surface::parse_string_array("not json at all", "image_paths").empty());
+    // A scalar where an array belongs is not silently promoted to a one-element list.
+    CHECK(lmp::surface::parse_string_array(R"({"image_paths":"a.png"})", "image_paths").empty());
+    // Non-strings and empties are DROPPED: an empty path would reach the prompt builder
+    // as an unreadable image and cost the turn a note about a file nobody attached.
+    const std::string mixed = R"({"image_paths":["ok.png","",7,null,"two.png"]})";
+    const std::vector<std::string> got = lmp::surface::parse_string_array(mixed, "image_paths");
+    REQUIRE(got.size() == std::size_t{2});
+    CHECK_EQ(got[0], std::string("ok.png"));
+    CHECK_EQ(got[1], std::string("two.png"));
 }

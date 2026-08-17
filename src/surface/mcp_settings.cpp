@@ -33,6 +33,30 @@ std::vector<std::string> json_string_array(const nlohmann::json& obj, const char
 
 } // namespace
 
+std::vector<std::string> parse_string_array(const std::string& message,
+                                            std::string_view key) {
+    std::vector<std::string> out;
+    const nlohmann::json root = nlohmann::json::parse(message, nullptr, false);
+    if (root.is_discarded() || !root.is_object()) {
+        return out;
+    }
+    const nlohmann::json& params =
+        root.contains("params") && root.at("params").is_object() ? root.at("params") : root;
+    const std::string k(key);
+    if (!params.contains(k) || !params.at(k).is_array()) {
+        return out;
+    }
+    for (const nlohmann::json& e : params.at(k)) {
+        // Non-strings and empties are DROPPED rather than turned into an empty path: an
+        // empty entry would reach the prompt builder as an unreadable image and cost the
+        // turn a "could not be read" note about a file nobody asked for.
+        if (e.is_string() && !e.get<std::string>().empty()) {
+            out.push_back(e.get<std::string>());
+        }
+    }
+    return out;
+}
+
 std::vector<tools::McpServerConfig> parse_mcp_servers(const std::string& message,
                                                      std::string& signature) {
     // nlohmann rather than the surface::string_field extractors, and this is the one
@@ -48,10 +72,33 @@ std::vector<tools::McpServerConfig> parse_mcp_servers(const std::string& message
     }
     const nlohmann::json& params =
         root.contains("params") && root.at("params").is_object() ? root.at("params") : root;
-    if (!params.contains("mcp_servers") || !params.at("mcp_servers").is_array()) {
+    // WHERE THE FIELD ACTUALLY IS: lmp/start carries StartParams -- {mission, settings,
+    // image_paths} -- so mcp_servers lives at params.SETTINGS.mcp_servers. This looked at
+    // params.mcp_servers and therefore never found a server, for anyone, ever: a 21 MB
+    // event log covering months of runs contains ZERO `mcp_server` events, which is what
+    // "no MCP server has ever connected" looks like from the outside.
+    //
+    // It survived because being the one place with a real parser is exactly what made it
+    // vulnerable. Every other setting is read by surface::string_field, a flat substring
+    // search that finds a nested key by accident and cannot be wrong about nesting; this
+    // is the only reader that has to KNOW the shape, and it guessed. The test agreed with
+    // the guess -- its start_message() helper built params.mcp_servers, a message the
+    // extension has never sent -- so both halves were wrong in the same direction and the
+    // gate stayed green.
+    //
+    // Both spellings are accepted. The nested one is what the schema defines and what the
+    // extension sends; the flat one is what the existing tests and headless drivers use,
+    // and dropping it would break them for no gain.
+    const nlohmann::json& settings =
+        params.contains("settings") && params.at("settings").is_object() ? params.at("settings")
+                                                                        : params;
+    const nlohmann::json& holder =
+        settings.contains("mcp_servers") && settings.at("mcp_servers").is_array() ? settings
+                                                                                  : params;
+    if (!holder.contains("mcp_servers") || !holder.at("mcp_servers").is_array()) {
         return out;
     }
-    const nlohmann::json& list = params.at("mcp_servers");
+    const nlohmann::json& list = holder.at("mcp_servers");
     for (const nlohmann::json& s : list) {
         if (!s.is_object()) {
             continue;

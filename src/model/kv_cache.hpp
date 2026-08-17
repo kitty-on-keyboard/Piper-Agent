@@ -82,19 +82,46 @@ struct TurnReuse {
     std::size_t prefill_from = 0;
 };
 
+// WHAT A POSITION HOLDS THAT ITS TOKEN ID DOES NOT.
+//
+// The ledger's whole claim is "the KV at these positions is what this prompt prefix would
+// produce", and it proves it by comparing token ids. That is sound only while the ids
+// determine the embeddings -- which images break: every image in the prompt is a run of
+// the SAME `<|image_pad|>` id, and the rows spliced over them come from the picture. Two
+// different screenshots produce byte-identical id runs, so an id-only comparison reports
+// a verified reuse of a prefix whose KV encodes the other one, and the model describes a
+// picture it was never shown. Fluently, and with nothing in the log to say so.
+//
+// So a position may carry a tag: zero for an ordinary token, and the content hash of the
+// image covering it otherwise. Comparison is over the PAIR. This strengthens the existing
+// contract rather than adding an exception to it -- ids alone were never the thing that
+// determined the cache, they were only a proxy that happened to be exact until images.
+using ContentTag = std::uint64_t;
+
 class KvCacheLedger {
   public:
     KvCacheLedger();
 
-    // Called after the backend actually consumed these ids (prefill or decode).
+    // Called after the backend actually consumed these ids (prefill or decode). The
+    // overloads without tags mean "all ordinary", which is every generated token and
+    // every text prompt.
     void append(const std::vector<TokenId>& ids);
     void append(std::span<const TokenId> ids);
     void append(TokenId id);
+    void append(TokenId id, ContentTag tag);
+    void append(std::span<const TokenId> ids, std::span<const ContentTag> tags);
 
-    // Compares the cached ids against `prompt`, id by id. The hash is a fast reject;
-    // equality is the proof. A hash match alone is never trusted (S5.10: verified,
-    // never assumed).
-    [[nodiscard]] ReuseDecision plan_reuse(const std::vector<TokenId>& prompt) const;
+    // Compares the cached ids against `prompt`, id by id AND tag by tag. The hash is a
+    // fast reject; equality is the proof. A hash match alone is never trusted (S5.10:
+    // verified, never assumed).
+    //
+    // `prompt_tags` empty means the prompt carries no images. It is NOT required to be
+    // the same length as `prompt`; positions past its end are ordinary.
+    [[nodiscard]] ReuseDecision plan_reuse(
+        const std::vector<TokenId>& prompt,
+        std::span<const ContentTag> prompt_tags = {}) const;
+
+    [[nodiscard]] const std::vector<ContentTag>& tags() const noexcept { return tags_; }
 
     // Drop the last `n` tokens; more than is held clears it. THE SPECULATIVE ROLLBACK.
     void truncate_last(std::size_t n);
@@ -115,6 +142,11 @@ class KvCacheLedger {
 
   private:
     std::vector<TokenId> ids_;
+    // Parallel to ids_, and zero for every ordinary token -- which is nearly all of them,
+    // so this is 8 bytes a position that is almost always the same 8 bytes. Kept dense
+    // rather than as a sparse map so that truncate_to stays the O(1) resize that the
+    // speculative rollback depends on.
+    std::vector<ContentTag> tags_;
     // hashes_[i] is the fingerprint of ids_[0..i). Always size() + 1 entries, so
     // hashes_[0] is the empty-ledger seed and "a ledger equals the prefix it was
     // truncated to" holds by construction rather than by arithmetic.
@@ -132,6 +164,7 @@ class KvCacheLedger {
 // enumeration is a list someone forgets to extend.
 [[nodiscard]] TurnReuse plan_turn_reuse(const KvCacheLedger& ledger,
                                         const std::vector<TokenId>& prompt,
-                                        std::size_t checkpoint_len, bool checkpoint_valid);
+                                        std::size_t checkpoint_len, bool checkpoint_valid,
+                                        std::span<const ContentTag> prompt_tags = {});
 
 } // namespace lmp::model

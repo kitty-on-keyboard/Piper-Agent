@@ -11,6 +11,8 @@ add_library(lmp_model
   backend.cpp
   chat_template.cpp
   grammar.cpp
+  image_decode.cpp
+  image_preprocess.cpp
   kv_cache.cpp
   mlx_backend.cpp
   model_limits.cpp
@@ -24,6 +26,17 @@ target_include_directories(lmp_model PUBLIC "${PROJECT_SOURCE_DIR}")
 target_link_libraries(lmp_model
   PRIVATE lmp_warnings lmp_assertions simdjson
   PUBLIC lmp_platform frankentok parsephony lmp_draft)
+
+# --- image decoding ---------------------------------------------------------
+#
+# ImageIO rather than a vendored decoder (see image_decode.hpp for why). These are system
+# frameworks on every target this product has -- CI included, which runs macos-15 -- so
+# there is nothing to fetch and nothing to keep up to date. image_preprocess.cpp links
+# none of it and is testable anywhere.
+if(APPLE)
+  target_link_libraries(lmp_model PRIVATE
+    "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
+endif()
 
 # --- MLX --------------------------------------------------------------------
 #

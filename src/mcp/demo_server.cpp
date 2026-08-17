@@ -85,6 +85,25 @@ void register_tools(Server& server) {
         return ToolResult::text("counted to " + std::to_string(n));
     });
 
+    // An image block, so the host's spooling path has something real to round-trip. The
+    // payload is the smallest legal PNG: an 8-bit greyscale 1x1, base64'd. Kept tiny
+    // because what is under test is the JOURNEY -- base64 to disk to ToolResult::images --
+    // and not the picture.
+    Tool shot;
+    shot.name = "screenshot";
+    shot.title = "Screenshot";
+    shot.description =
+        "Returns a tiny image, so a host can be checked for whether it can show the "
+        "model a picture rather than a note saying one arrived.";
+    server.add_tool(std::move(shot), [](const nlohmann::json&, RequestContext&) {
+        ToolResult r;
+        r.add(content::text("here is the screenshot"));
+        r.add(content::image(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP4DwABAQEAWk1v8QAAAABJRU5ErkJggg==",
+            "image/png"));
+        return r;
+    });
+
     Tool boom;
     boom.name = "always_fails";
     boom.title = "Always fails";

@@ -75,6 +75,7 @@ export interface PerfSample {
 export interface StartParams {
   mission: string;
   settings: RunSettings;
+  image_paths: string[];
 }
 export interface StartResult {
   run_id: string;
@@ -119,6 +120,7 @@ export interface ApproveResult {
 export interface MessageParams {
   run_id: string;
   text: string;
+  image_paths: string[];
 }
 export interface MessageResult {
   accepted: boolean;
@@ -203,6 +205,7 @@ export interface ApprovalRequestNotification {
   preview: string;
   command: string;
   irreversible: boolean;
+  can_remember: boolean;
   risk: number;
   capabilities: CapabilityChips;
 }

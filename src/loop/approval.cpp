@@ -25,15 +25,55 @@ namespace {
            w == "node" || w == "osascript";
 }
 
-[[nodiscard]] bool looks_like_script_path(std::string_view w) noexcept {
+// The last path component. An interpreter is an interpreter however it is spelled, and
+// `.venv/bin/python script.py` is the shape a project-local toolchain actually produces.
+[[nodiscard]] std::string_view basename_of(std::string_view w) noexcept {
+    const auto slash = w.rfind('/');
+    return slash == std::string_view::npos ? w : w.substr(slash + 1);
+}
+
+[[nodiscard]] bool has_script_extension(std::string_view w) noexcept {
+    return w.size() > 3 && (w.ends_with(".sh") || w.ends_with(".py") || w.ends_with(".rb") ||
+                            w.ends_with(".pl") || w.ends_with(".js") || w.ends_with(".mjs"));
+}
+
+// A script BODY about to be handed to something that will run it: the operand of `bash`,
+// `python`, `source` or `.`. A slash counts HERE because the VERB already established that
+// the operand is a file -- `bash /usr/local/lib/deploy` is a script whatever it is called.
+[[nodiscard]] bool looks_like_script_operand(std::string_view w) noexcept {
     if (w.empty() || w[0] == '-') {
         return false;
     }
-    if (w.find('/') != std::string_view::npos) {
-        return true;
+    return w.find('/') != std::string_view::npos || has_script_extension(w);
+}
+
+// The COMMAND WORD itself naming a script we would be running blind. A script extension is
+// required; a slash is deliberately NOT enough.
+//
+// A slash used to be enough, and that made this function measure SPELLING instead of
+// opacity. `pytest -q` resolves off PATH to a body we cannot see and auto-approved;
+// `.venv/bin/pytest -q` is the same program, the same risk score and the same effect, and
+// carded -- because it was spelled with a slash. Every project-local toolchain is spelled
+// that way: a venv, `node_modules/.bin`, `build/bin`. Naming an executable by path is not
+// evidence about what it does.
+//
+// MEASURED, on the run that prompted this: 89 command decisions with auto_approve_exec ON,
+// 35 escalations, 27 of them from this rule, 24 of those scoring 0.20 -- `--help`, `docs`,
+// `model list` against a venv CLI. The operator then clicked "Always allow" 19 times and
+// none of the rules could ever match (see can_persist_allowlist_rule), so it never got
+// better. Moving the venv inside the workspace root does not help either; it never was
+// about location.
+//
+// What stays closed is the shape this was built for: an interpreter invoked on a file
+// (`bash wipe.sh`, `.venv/bin/python wipe.py`), `source`/`eval`, and a script named
+// outright (`./wipe.sh`). Those name a body we could not read even in principle. A bare
+// executable -- `foo`, `./foo`, `/a/b/foo` -- is a program invocation and is answered by
+// the risk score, exactly as the same program off PATH always has been.
+[[nodiscard]] bool names_a_script_file(std::string_view w) noexcept {
+    if (w.empty() || w[0] == '-') {
+        return false;
     }
-    return w.size() > 3 && (w.ends_with(".sh") || w.ends_with(".py") || w.ends_with(".rb") ||
-                            w.ends_with(".pl") || w.ends_with(".js") || w.ends_with(".mjs"));
+    return has_script_extension(w);
 }
 
 // Best-effort operands whose bytes are NOT in the command string. Empty when there is
@@ -58,12 +98,16 @@ namespace {
         return {};
     }
     if (words[0] == "source" || words[0] == ".") {
-        if (words.size() >= 2 && looks_like_script_path(words[1])) {
+        if (words.size() >= 2 && looks_like_script_operand(words[1])) {
             return {words[1]};
         }
         return {};
     }
-    if (is_interpreter(words[0])) {
+    // Matched on the BASENAME, so an interpreter reached through a venv is still an
+    // interpreter. `.venv/bin/python wipe.py` used to be caught only by accident -- the
+    // slash in words[0] made it opaque -- and narrowing that slash rule would have opened
+    // the real hole this function exists to close if the operand were not read here.
+    if (is_interpreter(basename_of(words[0]))) {
         for (std::size_t i = 1; i < words.size(); ++i) {
             if (words[i] == "-c") {
                 return {}; // body is in the string; no file digest
@@ -71,14 +115,14 @@ namespace {
             if (!words[i].empty() && words[i][0] == '-') {
                 continue;
             }
-            if (looks_like_script_path(words[i])) {
+            if (looks_like_script_operand(words[i])) {
                 return {words[i]};
             }
             return {};
         }
         return {};
     }
-    if (looks_like_script_path(words[0])) {
+    if (names_a_script_file(words[0])) {
         return {words[0]};
     }
     return {};
@@ -100,6 +144,122 @@ namespace {
     std::ostringstream oss;
     oss << std::hex << bits;
     return oss.str();
+}
+
+// The targets of TRUNCATING redirects, and the command with those redirects removed.
+//
+// QUOTE-AWARE, because the point of the scan is to be told when we have misread the
+// command. A `>` inside quotes is data, and mistaking it for a redirect would hand the
+// re-classification in redirects_only_own_output() a mangled string -- which classifies
+// Unparseable, which clears every capability bit, which would read as "nothing was
+// destroyed". `unterminated` is how that path refuses to answer instead.
+struct RedirectScan {
+    std::vector<std::string> targets;
+    // The command with each truncating redirect operator and its target removed. Used
+    // ONLY to ask the classifier whether anything else in the command destroys data.
+    std::string without;
+    bool unterminated = false;
+};
+
+[[nodiscard]] RedirectScan scan_truncating_redirects(const std::string& command) {
+    RedirectScan out;
+    const std::size_t n = command.size();
+    char quote = '\0';
+    for (std::size_t i = 0; i < n; ++i) {
+        const char c = command[i];
+        if (quote != '\0') {
+            out.without.push_back(c);
+            if (c == '\\' && quote == '"' && i + 1 < n) {
+                out.without.push_back(command[++i]);
+                continue;
+            }
+            if (c == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (c == '\\' && i + 1 < n) {
+            out.without.push_back(c);
+            out.without.push_back(command[++i]);
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            quote = c;
+            out.without.push_back(c);
+            continue;
+        }
+        if (c != '>') {
+            out.without.push_back(c);
+            continue;
+        }
+        // `>>` appends. It destroys nothing, so it is copied through untouched.
+        if (i + 1 < n && command[i + 1] == '>') {
+            out.without.push_back(c);
+            out.without.push_back(command[++i]);
+            continue;
+        }
+        std::size_t at = i + 1;
+        if (at < n && command[at] == '|') { // `>|`, bash's force-truncate
+            ++at;
+        }
+        while (at < n && (command[at] == ' ' || command[at] == '\t')) {
+            ++at;
+        }
+        // `2>&1` duplicates a DESCRIPTOR. It names no file, so it destroys nothing and
+        // tells us nothing; the construct is left exactly where it is. This is the single
+        // most common redirect in real agent commands, so getting it wrong here would
+        // matter more than the case the function was written for.
+        if (at < n && command[at] == '&') {
+            out.without.push_back(c);
+            continue;
+        }
+        std::string target;
+        char tq = '\0';
+        for (; at < n; ++at) {
+            const char t = command[at];
+            if (tq != '\0') {
+                if (t == tq) {
+                    tq = '\0';
+                } else {
+                    target.push_back(t);
+                }
+                continue;
+            }
+            if (t == '\'' || t == '"') {
+                tq = t;
+                continue;
+            }
+            if (t == '\\' && at + 1 < n) {
+                target.push_back(command[++at]);
+                continue;
+            }
+            if (std::isspace(static_cast<unsigned char>(t)) != 0 || t == ';' || t == '|' ||
+                t == '&' || t == '>' || t == '<' || t == ')') {
+                break;
+            }
+            target.push_back(t);
+        }
+        if (tq != '\0' || target.empty()) {
+            out.unterminated = true;
+            return out;
+        }
+        out.targets.push_back(std::move(target));
+        // Drop the fd digits and any `&` that belonged to the operator just removed. A
+        // stray `&` left behind is a STAGE character, and it would change the command
+        // chain the classifier is about to be shown.
+        while (!out.without.empty() &&
+               std::isdigit(static_cast<unsigned char>(out.without.back())) != 0) {
+            out.without.pop_back();
+        }
+        if (!out.without.empty() && out.without.back() == '&') {
+            out.without.pop_back();
+        }
+        i = at - 1;
+    }
+    if (quote != '\0') {
+        out.unterminated = true;
+    }
+    return out;
 }
 
 [[nodiscard]] std::string digest_of_script(const std::string& workspace_root,
@@ -255,6 +415,30 @@ bool is_allowlisted(const std::string& command, const std::vector<std::string>& 
     return false;
 }
 
+// Whether "Always allow" on this card could persist a rule that will EVER match again.
+//
+// The button used to be offered whenever a command card was not irreversible, and it wrote
+// whatever it was given to lmPipe.allowedCommands. For a command carrying `;` or `|` -- the
+// shape a model reaches for constantly, `G=/path/tool; $G docs X 2>&1 | head -40` -- the
+// stored rule was unreachable twice over: is_allowlisted() refuses any command with shell
+// chaining, and allowlist_may_auto_approve() refuses anything not fully parsed. The rule
+// was saved, the settings file grew, and nothing changed.
+//
+// MEASURED: 19 entries in one workspace's .vscode/settings.json, every one dead on arrival,
+// against a run that answered 35 cards. A button that reports "you will not be asked again"
+// and leaves you being asked again is worse than no button, so the offer is now computed
+// from the same predicates that will judge the rule.
+//
+// Asked of the MATCHER ITSELF, with the command supplied as its own rule, so this cannot
+// drift from is_allowlisted's chaining rule -- there is exactly one copy of that rule and
+// this is not a second one.
+bool can_persist_allowlist_rule(const std::string& command, const tools::RiskHint& hint) {
+    if (command.empty() || !allowlist_may_auto_approve(hint)) {
+        return false;
+    }
+    return is_allowlisted(command, {command});
+}
+
 Approval route_approval(const tools::RiskHint& hint, const HitlThresholds& t) {
     const double score = risk_score(hint);
     if (score >= t.reject_above_risk) {
@@ -355,6 +539,77 @@ bool Agent::tool_allowed(const tools::ToolDecl& decl) const {
         return false;
     }
     return true;
+}
+
+// Whether every truncating redirect in this command lands on the run's OWN output, so the
+// `destroys_data` the classifier raised is not destruction of the operator's data.
+//
+// THE CLASSIFIER CANNOT ANSWER THIS AND SHOULD NOT TRY. blast_radius is a pure function
+// with no filesystem: it sees `> out.txt`, cannot know whether out.txt exists, and takes
+// the safe reading -- "may land on a file that exists", destroys_data. That is correct for
+// what it is. The gate is the layer that can actually look, and it already draws exactly
+// this distinction for writes: run_wrote_ is what separates "iterating on its own output"
+// from "overwriting the operator's data", and the write gate has used it since a run that
+// rewrote one file eleven times raised eleven cards with auto-approve on.
+//
+// The command gate never got the same treatment, so ordinary redirected work carded:
+// `echo hi > out.txt` scores 0.30 and is forced past auto_approve_exec by
+// is_irreversible(); `pytest -q > report.txt 2>&1` scores 0.50. MEASURED: 8 of 35
+// escalations on the run that prompted this, none of them touching a file the operator had
+// written.
+//
+// THE CLASSIFIER IS THE ORACLE FOR "WAS THE REDIRECT THE ONLY DESTRUCTIVE ACT". Rather
+// than guess from the verb, the command is re-classified with the truncating redirects
+// removed; only if THAT comes back with destroys_data clear were the redirects the whole
+// of it. `rm -rf build > log.txt` therefore still cards, and so it should.
+//
+// Every gate here refuses rather than loosens when it cannot be sure: a misread command
+// (unterminated quote), a target whose value is not in the string (`> $OUT`), a target
+// outside the workspace (`> /tmp/x`, which Seatbelt denies anyway), or an existing file
+// this run did not write.
+bool Agent::redirects_only_own_output(const std::string& command,
+                                     const tools::RiskHint& hint) const {
+    if (!hint.caps.destroys_data ||
+        hint.status == blast_radius::ParseStatus::Unparseable) {
+        return false;
+    }
+    const RedirectScan scan = scan_truncating_redirects(command);
+    if (scan.unterminated || scan.targets.empty()) {
+        return false;
+    }
+    const std::string& root = registry_.workspace().root;
+    if (root.empty()) {
+        return false;
+    }
+    // A trailing slash on the root would put the substring below off by one and hand
+    // would_overwrite_existing a path with a leading '/', which reads as absolute.
+    std::string base = root;
+    while (base.size() > 1 && base.back() == '/') {
+        base.pop_back();
+    }
+    for (const std::string& target : scan.targets) {
+        // The bytes of the target are not all in the string, so where they land is
+        // undecidable -- the same rule blast_radius applies to a substituted operand.
+        if (target.find('$') != std::string::npos || target.find('`') != std::string::npos) {
+            return false;
+        }
+        const std::string abs = platform::resolve_against(base, target);
+        if (!platform::is_within(base, abs) || abs.size() <= base.size()) {
+            return false;
+        }
+        const std::string rel = abs.substr(base.size() + 1);
+        if (run_wrote_.find(platform::lexically_normal(rel)) != run_wrote_.end()) {
+            continue; // its own output, written earlier in this run
+        }
+        if (registry_.would_overwrite_existing(rel)) {
+            return false; // content this run did not produce
+        }
+    }
+    const tools::RiskHint stripped = tools::classify_command(scan.without, base, base);
+    if (stripped.status == blast_radius::ParseStatus::Unparseable) {
+        return false;
+    }
+    return !stripped.caps.destroys_data;
 }
 
 // The HITL gate, moved here from dispatch_call so agent.cpp stays about the loop and the
@@ -525,7 +780,21 @@ std::optional<tools::ToolResult> Agent::gate_call(
         // containment card is the write/irreversible gate above -- not a phantom
         // Unparseable hint from the RiskHint default.
         if (!cmd.empty()) {
-            const tools::RiskHint hint = tools::classify_command(cmd, root, root);
+            tools::RiskHint hint = tools::classify_command(cmd, root, root);
+            // Redirecting into a file the run itself produced is not destruction. Applied
+            // to the hint rather than to the route, so the risk score, the capability chips
+            // on the card and is_irreversible() all agree about what this command does --
+            // one of them disagreeing is how the write gate's own switch came to look
+            // broken. See redirects_only_own_output() for why the gate may decide this and
+            // the classifier may not.
+            if (redirects_only_own_output(cmd, hint)) {
+                emit("redirect_own_output",
+                     {{"tool", name},
+                      {"command", cmd},
+                      {"why", "every truncating redirect lands on this run's own output "
+                              "or on a path that does not exist"}});
+                hint.caps.destroys_data = false;
+            }
             Approval route = route_approval(hint, config_.hitl);
 
             // Four checks, and the ORDER is the design.

@@ -1,5 +1,8 @@
 #include "src/tools/registry.hpp"
 
+#include "src/model/image_decode.hpp"
+#include "src/model/image_preprocess.hpp"
+
 #include "src/tools/concurrent_calls.hpp"
 #include "src/tools/ignore_dirs.hpp"
 #include "src/tools/symbol_index.hpp"
@@ -708,6 +711,82 @@ Registry::Registry(WorkspaceContext ctx)
     if (workspace_fs_.valid()) {
         ctx_.root = workspace_fs_.root();
     }
+    // --- view_image --------------------------------------------------------
+    //
+    // A SEPARATE TOOL, not a branch inside read_file. Reading a PNG as text is a mistake
+    // the model should be told about plainly ("that is an image, use view_image"), and
+    // silently doing something else because the extension looked graphical is the kind of
+    // helpfulness that makes a tool's contract unknowable. It also keeps the cost
+    // legible: this call spends context proportional to the picture, and the model should
+    // be choosing that deliberately.
+    //
+    // The result carries the PATH, not pixels. Decoding needs the vision config, which
+    // lives beside the model; the prompt builder re-reads the file when it renders, so
+    // the bytes the model sees are the bytes on disk at that moment.
+    //
+    // DECLARED ONLY IF THE MODEL CAN SEE. Not offering the tool is how a text-only
+    // checkpoint says "I cannot look at that" -- in the one language the model always
+    // understands, at the only moment it can still choose differently. Offered anyway,
+    // the tool returns Ok and the run dies on the next turn, several layers away, having
+    // already told the model it was shown a picture it was never shown.
+    if (ctx_.model_can_see) {
+        ToolDecl d;
+        d.name = "view_image";
+        d.description =
+            "Look at an image file (png, jpg, heic, gif, bmp, tiff, webp) -- the picture "
+            "itself, not a description of it. Use this when you need to SEE something: a "
+            "screenshot, a diagram, a rendered output, a photo. Costs context in "
+            "proportion to the image's size, so prefer it when looking is the point "
+            "rather than as a substitute for reading a file.";
+        d.spec.name = d.name;
+        d.spec.params = {param("path", ParamType::Text, true)};
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            const std::string& path = *get(p, "path");
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
+            }
+            if (!model::looks_like_image_path(path)) {
+                return ToolResult::error(
+                    ErrorClass::Malformed, false,
+                    "(" + path +
+                        " does not look like an image. view_image reads png, jpg, heic, "
+                        "gif, bmp, tiff and webp; for text use read_file.)");
+            }
+            // Decoded HERE as well as at render time, so a file that cannot be read is a
+            // failed tool call the model can react to -- rather than a prompt that throws
+            // several layers away, after the turn has already been recorded.
+            model::ImageRGB img;
+            std::string err;
+            // A DECODE bound, separate from the token budget below: this one exists to
+            // refuse a decompression bomb before the pixels are allocated, and it is
+            // checked against the file's header. 64 MP is well past any real screenshot
+            // and well short of a 48 GB host's patience.
+            constexpr long long kMaxDecodedPixels = 64LL * 1000LL * 1000LL;
+            if (!model::decode_image_file(resolved.absolute, kMaxDecodedPixels, img, err)) {
+                return ToolResult::error(ErrorClass::Malformed, false,
+                                         "(" + path + " could not be decoded: " + err + ")");
+            }
+            model::PreprocessConfig cfg;
+            cfg.max_pixels =
+                model::token_budget_to_max_pixels(ctx_.max_image_tokens, cfg);
+            model::PreprocessedImage pre;
+            if (!model::preprocess_image(img, cfg, pre, err)) {
+                return ToolResult::error(ErrorClass::Malformed, false,
+                                         "(" + path + " could not be prepared: " + err + ")");
+            }
+            // The summary says what it COST, because that is the part the model cannot
+            // see and the part that competes with everything else in the context.
+            ToolResult r = ToolResult::okay(
+                "(" + path + ": " + std::to_string(img.width) + "x" +
+                std::to_string(img.height) + " image, shown to you as " +
+                std::to_string(pre.token_count()) + " tokens)");
+            r.images.push_back(path);
+            r.bytes_read = img.rgb.size();
+            return r;
+        });
+    }
+
     // --- read_file ---------------------------------------------------------
     {
         ToolDecl d;

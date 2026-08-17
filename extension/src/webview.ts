@@ -694,6 +694,32 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
   color: var(--faint); margin-bottom: 6px; min-height: 13px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* --- attachments ---------------------------------------------------------
+   A strip of chips above the composer, and a drop veil over the whole pane. The veil is
+   pointer-events:none so it can never swallow a click when a stuck dragleave leaves it
+   visible -- a drop target that eats the send button is worse than one that never shows. */
+#attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px; }
+#attachments:empty { display: none; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 6px 3px 3px; border-radius: 6px;
+  background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+  font-size: 11px; max-width: 220px;
+}
+.attach-chip img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; }
+.attach-chip .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip .x { cursor: pointer; opacity: 0.7; padding: 0 2px; }
+.attach-chip .x:hover { opacity: 1; }
+.attach-chip.pending { opacity: 0.55; }
+.attach-chip.failed { background: var(--vscode-inputValidation-errorBackground); }
+#dropVeil {
+  position: fixed; inset: 0; display: none; pointer-events: none; z-index: 50;
+  align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--vscode-editor-background) 70%, transparent);
+  border: 2px dashed var(--vscode-focusBorder);
+  font-size: 13px; color: var(--vscode-foreground);
+}
+#dropVeil.on { display: flex; }
 #composer {
   display: flex; align-items: flex-end; gap: 6px;
   background: var(--vscode-input-background);
@@ -835,6 +861,8 @@ function markup(): string {
     <span id="ctxCompact"></span>
   </div>
   <div id="perf"></div>
+  <div id="dropVeil">Drop an image to show it to the agent</div>
+  <div id="attachments"></div>
   <div id="composer">
     <textarea id="say" rows="1" placeholder="Message the agent…"></textarea>
     <button id="stop" title="Stop this run"></button>
@@ -1637,10 +1665,109 @@ function openThought() {
 
 // --- composer -------------------------------------------------------------
 const box = $('say');
+// --- attachments ----------------------------------------------------------
+//
+// Dropped and pasted images. The bytes go to the HOST, which writes them into the
+// workspace and sends back a path -- the webview has no filesystem, and the sidecar only
+// accepts paths inside the workspace jail anyway.
+//
+// A chip appears immediately, before the write finishes, and carries its own thumbnail
+// from the local blob. Waiting for the round-trip to acknowledge a drop reads as the drop
+// not having worked, and the user drops again.
+let attachSeq = 0;
+const attached = new Map();
+
+function renderAttachments() {
+  const strip = $('attachments');
+  strip.innerHTML = '';
+  for (const [id, a] of attached) {
+    const chip = document.createElement('span');
+    chip.className = 'attach-chip' + (a.path ? '' : a.error ? ' failed' : ' pending');
+    if (a.thumb) {
+      const img = document.createElement('img');
+      img.src = a.thumb;
+      chip.appendChild(img);
+    }
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = a.error ? (a.name + ' — ' + a.error) : a.name;
+    chip.appendChild(n);
+    const x = document.createElement('span');
+    x.className = 'x';
+    x.textContent = '×';
+    x.title = 'Remove';
+    x.onclick = () => { attached.delete(id); renderAttachments(); };
+    chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+}
+
+function offerFile(file) {
+  // indexOf, not a regex. THIS SCRIPT IS THE BODY OF A TEMPLATE LITERAL: a backslash in
+  // it is consumed when the literal is evaluated, so /^image\\// arrived in the webview as
+  // /^image//, which is a syntax error -- and a syntax error here does not break one
+  // feature, it stops the whole script before any listener is attached, so every button
+  // in the pane goes dead. Avoiding the escape entirely is worth more than the regex.
+  if (!file || file.type.indexOf('image/') !== 0) return;
+  const id = 'a' + (++attachSeq);
+  attached.set(id, { name: file.name || 'pasted image', thumb: URL.createObjectURL(file) });
+  renderAttachments();
+  const reader = new FileReader();
+  reader.onload = () => {
+    // Strip the data: URL prefix; the host wants raw base64.
+    const s = String(reader.result || '');
+    const comma = s.indexOf(',');
+    api.postMessage({ kind: 'attach', id, name: file.name || 'image.png',
+                      data: comma >= 0 ? s.slice(comma + 1) : '' });
+  };
+  reader.onerror = () => {
+    const a = attached.get(id);
+    if (a) { a.error = 'could not be read'; renderAttachments(); }
+  };
+  reader.readAsDataURL(file);
+}
+
+// Depth-counted, not a boolean: dragenter/dragleave fire for every child element the
+// cursor crosses, so a naive toggle flickers the veil off the moment the pointer moves
+// over the composer inside the drop zone.
+let dragDepth = 0;
+const veil = () => $('dropVeil');
+window.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  if (++dragDepth === 1) veil().classList.add('on');
+});
+window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  if (--dragDepth <= 0) { dragDepth = 0; veil().classList.remove('on'); }
+});
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  veil().classList.remove('on');
+  const dt = e.dataTransfer;
+  if (!dt) return;
+  for (const f of Array.from(dt.files || [])) offerFile(f);
+});
+box.addEventListener('paste', (e) => {
+  const items = (e.clipboardData || {}).items || [];
+  for (const it of Array.from(items)) {
+    if (it.kind === 'file') {
+      const f = it.getAsFile();
+      if (f) { e.preventDefault(); offerFile(f); }
+    }
+  }
+});
+
 const submit = () => {
   const text = box.value.trim();
-  if (!text) return;
-  api.postMessage({ kind: 'message', text });
+  // A message that is ONLY images is legitimate -- dropping a screenshot and pressing
+  // send means "look at this" -- so the guard is "nothing at all", not "no text".
+  const ready = [...attached.values()].filter((a) => a.path).map((a) => a.path);
+  if (!text && ready.length === 0) return;
+  api.postMessage({ kind: 'message', text: text || 'Look at this.', images: ready });
+  attached.clear();
+  renderAttachments();
   box.value = '';
   box.style.height = 'auto';
 };
@@ -2096,6 +2223,17 @@ window.addEventListener('message', (e) => {
     busy(true, 'Thinking', 'THINKING');
   }
 
+  // The host finished writing a dropped image. The chip stops being pending and gains the
+  // path the sidecar will be given; a failure keeps the chip and says why, rather than
+  // vanishing and leaving the user unsure whether the drop registered at all.
+  if (kind === 'attached') {
+    const a = attached.get(msg.id);
+    if (a) {
+      if (msg.error) { a.error = msg.error; } else { a.path = msg.path; }
+      renderAttachments();
+    }
+    return;
+  }
   if (kind === 'said') {
     // The user has just typed. Whatever the agent was still saying is now the PAST, and
     // letting it trickle in under a message the human has already sent reads as the reply
@@ -2344,10 +2482,10 @@ window.addEventListener('message', (e) => {
     row.className = 'row';
     const yes = document.createElement('button'); yes.className = 'primary'; yes.textContent = 'Approve';
     const no = document.createElement('button'); no.className = 'ghost'; no.textContent = 'Deny';
-    const answer = (ok, remember, allowWrites) => {
+    const answer = (ok, remember, allowWrites, allowForRun) => {
       api.postMessage({
         kind: 'approve', id: payload.request_id, approved: ok, remember,
-        allowWrites: allowWrites === true,
+        allowWrites: allowWrites === true, allowForRun: allowForRun === true,
       });
       card.remove();
     };
@@ -2376,15 +2514,38 @@ window.addEventListener('message', (e) => {
       row.append(runAllow);
     }
 
-    // "Always allow" is offered only where it would actually do something. An
-    // irreversible call escalates whatever is on the allowlist, so offering to remember
-    // it would be a button that quietly does nothing -- worse than no button, because
-    // the user would believe they had stopped being asked.
+    // Run-scoped consent for a COMMAND, the counterpart to "Allow writes for this run".
+    // Offered on every command card that is not irreversible, including the ones no stored
+    // rule could ever match -- which is most of what a model actually writes, because it
+    // composes a fresh "VAR=...; $VAR sub --flag | head" every turn. The sidecar latches it
+    // and honours it on the next turn of THIS run; nothing is persisted.
     if (payload.command && !payload.irreversible) {
+      const runAllow = document.createElement('button');
+      runAllow.className = 'ghost';
+      runAllow.textContent = 'Allow for this run';
+      runAllow.title =
+        'Stop asking about this command for the rest of this run. Not remembered: the ' +
+        'next run asks again.';
+      runAllow.onclick = () => answer(true, undefined, false, true);
+      row.append(runAllow);
+    }
+
+    // "Always allow" is offered only where it would actually do something -- and whether it
+    // would is COMPUTED BY THE GATE and sent as can_remember, not guessed here.
+    //
+    // This used to test "irreversible" alone, which is a much weaker condition than the one
+    // the matcher applies. A command carrying a ";" or a pipe can never be matched by a
+    // stored prefix (allowlisting "pytest" must not authorise "pytest; rm -rf ~"), nor can
+    // one the classifier could not fully parse. Both were offered the button anyway, and
+    // both wrote a rule that sat in settings doing nothing: MEASURED, 19 of them in one
+    // workspace against a run that answered 35 cards. A button that says "you will not be
+    // asked again" and leaves you being asked again is worse than no button at all.
+    if (payload.command && !payload.irreversible && payload.can_remember) {
       const always = document.createElement('button');
       always.className = 'ghost';
       always.textContent = 'Always allow';
-      always.title = 'Remember this exact command: ' + payload.command;
+      always.title = 'Remember this exact command, for this run and every later one: ' +
+        payload.command;
       always.onclick = () => answer(true, payload.command);
       row.append(always);
     }

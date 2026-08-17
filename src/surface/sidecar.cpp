@@ -7,6 +7,7 @@
 #include <execinfo.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <csignal>
 
 #include <cstdint>
@@ -21,12 +22,15 @@
 
 #include "src/context/resume.hpp"
 #include "src/loop/agent.hpp"
+#include "src/model/mlx_backend.hpp"
+#include "src/model/model_limits.hpp"
 // The recall tools' token counter is built here, so this file needs the estimator it
 // falls back to when no model is loaded.
 #include "src/pcc/recall.hpp"
 #include "src/platform/event_log.hpp"
 #include "src/platform/fs.hpp"
 #include "src/surface/protocol_generated.hpp"
+#include "src/surface/mcp_settings.hpp"
 #include "src/surface/session.hpp"
 #include "src/surface/transport.hpp"
 #include "src/surface/wire.hpp"
@@ -270,6 +274,10 @@ class RunInbox {
         // Sent rather than re-derived in the view from the chips, so the UI and the gate
         // cannot disagree about which calls are unwaivable.
         req.irreversible = loop::is_irreversible(hint);
+        // Whether a persisted rule could ever match this command again. The view used to
+        // decide this from `irreversible` alone and offered "Always allow" on chained
+        // commands, whose stored rules the matcher can never hit.
+        req.can_remember = loop::can_persist_allowlist_rule(command, hint);
         req.risk = loop::risk_score(hint);
         req.capabilities = chips_of(hint);
         // Held so the answer can name what it consented TO. `lmp/approve` carries a
@@ -928,10 +936,69 @@ bool start_mission(const std::string& id, const std::string& message,
         }
     }
 
+    // CAN THE MACHINE HOLD THIS BUDGET? The clamp above asks only whether the MODEL can
+    // address it, which is a different question with a much larger answer.
+    //
+    // Clamped, not refused, and for the same reason the ceiling above is: a budget that
+    // does not fit is an operator mistake with an obvious correct value, not an ambiguity
+    // worth ending a run over. Refusing would also make the failure LOUDER than the one it
+    // replaces without making it clearer -- the old failure was the process disappearing.
+    //
+    // Emitted whatever it decides, including when it changes nothing. A silent clamp is
+    // how `context_budget_tokens` came to differ from what the settings file said with
+    // nothing anywhere recording it, and the arithmetic is the whole value here: the next
+    // person to look at a memory death needs the numbers this used, not its conclusion.
+    {
+        const std::size_t kv_per_token =
+            model::kv_bytes_per_token(model_dir) + model::kv_bytes_per_token(draft_model_dir);
+        const model::MemoryReport mem = model::mlx_memory_report();
+        const std::size_t working_set = model::mlx_cache_limit();
+        const int affordable =
+            model::max_affordable_context_tokens(kv_per_token, mem.active, working_set);
+        const int requested = session.config.context_budget_tokens;
+        const bool clamped = affordable > 0 && requested > affordable;
+        if (clamped) {
+            session.config.context_budget_tokens = affordable;
+            // The generation reserve rides on the budget, so a clamp that left it alone
+            // could put max_new_tokens above the whole context.
+            if (session.config.max_new_tokens > affordable / 2) {
+                session.config.max_new_tokens = std::max(1, affordable / 2);
+            }
+        }
+        platform::Event ev;
+        ev.kind = "context_budget";
+        ev.fields = {
+            {"requested", std::to_string(requested)},
+            {"affordable", std::to_string(affordable)},
+            {"applied", std::to_string(session.config.context_budget_tokens)},
+            {"clamped", clamped ? "1" : "0"},
+            {"kv_bytes_per_token", std::to_string(kv_per_token)},
+            {"weights_bytes", std::to_string(mem.active)},
+            {"device_working_set", std::to_string(working_set)},
+            {"why", affordable == 0
+                        ? "cannot size the KV cache (no MLX, or an unreadable config); the "
+                          "operator's budget is left exactly as configured"
+                    : clamped ? "the KV cache for the configured budget does not fit beside "
+                                "the weights in the device working set"
+                              : "the configured budget fits"}};
+        log.append(ev, clock);
+    }
+
     surface::ensure_registry(session, workspace, message, log, clock);
     const std::string& canonical_workspace = session.registry->workspace().root;
 
     session.ctx = std::make_unique<context::ContextStore>(mission);
+    // Images attached to the OPENING mission. The store takes the mission through its
+    // constructor (it is T0 and run-constant), so they cannot ride on it; they arrive as
+    // the first human turn behind it instead, which is where the chronology puts them
+    // anyway -- the picture was attached to that instruction, not to the session.
+    {
+        std::vector<std::string> attached =
+            surface::parse_string_array(message, "image_paths");
+        if (!attached.empty()) {
+            session.ctx->add_user_message("(attached)", std::move(attached));
+        }
+    }
     // A little above the widest single result the tool layer can produce, so the door
     // catches a tool that forgot to bound itself without firing on a legitimate one.
     session.ctx->set_observation_budget(tools::kObservationBudgetBytes);
@@ -1084,7 +1151,8 @@ bool continue_session(const std::string& id, const std::string& message,
         return false;
     }
     reply_result(id, R"({"accepted":true,"run_id":")" + id + R"(","started_run":true})");
-    session.ctx->add_user_message(text);
+    session.ctx->add_user_message(text,
+                                  surface::parse_string_array(message, "image_paths"));
     return run_loop(id, session, inbox, cancel, log, clock);
 }
 
