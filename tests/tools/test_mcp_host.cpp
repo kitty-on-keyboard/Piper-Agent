@@ -14,6 +14,9 @@
 #include "src/tools/mcp_host.hpp"
 #include "src/tools/registry.hpp"
 
+#include <filesystem>
+#include <unistd.h>
+
 #include "tests/check.hpp"
 
 using namespace lmp::tools;
@@ -38,6 +41,10 @@ WorkspaceContext workspace() {
     ctx.max_model_read_bytes = 4096;
     ctx.max_result_bytes = 4096;
     ctx.shell_wall_clock_seconds = 5;
+    // A real directory: an image block can only be shown to the model if there is
+    // somewhere to put the bytes, and an empty spool_dir correctly degrades to a note
+    // instead. Per-process so two suites do not collide.
+    ctx.spool_dir = "/tmp/lmp_mcp_spool_" + std::to_string(::getpid());
     return ctx;
 }
 
@@ -170,8 +177,8 @@ TEST(a_live_server_populates_the_registry_under_namespaced_names) {
     REQUIRE(report.size() == 1);
     CHECK(report[0].connected);
     CHECK(report[0].error.empty());
-    CHECK_EQ(report[0].registered, static_cast<std::size_t>(4));
-    CHECK(registry.decls().size() == native + 4);
+    CHECK_EQ(report[0].registered, static_cast<std::size_t>(5));
+    CHECK(registry.decls().size() == native + 5);
 
     // Namespaced, so a remote tool cannot shadow a native one.
     REQUIRE(find(registry, "mcp__demo__echo") != nullptr);
@@ -261,7 +268,7 @@ TEST(a_server_that_cannot_start_leaves_its_tools_absent_and_the_run_alive) {
     // ...and the working server beside it still registered. A broken server must not be
     // able to take the run down with it.
     CHECK(report[1].connected);
-    CHECK(registry.decls().size() == native + 4);
+    CHECK(registry.decls().size() == native + 5);
     CHECK(registry.execute("mcp__demo__echo", {{"text", "still here"}}, 0).ok());
 }
 
@@ -309,4 +316,47 @@ TEST(the_registry_lookup_can_say_no) {
     const ToolResult missing = registry.execute("mcp__demo__no_such_tool", {}, 0);
     CHECK(!missing.ok());
     CHECK(missing.error_class == ErrorClass::NotFound);
+}
+
+// --- images from a server ------------------------------------------------------
+//
+// An MCP image arrives as base64 inside a JSON block, and everything else in this
+// codebase moves images by PATH. The host spools the bytes into the workspace so the
+// picture goes through exactly the same decode -> resize -> patch -> splice path as a file
+// the model opened itself.
+//
+// Before this, every image block became the literal text "[image content omitted]": a
+// server whose entire purpose was returning a picture could describe one and never show
+// one, and nothing in the run said so.
+TEST(an_image_from_a_server_is_spooled_and_offered_as_pixels) {
+    Registry registry(workspace());
+    McpHost host;
+    (void)host.connect_and_register({demo("demo", true)}, registry);
+
+    const ToolResult r = registry.execute("mcp__demo__screenshot", {}, 0);
+    CHECK(r.ok());
+    // The text block still reaches the model...
+    CHECK(r.summary.find("here is the screenshot") != std::string::npos);
+    // ...and the image is a real file on disk, named in `images`.
+    REQUIRE(r.images.size() == std::size_t{1});
+    CHECK(std::filesystem::exists(r.images[0]));
+    CHECK(std::filesystem::file_size(r.images[0]) > 0);
+    // The extension follows the declared mime type, so view_image's own check agrees
+    // with the bytes.
+    CHECK(r.images[0].size() > 4 &&
+          r.images[0].compare(r.images[0].size() - 4, 4, ".png") == 0);
+    // And the model is TOLD where it went, so it can name the path again later.
+    CHECK(r.summary.find("spooled") != std::string::npos);
+    CHECK(r.summary.find("omitted") == std::string::npos);
+}
+
+// A block this build cannot turn into pixels must still be announced. Silence would read
+// as "the tool returned nothing", which is a different and wrong fact.
+TEST(a_non_image_block_is_still_named_rather_than_dropped) {
+    Registry registry(workspace());
+    McpHost host;
+    (void)host.connect_and_register({demo("demo", true)}, registry);
+    const ToolResult r = registry.execute("mcp__demo__echo", {{"text", "plain"}}, 0);
+    CHECK(r.ok());
+    CHECK(r.images.empty());
 }

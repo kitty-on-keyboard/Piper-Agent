@@ -46,6 +46,18 @@ struct ToolResult {
     // Paths of spooled full outputs (S14): oversized tool output goes to disk, bounded,
     // and the summary references it.
     std::vector<std::string> artifacts;
+
+    // Workspace paths of images the model should SEE, as pixels, in the next prompt.
+    //
+    // PATHS, NOT PIXELS. Decoding and patching need the vision config, which lives beside
+    // the model; a registry that returned float buffers would carry megabytes through the
+    // context store and re-derive nothing when the image changed on disk. The path is
+    // re-read when the prompt is built, and its bytes are what the KV ledger's content
+    // tag hashes -- so editing the file invalidates exactly the cache it should.
+    //
+    // Distinct from `artifacts`, which are outputs the model is told ABOUT. These are
+    // outputs the model is shown.
+    std::vector<std::string> images;
     // The command's exit status, for the tools that run one; -1 when no command ran (any
     // other tool, or a refusal). A FIELD rather than the `[exit N]` prefix on the summary,
     // because callers that need to tell 127 from 1 are exactly the callers this header

@@ -151,15 +151,6 @@ bool GrammarSink::on_token(model::TokenId id) {
     if (last != model::Advance::Ok) {
         return false;
     }
-    // Cap thinking separately so tool XML keeps a guaranteed remainder of max_new_tokens.
-    // Force the phase transition rather than stopping generation: a LengthCapped mid-think
-    // turn produces nothing the loop can act on.
-    if (max_think_tokens_ > 0 && g_.phase() == model::TurnPhase::Think &&
-        g_.think_ids().size() >= max_think_tokens_) {
-        if (g_.force_end_think()) {
-            think_capped = true;
-        }
-    }
     // Only what the grammar filed as PROSE. A tool call's tokens grow neither buffer, so a
     // file being written cannot be cut short here -- see LoopBreaker.
     if ((is_think || is_text) && breaker_.saw(id)) {

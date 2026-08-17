@@ -70,12 +70,6 @@ class TurnGrammar final : public MaskSource {
 
     void reset();
 
-    // Closes Think without consuming a </think> token. Used when the think budget is
-    // exhausted so the remaining generation budget can still produce tool XML / answer
-    // text -- without this, a long rumination LengthCaps in Think and tools never start.
-    // No-op (returns false) when not in Think.
-    bool force_end_think() noexcept;
-
     [[nodiscard]] Advance advance(TokenId id);
 
     // True if `id` may follow the current state. This is the DEFINITION of the mask --
@@ -187,6 +181,71 @@ class TurnGrammar final : public MaskSource {
     // a text-only turn never pays for them.
     struct MaskCache;
     std::unique_ptr<MaskCache> cache_;
+};
+
+// The think budget, enforced as a MASK POLICY over TurnGrammar rather than as a rule
+// inside it.
+//
+// It does not belong in the automaton: `<think> ... </think>` is well-formed at any
+// length, and the budget is the harness reserving room for tool XML. So it lives here,
+// wrapping the grammar. At the cap the legal set collapses to the single `</think>` id,
+// the sampler has nothing else to draw, and the token the model emits is a REAL one --
+// it goes through the ledger and the forward pass like any other, so the model's own
+// context contains the boundary it was pushed through.
+//
+// THE PREDECESSOR FLIPPED THE PHASE AND APPENDED NOTHING (TurnGrammar::force_end_think,
+// deleted with this). The model never saw a close, so it kept reasoning -- and every
+// token after the cap was filed as ANSWER text and streamed to the surface as one,
+// rendering raw deliberation as the reply. It could not recover, either: `</think>` is
+// structural and Text rejected every structural id, so the one token that would have
+// ended the thought was the one token the mask denied. The model fell back to spelling a
+// closer as ordinary text (`</thinking>` in the transcript) and narrated a tool call
+// instead of emitting one.
+//
+// MEASURED, 27B, two consecutive turns: think capped at 2048, then 1130 and 2175 tokens
+// of deliberation leaked into the answer channel, the second producing no tool call at
+// all (`cap_phase=think_budget`, `outcome=TextOnly`). The leaked text then entered
+// history as the assistant's own reply, so the next turn reproduced its shape.
+//
+// OVERSHOOT IS DELIBERATE. A speculative block drafted just below the cap commits its
+// remaining tokens as ordinary think tokens -- TurnGrammar accepts them, because the cap
+// is not its rule -- and the close is forced at the next mask. That is bounded by one
+// block. The alternative, rejecting them, ends the turn on a budget, which is the exact
+// failure this class exists to remove.
+class ThinkCapMask final : public MaskSource {
+  public:
+    // `cap` 0 means no budget: every call delegates and this class costs nothing.
+    ThinkCapMask(TurnGrammar& g, const QwenTokenizer& tok, std::size_t cap)
+        : g_(g), tok_(tok), cap_(cap) {}
+
+    [[nodiscard]] const TokenMask& mask() const final;
+
+    // At the cap the answer is one id, and the NEXT position is Text -- a block-wide
+    // snapshot would offer `</think>` at both and the second would be rejected. So the
+    // block walks instead (can_checkpoint is the grammar's, and it is true).
+    [[nodiscard]] bool mask_is_block_stable() const final {
+        return !at_cap() && g_.mask_is_block_stable();
+    }
+
+    [[nodiscard]] bool can_checkpoint() const final { return g_.can_checkpoint(); }
+    void checkpoint() final { g_.checkpoint(); }
+    void rollback() final { g_.rollback(); }
+    bool probe_advance(TokenId id) final { return g_.probe_advance(id); }
+    [[nodiscard]] bool is_block_boundary(TokenId id) const final {
+        return g_.is_block_boundary(id);
+    }
+
+  private:
+    [[nodiscard]] bool at_cap() const noexcept {
+        return cap_ > 0 && g_.phase() == TurnPhase::Think && g_.think_ids().size() >= cap_;
+    }
+
+    TurnGrammar& g_;
+    const QwenTokenizer& tok_;
+    std::size_t cap_ = 0;
+    // Built on first use and never rebuilt: one id in a vocabulary-wide bitset.
+    mutable TokenMask close_only_;
+    mutable bool close_only_built_ = false;
 };
 
 } // namespace lmp::model

@@ -272,6 +272,12 @@
         {
           "name": "settings",
           "type": "RunSettings"
+        },
+        {
+          "_comment": "Images to show the model with this message, as workspace-relative paths. PATHS, not bytes: the surface writes a dropped or pasted image into the workspace and sends where it put it, so the picture travels the same route as a file the model opened itself -- decoded and patched at prompt time, re-readable by view_image in a later turn, and never a megabyte of base64 on a wire format that would then have to carry it in every replayed transcript. A path outside the workspace is refused at the sidecar boundary, like every other path.",
+          "name": "image_paths",
+          "type": "string",
+          "repeated": true
         }
       ],
       "result": [
@@ -401,6 +407,12 @@
         {
           "name": "text",
           "type": "string"
+        },
+        {
+          "_comment": "Images to show the model with this message, as workspace-relative paths. PATHS, not bytes: the surface writes a dropped or pasted image into the workspace and sends where it put it, so the picture travels the same route as a file the model opened itself -- decoded and patched at prompt time, re-readable by view_image in a later turn, and never a megabyte of base64 on a wire format that would then have to carry it in every replayed transcript. A path outside the workspace is refused at the sidecar boundary, like every other path.",
+          "name": "image_paths",
+          "type": "string",
+          "repeated": true
         }
       ],
       "result": [
@@ -667,6 +679,11 @@
         "type": "bool"
       },
       {
+        "_comment": "Whether 'Always allow' could persist a rule that will ever match again -- see loop::can_persist_allowlist_rule. Computed by the gate and sent for the same reason `irreversible` is: the view must not re-derive it. A command carrying shell chaining (`;` `|` `&&`) or one the classifier could not fully parse can never be matched by a stored prefix, and the button used to be offered anyway: MEASURED, 19 rules written to one workspace's settings, none of them reachable, against a run that answered 35 cards. When this is false the card offers run-scoped consent instead, which the sidecar honours on the very next turn.",
+        "name": "can_remember",
+        "type": "bool"
+      },
+      {
         "name": "risk",
         "type": "double"
       },
@@ -706,7 +723,7 @@
     ],
     "lmp/code_intel": [
       {
-        "_comment": "Matched by lmp/code_intel_result. op is one of workspace_symbols, definition, references, diagnostics, rename_preview. Uses the language services the editor already hosts — not a sidecar clangd.",
+        "_comment": "Matched by lmp/code_intel_result. op is one of workspace_symbols, definition, references, diagnostics, rename_preview. Uses the language services the editor already hosts \u2014 not a sidecar clangd.",
         "name": "request_id",
         "type": "string"
       },

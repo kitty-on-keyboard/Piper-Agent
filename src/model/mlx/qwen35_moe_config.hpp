@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <simdjson.h>
 
@@ -178,6 +179,110 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
     return cfg.hidden_size > 0 && cfg.num_hidden_layers > 0;
 }
 
+// The vision tower, which BOTH checkpoints on this machine already carry and which the
+// loader used to delete on the way in (sanitize_weights dropped every `vision_tower.*`
+// key). 333 tensors, 0.92 GB unquantized, against 15.13 GB of quantized text -- so the
+// image path costs about 6% more resident memory and no accuracy.
+//
+// Read from the ROOT of config.json, not from text_config: this is the multimodal
+// wrapper's own block, and the ids below sit beside it rather than inside it.
+struct Qwen35VisionConfig {
+    // `present` is the load-time question ("does this checkpoint have eyes?"), and it is
+    // answered from the config rather than by probing for a tensor -- a checkpoint whose
+    // vision block is declared but whose weights are absent must fail loudly at load, not
+    // silently run text-only.
+    bool present{false};
+    int depth{27};
+    int hidden_size{1152};
+    int num_heads{16};
+    int intermediate_size{4304};
+    int in_channels{3};
+    int patch_size{16};
+    int spatial_merge_size{2};
+    int temporal_patch_size{2};
+    int num_position_embeddings{2304};
+    // The LLM's hidden size, which the merger projects onto. Checked against the text
+    // config at load: a mismatch means the two halves of the checkpoint disagree, and
+    // splicing a wrongly-sized row into the residual stream is not something a shape
+    // check downstream would catch cleanly.
+    int out_hidden_size{0};
+
+    // Qwen3-VL's deepstack: visual features injected at several LLM layers rather than
+    // only at the embedding. EMPTY on both checkpoints here, which is why this build
+    // splices at the embedding alone. A non-empty list must refuse at load rather than
+    // quietly ignore the extra injection sites -- the model would run and be subtly
+    // wrong, which is the worst available outcome.
+    std::vector<int> deepstack_visual_indexes;
+
+    // Single ids in the tokenizer (measured: 248053/248054/248056/248057).
+    int image_token_id{-1};
+    int video_token_id{-1};
+    int vision_start_token_id{-1};
+    int vision_end_token_id{-1};
+
+    // Patches per merged token: the merger concatenates a spatial_merge_size square.
+    [[nodiscard]] int merge_unit() const noexcept {
+        return spatial_merge_size * spatial_merge_size;
+    }
+    [[nodiscard]] int head_dim() const noexcept {
+        return num_heads > 0 ? hidden_size / num_heads : 0;
+    }
+};
+
+inline bool load_qwen35_vision_config(const std::string& model_dir,
+                                      Qwen35VisionConfig& cfg) {
+    const std::string path = model_dir + "/config.json";
+    std::ifstream in(path);
+    if (!in) {
+        return false;
+    }
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    simdjson::dom::parser parser;
+    simdjson::dom::element root;
+    if (parser.parse(buf.str()).get(root)) {
+        return false;
+    }
+    simdjson::dom::element vc;
+    if (root["vision_config"].get(vc)) {
+        return false; // text-only checkpoint; not an error
+    }
+    cfg.present = true;
+
+    const auto get_i = [](simdjson::dom::element scope, const char* key, int& out) {
+        int64_t v = 0;
+        if (!scope[key].get_int64().get(v)) {
+            out = static_cast<int>(v);
+        }
+    };
+    get_i(vc, "depth", cfg.depth);
+    get_i(vc, "hidden_size", cfg.hidden_size);
+    get_i(vc, "num_heads", cfg.num_heads);
+    get_i(vc, "intermediate_size", cfg.intermediate_size);
+    get_i(vc, "in_channels", cfg.in_channels);
+    get_i(vc, "patch_size", cfg.patch_size);
+    get_i(vc, "spatial_merge_size", cfg.spatial_merge_size);
+    get_i(vc, "temporal_patch_size", cfg.temporal_patch_size);
+    get_i(vc, "num_position_embeddings", cfg.num_position_embeddings);
+    get_i(vc, "out_hidden_size", cfg.out_hidden_size);
+
+    simdjson::dom::array deep;
+    if (!vc["deepstack_visual_indexes"].get_array().get(deep)) {
+        for (simdjson::dom::element e : deep) {
+            int64_t v = 0;
+            if (!e.get_int64().get(v)) {
+                cfg.deepstack_visual_indexes.push_back(static_cast<int>(v));
+            }
+        }
+    }
+
+    get_i(root, "image_token_id", cfg.image_token_id);
+    get_i(root, "video_token_id", cfg.video_token_id);
+    get_i(root, "vision_start_token_id", cfg.vision_start_token_id);
+    get_i(root, "vision_end_token_id", cfg.vision_end_token_id);
+    return true;
+}
+
 // The MTP head's block size, or 0 when the directory is not a usable MTP checkpoint.
 //
 // A round drafts block_size - 1 tokens, which is why the Qwen3.6-27B MTP card advertises
@@ -222,6 +327,47 @@ inline int load_max_position_embeddings(const std::string& model_dir) {
         return 0;
     }
     return cfg.max_position_embeddings > 0 ? cfg.max_position_embeddings : 0;
+}
+
+// Bytes of KV cache this checkpoint needs for ONE token of context. 0 when unreadable.
+//
+// Only the FULL-ATTENTION layers hold a KV cache that grows with the sequence; the linear
+// (gated-delta) layers carry a fixed-size SSM state that does not. Counting all 64 layers
+// of a hybrid checkpoint overstates this by 4x, which would be the difference between a
+// budget that fits and a budget that is refused for no reason.
+//
+// K and V, per full-attention layer, per kv head, head_dim wide, at 2 bytes an element:
+// the cache is bf16 even when the WEIGHTS are 4-bit, which is the trap in eyeballing this
+// from the quantisation in the directory name.
+//
+// VERIFIED against a real run rather than asserted. Qwen3.8-27B-MLX-4bit: 64 layers,
+// full_attention_interval 4 => 16 full-attention layers, 4 kv heads, head_dim 256:
+//   2 * 16 * 4 * 256 * 2 = 65,536 B = 64 KB/token
+// and the run's own `memory` events give 72 KB/token against a constant 16.29 GB of
+// weights (94,527 tok -> 6.81 GB KV; 112,088 tok -> 8.21 GB KV). The 8 KB difference is
+// the MTP draft head's own cache, which is why the caller sums this over both checkpoints.
+[[nodiscard]] inline std::size_t kv_bytes_per_token(const std::string& model_dir) {
+    Qwen35MoeConfig cfg;
+    if (!load_qwen35_moe_config(model_dir, cfg)) {
+        return 0;
+    }
+    if (cfg.num_hidden_layers <= 0 || cfg.num_key_value_heads <= 0 || cfg.head_dim <= 0) {
+        return 0;
+    }
+    int full = 0;
+    for (int i = 0; i < cfg.num_hidden_layers; ++i) {
+        if (!cfg.is_linear_layer(i)) {
+            ++full;
+        }
+    }
+    // A checkpoint with no linear layers at all is dense: every layer holds KV.
+    if (full == 0) {
+        full = cfg.num_hidden_layers;
+    }
+    constexpr std::size_t kKvElementBytes = 2; // bf16
+    return std::size_t{2} * static_cast<std::size_t>(full) *
+           static_cast<std::size_t>(cfg.num_key_value_heads) *
+           static_cast<std::size_t>(cfg.head_dim) * kKvElementBytes;
 }
 
 } // namespace lmp::model::mlxl

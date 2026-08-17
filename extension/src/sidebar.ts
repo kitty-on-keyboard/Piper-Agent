@@ -77,6 +77,21 @@ export interface ExtensionHost {
   confirmTrustedMcp(settings: RunSettings): Promise<boolean>;
 }
 
+
+/**
+ * A safe file extension for a dropped image, chosen from an ALLOWLIST rather than taken
+ * from the drop event. The name on a DataTransfer item is attacker-influenced content: a
+ * "../../.ssh/authorized_keys" would otherwise walk out of the attachments directory, and
+ * a ".sh" would leave an executable in the workspace. Unknown types become .png, which is
+ * what the sidecar's decoder will sniff anyway -- it reads the bytes, not the name.
+ */
+function extensionOf(name: string): string {
+  const m = /\.([A-Za-z0-9]{1,5})$/.exec(name);
+  const ext = (m ? m[1] : "").toLowerCase();
+  const allowed = ["png", "jpg", "jpeg", "heic", "heif", "gif", "bmp", "tif", "tiff", "webp"];
+  return allowed.includes(ext) ? `.${ext}` : ".png";
+}
+
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "lmPipe.sidebar";
   public currentRunId: string | undefined;
@@ -486,6 +501,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         kind: string; id?: string; approved?: boolean; text?: string;
         key?: string; value?: unknown; remember?: string; dir?: string;
         allowWrites?: boolean;
+        allowForRun?: boolean;
+        // Attachments. `images` are workspace paths already written by attachImage;
+        // `data` is one image's bytes, base64, on its way to becoming one of them.
+        images?: string[];
+        data?: string;
+        name?: string;
       }) => {
         if (msg.kind === "approve" && msg.id !== undefined) {
           // "Always allow" is an approval PLUS a remembered rule. The rule is stored on
@@ -497,6 +518,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // command again on the next turn and the button would read as broken. The
           // sidecar latches it for the rest of the run; settings carry it past the end.
           if (msg.remember) this.remember(msg.remember);
+          // Run-scoped consent is the answer for everything "Always allow" cannot cover.
+          // Both roads end at the same latch in the sidecar; only the first also writes a
+          // rule to settings, and it is only offered where a rule can match.
           // "Allow writes for this run" goes the OTHER way -- to the sidecar and not to
           // settings. It must take effect on the next card of the run in flight, which
           // nothing stored here can do: settings reach the sidecar at lmp/start, one run
@@ -506,7 +530,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             msg.id,
             msg.approved === true,
             msg.allowWrites === true,
-            msg.remember !== undefined && msg.remember !== ""
+            (msg.remember !== undefined && msg.remember !== "") || msg.allowForRun === true
           );
         }
         if (msg.kind === "cancel") {
@@ -516,7 +540,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           this.post("history", { runs: this.history() });
         }
         if (msg.kind === "message" && msg.text) {
-          void this.send(msg.text);
+          void this.send(msg.text, Array.isArray(msg.images) ? msg.images : []);
+        }
+        // Bytes dropped or pasted into the pane. Written to a file here, in the HOST --
+        // the webview has no filesystem, and shipping the bytes on to the sidecar would
+        // put megabytes of base64 into the wire format and then into every replayed
+        // transcript. The reply carries the path back so the composer can show a chip.
+        if (msg.kind === "attach" && typeof msg.data === "string") {
+          void this.attachImage(msg.id, msg.name, msg.data);
         }
         if (msg.kind === "load_model") void this.loadModel();
         if (msg.kind === "unload_model") void this.unloadModel();
@@ -553,10 +584,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  /** Adds a command to the allowlist, deduplicated. */
+  /** Adds a command to the allowlist, deduplicated.
+   *
+   *  Refuses a rule the matcher could never hit, as a backstop behind the card: the button
+   *  is only offered when the gate says `can_remember`, but this is the function that grows
+   *  a settings file the user then has to read, and a rule in there that cannot fire is a
+   *  lie told in writing. The one condition checkable on this side is shell chaining, which
+   *  is the condition that actually fired -- all 19 dead rules in the run that prompted
+   *  this carried `;` or `|`. Kept in sync with loop::is_allowlisted by matching its
+   *  character set exactly; the authority is still the gate. */
   private remember(command: string): void {
     const trimmed = command.trim();
     if (!trimmed) return;
+    if (/[;|&`<>]|\$\(/.test(trimmed)) return;
     const cfg = vscode.workspace.getConfiguration("lmPipe");
     const current = cfg.get<string[]>("allowedCommands", []);
     if (current.includes(trimmed)) return;
@@ -583,8 +623,39 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  exist and is why the extension appeared dead -- the mission of a brand new run. The
    *  composer is the only input this view has; it had better be able to start something.
    */
-  private async send(text: string): Promise<void> {
-    this.post("said", { text, steering: this.runInFlight });
+  /**
+   * Writes a dropped or pasted image into the workspace and tells the view where it went.
+   *
+   * INSIDE THE WORKSPACE, not a system temp dir: the sidecar resolves every image path
+   * through the same containment jail it uses for reads, so a path outside the root is
+   * refused -- correctly, and the picture would simply never appear. `.lmp/attachments`
+   * is the harness's own corner of the tree, and the agent can `view_image` anything left
+   * there in a later turn.
+   */
+  private async attachImage(id: unknown, name: unknown, dataBase64: string): Promise<void> {
+    const root = this.host.settings().workspace_root;
+    if (!root) {
+      this.post("attached", { id, error: "no workspace is open" });
+      return;
+    }
+    try {
+      const dir = vscode.Uri.joinPath(vscode.Uri.file(root), ".lmp", "attachments");
+      await vscode.workspace.fs.createDirectory(dir);
+      // The extension is what names the file, never the page: a name off the drop event
+      // is attacker-influenced content and `../` in it would escape the directory.
+      const ext = extensionOf(typeof name === "string" ? name : "");
+      const file = vscode.Uri.joinPath(dir, `${Date.now()}-${this.attachSeq++}${ext}`);
+      await vscode.workspace.fs.writeFile(file, Buffer.from(dataBase64, "base64"));
+      this.post("attached", { id, path: file.fsPath, name: typeof name === "string" ? name : "image" });
+    } catch (e) {
+      this.post("attached", { id, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  private attachSeq = 0;
+
+  private async send(text: string, imagePaths: string[] = []): Promise<void> {
+    this.post("said", { text, steering: this.runInFlight, images: imagePaths });
     if (!(await this.ready())) return;
 
     // A run id survives its run: it is what makes the NEXT prompt a follow-up over the
@@ -592,7 +663,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // because that is when the context it names stops existing.
     if (this.currentRunId !== undefined) {
       this.runInFlight = true;
-      const reply = await this.client.message(this.currentRunId, text);
+      const reply = await this.client.message(this.currentRunId, text, imagePaths);
       if (reply.error) this.fail(reply.error);
       return;
     }
@@ -609,7 +680,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.beginRun(text, false);
-    const reply = await this.client.start_run(text, settings);
+    const reply = await this.client.start_run(text, settings, imagePaths);
     if (reply.error) this.fail(reply.error);
   }
 

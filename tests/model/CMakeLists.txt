@@ -67,6 +67,12 @@ lmp_add_test(test_model_bounds SOURCES test_model_bounds.cpp LABELS gate LINK lm
 add_dependencies(test_model_bounds lmp_mini_vocab)
 target_compile_definitions(test_model_bounds PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
 
+# Image -> patch tensor. Runs in the GATE: no checkpoint, no GPU, no MLX. The patch
+# ORDER it pins is a contract the vision tower cannot check for itself -- raster order and
+# merge-block order have identical shapes and both produce finite activations.
+lmp_add_test(test_image_preprocess SOURCES test_image_preprocess.cpp LABELS gate
+             LINK lmp_model TIMEOUT 120)
+
 # Real-model tests (S11.6): excluded from the gate, and `ctest --preset realmodel`
 # pins jobs=1 -- concurrent large model loads exhaust unified memory.
 lmp_add_test(test_grammar_realmodel SOURCES test_grammar.cpp LABELS realmodel LINK lmp_model TIMEOUT 300)
@@ -78,6 +84,13 @@ lmp_stage_metallib(test_realmodel)
 # decodes fluent wrong text rather than crashing, so byte-identity is the only assertion
 # that catches it.
 lmp_add_test(test_kv_reuse_realmodel SOURCES test_kv_reuse_realmodel.cpp LABELS realmodel LINK lmp_model TIMEOUT 1200)
+
+# The vision tower: shapes, finiteness, and the invariances a transcription error breaks.
+# There is no reference implementation on this machine, so these do not establish
+# numerical agreement with HF -- see the header of the file.
+lmp_add_test(test_vision_tower SOURCES test_vision_tower.cpp LABELS realmodel
+             LINK lmp_model simdjson TIMEOUT 900)
+lmp_stage_metallib(test_vision_tower)
 lmp_stage_metallib(test_kv_reuse_realmodel)
 lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK lmp_model simdjson TIMEOUT 900)
 lmp_stage_metallib(test_spec_cache)
@@ -95,3 +108,11 @@ lmp_stage_metallib(lmp_diag)
 # directly so the scan can be benchmarked against its own reference implementation.
 set_source_files_properties(diag_main.cpp diag_moe.cpp PROPERTIES COMPILE_OPTIONS
   "-Wno-conversion;-Wno-sign-conversion;-Wno-old-style-cast;-Wno-shadow")
+
+# Can it actually see? A synthesized image of known colour, through decode -> preprocess
+# -> tower -> splice -> generation, twice with different pictures so the KV ledger's image
+# tags are exercised too. The only test here that distinguishes a correct tower from a
+# merely plausible one.
+lmp_add_test(test_vision_end_to_end SOURCES test_vision_end_to_end.cpp LABELS realmodel
+             LINK lmp_model TIMEOUT 1800)
+lmp_stage_metallib(test_vision_end_to_end)

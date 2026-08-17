@@ -556,6 +556,48 @@ TEST(persistent_allowlist_cannot_auto_approve_opaque_or_destructive_hints) {
     CHECK(!forces_escalation(ordinary));
 }
 
+// THE BUTTON MUST NOT PROMISE WHAT THE MATCHER WILL NOT HONOUR.
+//
+// "Always allow" was offered on any command card that was not irreversible, and it wrote
+// whatever it was given to lmPipe.allowedCommands. Two conditions the matcher applies were
+// never consulted: is_allowlisted() refuses shell chaining, and allowlist_may_auto_approve()
+// refuses anything not fully parsed. MEASURED: 19 rules in one workspace's settings, every
+// one unreachable, against a run that answered 35 cards -- the operator was told 19 times
+// that they would not be asked again, and was asked again every time.
+TEST(always_allow_is_offered_only_where_a_rule_could_match) {
+    tools::RiskHint parsed;
+    parsed.status = blast_radius::ParseStatus::Parsed;
+
+    // The shape a stored prefix can actually hit.
+    CHECK(can_persist_allowlist_rule("pytest -q", parsed));
+    CHECK(can_persist_allowlist_rule(".venv/bin/pytest -q", parsed));
+
+    // Every one of the 19 dead rules looked like this: a variable assignment, a `;`, and a
+    // pipeline. The matcher refuses chaining outright, so no such rule can ever fire.
+    CHECK(!can_persist_allowlist_rule("G=/opt/tool/bin/t; $G docs X 2>&1 | head -40", parsed));
+    CHECK(!can_persist_allowlist_rule("pytest -q | tee out", parsed));
+    CHECK(!can_persist_allowlist_rule("pytest -q && echo done", parsed));
+    CHECK(!can_persist_allowlist_rule("pytest -q > report.txt", parsed));
+    CHECK(!can_persist_allowlist_rule("echo $(rm -rf ~)", parsed));
+    CHECK(!can_persist_allowlist_rule("", parsed));
+
+    // A prefix rule may not stand in for a property. Not fully parsed, or destructive, and
+    // the allowlist is not eligible to speak at all.
+    tools::RiskHint partial;
+    partial.status = blast_radius::ParseStatus::PartiallyParsed;
+    CHECK(!can_persist_allowlist_rule("cmake --build build", partial));
+
+    tools::RiskHint destroy;
+    destroy.status = blast_radius::ParseStatus::Parsed;
+    destroy.caps.destroys_data = true;
+    CHECK(!can_persist_allowlist_rule("rm -rf src", destroy));
+
+    // The predicate agrees with the matcher BY CONSTRUCTION -- it asks the matcher, with the
+    // command as its own rule -- so a rule it approves is a rule that fires.
+    const std::vector<std::string> allowed = {"pytest -q"};
+    CHECK(is_allowlisted("pytest -q", allowed));
+}
+
 TEST(opaque_run_consent_binds_to_script_digest) {
     const std::string root = "/tmp/lmp_opaque_consent_test";
     (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
@@ -618,4 +660,100 @@ TEST(a_compacted_span_names_each_tool_once) {
     CHECK(span.find("- read_file(path=src/a.swift)") != std::string::npos);
     // The bare-argument form still gets its tool name and its parentheses.
     CHECK(span.find("- read_slice(src/b.swift)") != std::string::npos);
+}
+
+// --- images through the context store ------------------------------------------
+//
+// The wiring between "a tool returned a picture" and "the prompt reserves pad tokens for
+// it" crosses four types and is not covered by any of their unit tests:
+//
+//   tools::ToolResult::images -> TurnRecord::observed_images -> ContextStore::render
+//   -> model::Message::images -> ChatTemplate placements -> InferenceTask::PromptImage
+//
+// Every hop is trivial and the whole chain is silent when it breaks: a dropped path means
+// the model is told about an image in the text and never shown one, which reads as the
+// model ignoring the picture rather than as a harness bug.
+
+TEST(a_tool_result_image_reaches_the_rendered_message) {
+    context::ContextStore ctx("look at the screenshot");
+    context::TurnRecord t;
+    t.tool_name = "view_image";
+    t.tool_call_text = "<function=view_image>\n<parameter=path>\nshot.png\n</parameter>\n</function>";
+    t.observation = "(shot.png: 800x600 image, shown to you as 234 tokens)";
+    t.observed_images = {"shot.png"};
+    ctx.add_turn(std::move(t));
+
+    const std::vector<model::Message> messages = ctx.render("");
+    // The image rides on the TOOL RESPONSE, which is a user turn in Qwen's template and
+    // therefore a role the reference allows an image on.
+    bool found = false;
+    for (const model::Message& m : messages) {
+        if (m.images.empty()) {
+            continue;
+        }
+        found = true;
+        CHECK(m.role == model::Role::ToolResponse);
+        CHECK_EQ(m.images.size(), std::size_t{1});
+        CHECK_EQ(m.images[0].source, std::string("shot.png"));
+        // Left at zero on purpose: only a caller that can preprocess the pixels knows how
+        // many pads to reserve, and rendering with zero throws rather than reserving an
+        // empty run the splice would have nowhere to write into.
+        CHECK_EQ(m.images[0].tokens, 0);
+    }
+    CHECK(found);
+}
+
+TEST(a_tool_result_without_images_carries_none) {
+    context::ContextStore ctx("read the file");
+    ctx.add_turn(turn("read_file", "12 lines"));
+    for (const model::Message& m : ctx.render("")) {
+        CHECK(m.images.empty());
+    }
+}
+
+// An observation that is ONLY an image still produces a message: the summary can be empty
+// (a tool that returns a picture and says nothing about it), and render() used to drop a
+// record with no observation text -- which would have dropped the picture with it.
+TEST(an_image_with_no_summary_still_renders) {
+    context::ContextStore ctx("show me");
+    context::TurnRecord t;
+    t.tool_name = "view_image";
+    t.observed_images = {"a.png"};
+    ctx.add_turn(std::move(t));
+    std::size_t with_images = 0;
+    for (const model::Message& m : ctx.render("")) {
+        with_images += m.images.empty() ? 0 : 1;
+    }
+    CHECK_EQ(with_images, std::size_t{1});
+}
+
+// Images the HUMAN attached, as against the ones a tool returned. Same field, same
+// resolution downstream -- but they render on a USER message rather than a tool response,
+// and the reference chat template allows an image on both.
+TEST(a_user_attached_image_rides_the_user_message) {
+    context::ContextStore ctx("first mission");
+    ctx.add_user_message("what is wrong with this?", {".lmp/attachments/1.png"});
+
+    bool found = false;
+    for (const model::Message& m : ctx.render("")) {
+        if (m.images.empty()) {
+            continue;
+        }
+        found = true;
+        CHECK(m.role == model::Role::User);
+        CHECK_EQ(m.images.size(), std::size_t{1});
+        CHECK_EQ(m.images[0].source, std::string(".lmp/attachments/1.png"));
+        CHECK_EQ(m.images[0].tokens, 0); // resolved by the prompt builder, not here
+    }
+    CHECK(found);
+}
+
+// The one-argument overload must stay exactly what it was: every existing caller passes a
+// bare string and must not start attaching anything.
+TEST(a_plain_user_message_attaches_nothing) {
+    context::ContextStore ctx("mission");
+    ctx.add_user_message("keep going");
+    for (const model::Message& m : ctx.render("")) {
+        CHECK(m.images.empty());
+    }
 }

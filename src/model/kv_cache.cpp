@@ -38,24 +38,47 @@ std::uint64_t hash_ids(const std::vector<TokenId>& ids) noexcept {
 
 KvCacheLedger::KvCacheLedger() { hashes_.push_back(kSeed); }
 
-void KvCacheLedger::append(TokenId id) {
+void KvCacheLedger::append(TokenId id) { append(id, ContentTag{0}); }
+
+void KvCacheLedger::append(TokenId id, ContentTag tag) {
     ids_.push_back(id);
-    hashes_.push_back(fold(hashes_.back(), id));
+    tags_.push_back(tag);
+    // The tag folds into the fingerprint too, so the cheap reject stays as strong as the
+    // proof. Folded as a second mix rather than xor'd into the id: an image tag is a
+    // full 64-bit hash and xor'ing it against a token id would let a tag change cancel
+    // an id change.
+    std::uint64_t h = fold(hashes_.back(), id);
+    if (tag != 0) {
+        h = mix64(h ^ tag);
+    }
+    hashes_.push_back(h);
 }
 
 void KvCacheLedger::append(const std::vector<TokenId>& ids) {
     append(std::span<const TokenId>(ids));
 }
 
+void KvCacheLedger::append(std::span<const TokenId> ids,
+                           std::span<const ContentTag> tags) {
+    ids_.reserve(ids_.size() + ids.size());
+    tags_.reserve(tags_.size() + ids.size());
+    hashes_.reserve(hashes_.size() + ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        append(ids[i], i < tags.size() ? tags[i] : ContentTag{0});
+    }
+}
+
 void KvCacheLedger::append(std::span<const TokenId> ids) {
     ids_.reserve(ids_.size() + ids.size());
+    tags_.reserve(tags_.size() + ids.size());
     hashes_.reserve(hashes_.size() + ids.size());
     for (TokenId id : ids) {
         append(id);
     }
 }
 
-ReuseDecision KvCacheLedger::plan_reuse(const std::vector<TokenId>& prompt) const {
+ReuseDecision KvCacheLedger::plan_reuse(const std::vector<TokenId>& prompt,
+                                        std::span<const ContentTag> prompt_tags) const {
     ReuseDecision d;
     // Id-by-id, not by hash: the hash exists to key lookups, equality is the proof.
     // std::mismatch rather than a hand-rolled loop -- it vectorises, and it measured
@@ -65,10 +88,31 @@ ReuseDecision KvCacheLedger::plan_reuse(const std::vector<TokenId>& prompt) cons
         std::mismatch(ids_.begin(), ids_.end(), prompt.begin(), prompt.end());
     (void)prompt_it;
     d.reusable = static_cast<std::size_t>(std::distance(ids_.begin(), led_it));
+
+    // ...then the same walk over the tags, which is what stops two different images
+    // behind identical `<|image_pad|>` runs from reading as the same prefix. Kept as a
+    // separate pass so the id comparison stays the vectorised one it was measured to be:
+    // the tag array is all zeros in every run without an image, and this loop exits at
+    // the first difference.
+    if (!tags_.empty() || !prompt_tags.empty()) {
+        for (std::size_t i = 0; i < d.reusable; ++i) {
+            const ContentTag mine = i < tags_.size() ? tags_[i] : ContentTag{0};
+            const ContentTag theirs =
+                i < prompt_tags.size() ? prompt_tags[i] : ContentTag{0};
+            if (mine != theirs) {
+                d.reusable = i;
+                break;
+            }
+        }
+    }
     // Divergent if the cache holds anything beyond the verified-identical prefix --
     // whether a mid-prompt mismatch or a cache LONGER than the prompt. Either way those
     // entries are stale context and must be dropped, not decoded past.
-    d.divergent = (led_it != ids_.end());
+    //
+    // Read off `reusable` rather than the id iterator, because the tag walk above may
+    // have shortened it: a run whose ids match and whose images do not is divergent, and
+    // testing the iterator alone would have called it clean.
+    d.divergent = d.reusable < ids_.size();
     return d;
 }
 
@@ -81,11 +125,13 @@ void KvCacheLedger::truncate_to(std::size_t n) {
         return;
     }
     ids_.resize(n);
+    tags_.resize(n);
     hashes_.resize(n + 1);
 }
 
 void KvCacheLedger::clear() noexcept {
     ids_.clear();
+    tags_.clear();
     hashes_.clear();
     hashes_.push_back(kSeed);
 }
@@ -95,8 +141,9 @@ std::uint64_t KvCacheLedger::fingerprint_at(std::size_t k) const noexcept {
 }
 
 TurnReuse plan_turn_reuse(const KvCacheLedger& ledger, const std::vector<TokenId>& prompt,
-                          std::size_t checkpoint_len, bool checkpoint_valid) {
-    const ReuseDecision d = ledger.plan_reuse(prompt);
+                          std::size_t checkpoint_len, bool checkpoint_valid,
+                          std::span<const ContentTag> prompt_tags) {
+    const ReuseDecision d = ledger.plan_reuse(prompt, prompt_tags);
     if (!d.divergent) {
         // The cache is a verified prefix of the prompt: prefill only the tail. Unchanged
         // from before this function existed, and still the fast path within a turn.

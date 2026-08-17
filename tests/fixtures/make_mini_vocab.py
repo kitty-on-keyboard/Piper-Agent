@@ -75,6 +75,16 @@ SPECIALS = [
     "</tool_response>",
     "<think>",
     "</think>",
+    # Vision framing. Present on both real checkpoints (they are VL models), and needed
+    # here so ChatTemplate's image framing -- where the pad run lands, which is the offset
+    # the embedding splice addresses -- is pinned in the GATE rather than only against a
+    # 19 GB checkpoint. They are deliberately NOT part of SpecialIds::complete(): a
+    # text-only checkpoint must still load.
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|vision_pad|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
 ]
 
 # Gemma-4's 24 added tokens, read off the checkpoint before it was deleted. Kept verbatim
