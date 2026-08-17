@@ -94,16 +94,141 @@ TEST(turn_walks_think_text_accept) {
     CHECK_EQ(tok().decode(g.think_ids()), std::string("let me think about this"));
 }
 
-TEST(force_end_think_opens_text_without_close_token) {
+// The think budget collapses the legal set to a single id, so the close the model emits
+// is a REAL token -- it reaches the ledger and the forward pass, and the model's own
+// context carries the boundary. The predecessor flipped the phase and appended nothing,
+// and the model went on reasoning into the answer channel.
+TEST(the_think_cap_forces_a_real_close_token) {
     REQUIRE(tok().loaded());
     const auto tools = one_tool();
     TurnGrammar g(tok(), tools);
-    CHECK(feed_text(g, "ruminate") == Advance::Ok);
-    CHECK(g.phase() == TurnPhase::Think);
-    CHECK(g.force_end_think());
+    const auto ids = tok().encode_content("ruminate at some length about it");
+    REQUIRE(ids.size() >= 4);
+    ThinkCapMask capped(g, tok(), /*cap=*/3);
+
+    // Below the cap the mask is the grammar's own: ordinary prose is legal.
+    CHECK(capped.mask().allows(ids[0]));
+    CHECK(capped.mask_is_block_stable());
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(g.advance(ids[i]) == Advance::Ok);
+    }
+
+    // At the cap exactly one id is legal, and it is the closer.
+    const TokenId close = tok().specials().think_close;
+    CHECK_EQ(capped.mask().count(), std::size_t{1});
+    CHECK(capped.mask().allows(close));
+    CHECK(!capped.mask().allows(ids[3]));
+    // A block-wide snapshot would offer the closer at the next position too, where it is
+    // no longer what the turn needs -- so the block walks instead of reusing one.
+    CHECK(!capped.mask_is_block_stable());
+    CHECK(capped.can_checkpoint());
+
+    // Emitting it transitions the grammar normally: this is advance_think's own path.
+    CHECK(g.advance(close) == Advance::Ok);
     CHECK(g.phase() == TurnPhase::Text);
-    CHECK(!g.force_end_think()); // already out of Think
+    CHECK_EQ(g.think_ids().size(), std::size_t{3});
+    // ...and the cap stops binding, so the turn can produce an answer or a call.
+    CHECK(capped.mask().allows(ids[3]));
     CHECK(feed_text(g, "now tools") == Advance::Ok);
+    CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
+}
+
+// The cap is a mask policy, not a grammar rule, so TurnGrammar keeps accepting think
+// tokens past it. That is what makes a speculative block drafted just below the cap safe:
+// its remaining tokens commit as ordinary reasoning and the close is forced at the next
+// mask. Rejecting them would end the turn on a budget.
+TEST(overshooting_the_think_cap_is_accepted_not_rejected) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    const auto ids = tok().encode_content("one two three four five six");
+    REQUIRE(ids.size() >= 5);
+    ThinkCapMask capped(g, tok(), /*cap=*/2);
+    for (const TokenId id : ids) {
+        CHECK(g.advance(id) == Advance::Ok);
+    }
+    CHECK(g.phase() == TurnPhase::Think);
+    CHECK_EQ(g.think_ids().size(), ids.size());
+    // Still forced, however far past the cap the block ran.
+    CHECK_EQ(capped.mask().count(), std::size_t{1});
+    CHECK(capped.mask().allows(tok().specials().think_close));
+}
+
+// EXACTLY WHAT THE DECODER DOES ACROSS A FORCED CLOSE, through the MaskSource interface:
+// checkpoint, read the mask, probe a drafted token, read it again, then put it back.
+//
+// The failure this guards is the one that took tool-call speculation down once already --
+// a position with NO legal token. A block-wide snapshot at the cap would offer `</think>`
+// at the position after it too, where the phase has already moved to Text; that is why
+// mask_is_block_stable() is false here and the decoder walks instead. If the walk ever
+// produced an empty mask the decode loop would report "the grammar and the vocabulary
+// disagree" and end the run.
+TEST(the_decoder_walk_across_a_forced_close_never_sees_an_empty_mask) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    const auto ids = tok().encode_content("weigh it up carefully");
+    REQUIRE(ids.size() >= 3);
+    const TokenId close = tok().specials().think_close;
+
+    ThinkCapMask capped(g, tok(), /*cap=*/2);
+    for (std::size_t i = 0; i < 2; ++i) {
+        CHECK(g.advance(ids[i]) == Advance::Ok);
+    }
+    REQUIRE(!capped.mask_is_block_stable());
+    REQUIRE(capped.can_checkpoint());
+
+    capped.checkpoint();
+    const TokenMask at_cap = capped.mask(); // copied: the next probe may invalidate it
+    CHECK(at_cap.any());
+    CHECK_EQ(at_cap.count(), std::size_t{1});
+    CHECK(at_cap.allows(close));
+    // A drafter that guesses anything else is refused by the mask, which truncates the
+    // draft -- it does not walk the automaton somewhere it cannot leave.
+    CHECK(!at_cap.allows(ids[2]));
+
+    CHECK(capped.probe_advance(close));
+    const TokenMask after = capped.mask();
+    CHECK(after.any()); // THE ASSERTION: the position after the close is not a dead end
+    CHECK(after.allows(ids[2]));
+    CHECK(!after.allows(tok().specials().im_start));
+
+    capped.rollback();
+    // Back exactly where it was: still in Think, still at the cap, still forcing.
+    CHECK(g.phase() == TurnPhase::Think);
+    CHECK_EQ(g.think_ids().size(), std::size_t{2});
+    CHECK_EQ(capped.mask().count(), std::size_t{1});
+    CHECK(capped.mask().allows(close));
+}
+
+// A cap of 0 is "no budget", and the wrapper must then be invisible.
+TEST(a_zero_think_cap_delegates_everything) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    ThinkCapMask capped(g, tok(), /*cap=*/0);
+    CHECK(feed_text(g, "ruminate as long as it likes") == Advance::Ok);
+    CHECK(g.phase() == TurnPhase::Think);
+    CHECK_EQ(capped.mask().count(), g.mask().count());
+    CHECK(capped.mask_is_block_stable());
+}
+
+// `</think>` in Text is a no-op rather than a rejection: reasoning has already ended, so a
+// second closer carries nothing -- and ending the turn on it loses a run to punctuation.
+TEST(a_second_think_close_in_text_is_a_no_op) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    const TokenId close = tok().specials().think_close;
+    CHECK(feed_text(g, "thinking") == Advance::Ok);
+    CHECK(g.advance(close) == Advance::Ok);
+    CHECK(g.phase() == TurnPhase::Text);
+    CHECK(g.advance(close) == Advance::Ok); // the second one
+    CHECK(g.phase() == TurnPhase::Text);
+    CHECK(g.text_ids().empty()); // and it is not filed as answer text
+    CHECK(g.permitted(close));
+    CHECK(g.mask().allows(close));
+    CHECK(feed_text(g, "The answer is 4.") == Advance::Ok);
     CHECK(g.advance(tok().specials().im_end) == Advance::Accepted);
 }
 

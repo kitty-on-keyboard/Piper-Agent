@@ -32,6 +32,7 @@
 #include "src/model/qwen_tokenizer.hpp"
 #include "src/platform/clock.hpp"
 #include "src/platform/event_log.hpp"
+#include "src/model/image_preprocess.hpp"
 #include "src/tools/registry.hpp"
 #include "src/tools/sandbox.hpp"
 #include "src/tools/syntax_check.hpp"
@@ -82,6 +83,12 @@ struct HitlThresholds {
 // Persistent prefix allowlists apply only to fully parsed, non-destructive commands.
 // Opaque / irreversible calls cannot be waved through by a remembered prefix.
 [[nodiscard]] bool allowlist_may_auto_approve(const tools::RiskHint& hint) noexcept;
+
+// Whether "Always allow" on this command could persist a rule that will ever match again.
+// Sent to the card so the button appears only where it does something -- see the
+// definition for the 19 saved rules that could not match anything.
+[[nodiscard]] bool can_persist_allowlist_rule(const std::string& command,
+                                              const tools::RiskHint& hint);
 
 // The build command this workspace obviously has, or empty when it is not obvious.
 //
@@ -310,6 +317,12 @@ class Agent {
     [[nodiscard]] std::optional<tools::ToolResult> gate_call(
         const tools::ToolDecl* decl, const std::string& name,
         const std::vector<tools::ToolParamValue>& params);
+    // Whether the command's truncating redirects all land on this run's own output, which
+    // makes the classifier's `destroys_data` a statement about a file the run itself wrote.
+    // A member because it needs both halves the classifier lacks: run_wrote_ and a
+    // filesystem. See the definition in approval.cpp.
+    [[nodiscard]] bool redirects_only_own_output(const std::string& command,
+                                                 const tools::RiskHint& hint) const;
     // May this mode call this tool AT ALL? Asked TWICE, deliberately: here, to decide what
     // the model is told it has, and again inside gate_call, to decide what it may do.
     // Filtering is not defence in depth for its own sake; it is the difference between a
@@ -352,6 +365,22 @@ class Agent {
                                  const tools::ToolResult& result);
     // Whether a batched call may be executed off the agent thread, and the serial tail
     // such a call still owes. See parallel_calls.hpp.
+    // Decode + preprocess an image for the prompt, and fingerprint its pixels for the KV
+    // ledger. False when the file cannot be read -- the caller degrades to a note in the
+    // text rather than failing the turn. See the definition for why the hash is over the
+    // pixels and not the path.
+    // Fills in message image token counts (decoding to learn them) and optionally hands
+    // back the pixels and their content hashes, in render order. Used by BOTH render
+    // sites so the prompt step() sends and the prompt prompt_tokens() measures cannot
+    // diverge.
+    void resolve_images(std::vector<model::Message>& messages,
+                        std::vector<model::PreprocessedImage>* pixels,
+                        std::vector<std::uint64_t>* hashes) const;
+
+    [[nodiscard]] bool load_image_for_prompt(const std::string& path,
+                                             model::PreprocessedImage& out,
+                                             std::uint64_t& content_hash) const;
+
     [[nodiscard]] bool can_run_in_parallel(const std::string& name) const;
     [[nodiscard]] bool adopt_readonly_result(const std::string& name,
                                              const std::vector<tools::ToolParamValue>& params,

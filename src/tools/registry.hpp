@@ -134,6 +134,23 @@ struct WorkspaceContext {
     std::size_t max_observation_bytes;
     std::string spool_dir;        // oversized output lands here (S14)
     int shell_wall_clock_seconds;
+
+    // THE MOST CONTEXT ONE IMAGE MAY COST, in tokens.
+    //
+    // Not a pixel budget: the checkpoint's own ceiling is 16.7M pixels, which is 16,384
+    // tokens for a single picture -- more than most of this agent's prompts. An image
+    // competes with text for the same window, and this is the number that says how much
+    // it may take. The preprocessor scales the image down to fit rather than refusing it,
+    // so a 4K screenshot is legible at a cost the run can afford.
+    int max_image_tokens = 512;
+
+    // CAN THE LOADED MODEL ACTUALLY SEE? Decides whether `view_image` is declared at all.
+    //
+    // Defaults to false so a caller that has not thought about it gets the safe answer.
+    // A tool the model can call but whose result the model cannot consume is worse than a
+    // missing tool: the call succeeds, spends a turn, reports a cost in tokens, and the
+    // damage only lands on the NEXT turn, in the backend, as a run-ending error.
+    bool model_can_see = false;
 };
 
 // Cap on paths inside one read_many call. Matches TurnGrammar::kMaxCallsPerTurn so a

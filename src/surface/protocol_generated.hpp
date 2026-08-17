@@ -292,6 +292,7 @@ inline void append_value(std::string& out, const PerfSample& v) {
 struct StartParams {
     std::string mission;
     RunSettings settings;
+    std::vector<std::string> image_paths;
 };
 struct StartResult {
     std::string run_id;
@@ -341,6 +342,7 @@ struct ApproveResult {
 struct MessageParams {
     std::string run_id;
     std::string text;
+    std::vector<std::string> image_paths;
 };
 struct MessageResult {
     bool accepted = false;
@@ -558,6 +560,7 @@ struct ApprovalRequestNotification {
     std::string preview;
     std::string command;
     bool irreversible = false;
+    bool can_remember = false;
     double risk = 0.0;
     CapabilityChips capabilities;
     static constexpr const char* kMethod = "lmp/approval_request";
@@ -581,6 +584,9 @@ struct ApprovalRequestNotification {
     out += ",";
     out += "\"irreversible\":";
     append_value(out, n.irreversible);
+    out += ",";
+    out += "\"can_remember\":";
+    append_value(out, n.can_remember);
     out += ",";
     out += "\"risk\":";
     append_value(out, n.risk);

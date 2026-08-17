@@ -67,6 +67,11 @@ struct MlxBackendConfig {
     // plain decode path stays the reference. LMP_SPECULATIVE=1 turns it on without a
     // rebuild so the two can be measured against each other on the same binary.
     SpecConfig speculative{};
+    // Keep the checkpoint's vision tower resident so the prompt may carry images. Off by
+    // default: it is 0.92 GB, and most runs never send one. A load that asks for it
+    // against a text-only checkpoint REFUSES rather than falling back silently -- a run
+    // that quietly cannot see is indistinguishable from a model that will not look.
+    bool with_vision = false;
 };
 
 class MlxBackend final : public InferenceBackend {
@@ -77,6 +82,16 @@ class MlxBackend final : public InferenceBackend {
     // Loads config + weights once. A second call refuses (S5.11: one load per process).
     [[nodiscard]] LoadStatus load(const MlxBackendConfig& config);
     [[nodiscard]] bool available() const noexcept { return loaded_; }
+
+    // CAN THIS BACKEND SEE? The tower is resident and initialised, so a prompt may carry
+    // images. Answered from the loaded model, not from the config that was requested:
+    // those two disagreeing is exactly the state that must not be guessed at.
+    //
+    // Everything that puts an image in front of this backend is required to ask. A run
+    // whose model cannot see should say so in the prompt; it must never assemble the
+    // image anyway and let generate() refuse, because that refusal is terminal and takes
+    // the whole run with it.
+    [[nodiscard]] bool can_see() const noexcept;
 
     [[nodiscard]] GenResult generate(const InferenceTask& task, TokenSink& sink,
                                      const CancelToken& cancel) override;

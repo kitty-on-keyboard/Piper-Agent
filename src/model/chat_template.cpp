@@ -1,6 +1,8 @@
 #include "src/model/chat_template.hpp"
 #include "src/model/family_traits.hpp"
 
+#include <stdexcept>
+
 namespace lmp::model {
 namespace {
 
@@ -41,8 +43,43 @@ void append(std::vector<TokenId>& out, const std::vector<TokenId>& ids) {
 
 } // namespace
 
+bool ChatTemplate::supports_images() const { return tok_.specials().has_vision(); }
+
+// Each image in its own <|vision_start|> ... <|vision_end|>, before the message's text --
+// the order the checkpoint's chat_template.jinja emits for a content list, and the one a
+// question about a picture wants.
+//
+// The pads go in as the SPECIAL id, not as the literal characters: encode_content would
+// turn "<|image_pad|>" into ordinary bytes, which the splice would then fail to find, and
+// the model would read TEXT ABOUT an image rather than an image. That is the same split
+// the tool-call framing makes, for the same reason.
+void ChatTemplate::append_images(const Message& m, std::vector<TokenId>& out,
+                                 std::vector<ImagePlacement>* placements,
+                                 std::size_t message_index) const {
+    const SpecialIds& s = tok_.specials();
+    for (std::size_t i = 0; i < m.images.size(); ++i) {
+        const MessageImage& img = m.images[i];
+        if (img.tokens <= 0) {
+            // Reached only if a caller rendered before preprocessing the pixels, which
+            // would otherwise reserve a zero-length run and leave the splice with nowhere
+            // to write.
+            throw std::runtime_error(
+                "chat template: image has no token count -- preprocess the pixels before "
+                "rendering, so the pad run can be reserved");
+        }
+        out.push_back(s.vision_start);
+        if (placements != nullptr) {
+            placements->push_back({message_index, i, out.size(), img.tokens});
+        }
+        out.insert(out.end(), static_cast<std::size_t>(img.tokens), s.image_pad);
+        out.push_back(s.vision_end);
+    }
+}
+
 void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
-                                  std::vector<TokenId>& out) const {
+                                  std::vector<TokenId>& out,
+                                  std::vector<ImagePlacement>* placements,
+                                  std::size_t message_index) const {
     const SpecialIds& s = tok_.specials();
     const FamilyTraits traits = traits_for(tok_.family());
     out.push_back(s.im_start);
@@ -65,6 +102,11 @@ void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
         }
         case Role::User: {
             append(out, tok_.encode_template("user\n"));
+            // Images first, each in its own <|vision_start|> ... <|vision_end|>, then the
+            // text -- the order the checkpoint's chat_template.jinja emits for a content
+            // list, and the one a question about a picture wants.
+            //
+            append_images(m, out, placements, message_index);
             append(out, tok_.encode_content(m.content));
             break;
         }
@@ -89,6 +131,11 @@ void ChatTemplate::append_message(const Message& m, std::string_view tools_json,
             append(out, tok_.encode_template("user\n"));
             out.push_back(s.tool_response_open);
             append(out, tok_.encode_template("\n"));
+            // A tool that returns an image puts it HERE, inside the response block, ahead
+            // of whatever the tool said about it. This is still a user turn as far as the
+            // model is concerned, which is the role the reference template allows an
+            // image on.
+            append_images(m, out, placements, message_index);
             append(out, tok_.encode_content(m.content));
             append(out, tok_.encode_template("\n"));
             out.push_back(s.tool_response_close);
@@ -112,18 +159,44 @@ void ChatTemplate::append_generation_prompt(std::vector<TokenId>& out) const {
 
 std::vector<TokenId> ChatTemplate::render_with_offsets(
     const std::vector<Message>& messages, std::string_view tools_json,
-    std::vector<std::size_t>& offsets) const {
+    std::vector<std::size_t>& offsets, std::vector<ImagePlacement>* placements) const {
     std::vector<TokenId> out;
     offsets.clear();
     offsets.reserve(messages.size() + 1);
+    if (placements != nullptr) {
+        placements->clear();
+    }
+    // Refused up front rather than per-message, so "this checkpoint cannot take an image"
+    // is one clear failure instead of an kInvalidToken spliced into a prompt.
+    for (const Message& m : messages) {
+        if (m.images.empty()) {
+            continue;
+        }
+        if (!supports_images()) {
+            throw std::runtime_error(
+                "chat template: a message carries an image but this checkpoint has no "
+                "vision tokens");
+        }
+        // A tool response IS a user turn in Qwen's template (it wraps the result in
+        // <tool_response> inside one), so a tool that returns an image is allowed. A
+        // system message is not: the reference template raises on that, and so does this.
+        if (m.role != Role::User && m.role != Role::ToolResponse) {
+            throw std::runtime_error(
+                "chat template: images are only legal on a user message or a tool "
+                "response (the reference template raises on one in a system message)");
+        }
+    }
     bool first = true;
+    std::size_t index = 0;
     for (const Message& m : messages) {
         offsets.push_back(out.size());
         // The tools block rides on the first message iff it is the system message;
         // it is part of the KV prefix and therefore run-constant (S6.4).
         const bool with_tools = first && m.role == Role::System;
-        append_message(m, with_tools ? tools_json : std::string_view{}, out);
+        append_message(m, with_tools ? tools_json : std::string_view{}, out, placements,
+                       index);
         first = false;
+        ++index;
     }
     offsets.push_back(out.size()); // where the generation prompt starts
     append_generation_prompt(out);

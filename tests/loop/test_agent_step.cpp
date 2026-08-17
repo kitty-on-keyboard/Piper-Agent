@@ -1823,6 +1823,201 @@ TEST(partially_parsed_commands_card_through_auto_approve_exec) {
     (void)::system(("rm -rf " + root).c_str());
 }
 
+// NAMING AN EXECUTABLE BY PATH IS NOT EVIDENCE ABOUT WHAT IT DOES.
+//
+// The opaque-script rule tested above used to fire on any command word containing a `/`,
+// which made it measure SPELLING rather than opacity: `pytest -q` resolves off PATH to a
+// body we cannot see and auto-approved, while `.venv/bin/pytest -q` -- the same program,
+// the same risk score, the same effect -- carded. Every project-local toolchain is spelled
+// with a slash: a venv, node_modules/.bin, build/bin.
+//
+// MEASURED on the run that prompted this: 89 command decisions with auto_approve_exec ON,
+// 35 escalations, 27 of them from this rule and 24 of those scoring 0.20 -- `--help`,
+// `docs`, `model list` against a venv CLI. Moving the venv inside the workspace root does
+// not help; it never was about location.
+TEST(a_toolchain_named_by_path_is_not_an_opaque_script) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_venv_gate_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root + "/.venv/bin" +
+                    " && printf 'echo hi\\n' > " + root + "/wipe.sh")
+                       .c_str());
+
+    int asked = 0;
+    const auto run_cmd = [&](const std::string& cmd) {
+        const std::string body =
+            "<function=shell>\n<parameter=command>\n" + cmd +
+            "\n</parameter>\n</function>\n";
+        model::ScriptedBackend backend;
+        backend.enqueue_response(call_turn(tok, body));
+        tools::Registry registry(workspace(root));
+        context::ContextStore ctx("run it");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.auto_approve_exec = true;
+        config.sandbox_tier_override = 0; // the GATE is under test, not execution
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        agent.set_approver([&](const std::string&, const std::string&, const std::string&,
+                               const tools::RiskHint&) {
+            ++asked;
+            return true;
+        });
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+    };
+
+    // THE ASSERTION. A venv binary, and the shape the model actually writes: a variable
+    // holding an absolute path, then a chained pipeline through it. Verbatim from the log.
+    asked = 0;
+    run_cmd(".venv/bin/pytest -q");
+    CHECK_EQ(asked, 0);
+    asked = 0;
+    run_cmd("node_modules/.bin/tsc --noEmit");
+    CHECK_EQ(asked, 0);
+    asked = 0;
+    run_cmd("G=" + root + "/.venv/bin/godoer; $G docs SpringArm3D 2>&1 | head -60");
+    CHECK_EQ(asked, 0);
+
+    // What must STAY closed: an interpreter invoked on a file, whatever the interpreter is
+    // called. `.venv/bin/python wipe.py` used to card only by accident of its slash; it
+    // cards now because the BASENAME is recognised as an interpreter, which is the reason
+    // narrowing the slash rule could be done without opening the hole.
+    asked = 0;
+    run_cmd("bash wipe.sh");
+    CHECK_EQ(asked, 1);
+    asked = 0;
+    run_cmd(".venv/bin/python wipe.py");
+    CHECK_EQ(asked, 1);
+    asked = 0;
+    run_cmd("./wipe.sh");
+    CHECK_EQ(asked, 1);
+    // `-c` puts the body in the string, so there is nothing unseen -- as with plain python3.
+    asked = 0;
+    run_cmd(".venv/bin/python -c 'print(1)'");
+    CHECK_EQ(asked, 0);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+// A TRUNCATING REDIRECT INTO THE RUN'S OWN OUTPUT IS NOT DESTRUCTION.
+//
+// blast_radius has no filesystem: it sees `> out.txt`, cannot know whether out.txt exists,
+// and takes the safe reading -- destroys_data. Correct for a pure function, and it made
+// `echo hi > out.txt` score 0.30, which is_irreversible() then forced past
+// auto_approve_exec. The gate CAN look, and already draws this exact distinction for
+// writes: run_wrote_ separates "iterating on its own output" from "overwriting the
+// operator's data". MEASURED: 8 of 35 escalations on the run that prompted this, none of
+// them touching a file the operator had written.
+TEST(a_redirect_into_the_runs_own_output_is_not_destruction) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_redirect_gate_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root +
+                    " && printf 'ledger,data\\n' > " + root + "/ledger.csv")
+                       .c_str());
+
+    int asked = 0;
+    const auto run_cmd = [&](const std::string& cmd) {
+        const std::string body =
+            "<function=shell>\n<parameter=command>\n" + cmd +
+            "\n</parameter>\n</function>\n";
+        model::ScriptedBackend backend;
+        backend.enqueue_response(call_turn(tok, body));
+        tools::Registry registry(workspace(root));
+        context::ContextStore ctx("run it");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.auto_approve_exec = true;
+        config.sandbox_tier_override = 0;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        agent.set_approver([&](const std::string&, const std::string&, const std::string&,
+                               const tools::RiskHint&) {
+            ++asked;
+            return true;
+        });
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+    };
+
+    // A file that does not exist yet destroys nothing.
+    asked = 0;
+    run_cmd("pytest -q > report.txt 2>&1");
+    CHECK_EQ(asked, 0);
+    asked = 0;
+    run_cmd("echo hi > build/out.txt");
+    CHECK_EQ(asked, 0);
+
+    // THE OPERATOR'S DATA STILL CARDS. ledger.csv exists and this run did not write it --
+    // the case the whole gate was built for, and the one a blanket loosening would lose.
+    asked = 0;
+    run_cmd("echo x > ledger.csv");
+    CHECK_EQ(asked, 1);
+
+    // Outside the workspace is a different capability and is not covered by this at all.
+    asked = 0;
+    run_cmd("echo x > /tmp/lmp_redirect_gate_escape.txt");
+    CHECK_EQ(asked, 1);
+
+    // The redirect must be the ONLY destructive act. The classifier is the oracle for that:
+    // the command is re-classified with the redirects removed, and `rm -rf` survives it.
+    asked = 0;
+    run_cmd("rm -rf src > log.txt");
+    CHECK_EQ(asked, 1);
+
+    // A target whose value is not in the string can land anywhere, so it is not loosened.
+    asked = 0;
+    run_cmd("echo x > $OUT");
+    CHECK_EQ(asked, 1);
+
+    // `>>` appends and never destroyed anything, so it was never carded and still is not.
+    asked = 0;
+    run_cmd("echo x >> ledger.csv");
+    CHECK_EQ(asked, 0);
+
+    // ITS OWN OUTPUT, across turns. One agent, two turns: write the file through the write
+    // door, then truncate it with a shell redirect. run_wrote_ carries between them, which
+    // is what makes the second turn ordinary iteration rather than data loss.
+    {
+        const std::string write_body =
+            "<function=write_file>\n<parameter=path>\nnotes.md\n</parameter>\n"
+            "<parameter=content>\nfirst\n</parameter>\n</function>\n";
+        const std::string redirect_body =
+            "<function=shell>\n<parameter=command>\necho second > notes.md\n"
+            "</parameter>\n</function>\n";
+        model::ScriptedBackend backend;
+        backend.enqueue_response(call_turn(tok, write_body));
+        backend.enqueue_response(call_turn(tok, redirect_body));
+        tools::Registry registry(workspace(root));
+        context::ContextStore ctx("write then rewrite");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.auto_approve_exec = true;
+        config.auto_approve_writes = true;
+        config.sandbox_tier_override = 0;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        int asked_own = 0;
+        agent.set_approver([&](const std::string&, const std::string&, const std::string&,
+                               const tools::RiskHint&) {
+            ++asked_own;
+            return true;
+        });
+        const model::CancelToken cancel;
+        CHECK(agent.step(cancel).tool_result.ok()); // the write
+        (void)agent.step(cancel);                   // the redirect over it
+        CHECK_EQ(asked_own, 0);
+    }
+
+    (void)::system(("rm -rf " + root + " /tmp/lmp_redirect_gate_escape.txt").c_str());
+}
+
 // --- re-reads are answered; the duplicate is what gets collapsed ---------------
 //
 // The measurement that started this is real: 45 turns produced 65 turn records, 34 of them
