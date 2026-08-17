@@ -45,6 +45,7 @@ export interface RunSettings {
   allowed_commands: string;
   context_budget_tokens: number;
   max_new_tokens: number;
+  reasoning_effort: string;
   verify_contract: string;
   mcp_servers: McpServerSettings[];
 }
@@ -154,6 +155,7 @@ export interface ModelStatusNotification {
   model_dir: string;
   detail: string;
   elapsed_ms: number;
+  supports_reasoning_effort: boolean;
 }
 
 export interface TokenNotification {

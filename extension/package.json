@@ -180,6 +180,21 @@
           "default": 4096,
           "markdownDescription": "Generation cap for one turn. A turn that hits the cap makes no tool call and leaves nothing behind, so a mission needing a long first plan can stall on it; raise this rather than the turn budget."
         },
+        "lmPipe.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "xhigh"
+          ],
+          "enumDescriptions": [
+            "Think briefly and move to the conclusion.",
+            "No instruction either way — the checkpoint's untouched behaviour, and what every run got before this setting existed.",
+            "Think carefully, validate assumptions and weigh alternatives. The most thorough level, and the slowest."
+          ],
+          "default": "medium",
+          "markdownDescription": "How hard the model should think. Only some checkpoints understand this — Qwen3.8-27B does, Qwen3.6-35B-A3B has no notion of it and the setting is ignored (the panel greys the control out and the sidecar logs a `reasoning_effort` event saying so). There is deliberately no `high`: the checkpoint's own template accepts only `low`, `medium` and `xhigh`, and raises on anything else. Changing this rewrites the front of the prompt, so it takes effect on the next turn and that turn re-reads the conversation."
+        },
         "lmPipe.verifyContract": {
           "type": "string",
           "default": "",

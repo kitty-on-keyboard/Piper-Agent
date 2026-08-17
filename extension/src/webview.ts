@@ -585,6 +585,11 @@ button.ghost {
 }
 .seg button.on { background: var(--vscode-sideBar-background); color: var(--fg); font-weight: 590;
                  box-shadow: 0 1px 3px rgba(0,0,0,.16); }
+/* A control the loaded checkpoint cannot honour. Dimmed and inert, but still showing
+   which value is selected -- the setting survives a model change, and hiding its value
+   would leave the operator guessing what the next checkpoint will pick up. */
+.seg.off { opacity: .5; }
+.seg button:disabled { cursor: default; }
 input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 .toggle { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
 .toggle span { font-size: 12px; }
@@ -829,6 +834,15 @@ function markup(): string {
         <button data-v="3">Host</button>
       </div>
       <div class="warnbox" id="tierWarn"></div>
+    </div>
+    <div class="set">
+      <label>Thinking <b id="effortState"></b></label>
+      <div class="seg" id="segEffort">
+        <button data-v="low" title="Keep thinking brief and move to the conclusion">Low</button>
+        <button data-v="medium" title="No instruction either way — the checkpoint's untouched behaviour">Medium</button>
+        <button data-v="xhigh" title="Think carefully, validate assumptions, weigh alternatives — the slowest level">xHigh</button>
+      </div>
+      <div class="warnbox" id="effortWarn"></div>
     </div>
     <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec"></div></div>
     <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite"></div></div>
@@ -1920,6 +1934,11 @@ const SLIDERS = [
   ['sampling.repetitionPenalty', 'Repetition penalty', 1, 1.5, 0.01, ''],
 ];
 let settings = {};
+// A property of the LOADED CHECKPOINT, not a setting -- it arrives on model_status and is
+// never written back. Starts false so the control reads as unavailable until a model has
+// actually said otherwise; claiming the level works and finding out later that it never
+// reached the prompt is the failure this whole flag exists to prevent.
+let effortSupported = false;
 
 const put = (key, value) => {
   settings[key] = value;
@@ -1951,6 +1970,7 @@ function seg(id, key, cast) {
 }
 seg('segMode', 'mode', String);
 seg('segTier', 'sandboxTier', Number);
+seg('segEffort', 'reasoningEffort', String);
 
 function sw(id, key) {
   $(id).onclick = () => { put(key, !settings[key]); paint(); };
@@ -2066,6 +2086,23 @@ function paint() {
     (b) => b.classList.toggle('on', Number(b.dataset.v) === settings.sandboxTier));
   $('swExec').classList.toggle('on', settings.autoApproveExec === true);
   $('swWrite').classList.toggle('on', settings.autoApproveWrites === true);
+  // Thinking level. Greyed rather than hidden when the checkpoint has no notion of it:
+  // the setting is real and shared across checkpoints, so the honest thing is to show
+  // the value it holds and say why it is doing nothing here -- a control that vanishes
+  // reads as a missing feature, and one that looks live reads as a lie.
+  $('segEffort').querySelectorAll('button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.v === settings.reasoningEffort);
+    b.disabled = !effortSupported;
+  });
+  $('segEffort').classList.toggle('off', !effortSupported);
+  $('effortState').textContent = effortSupported ? '' : 'not supported here';
+  $('effortWarn').textContent = !effortSupported
+    ? 'This checkpoint has no thinking levels — the setting is kept and ignored. Qwen3.8 has them; Qwen3.6 does not.'
+    : settings.reasoningEffort === 'xhigh'
+    ? 'Most thorough and slowest. Every turn carries the instruction, so it costs decode time on all of them.'
+    : settings.reasoningEffort === 'low'
+    ? 'Briefest reasoning. Good for mechanical work, worse for anything needing a plan.'
+    : '';
   // Tier 2 is a real setting the segmented control has no button for; say so rather
   // than showing three buttons all unselected and looking broken.
   $('tierWarn').textContent =
@@ -2177,6 +2214,8 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'model') {
     paintModel(payload);
+    effortSupported = payload.supports_reasoning_effort === true;
+    paint();
     // A load owns the sidecar's only thread, so nothing else can be happening while one
     // runs -- which is both why "Loading the model" is safe to put in the status line and
     // why a run can never be in flight underneath it. Saying it is the difference between
