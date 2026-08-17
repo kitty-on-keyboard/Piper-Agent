@@ -23,3 +23,10 @@ lmp_add_test(test_token_stream SOURCES test_token_stream.cpp LABELS realmodel LI
 
 # Pure timing + ordering over the dispatch primitive: no tokenizer, no model, so gate.
 lmp_add_test(test_parallel_calls SOURCES test_parallel_calls.cpp LABELS gate LINK lmp_loop TIMEOUT 60)
+
+# The whole loop, with eyes: the model calls view_image on a file in its workspace and
+# names a colour that appears nowhere in the prompt. The only test that proves the tool
+# chain and the embedding splice are connected end to end.
+lmp_add_test(test_vision_agent SOURCES test_vision_agent.cpp LABELS realmodel
+             LINK lmp_loop lmp_model lmp_tools lmp_context TIMEOUT 1800)
+lmp_stage_metallib(test_vision_agent)

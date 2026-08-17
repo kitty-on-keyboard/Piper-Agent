@@ -59,14 +59,6 @@ void TurnGrammar::rollback() {
     mark_.held = false;
 }
 
-bool TurnGrammar::force_end_think() noexcept {
-    if (phase_ != TurnPhase::Think) {
-        return false;
-    }
-    phase_ = TurnPhase::Text;
-    return true;
-}
-
 bool TurnGrammar::is_structural(TokenId id) const noexcept {
     const SpecialIds& s = tok_.specials();
     return id == s.im_start || id == s.im_end || id == s.tool_call_open ||
@@ -115,6 +107,15 @@ Advance TurnGrammar::advance_text(TokenId id) {
             phase_ = TurnPhase::Text;
             return Advance::Rejected;
         }
+        return Advance::Ok;
+    }
+    if (id == s.think_close) {
+        // A NO-OP, NOT A REJECTION. Reasoning has already ended here, so a second closer
+        // means nothing -- and rejecting it ends the turn on a token that carries no
+        // content. Two paths reach it: ThinkCapMask forces a close, and a speculative
+        // block drafted across that transition can carry another; and a model whose
+        // thought was cut short sometimes spells a closer of its own once it is in Text.
+        // Both used to be fatal.
         return Advance::Ok;
     }
     if (is_structural(id)) {
@@ -290,6 +291,30 @@ const TokenMask& TurnGrammar::mask() const {
         it = cache_->structural.find(key);
     }
     return it->second;
+}
+
+// --- ThinkCapMask ------------------------------------------------------------
+
+const TokenMask& ThinkCapMask::mask() const {
+    if (!at_cap()) {
+        return g_.mask();
+    }
+    const TokenId close = tok_.specials().think_close;
+    // YIELD RATHER THAN HAND THE SAMPLER AN EMPTY MASK. If the grammar would not accept a
+    // close right here, forcing one produces a mask with no legal token, which the decode
+    // loop reports as "the grammar and the vocabulary disagree" and ends the run on. A
+    // thought that runs past its budget is a far cheaper outcome than a dead run, and this
+    // is unreachable today -- Think always accepts its own closer -- so it is a floor, not
+    // a branch anyone is expected to take.
+    if (!g_.permitted(close)) {
+        return g_.mask();
+    }
+    if (!close_only_built_) {
+        close_only_.reset(tok_.vocab_size());
+        close_only_.allow(close);
+        close_only_built_ = true;
+    }
+    return close_only_;
 }
 
 } // namespace lmp::model

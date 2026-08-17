@@ -70,6 +70,15 @@ struct TurnRecord {
     // and is it now wrong?" -- by construction it answers only the opposite question. A
     // path can. See ContextStore::stale_copies_of_path.
     std::string observed_path;
+    // Images to SHOW the model, as workspace paths. On a tool turn these are
+    // tools::ToolResult's `images`; on a HUMAN turn they are what was dragged or pasted
+    // into the pane. One field for both because nothing downstream cares which it was --
+    // the prompt builder resolves them identically.
+    //
+    // Carried as paths rather than pixels: they are re-read when the prompt is built, so
+    // what reaches the model is what is on disk at that moment, and the context store
+    // does not hold megabytes of decoded image per turn.
+    std::vector<std::string> observed_images;
     std::string observation;      // the tool result summary -- an OBSERVED fact
     bool observation_is_error = false;
     std::uint64_t first_event_seq = 0; // provenance into the event log
@@ -376,10 +385,16 @@ class ContextStore {
     // instruction is an observed fact about this session, in the same sense a tool
     // result is (S8.4). What stays forbidden is text nobody said -- an inferred
     // workspace description or a guessed deliverable name.
-    void add_user_message(std::string text) {
+    void add_user_message(std::string text) { add_user_message(std::move(text), {}); }
+
+    // `images` are workspace paths the human attached -- dragged or pasted into the pane.
+    // They ride the same TurnRecord field a tool result's images do, because by the time
+    // the prompt is built nothing cares which of the two put them there.
+    void add_user_message(std::string text, std::vector<std::string> images) {
         user_turns_.push_back(text);
         TurnRecord t;
         t.user_text = std::move(text);
+        t.observed_images = std::move(images);
         add_turn(std::move(t));
     }
     [[nodiscard]] const std::vector<std::string>& user_turns() const noexcept {

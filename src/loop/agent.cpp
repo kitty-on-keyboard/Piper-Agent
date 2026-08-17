@@ -1,5 +1,7 @@
 #include "src/loop/agent.hpp"
 
+#include "src/model/image_decode.hpp"
+
 #include <algorithm>
 #include <cassert> // the emit() field-name guard
 #include <cctype> // ordinal_width's digit test
@@ -812,14 +814,51 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
 
     // --- prompt assembly ---------------------------------------------------
     const model::ChatTemplate tmpl(tok_);
-    const std::vector<model::Message> messages = ctx_.render("");
+    std::vector<model::Message> messages = ctx_.render("");
     model::InferenceTask task;
+    // --- images -------------------------------------------------------------
+    //
+    // The context store carries image PATHS; the pixels are read here, at prompt time, so
+    // what the model sees is what is on disk now rather than what it was when the tool
+    // ran. Preprocessing has to happen BEFORE rendering, because the token count decides
+    // how many `<|image_pad|>` ids the template reserves.
+    //
+    // A path that has since been deleted or corrupted degrades to a note in the text
+    // rather than failing the turn: the run has already recorded that it looked at the
+    // picture, and killing the turn over it would lose everything else in the prompt.
+    std::vector<model::PreprocessedImage> pixels;
+    std::vector<std::uint64_t> image_hashes;
+    resolve_images(messages, &pixels, &image_hashes);
     // render_with_offsets, NOT a second render of a message sub-list: render() appends the
     // generation prompt, so the first k messages rendered alone are not a token prefix of
     // the whole. Asking for offsets is the only correct way to locate the boundary, and
     // getting it wrong reuses a cache against the wrong prefix without crashing (S5.10).
     std::vector<std::size_t> offsets;
-    task.prompt = tmpl.render_with_offsets(messages, tools_guidance_, offsets);
+    std::vector<model::ImagePlacement> placements;
+    task.prompt = tmpl.render_with_offsets(messages, tools_guidance_, offsets, &placements);
+    // Placements come back in render order and `pixels` was filled in that same order, so
+    // the two are paired by index. Asserted rather than assumed: a mismatch would splice
+    // one picture's rows over another's pads, and both are the same run of `<|image_pad|>`
+    // ids, so nothing downstream could tell.
+    if (placements.size() != pixels.size()) {
+        turn.generation.status = model::GenStatus::BackendError;
+        turn.generation.error = "image placements (" + std::to_string(placements.size()) +
+                                ") do not match preprocessed images (" +
+                                std::to_string(pixels.size()) + ")";
+        turn.outcome = Outcome::BackendError;
+        return turn;
+    }
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+        model::PromptImage pi;
+        pi.pad_offset = placements[i].pad_offset;
+        pi.tokens = placements[i].tokens;
+        pi.grid_h = pixels[i].grid_h;
+        pi.grid_w = pixels[i].grid_w;
+        pi.patch_dim = pixels[i].patch_dim;
+        pi.patches = std::move(pixels[i].patches);
+        pi.content_hash = image_hashes[i];
+        task.images.push_back(std::move(pi));
+    }
     // The real size of the prompt this turn, free of charge -- it has just been tokenized.
     // Read by collapse_duplicate_read, which must not call prompt_tokens() per read: that
     // re-renders and re-tokenizes the whole context, and a batched turn would do it four
@@ -903,7 +942,6 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // did not think it could. The mode's set is a run constant, which is also what keeps
     // the KV prefix stable (S6.4).
     model::TurnGrammar grammar(tok_, mode_specs());
-    task.mask = &grammar;
 
     // Reasoning is surfaced on its own channel, never inlined into the answer (S5.7).
     // The split happens by TOKEN ID upstream; the streamer only routes it, one token at a
@@ -921,7 +959,12 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         think_cap = static_cast<std::size_t>(
             std::max(0, std::min(config_.max_think_tokens, room)));
     }
-    GrammarSink sink(grammar, streamer.get(), think_cap);
+    // The budget constrains the MASK, not the automaton: at the cap the only legal id is
+    // `</think>`, so the model emits a real one and its own context carries the boundary.
+    // See ThinkCapMask for what happened when the phase was flipped from under it instead.
+    model::ThinkCapMask capped_mask(grammar, tok_, think_cap);
+    task.mask = &capped_mask;
+    GrammarSink sink(grammar, streamer.get());
     turn.generation = backend_.generate(task, sink, cancel);
 
     // Drained and joined BEFORE the text below is read, so what the surface showed and
@@ -943,9 +986,13 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         generated - std::min(generated, turn.think_tokens + turn.text_tokens);
     if (turn.generation.status == model::GenStatus::LengthCapped) {
         turn.cap_phase = phase_name(grammar.phase());
-    } else if (sink.think_capped) {
+    } else if (think_cap > 0 && turn.think_tokens >= think_cap) {
         // Not a length cap of the turn -- generation continued after think closed -- but
         // still worth naming so a trace can see why reasoning stopped early.
+        //
+        // Read off the COMMITTED think tokens rather than a flag the mask sets. The mask
+        // is consulted during speculative probing too, on states that are then rolled
+        // back, so a flag there would report a cap that no committed token ever hit.
         turn.cap_phase = "think_budget";
     }
     if (observer_.on_perf) {
@@ -1140,6 +1187,106 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
 // the checklist, `mutates_workspace` opens the write gate and the deliverable ledger,
 // `executes_commands` opens the risk classifier and the approver. An unregistered name is
 // not eligible either -- dispatch_call has to be the one to produce the typed NotFound.
+// Decode + preprocess one image for the prompt, and fingerprint its BYTES.
+//
+// The hash is what keeps the KV cache honest. Every image in a prompt is the same run of
+// `<|image_pad|>` ids, so the ledger cannot tell two pictures apart from the tokens; it
+// compares this instead. Hashing the FILE BYTES rather than the path is what makes the
+// cache track edits: overwrite a screenshot and re-run, and the tag changes, so the
+// prefix from that image onward is re-prefilled instead of served from a cache encoding
+// the old picture. Hashing the path would have been the version of this that looks right
+// and silently shows the model a stale image.
+// Fill in every message image's token count, decoding the pixels to learn it, and hand
+// back those pixels when the caller wants them.
+//
+// ONE FUNCTION FOR BOTH RENDER SITES. step() builds the prompt it sends and prompt_tokens()
+// measures the prompt it would send, and the two must agree -- the comment on
+// prompt_tokens records what it cost the last time they did not. An image that cannot be
+// resolved is dropped from the message and replaced by a line of text saying so, rather
+// than failing the turn: the run has already recorded that it looked at the picture, and
+// killing the turn would lose everything else in the prompt with it.
+void Agent::resolve_images(std::vector<model::Message>& messages,
+                           std::vector<model::PreprocessedImage>* pixels,
+                           std::vector<std::uint64_t>* hashes) const {
+    // A BLIND MODEL DROPS EVERY IMAGE HERE, for the same reason an unreadable one is
+    // dropped below and by the same mechanism.
+    //
+    // This is the backstop, not the fix -- with the registry gated on the same flag, a
+    // model that cannot see is never offered `view_image` and nothing should reach this
+    // line. It exists because the alternative when something does reach it is the failure
+    // this was written for: prepare_images() refuses an image-bearing prompt, the refusal
+    // is a BackendError, and BackendError ends the run. A run died at turn 3 with nothing
+    // produced because three pictures it had already been told it was looking at could
+    // not be encoded. Degrading costs the pictures; the terminal path costs the run.
+    //
+    // The user-attached path (surface images on a message) has no tool call to gate and
+    // so can only be caught here.
+    const bool can_see = registry_.workspace().model_can_see;
+    for (model::Message& m : messages) {
+        for (auto it = m.images.begin(); it != m.images.end();) {
+            model::PreprocessedImage pre;
+            std::uint64_t hash = 0;
+            if (!can_see) {
+                // Named as a property of the MODEL, not of the file. "could not be read"
+                // would send the model looking for a problem with a picture that is
+                // perfectly fine, and it would try again.
+                m.content = "(the image at " + it->source +
+                            " is not shown here: the loaded model has no vision tower and "
+                            "cannot see images)\n" + m.content;
+                it = m.images.erase(it);
+                continue;
+            }
+            if (!load_image_for_prompt(it->source, pre, hash)) {
+                m.content = "(the image at " + it->source +
+                            " could not be read when this prompt was built, so it is not "
+                            "shown here)\n" + m.content;
+                it = m.images.erase(it);
+                continue;
+            }
+            it->tokens = pre.token_count();
+            if (pixels != nullptr) {
+                pixels->push_back(std::move(pre));
+            }
+            if (hashes != nullptr) {
+                hashes->push_back(hash);
+            }
+            ++it;
+        }
+    }
+}
+
+bool Agent::load_image_for_prompt(const std::string& path, model::PreprocessedImage& out,
+                                  std::uint64_t& content_hash) const {
+    const tools::WorkspaceContext& ws = registry_.workspace();
+    // Through the workspace jail, not raw: an image path arrives from a tool result the
+    // model influenced, so it gets the same containment every other path does.
+    const platform::WorkspaceFs fs(ws.root);
+    const platform::ContainedPath resolved = fs.contained_path(path);
+    if (!fs.valid() || !resolved.ok()) {
+        return false;
+    }
+    constexpr long long kMaxDecodedPixels = 64LL * 1000LL * 1000LL;
+    model::ImageRGB img;
+    std::string err;
+    if (!model::decode_image_file(resolved.absolute, kMaxDecodedPixels, img, err)) {
+        return false;
+    }
+    // FNV-1a over the decoded pixels. Decoded rather than raw file bytes so that
+    // re-encoding the same picture (a PNG saved again at a different compression level)
+    // does not needlessly invalidate the cache, while any change to what the model would
+    // actually SEE does.
+    std::uint64_t h = 14695981039346656037ULL;
+    for (const std::uint8_t b : img.rgb) {
+        h = (h ^ b) * 1099511628211ULL;
+    }
+    // Zero means "ordinary token" to the ledger, so an image must never hash to it.
+    content_hash = h != 0 ? h : 1ULL;
+
+    model::PreprocessConfig cfg;
+    cfg.max_pixels = model::token_budget_to_max_pixels(ws.max_image_tokens, cfg);
+    return model::preprocess_image(img, cfg, out, err);
+}
+
 bool Agent::can_run_in_parallel(const std::string& name) const {
     if (name == "plan") {
         return false;
@@ -1669,7 +1816,16 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
 // managed against was never the number it was sending.
 std::size_t Agent::prompt_tokens() const {
     const model::ChatTemplate tmpl(tok_);
-    return tmpl.render(ctx_.render(""), tools_guidance_).size();
+    std::vector<model::Message> messages = ctx_.render("");
+    // THROUGH THE SAME IMAGE RESOLUTION step() USES, for the reason the paragraph above
+    // gives: a budget computed against a different prompt is not a budget. It also cannot
+    // be skipped -- an unresolved image has no token count, and the template refuses to
+    // reserve a run it cannot size.
+    //
+    // This decodes each image on every call, which is a real cost only for a run that is
+    // carrying pictures, and a small one against the prefill it is deciding about.
+    resolve_images(messages, nullptr, nullptr);
+    return tmpl.render(messages, tools_guidance_).size();
 }
 
 void Agent::compact_to_budget() {
@@ -1979,6 +2135,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         }
         rec.observation = turn.tool_result.summary;
         rec.observation_is_error = !turn.tool_result.ok();
+        // What the tool wants the model to SEE. Paths, re-read at prompt time.
+        rec.observed_images = turn.tool_result.images;
         rec.last_event_seq = log_.events_written();
 
         // Tool turns often leave the answer channel empty (reasoning lived in <think>).
@@ -2107,6 +2265,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             }
             er.observation = extra.result.summary;
             er.observation_is_error = !extra.result.ok();
+            er.observed_images = extra.result.images;
             er.first_event_seq = log_.events_written();
             er.last_event_seq = er.first_event_seq;
             ctx_.add_turn(std::move(er));
@@ -2251,6 +2410,15 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 // each one nudged with the file note, none of them broken out of.
                 const bool display_only_turn =
                     spun && turn.extra_calls.empty() && is_display_only(turn.tool_name);
+                // A TURN WHOSE REASONING THE HARNESS CUT DID NOT CHOOSE TO STOP THINKING,
+                // and the generic note reads as though it did. ThinkCapMask forces a
+                // `</think>` at the budget; the model receives it, but a thought
+                // interrupted mid-sentence carries on in the answer channel, and the turn
+                // then ends having narrated rather than acted. Telling it to "call the
+                // tool NOW" without saying WHY it never got there is the same failure the
+                // spun note above was written to fix: advice for a state the model is not
+                // in.
+                const bool think_truncated = !spun && turn.cap_phase == "think_budget";
                 context::TurnRecord note;
                 note.observation =
                     display_only_turn
@@ -2268,6 +2436,15 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                            "'ask_question' if you need a decision from the human. "
                            "Do not re-read a file this run has already read unless something has "
                            "written to it since.]"
+                    : think_truncated
+                        ? "[Note: Your reasoning hit its budget and was closed for you, so the "
+                          "turn ran out having thought rather than acted -- and what you wrote "
+                          "after the close went out as your answer, not as thinking. Nothing "
+                          "ran and nothing changed. Do not resume that train of thought: decide "
+                          "on what you already have and ACT this turn. Make the call you were "
+                          "working toward, or call 'ask_question' if the decision is the "
+                          "human's. Keep the next thought short -- the budget is per turn, and "
+                          "spending it again the same way ends the run.]"
                     : policy_.conversational
                         ? "[Note: You are in Plan mode and your last turn called no tool. Do not output "
                           "standalone text updates or commentary -- they do not reach the human. "

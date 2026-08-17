@@ -16,6 +16,9 @@
 #include "src/model/model_limits.hpp"
 #include "src/model/qwen_tokenizer.hpp"
 
+#include <algorithm>
+#include <stdexcept>
+#include "src/model/chat_template.hpp"
 #include "tests/check.hpp"
 
 using namespace lmp::model;
@@ -209,7 +212,7 @@ TEST(rope_parameters_still_overrides_the_config_level) {
     CHECK(cfg.partial_rotary_factor == 0.5F);
 }
 
-TEST(think_budget_force_transitions_so_tools_keep_room) {
+TEST(think_budget_leaves_room_for_tools_by_forcing_a_close) {
     REQUIRE(tok().loaded());
     std::vector<parsephony::ToolSpec> tools;
     parsephony::ToolSpec spec;
@@ -222,7 +225,8 @@ TEST(think_budget_force_transitions_so_tools_keep_room) {
     tools.push_back(spec);
 
     TurnGrammar g(tok(), tools);
-    lmp::loop::GrammarSink sink(g, nullptr, /*max_think_tokens=*/3);
+    lmp::loop::GrammarSink sink(g, nullptr);
+    ThinkCapMask capped(g, tok(), /*cap=*/3);
 
     // Mini vocab is sparse; pad until encode_content yields enough ordinary ids.
     std::string prose = "a b c d e f g h i j";
@@ -231,13 +235,184 @@ TEST(think_budget_force_transitions_so_tools_keep_room) {
         prose += " k";
         ids = tok().encode_content(prose);
     }
-    for (std::size_t i = 0; i < 6; ++i) {
+
+    // Decode as the backend does: consult the mask, then feed what it permitted. Three
+    // think tokens in, the mask leaves the sampler one choice.
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(capped.mask().allows(ids[i]));
         CHECK(sink.on_token(ids[i]));
     }
-    CHECK(sink.think_capped);
+    CHECK_EQ(capped.mask().count(), std::size_t{1});
+    CHECK(capped.mask().allows(tok().specials().think_close));
+
+    // The forced token is an ordinary emission: the sink sees it, the phase moves, and
+    // whatever budget remains is now spendable on answer text and tool XML.
+    CHECK(sink.on_token(tok().specials().think_close));
     CHECK(g.phase() == TurnPhase::Text);
     CHECK(g.think_ids().size() == 3);
-    // Remaining tokens land as answer text, not more think -- the reserved tool budget
-    // path depends on this phase flip.
+    for (std::size_t i = 3; i < 6; ++i) {
+        CHECK(capped.mask().allows(ids[i]));
+        CHECK(sink.on_token(ids[i]));
+    }
     CHECK(g.text_ids().size() == 3);
+}
+
+// --- image framing in the chat template ----------------------------------------
+//
+// The pad OFFSET is the number the splice addresses, and nothing downstream can check it:
+// point it one token early and the splice overwrites real text, leaving the model reading
+// a sentence with a hole in it -- fluent, and silent. So the template computes it and
+// these pin it.
+
+TEST(an_image_is_framed_and_its_pad_run_is_located) {
+    REQUIRE(tok().loaded());
+    if (!tok().specials().has_vision()) {
+        // The miniature vocabulary carries the vision specials only if the generator was
+        // asked for them; say so rather than passing green on an untested path.
+        lmp::test::record_failure(__FILE__, __LINE__,
+                                  "mini vocab has no vision specials, so the image "
+                                  "framing is untested here");
+        return;
+    }
+    const ChatTemplate tmpl(tok());
+    const SpecialIds& s = tok().specials();
+
+    Message user;
+    user.role = Role::User;
+    user.content = "what is this?";
+    user.images.push_back({4});
+    const std::vector<Message> messages = {{Role::System, "sys"}, user};
+
+    std::vector<std::size_t> offsets;
+    std::vector<ImagePlacement> places;
+    const std::vector<TokenId> ids = tmpl.render_with_offsets(messages, {}, offsets, &places);
+
+    REQUIRE(places.size() == 1);
+    CHECK_EQ(places[0].message_index, std::size_t{1});
+    CHECK_EQ(places[0].tokens, 4);
+
+    // The run is exactly where it says, is exactly as long as it says, and is bracketed.
+    const std::size_t at = places[0].pad_offset;
+    REQUIRE(at + 4 < ids.size());
+    CHECK_EQ(ids[at - 1], s.vision_start);
+    for (int i = 0; i < 4; ++i) {
+        CHECK_EQ(ids[at + static_cast<std::size_t>(i)], s.image_pad);
+    }
+    CHECK_EQ(ids[at + 4], s.vision_end);
+
+    // ...and exactly four pads exist in the whole prompt, so nothing else minted one.
+    CHECK_EQ(std::count(ids.begin(), ids.end(), s.image_pad), 4);
+}
+
+TEST(images_outside_a_user_message_are_refused) {
+    REQUIRE(tok().loaded());
+    if (!tok().specials().has_vision()) {
+        return; // reported by the test above
+    }
+    const ChatTemplate tmpl(tok());
+    Message sys;
+    sys.role = Role::System;
+    sys.content = "sys";
+    sys.images.push_back({2});
+    std::vector<std::size_t> offsets;
+    bool threw = false;
+    try {
+        (void)tmpl.render_with_offsets({sys}, {}, offsets, nullptr);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Two images in one message keep their order and do not overlap.
+TEST(two_images_in_one_message_are_placed_in_order) {
+    REQUIRE(tok().loaded());
+    if (!tok().specials().has_vision()) {
+        return;
+    }
+    const ChatTemplate tmpl(tok());
+    Message user;
+    user.role = Role::User;
+    user.content = "compare these";
+    user.images.push_back({3});
+    user.images.push_back({5});
+    std::vector<std::size_t> offsets;
+    std::vector<ImagePlacement> places;
+    const std::vector<TokenId> ids =
+        tmpl.render_with_offsets({user}, {}, offsets, &places);
+    REQUIRE(places.size() == 2);
+    CHECK_EQ(places[0].image_index, std::size_t{0});
+    CHECK_EQ(places[1].image_index, std::size_t{1});
+    CHECK(places[0].pad_offset + 3 <= places[1].pad_offset);
+    CHECK_EQ(std::count(ids.begin(), ids.end(), tok().specials().image_pad), 8);
+}
+
+// --- can the machine hold this context budget? -------------------------------
+//
+// context_budget_tokens was only ever checked against max_position_embeddings, which says
+// what the MODEL can address and nothing about what the MACHINE can hold. A run died with
+// no run_end and no crash report because 245,760 passed that check and needed ~18 GB of KV
+// beside 16.3 GB of weights on a 48 GB host. The numbers below are that run's, so this
+// test fails if the policy ever stops refusing the budget that killed it.
+
+TEST(kv_cost_counts_only_the_layers_that_actually_hold_a_cache) {
+    // The shape of Qwen3.8-27B-MLX-4bit, built here rather than read from a checkpoint so
+    // the gate needs no weights.
+    lmp::model::mlxl::Qwen35MoeConfig cfg;
+    cfg.num_hidden_layers = 64;
+    cfg.num_key_value_heads = 4;
+    cfg.head_dim = 256;
+    cfg.full_attention_interval = 4;
+
+    // 16 full-attention layers, not 64: the linear layers carry a fixed-size state that
+    // does not grow with the sequence. Counting all of them overstates KV by 4x.
+    int full = 0;
+    for (int i = 0; i < cfg.num_hidden_layers; ++i) {
+        if (!cfg.is_linear_layer(i)) {
+            ++full;
+        }
+    }
+    CHECK_EQ(full, 16);
+
+    // 2 (K and V) * 16 * 4 kv heads * 256 wide * 2 bytes (bf16 -- NOT the 4 bits the
+    // weights are quantised to) = 64 KB per token.
+    const std::size_t per_token =
+        std::size_t{2} * 16 * 4 * 256 * 2;
+    CHECK_EQ(per_token, std::size_t{65536});
+}
+
+TEST(a_context_budget_the_device_cannot_hold_is_refused) {
+    using lmp::model::max_affordable_context_tokens;
+    // The crashed run, exactly: 72 KB/token (27B + its MTP draft head), 16.29 GB of
+    // weights resident, a 40.20 GB device working set.
+    const std::size_t kv = 72 * 1024;
+    const std::size_t weights = 16290000000ULL;
+    const std::size_t working_set = 40200000000ULL;
+
+    const int affordable = max_affordable_context_tokens(kv, weights, working_set);
+
+    // THE ASSERTION. The configured 245,760 must not survive, and neither may the 112,088
+    // the process actually died at -- a limit that still permits the observed death would
+    // be a limit in name only.
+    CHECK(affordable > 0);
+    CHECK(affordable < 245760);
+    CHECK(affordable < 112088);
+    // ...and the 96,000 the extension SHIPS AS ITS DEFAULT must survive untouched. That
+    // budget has run on this machine for months with no memory death, so a guard that
+    // clamps it is wrong about the default rather than right about the danger -- and it
+    // would fire a clamp event on every ordinary run, which is how a real signal gets
+    // tuned out. This is the assertion that keeps the constants honest in both directions.
+    CHECK(affordable >= 96000);
+
+    // Unknowable inputs mean "leave the operator's setting alone", never "clamp to zero".
+    // A no-MLX build reports a 0 working set, and a checkpoint we cannot parse reports 0
+    // bytes per token; both must be inert rather than silently capping every run.
+    CHECK_EQ(max_affordable_context_tokens(kv, weights, 0), 0);
+    CHECK_EQ(max_affordable_context_tokens(0, weights, working_set), 0);
+    // Weights alone over the safe share is not this function's call to make.
+    CHECK_EQ(max_affordable_context_tokens(kv, working_set, working_set), 0);
+
+    // More device, more context: the policy has to be monotonic in the memory available,
+    // or a bigger machine would buy nothing.
+    CHECK(max_affordable_context_tokens(kv, weights, working_set * 2) > affordable);
 }

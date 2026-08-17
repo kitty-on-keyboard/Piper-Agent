@@ -21,6 +21,7 @@
 #include "kv_cache.hpp"
 #include "moe_trace.hpp"
 #include "switch_glu.hpp"
+#include "vision_tower.hpp"
 #include "weight_store.hpp"
 
 #include "mlx/fast.h"
@@ -35,9 +36,12 @@ using lmp::model::mlxl::WeightStore;
 
 class Qwen35MoeModel {
 public:
-    bool load(const std::string& model_dir) {
+    // `with_vision` keeps the checkpoint's vision tower resident and initialises it.
+    // Off by default: most runs never send an image, and the tower is 0.92 GB.
+    bool load(const std::string& model_dir, bool with_vision = false) {
         prefix_ = "language_model.model.";
         load_error_.clear();
+        keep_vision_ = with_vision;
         if (!load_qwen35_moe_config(model_dir, cfg_)) {
             return false;
         }
@@ -58,7 +62,34 @@ public:
         sanitize_weights();
         reset_cache();
         cfg_.vocab_size = cfg_.vocab_size > 0 ? cfg_.vocab_size : 248320;
+        if (keep_vision_) {
+            if (!load_qwen35_vision_config(model_dir, vision_cfg_)) {
+                load_error_ = "vision requested, but this checkpoint declares no "
+                              "vision_config (it is a text-only export)";
+                return false;
+            }
+            // The merger projects onto the LLM's residual stream. A disagreement here
+            // means the two halves of the checkpoint were exported from different
+            // models, and the splice would put a wrongly-sized row into the stream.
+            if (vision_cfg_.out_hidden_size != cfg_.hidden_size) {
+                load_error_ = "vision: merger emits " +
+                              std::to_string(vision_cfg_.out_hidden_size) +
+                              " but the text model's hidden size is " +
+                              std::to_string(cfg_.hidden_size);
+                return false;
+            }
+            if (!vision_.init(vision_cfg_, weights_, load_error_)) {
+                return false;
+            }
+            vision_loaded_ = true;
+        }
         return true;
+    }
+
+    [[nodiscard]] bool vision_loaded() const noexcept { return vision_loaded_; }
+    [[nodiscard]] const Qwen35VisionTower& vision() const noexcept { return vision_; }
+    [[nodiscard]] const Qwen35VisionConfig& vision_config() const noexcept {
+        return vision_cfg_;
     }
 
     void reset_cache() {
@@ -386,6 +417,27 @@ public:
         return logits_from_hidden(h);
     }
 
+    // --- image embedding splice ------------------------------------------------
+    //
+    // Visual rows REPLACE the embeddings of the `<|image_pad|>` tokens they cover. That
+    // is the WHOLE of the multimodal seam for this checkpoint: `deepstack_visual_indexes`
+    // is empty, so nothing is injected at any later layer, and everything downstream --
+    // 40 layers, the KV caches, the gated-delta recurrences, the sampler -- runs exactly
+    // as it does for text.
+    //
+    // Set per forward by the backend, because prefill is chunked: an image runs to
+    // hundreds of tokens and does not respect the 512-token chunk edge, so each chunk
+    // receives the sub-range of rows that lands inside it.
+    struct EmbedSplice {
+        int offset = 0; // position within THIS chunk
+        mx::array rows; // [count, hidden]
+    };
+
+    void set_embed_splices(std::vector<EmbedSplice> splices) {
+        splices_ = std::move(splices);
+    }
+    void clear_embed_splices() { splices_.clear(); }
+
 private:
     std::string prefix_;
     Qwen35MoeConfig cfg_{};
@@ -393,6 +445,11 @@ private:
     std::string load_error_;
     bool mtp_loaded_ = false;
     int mtp_block_size_ = 0;
+    bool keep_vision_ = false;
+    bool vision_loaded_ = false;
+    std::vector<EmbedSplice> splices_;
+    Qwen35VisionConfig vision_cfg_{};
+    Qwen35VisionTower vision_{};
     KVCache mtp_cache_{};
     std::optional<mx::array> last_hidden_;
     WeightStore weights_;
@@ -424,9 +481,20 @@ private:
         std::vector<std::string> to_erase;
 
         for (auto& [key, val] : w) {
-            if (key.find("mtp.") != std::string::npos ||
-                key.find("vision_tower") != std::string::npos) {
+            // `vision_tower.*` used to be dropped here unconditionally, which is the
+            // whole reason this product could not see: the weights ship in the same
+            // shards, and load threw them away before anything could ask. They are kept
+            // when the caller asked for vision and dropped otherwise, so a text-only run
+            // still pays neither the 0.92 GB nor the load time.
+            const bool is_vision = key.find("vision_tower") != std::string::npos;
+            if (key.find("mtp.") != std::string::npos || (is_vision && !keep_vision_)) {
                 to_erase.push_back(key);
+                continue;
+            }
+            if (is_vision) {
+                // The vision tower is unquantized bf16 and shares none of the text
+                // stack's fixups -- no conv1d axis move, no RMSNorm "+1" shift (its
+                // norms are LayerNorm, with their own bias).
                 continue;
             }
             if (key.find("conv1d.weight") != std::string::npos && val.ndim() == 3 &&
@@ -469,7 +537,7 @@ private:
     // The layer stack, shared verbatim by forward_logits and forward_logits_all so the two
     // cannot drift apart. Returns the final-normed hidden state, [1, seq_len, hidden].
     mx::array forward_hidden(const mx::array& input_ids, int seq_len) {
-        mx::array h = embed_tokens(input_ids);
+        mx::array h = apply_embed_splices(embed_tokens(input_ids), seq_len);
         if (MoeTrace::instance().enabled() && seq_len == 1) {
             mx::array t = mx::astype(mx::reshape(input_ids, {-1}), mx::int32);
             mx::eval(t);
@@ -493,6 +561,43 @@ private:
 
     [[nodiscard]] mx::array embed_tokens(const mx::array& ids) const {
         return weights_.embed_lookup(ids, prefix_ + "embed_tokens");
+    }
+
+
+    // Rebuilt by concatenation rather than scatter: an image is a CONTIGUOUS run of pads,
+    // so a chunk carrying k images is at most 2k+1 pieces, and concatenate keeps the
+    // whole thing one graph node the compiler can fuse. A scatter over row indices would
+    // express the same edit as a gather-modify-write over the full [1, L, hidden] block.
+    [[nodiscard]] mx::array apply_embed_splices(mx::array h, int seq_len) const {
+        if (splices_.empty()) {
+            return h;
+        }
+        const int hidden = static_cast<int>(h.shape()[2]);
+        std::vector<mx::array> pieces;
+        int cursor = 0;
+        for (const EmbedSplice& s : splices_) {
+            const int count = static_cast<int>(s.rows.shape()[0]);
+            if (s.offset < cursor || s.offset + count > seq_len) {
+                // The backend computed these from the same chunk bounds it passed in, so
+                // this is a programming error rather than bad input -- and a silently
+                // dropped splice is an image the model never sees while everything
+                // downstream reports success.
+                throw std::runtime_error(
+                    "embed splice [" + std::to_string(s.offset) + "," +
+                    std::to_string(s.offset + count) + ") does not fit a chunk of " +
+                    std::to_string(seq_len) + " starting at " + std::to_string(cursor));
+            }
+            if (s.offset > cursor) {
+                pieces.push_back(mx::slice(h, {0, cursor, 0}, {1, s.offset, hidden}));
+            }
+            pieces.push_back(
+                mx::astype(mx::reshape(s.rows, {1, count, hidden}), h.dtype()));
+            cursor = s.offset + count;
+        }
+        if (cursor < seq_len) {
+            pieces.push_back(mx::slice(h, {0, cursor, 0}, {1, seq_len, hidden}));
+        }
+        return mx::concatenate(pieces, 1);
     }
 
     [[nodiscard]] mx::array rms_norm(const mx::array& x, const std::string& wkey) const {

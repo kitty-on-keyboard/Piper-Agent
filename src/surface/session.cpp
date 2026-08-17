@@ -46,7 +46,29 @@ ModelLoad load_model(Session& session, const std::string& model_dir,
     session.draft_model_dir.clear();
 
     auto backend = std::make_unique<model::MlxBackend>(clock);
-    const model::LoadStatus backend_status = backend->load({model_dir, draft_model_dir});
+    model::MlxBackendConfig backend_cfg;
+    backend_cfg.model_dir = model_dir;
+    backend_cfg.draft_model_dir = draft_model_dir;
+    // THE PRODUCT'S VISION POLICY, and the only place it is decided: keep the tower
+    // whenever the checkpoint has one.
+    //
+    // This line is the whole reason `view_image` did not work. `with_vision` defaults to
+    // off and nothing outside the tests ever set it, so every real run loaded a seeing
+    // checkpoint blind -- the tool ran, reported the picture's cost, and the turn after
+    // it died with "the prompt carries an image but the model was loaded without its
+    // vision tower". A capability nothing switches on is a capability that does not ship.
+    //
+    // Unconditional `true` is not the fix: the loader REFUSES vision against a text-only
+    // export by design, so asking always would turn every text-only checkpoint into a
+    // load failure. Ask what is there, then request exactly that.
+    //
+    // The cost is 0.92 GB resident, about 6% on top of the 15.13 GB text weights, paid on
+    // every run whether or not it looks at anything. That is the right trade here: the
+    // load is one-shot per process (S5.11), so a tower skipped at load cannot be added
+    // when the first image arrives -- the alternative to paying always is not paying
+    // later, it is a full 19 GB reload mid-run.
+    backend_cfg.with_vision = model::checkpoint_declares_vision(model_dir);
+    const model::LoadStatus backend_status = backend->load(backend_cfg);
     if (!backend_status.ok) {
         return {false, "model_load_failed: " + backend_status.error,
                 ms_since(clock, started)};
@@ -82,8 +104,14 @@ void ensure_registry(Session& session, const std::string& workspace,
     std::string mcp_signature;
     const std::vector<tools::McpServerConfig> servers =
         parse_mcp_servers(message, mcp_signature);
+    // What the model loaded RIGHT NOW can do, not what the last one could. A registry
+    // built against a seeing checkpoint offers `view_image`, and reusing it after a
+    // reload onto a text-only one would offer a tool whose every result is unusable --
+    // so the capability joins workspace and MCP config in what makes a registry stale.
+    const bool can_see = session.backend != nullptr && session.backend->can_see();
     if (session.registry != nullptr && session.workspace == workspace &&
-        session.mcp_signature == mcp_signature) {
+        session.mcp_signature == mcp_signature &&
+        session.registry->workspace().model_can_see == can_see) {
         return;
     }
 
@@ -95,6 +123,7 @@ void ensure_registry(Session& session, const std::string& workspace,
     wctx.max_observation_bytes = tools::kObservationBudgetBytes;
     wctx.spool_dir = workspace + "/.lmp_spool";
     wctx.shell_wall_clock_seconds = 300;
+    wctx.model_can_see = can_see;
     // Registry first, then host: the old registry's handlers are what keep the old
     // clients alive, so releasing it first lets those connections go at the same time
     // rather than one reconfiguration later.

@@ -35,4 +35,10 @@ void connect_mcp_servers(tools::McpHost& host,
                          tools::Registry& registry, platform::EventLogWriter& log,
                          const platform::Clock& clock);
 
+// A repeated STRING field, for the same reason parse_mcp_servers exists just above: the
+// surface::string_field extractors are a substring search for a scalar and cannot walk an
+// array. Used for `image_paths` on lmp/start and lmp/message.
+[[nodiscard]] std::vector<std::string> parse_string_array(const std::string& message,
+                                                          std::string_view key);
+
 } // namespace lmp::surface

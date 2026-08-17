@@ -46,7 +46,7 @@ TEST(stdio_session_against_a_real_subprocess) {
     CHECK_EQ(info.protocol_version, std::string(kProtocolVersion));
 
     const std::vector<Tool> tools = client.list_tools();
-    CHECK_EQ(tools.size(), std::size_t(4));
+    CHECK_EQ(tools.size(), std::size_t(5)); // + screenshot, the image round-trip
 
     const ToolResult r = client.call_tool("echo", nlohmann::json{{"text", "over a pipe"}});
     CHECK(!r.is_error);

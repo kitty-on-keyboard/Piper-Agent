@@ -204,7 +204,7 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
     bool ok = false;
     std::string threw;
     try {
-        ok = impl_->model.load(config.model_dir);
+        ok = impl_->model.load(config.model_dir, config.with_vision);
     } catch (const std::exception& e) {
         threw = e.what();
     } catch (...) {
@@ -274,6 +274,10 @@ void MlxBackend::reset_cache() {
         impl_->ckpt = {};
     }
     ledger_.clear();
+}
+
+bool MlxBackend::can_see() const noexcept {
+    return loaded_ && impl_ != nullptr && impl_->model.vision_loaded();
 }
 
 namespace {
@@ -664,6 +668,109 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     return r;
 }
 
+// --- images -----------------------------------------------------------------
+//
+// The tower runs ONCE per generate, not once per prefill chunk: its output is a function
+// of the pixels alone, and an image spanning three chunks would otherwise be encoded
+// three times. The rows are evaluated here so the cost lands in prefill, where it belongs
+// and where ttft reports it, rather than smeared across the decode loop.
+
+struct ImageRows {
+    ImageRows(std::size_t off, int n, mx::array r)
+        : pad_offset(off), tokens(n), rows(std::move(r)) {}
+    std::size_t pad_offset;
+    int tokens;
+    mx::array rows; // [tokens, hidden]
+};
+
+bool prepare_images(const InferenceTask& task, mlxl::Qwen35MoeModel& model,
+                    std::vector<ContentTag>& tags, std::vector<ImageRows>& out,
+                    std::string& error) {
+    if (!model.vision_loaded()) {
+        error = "the prompt carries an image but the model was loaded without its vision "
+                "tower";
+        return false;
+    }
+    const int pad_id = model.vision_config().image_token_id;
+    tags.assign(task.prompt.size(), ContentTag{0});
+
+    std::size_t previous_end = 0;
+    for (const PromptImage& img : task.images) {
+        const std::size_t end = img.pad_offset + static_cast<std::size_t>(img.tokens);
+        if (img.tokens <= 0 || end > task.prompt.size()) {
+            error = "image at " + std::to_string(img.pad_offset) + " spans " +
+                    std::to_string(img.tokens) +
+                    " tokens, which does not fit a prompt of " +
+                    std::to_string(task.prompt.size());
+            return false;
+        }
+        // Ascending and non-overlapping: splices_for_chunk walks them in order and
+        // rebuilds the chunk by concatenation, so an unsorted list would silently
+        // reorder the prompt rather than fail.
+        if (img.pad_offset < previous_end) {
+            error = "images overlap or are not sorted by prompt position";
+            return false;
+        }
+        previous_end = end;
+        // Zero means "ordinary token" to the ledger, so an unhashed image would collide
+        // with ordinary text rather than merely with another image.
+        if (img.content_hash == 0) {
+            error = "image at " + std::to_string(img.pad_offset) + " has no content hash";
+            return false;
+        }
+        // THE RUN MUST ACTUALLY BE PADS. If the template and this list disagree, the
+        // splice overwrites real text -- the model then reads a sentence with a hole in
+        // it, which produces fluent output and no error anywhere.
+        for (std::size_t i = img.pad_offset; i < end; ++i) {
+            if (task.prompt[i] != pad_id) {
+                error = "prompt position " + std::to_string(i) +
+                        " is not <|image_pad|> but an image claims it";
+                return false;
+            }
+            tags[i] = img.content_hash;
+        }
+
+        const mlxl::VisionGrid grid{1, img.grid_h, img.grid_w};
+        const auto patch_count =
+            static_cast<int>(img.patches.size() / static_cast<std::size_t>(img.patch_dim));
+        if (patch_count != grid.patches()) {
+            error = "image patch buffer holds " + std::to_string(patch_count) +
+                    " patches but its grid says " + std::to_string(grid.patches());
+            return false;
+        }
+        mx::array patches(img.patches.data(), {patch_count, img.patch_dim}, mx::float32);
+        mx::array rows = model.vision().forward(patches, grid);
+        mx::eval(rows);
+        if (static_cast<int>(rows.shape()[0]) != img.tokens) {
+            error = "vision tower produced " + std::to_string(rows.shape()[0]) +
+                    " rows for an image claiming " + std::to_string(img.tokens) +
+                    " pad tokens";
+            return false;
+        }
+        out.emplace_back(img.pad_offset, img.tokens, std::move(rows));
+    }
+    return true;
+}
+
+std::vector<mlxl::Qwen35MoeModel::EmbedSplice> splices_for_chunk(
+    const std::vector<ImageRows>& imgs, std::size_t at, std::size_t end) {
+    std::vector<mlxl::Qwen35MoeModel::EmbedSplice> out;
+    for (const ImageRows& img : imgs) {
+        const std::size_t img_end = img.pad_offset + static_cast<std::size_t>(img.tokens);
+        const std::size_t lo = std::max(at, img.pad_offset);
+        const std::size_t hi = std::min(end, img_end);
+        if (lo >= hi) {
+            continue;
+        }
+        const auto r0 = static_cast<int>(lo - img.pad_offset);
+        const auto r1 = static_cast<int>(hi - img.pad_offset);
+        const auto hidden = static_cast<int>(img.rows.shape()[1]);
+        out.push_back({static_cast<int>(lo - at),
+                       mx::slice(img.rows, {r0, 0}, {r1, hidden})});
+    }
+    return out;
+}
+
 } // namespace
 
 GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
@@ -708,6 +815,21 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
         return r;
     }
 
+    // --- images -------------------------------------------------------------
+    //
+    // Done BEFORE the reuse decision, because the tags are part of it: every image is the
+    // same repeated `<|image_pad|>` id, so two different pictures are an identical token
+    // run and an id-only comparison would hand back the previous one's KV.
+    std::vector<ContentTag> prompt_tags;
+    std::vector<ImageRows> image_rows;
+    if (!task.images.empty()) {
+        std::string err;
+        if (!prepare_images(task, impl_->model, prompt_tags, image_rows, err)) {
+            r.error = "MlxBackend: " + err;
+            return r;
+        }
+    }
+
     // --- verified prefix reuse (S5.10) -------------------------------------
     //
     // Three outcomes, decided by a pure function so the algebra is gate-testable with no
@@ -715,8 +837,8 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     // mid-ledger (a new turn record is inserted before the live-state block), and the old
     // code answered that with a full reset -- so every turn re-prefilled the whole
     // context and the most-stable-first prompt layout bought nothing.
-    const TurnReuse plan =
-        plan_turn_reuse(ledger_, task.prompt, impl_->ckpt.len, impl_->ckpt.valid);
+    const TurnReuse plan = plan_turn_reuse(ledger_, task.prompt, impl_->ckpt.len,
+                                           impl_->ckpt.valid, prompt_tags);
     switch (plan.mode) {
         case ReuseMode::Extend:
             break;
@@ -763,10 +885,15 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
         }
         mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
                                   {1, static_cast<int>(end - at)}, mx::int32);
+        // Whatever part of each image lands inside THIS chunk. An image is hundreds of
+        // tokens and does not respect the chunk edge, so a chunk may carry a slice from
+        // the middle of one.
+        impl_->model.set_embed_splices(splices_for_chunk(image_rows, at, end));
         mx::array logits = impl_->model.forward_logits(ids);
         impl_->model.eval_caches();
+        impl_->model.clear_embed_splices();
         for (std::size_t i = at; i < end; ++i) {
-            ledger_.append(task.prompt[i]);
+            ledger_.append(task.prompt[i], i < prompt_tags.size() ? prompt_tags[i] : 0);
         }
         if (end == boundary) {
             // Exactly one checkpoint is held, and it is overwritten each turn -- which is
@@ -877,6 +1004,9 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
 }
 
 void MlxBackend::reset_cache() { ledger_.clear(); }
+
+// No weights ever load in this build, so there is no tower and nothing may send an image.
+bool MlxBackend::can_see() const noexcept { return false; }
 
 GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
                                const CancelToken& cancel) {

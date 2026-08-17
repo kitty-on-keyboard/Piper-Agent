@@ -58,8 +58,19 @@ struct SpecialIds {
     TokenId tool_response_close = kInvalidToken;
     TokenId think_open = kInvalidToken;
     TokenId think_close = kInvalidToken;
+    // Vision framing (measured: 248053/248054/248056). Deliberately OUTSIDE complete():
+    // a text-only checkpoint that lacks them must still load, because a run that never
+    // shows the model a picture never touches them.
+    TokenId vision_start = kInvalidToken;
+    TokenId vision_end = kInvalidToken;
+    TokenId image_pad = kInvalidToken;
 
     [[nodiscard]] bool complete() const noexcept;
+    // Whether this checkpoint can be handed an image at all.
+    [[nodiscard]] bool has_vision() const noexcept {
+        return vision_start != kInvalidToken && vision_end != kInvalidToken &&
+               image_pad != kInvalidToken;
+    }
 };
 
 class QwenTokenizer {

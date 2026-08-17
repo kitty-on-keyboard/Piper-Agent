@@ -38,6 +38,10 @@ Registry make_registry(const std::string& root) {
     ctx.max_observation_bytes = lmp::tools::kObservationBudgetBytes;
     ctx.spool_dir = root + "/.spool";
     ctx.shell_wall_clock_seconds = 20;
+    // The seeing configuration is the default under test: `view_image` is declared only
+    // when the loaded model has a vision tower, and most of this file's expectations --
+    // the tool count included -- are about a registry that offers it.
+    ctx.model_can_see = true;
     return Registry(std::move(ctx));
 }
 
@@ -85,7 +89,13 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // run had to be inferred from the inert counter: three nudges and a fourth turn at
     // best, and unbounded at worst, since a nudge that provoked any tool call which
     // learned something reset that counter.
-    CHECK_EQ(reg.decls().size(), std::size_t{23});
+    //
+    // 23 -> 24: `view_image`, which shows the model a picture rather than describing one.
+    // A separate tool and not a branch inside read_file: reading a PNG as text is a
+    // mistake worth telling the model about plainly, and this call spends context in
+    // proportion to the image, which the model should be choosing deliberately.
+    CHECK_EQ(reg.decls().size(), std::size_t{24});
+    CHECK(reg.find("view_image") != nullptr);
     CHECK(reg.find("finish") != nullptr);
     CHECK(reg.find("find_files") != nullptr);
     CHECK(reg.find("ask_user") != nullptr);
@@ -1469,4 +1479,87 @@ TEST(expected_version_normalises_without_weakening_the_claim) {
     CHECK(stale.summary.find("version conflict") != std::string::npos);
     CHECK_EQ(lmp::platform::read_file_whole(root + "/q.txt", 1024).bytes,
              std::string("one\n"));
+}
+
+// --- view_image ----------------------------------------------------------------
+//
+// The tool returns a PATH, not pixels: decoding needs the vision config, which lives
+// beside the model, and the prompt builder re-reads the file when it renders. What is
+// asserted here is the contract the rest of the vision path depends on -- a successful
+// call names exactly the image it looked at, and a failure names nothing, because a
+// result carrying a path it could not read would reserve pad tokens for an image that
+// never arrives.
+
+// The regression this file exists to pin, from the run that found it: a seeing model was
+// loaded blind, `view_image` was offered anyway, three calls returned Ok reporting 486,
+// 480 and 220 tokens of picture -- and the NEXT turn died with "the prompt carries an
+// image but the model was loaded without its vision tower", which is a BackendError,
+// which ends the run. Three turns, nothing produced.
+//
+// A tool whose result the model cannot consume must not be on the menu. Withholding it is
+// the only signal that arrives while the model can still act on it.
+TEST(view_image_is_not_offered_when_the_model_cannot_see) {
+    const std::string root = temp_dir();
+    WorkspaceContext ctx;
+    ctx.root = root;
+    ctx.max_read_bytes = 1U << 20;
+    ctx.max_model_read_bytes = 16384;
+    ctx.max_result_bytes = 8192;
+    ctx.max_observation_bytes = lmp::tools::kObservationBudgetBytes;
+    ctx.spool_dir = root + "/.spool";
+    ctx.shell_wall_clock_seconds = 20;
+    ctx.model_can_see = false;
+    Registry reg(std::move(ctx));
+
+    CHECK(reg.find("view_image") == nullptr);
+    // And it is the ONLY thing withheld: a text-only checkpoint loses its eyes, not its
+    // hands. Asserted against the seeing count so the two cannot drift.
+    CHECK_EQ(reg.decls().size(), make_registry(root).decls().size() - 1);
+    // Calling it anyway is a clean miss, not a crash and not a silent success.
+    const ToolResult r = reg.execute("view_image", args({{"path", "shot.png"}}), 0);
+    CHECK(!r.ok());
+    CHECK(r.images.empty());
+}
+
+TEST(view_image_refuses_a_non_image) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "notes.txt"}, {"content", "plain text"}}), 0).ok());
+    const ToolResult r = reg.execute("view_image", args({{"path", "notes.txt"}}), 0);
+    CHECK(!r.ok());
+    CHECK(r.images.empty());
+    CHECK(r.summary.find("does not look like an image") != std::string::npos);
+}
+
+TEST(view_image_refuses_bytes_that_are_not_decodable) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    // The extension says image; the bytes disagree. The bytes win.
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "fake.png"},
+                              {"content", "this is not a PNG at all"}}), 0).ok());
+    const ToolResult r = reg.execute("view_image", args({{"path", "fake.png"}}), 0);
+    CHECK(!r.ok());
+    CHECK(r.images.empty());
+}
+
+TEST(view_image_stays_inside_the_workspace) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const ToolResult r = reg.execute("view_image", args({{"path", "../outside.png"}}), 0);
+    CHECK(!r.ok());
+    CHECK(r.images.empty());
+}
+
+TEST(view_image_declares_itself_read_only) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const ToolDecl* d = reg.find("view_image");
+    REQUIRE(d != nullptr);
+    // Looking at a picture writes nothing and runs nothing, so it must not raise a card
+    // or be withheld from a read-only mode.
+    CHECK(!d->mutates_workspace);
+    CHECK(!d->executes_commands);
+    CHECK(!d->irreversible);
 }

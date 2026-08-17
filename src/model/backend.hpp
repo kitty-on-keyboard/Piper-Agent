@@ -46,8 +46,36 @@ struct SamplingParams {
     std::uint64_t seed = 0;
 };
 
+// An image already reduced to patches, sitting over a run of `<|image_pad|>` ids in the
+// prompt.
+//
+// PATCHES, NOT EMBEDDINGS. The vision tower runs inside the backend, where MLX is -- this
+// header compiles without it (ScriptedBackend and ReplayBackend are the CI path), so it
+// cannot hold an mx::array, and pushing the tower out to the caller would put model math
+// in the agent loop. The harness's job ends at pixels.
+struct PromptImage {
+    // Index in `prompt` of the first `<|image_pad|>` this covers. The run is contiguous
+    // and exactly `tokens` long; the template guarantees it.
+    std::size_t pad_offset = 0;
+    int tokens = 0;
+    // Patch grid, from image_preprocess.hpp. tokens == (grid_h * grid_w) / merge_unit.
+    int grid_h = 0;
+    int grid_w = 0;
+    int patch_dim = 0;
+    // [grid_h * grid_w, patch_dim], merge-block ordered. See image_preprocess.hpp: the
+    // order is a contract the tower cannot check.
+    std::vector<float> patches;
+    // Identity of the pixels, for the KV ledger. Every image is the same repeated
+    // `<|image_pad|>` id, so without this two different pictures are an identical token
+    // run and the cache hands back the wrong one's KV. Zero is not a legal value here --
+    // it means "ordinary token" to the ledger.
+    std::uint64_t content_hash = 0;
+};
+
 struct InferenceTask {
     std::vector<TokenId> prompt;
+    // Empty for every text-only turn, which is nearly all of them.
+    std::vector<PromptImage> images;
     SamplingParams sampling;
     std::int32_t max_new_tokens = 4096;
     // Constrained decoding (S5.6): the legal-token set for the current state, asked for

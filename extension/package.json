@@ -74,16 +74,6 @@
           "default": "",
           "description": "Optional absolute path to a Qwen MTP draft head (model_type qwen3_5_mtp), e.g. Qwen3.6-27B-MTP-4bit. NOT a smaller chat model \u2014 it is a head split from the target and only works with the matching dense checkpoint. Empty disables speculative decoding; a path that is not a usable head fails the load rather than generating without it."
         },
-        "lmPipe.quantization": {
-          "type": "string",
-          "default": "4bit-experts",
-          "enum": [
-            "4bit-experts",
-            "4bit",
-            "8bit"
-          ],
-          "description": "Quantisation. Both quality and speed must be MEASURED before changing this, never assumed (S5.11)."
-        },
         "lmPipe.mode": {
           "type": "string",
           "default": "agent",
@@ -194,28 +184,6 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Shell command the harness runs after any turn that writes a file — its output is shown to the model and exit 0 counts as pass. A run's final `Complete` requires the last reading to have passed. Empty disables the check. Example: `cd /path/to/project && swift build`."
-        },
-        "lmPipe.egressPolicy": {
-          "type": "string",
-          "default": "deny",
-          "enum": [
-            "deny"
-          ],
-          "description": "Egress is denied in the sandbox profile itself, not by inspecting commands (S7.4). There is no allow option."
-        },
-        "lmPipe.telemetry": {
-          "type": "boolean",
-          "default": false
-        },
-        "lmPipe.logLevel": {
-          "type": "string",
-          "default": "info",
-          "enum": [
-            "error",
-            "warn",
-            "info",
-            "debug"
-          ]
         },
         "lmPipe.autoApproveExec": {
           "type": "boolean",
