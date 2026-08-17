@@ -1085,6 +1085,27 @@ bool start_mission(const std::string& id, const std::string& message,
     }
     session.journal = std::move(journal.journal);
 
+    // TELL THE PROMPT WHETHER RECALL IS WORTH REACHING FOR. Asked once, here, because the
+    // answer is stable for the run and the system prompt is stable with it -- counting per
+    // turn would rewrite the front of the prefix every time a row was written and re-
+    // prefill the whole conversation to change one number.
+    //
+    // Read AFTER the journal opens, so the mission row this run just wrote is included and
+    // the current session is one of the sessions counted. That is what makes `sessions > 1`
+    // in render() mean "an EARLIER session left something", which is the condition worth
+    // advertising: recall's measured value is cross-session, and this run's own turns are
+    // still in the context window anyway.
+    if (session.journal != nullptr) {
+        const pcc::StoreStats stats = session.journal->store().stats();
+        session.ctx->set_recall_scope(stats.items, stats.sessions);
+        platform::Event ev;
+        ev.kind = "recall_scope";
+        ev.fields = {{"items", std::to_string(stats.items)},
+                     {"sessions", std::to_string(stats.sessions)},
+                     {"advertised", (stats.sessions > 1 && stats.items > 0) ? "1" : "0"}};
+        log.append(ev, clock);
+    }
+
     // The READ side of the store, which for a long time did not exist: src/pcc journalled
     // faithfully and no tool in this binary could get a byte back out. Declared only when
     // there is a journal to read -- a run whose database would not open keeps every other

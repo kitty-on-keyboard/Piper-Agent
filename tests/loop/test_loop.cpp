@@ -800,3 +800,52 @@ TEST(an_empty_reasoning_brief_changes_no_byte_of_the_prompt) {
     const std::vector<model::Message> medium_msgs = medium.render(tools);
     CHECK_EQ(medium_msgs[0].content, untouched);
 }
+
+// --- recall scope ------------------------------------------------------------
+
+TEST(a_workspace_with_earlier_sessions_is_told_recall_is_worth_using) {
+    context::ContextStore ctx("do the thing");
+    ctx.set_workspace_root("/w");
+    ctx.set_recall_scope(336, 7);
+
+    const std::vector<model::Message> msgs = ctx.render("");
+    REQUIRE(!msgs.empty());
+    const std::string& sys = msgs[0].content;
+    CHECK(sys.find("What this workspace already remembers") != std::string::npos);
+    CHECK(sys.find("context_recall") != std::string::npos);
+    // The numbers are stated, because "there is history" is a weaker claim than "there
+    // are 336 items across 7 sessions" and the model has no other way to gauge it.
+    CHECK(sys.find("336") != std::string::npos);
+    CHECK(sys.find("7 sessions") != std::string::npos);
+    // What a MISS means, said up front. Runs that got an empty recall asked again until
+    // break_repeat and then escalated_hold suppressed them.
+    CHECK(sys.find("that is a real answer") != std::string::npos);
+}
+
+// THE ONE THE MEASUREMENT ARGUES FOR. 46% of real context_recall calls came back empty,
+// and pointing a fresh workspace at an empty store manufactures exactly that. A first run
+// in a new workspace must not be told to search anything.
+TEST(a_first_run_is_never_told_to_search_an_empty_store) {
+    const char* tools = "";
+
+    // Nothing stored at all.
+    context::ContextStore fresh("do the thing");
+    fresh.set_workspace_root("/w");
+    const std::vector<model::Message> fresh_msgs = fresh.render(tools);
+    CHECK(fresh_msgs[0].content.find("already remembers") == std::string::npos);
+
+    // The mission row this run just wrote is the ONLY thing in the store: one session,
+    // and that session is this one. There is no earlier work to recall.
+    context::ContextStore first("do the thing");
+    first.set_workspace_root("/w");
+    first.set_recall_scope(1, 1);
+    const std::vector<model::Message> first_msgs = first.render(tools);
+    CHECK(first_msgs[0].content.find("already remembers") == std::string::npos);
+
+    // Sessions counted but no rows -- an inconsistent store, and still nothing to search.
+    context::ContextStore empty("do the thing");
+    empty.set_workspace_root("/w");
+    empty.set_recall_scope(0, 4);
+    const std::vector<model::Message> empty_msgs = empty.render(tools);
+    CHECK(empty_msgs[0].content.find("already remembers") == std::string::npos);
+}
