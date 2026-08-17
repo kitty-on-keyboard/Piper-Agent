@@ -56,6 +56,13 @@ function settingsFromConfig(): RunSettings {
     allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
     max_new_tokens: cfg.get<number>("maxNewTokens", 4096),
+    // How hard to think, in the checkpoint's own vocabulary. `medium` is the default
+    // because `medium` is what every run has effectively had until now: the reference
+    // template defaults to xhigh, but this harness renders its own prompt and has never
+    // emitted a reasoning instruction at all -- and medium is precisely the level whose
+    // instruction is the empty string. So the default preserves current behaviour exactly
+    // rather than quietly making every run think harder.
+    reasoning_effort: cfg.get<string>("reasoningEffort", "medium"),
     // The operator's check: run after any turn that writes, exit 0 = pass, output fed
     // to the model. Empty disables. Operator-owned -- the model cannot set or change it.
     verify_contract: cfg.get<string>("verifyContract", ""),

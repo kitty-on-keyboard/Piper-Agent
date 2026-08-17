@@ -144,6 +144,7 @@ struct RunSettings {
     std::string allowed_commands;
     std::int64_t context_budget_tokens = 0;
     std::int64_t max_new_tokens = 0;
+    std::string reasoning_effort;
     std::string verify_contract;
     std::vector<McpServerSettings> mcp_servers;
 };
@@ -199,6 +200,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"max_new_tokens\":";
     append_value(out, v.max_new_tokens);
+    out += ",";
+    out += "\"reasoning_effort\":";
+    append_value(out, v.reasoning_effort);
     out += ",";
     out += "\"verify_contract\":";
     append_value(out, v.verify_contract);
@@ -380,6 +384,7 @@ struct ModelStatusNotification {
     std::string model_dir;
     std::string detail;
     double elapsed_ms = 0.0;
+    bool supports_reasoning_effort = false;
     static constexpr const char* kMethod = "lmp/model_status";
 };
 [[nodiscard]] inline std::string to_json(const ModelStatusNotification& n) {
@@ -395,6 +400,9 @@ struct ModelStatusNotification {
     out += ",";
     out += "\"elapsed_ms\":";
     append_value(out, n.elapsed_ms);
+    out += ",";
+    out += "\"supports_reasoning_effort\":";
+    append_value(out, n.supports_reasoning_effort);
     out += "}";
     return out;
 }

@@ -16,12 +16,14 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "src/context/resume.hpp"
 #include "src/loop/agent.hpp"
+#include "src/model/family_traits.hpp"
 #include "src/model/mlx_backend.hpp"
 #include "src/model/model_limits.hpp"
 // The recall tools' token counter is built here, so this file needs the estimator it
@@ -725,6 +727,11 @@ void notify_model(const char* state, const std::string& model_dir,
     n.model_dir = model_dir;
     n.detail = detail;
     n.elapsed_ms = elapsed_ms;
+    // Answered from the checkpoint on disk, so it is right on `loading` too -- the
+    // surface can settle the control before the weights are up, and an empty model_dir
+    // (the `unloaded` status) answers false without touching the filesystem.
+    n.supports_reasoning_effort =
+        !model_dir.empty() && model::supports_reasoning_effort(model_dir);
     notify(n);
 }
 
@@ -984,6 +991,53 @@ bool start_mission(const std::string& id, const std::string& message,
         log.append(ev, clock);
     }
 
+    // HOW HARD TO THINK. Resolved here, ahead of any session state, because the invalid
+    // case ends the run and every other refusal in this function does so before there is
+    // a store or a registry to leave half-built.
+    //
+    // Two independent questions, and they get opposite answers on failure: is the word a
+    // level at all, and does THIS checkpoint understand levels?
+    //
+    // The first is refused. `high` looks entirely reasonable, is what every summary of
+    // this feature claims exists, and is exactly what the reference template raises on --
+    // so an unknown word ends the run naming the three that work, rather than silently
+    // instructing nothing.
+    //
+    // The second is dropped, silently and on purpose. One settings file is used against
+    // both checkpoints on this machine and only Qwen3.8 has levels, so carrying the
+    // setting to a checkpoint without them is the NORMAL case, not an operator error.
+    // Logged either way, because "I set it to low and nothing changed" is otherwise an
+    // unanswerable question.
+    std::string reasoning_brief;
+    {
+        const std::string requested = surface::string_field(message, "reasoning_effort");
+        const std::optional<model::ReasoningEffort> level =
+            model::parse_reasoning_effort(requested);
+        if (!level.has_value()) {
+            end_run(id, "reasoning_effort must be one of low, medium or xhigh (got \"" +
+                            requested + "\"); note that this checkpoint family has no "
+                                        "'high' -- xhigh is the top level");
+            return false;
+        }
+        const bool supported = model::supports_reasoning_effort(model_dir);
+        if (supported) {
+            reasoning_brief = std::string(model::reasoning_instructions_for(*level));
+        }
+        platform::Event ev;
+        ev.kind = "reasoning_effort";
+        ev.fields = {{"requested", requested.empty() ? "(checkpoint default)" : requested},
+                     {"supported", supported ? "1" : "0"},
+                     {"instructed", reasoning_brief.empty() ? "0" : "1"},
+                     {"why", !supported ? "this checkpoint's chat template has no "
+                                          "reasoning_effort; the prompt is unchanged"
+                             : reasoning_brief.empty()
+                                 ? "medium and the checkpoint default both instruct "
+                                   "nothing; the prompt is unchanged"
+                                 : "the checkpoint's own sentence for this level opens "
+                                   "the system prompt"}};
+        log.append(ev, clock);
+    }
+
     surface::ensure_registry(session, workspace, message, log, clock);
     const std::string& canonical_workspace = session.registry->workspace().root;
 
@@ -1011,6 +1065,10 @@ bool start_mission(const std::string& id, const std::string& message,
     session.ctx->set_workspace_root(canonical_workspace);
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
+
+    // Resolved before any of this was built; empty whenever the level instructs nothing
+    // or the checkpoint has no levels, and an empty brief leaves the prompt untouched.
+    session.ctx->set_reasoning_brief(std::move(reasoning_brief));
     // Logged the way a failed MCP server is (see connect_mcp_servers): a degradation the
     // run survives, recorded where a postmortem will find it rather than announced. A
     // null journal means this run's compacted turns are gone for good once they are

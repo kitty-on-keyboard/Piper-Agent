@@ -191,6 +191,23 @@ class ContextStore {
     // which tells every run to go and run its tests, advice that is unfollowable at T0.
     void set_mode_brief(std::string text) { mode_brief_ = std::move(text); }
 
+    // HOW HARD TO THINK, already resolved to the checkpoint's own sentence by the caller
+    // (model::reasoning_instructions_for). The store is handed text rather than a level
+    // for the same reason it is handed a persona rather than a mode: which words a family
+    // was tuned on is the model layer's business, and this one renders what it is given.
+    //
+    // Rendered FIRST, ahead of even the persona, because that is where the reference
+    // template puts it -- reasoning_instructions is the opening of the system message and
+    // everything else, tools included, follows it.
+    //
+    // CHANGING IT IS NOT FREE. It sits at the very front of the stable prefix, so a new
+    // level fails plan_turn_reuse's id-by-id compare at position zero and the whole
+    // conversation re-prefills (kv_cache.hpp is explicit that invalidation is not
+    // enumerated, and this is one more thing it deliberately does not special-case).
+    // That is affordable for an occasional operator action and would not be for anything
+    // set per turn -- which is why the surface applies it at a turn boundary and says so.
+    void set_reasoning_brief(std::string text) { reasoning_brief_ = std::move(text); }
+
     // The absolute path the run is rooted at. Stated in the prompt because the model
     // otherwise has to GUESS it, and a wrong guess is not cheap: every path tool resolves
     // against this root and refuses anything outside it, so the guess costs a refusal per
@@ -479,6 +496,7 @@ class ContextStore {
     std::vector<std::string> user_turns_;
     std::string persona_;
     std::string mode_brief_;
+    std::string reasoning_brief_;
     std::string workspace_root_;
     std::string project_instructions_;
     std::string project_memory_;
