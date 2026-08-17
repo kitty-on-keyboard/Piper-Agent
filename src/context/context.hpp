@@ -219,6 +219,29 @@ class ContextStore {
     // costs nothing after the first prefill.
     void set_workspace_root(std::string path) { workspace_root_ = std::move(path); }
 
+    // HOW MUCH THIS WORKSPACE REMEMBERS, so the prompt can say that recall is worth
+    // reaching for -- and, when there is nothing stored, say nothing at all.
+    //
+    // Numbers rather than a sentence, following set_workspace_root: the wording of the
+    // prompt belongs in render() with the rest of it, and the caller's job is to answer
+    // the question, not to phrase it.
+    //
+    // MEASURED, over 12 days of real runs: context_recall was called on ~1% of tool calls
+    // (20 against 2,081, versus 2,002 read_file), and 46% of those calls came back empty.
+    // The store itself was healthy -- five workspaces, 223 to 336 rows each -- so the read
+    // side was the weak half, not the write side. Nothing in the prompt had ever mentioned
+    // recall; its only advertisement was its own tool description, competing with two
+    // dozen others. Both halves of that are addressed here: the prompt names the tool, and
+    // it names it ONLY when there is prior-session content to find, because a nudge toward
+    // an empty database manufactures exactly the empty result that was already the
+    // problem. An empty result is not free -- the log shows break_repeat and then
+    // escalated_hold firing on context_recall, i.e. the model asking, getting nothing, and
+    // asking again until the harness suppressed it.
+    void set_recall_scope(std::int64_t items, std::int64_t sessions) noexcept {
+        recall_items_ = items;
+        recall_sessions_ = sessions;
+    }
+
     // --- T2 recent ----------------------------------------------------------
     // The most an observation may carry into the prompt. The tool layer is supposed to
     // bound every result before it gets here -- tool_result.hpp says so -- but only the
@@ -497,6 +520,8 @@ class ContextStore {
     std::string persona_;
     std::string mode_brief_;
     std::string reasoning_brief_;
+    std::int64_t recall_items_ = 0;
+    std::int64_t recall_sessions_ = 0;
     std::string workspace_root_;
     std::string project_instructions_;
     std::string project_memory_;

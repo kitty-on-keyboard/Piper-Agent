@@ -169,6 +169,26 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
                   "not `/home/user/src/store.py`. Directories in a path you write to are "
                   "created for you.";
     }
+    // Next to the workspace because it is a fact ABOUT the workspace: what this one
+    // already remembers. Only when an earlier session actually left something -- see
+    // set_recall_scope for the measurement, and for why pointing at an empty store is
+    // worse than saying nothing.
+    //
+    // The closing instruction is not padding. An empty recall already answers "nothing
+    // stored matches that", and runs asked anyway, often enough to trip break_repeat and
+    // then escalated_hold. Telling the model up front what a miss MEANS is cheaper than
+    // suppressing the repeat after the fact.
+    if (recall_sessions_ > 1 && recall_items_ > 0) {
+        system += "\n\n# What this workspace already remembers\n\nEarlier sessions here "
+                  "left " + std::to_string(recall_items_) + " stored items across " +
+                  std::to_string(recall_sessions_) +
+                  " sessions -- their turns, the files they read and what they worked "
+                  "out. `context_recall` searches all of it. Reach for it before "
+                  "re-deriving something this project may have already settled, and "
+                  "before re-reading a file an earlier session read. If it comes back "
+                  "empty, that is a real answer: the fact is not stored, so go to the "
+                  "files instead rather than asking again.";
+    }
     if (!project_instructions_.empty()) {
         system += "\n\n# Project conventions\n\n" + project_instructions_;
     }
