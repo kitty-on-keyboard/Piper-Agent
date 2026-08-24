@@ -77,7 +77,8 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     //
     // 18 -> 19: `read_many`, bounded batch read (at most four paths).
     // 19 -> 20: `apply_patch`, exact structured multi-hunk edits (keeps replace_in_file).
-    // 20 -> 21: `ask_question`, structured multiple choice question tool.
+    // 20 -> 21: `ask_question`, structured multiple choice question tool. REMOVED at 24 ->
+    // 23 below; it was `ask_user` with one parameter made mandatory.
     //
     // 21 -> 22: `find_files`, search by file NAME. `search` reads contents, and a model
     // looking for a project's Swift files reaches for search(".swift"), gets no matches --
@@ -94,12 +95,24 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // A separate tool and not a branch inside read_file: reading a PNG as text is a
     // mistake worth telling the model about plainly, and this call spends context in
     // proportion to the image, which the model should be choosing deliberately.
-    CHECK_EQ(reg.decls().size(), std::size_t{24});
+    // 24 -> 23: `ask_question` REMOVED. It and `ask_user` were one tool behind two names
+    // -- same `question` field, same `options` field (required in one, optional in the
+    // other), one shared loop path halting with `awaiting_user`, and a view that could not
+    // tell them apart. The duplicate was not costing tokens, it was costing a coin flip:
+    // `ask_user`'s description never mentioned the `options` it accepted, so a run that
+    // picked that name wrote "Option 1: ... Option 4: ..." into the question prose and got
+    // no clickable card. Fewer tools is the point -- every one is a decision the model can
+    // get wrong, and a smaller model gets it wrong more often. This pin going DOWN is the
+    // rare direction and is meant to be as deliberate as growing it.
+    CHECK_EQ(reg.decls().size(), std::size_t{23});
     CHECK(reg.find("view_image") != nullptr);
     CHECK(reg.find("finish") != nullptr);
     CHECK(reg.find("find_files") != nullptr);
     CHECK(reg.find("ask_user") != nullptr);
-    CHECK(reg.find("ask_question") != nullptr);
+    // Not declared, deliberately. The loop still ANSWERS to it (agent.cpp) so a model
+    // emitting it from habit is not met with an unknown-tool error, but it must not be
+    // back on the prompt surface -- which is the whole of what the removal bought.
+    CHECK(reg.find("ask_question") == nullptr);
     CHECK(reg.find("exit_plan_mode") != nullptr);
     CHECK(reg.find("git_diff") != nullptr);
     CHECK(reg.find("plan") != nullptr);
