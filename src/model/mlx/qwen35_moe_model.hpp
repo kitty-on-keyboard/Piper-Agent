@@ -14,17 +14,20 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "activations.hpp"
 #include "gated_delta.hpp"
 #include "kv_cache.hpp"
+#include "quant_attention.hpp"
 #include "moe_trace.hpp"
 #include "switch_glu.hpp"
 #include "vision_tower.hpp"
 #include "weight_store.hpp"
 
 #include "mlx/fast.h"
+#include "mlx/memory.h"
 #include "mlx/ops.h"
 
 namespace lmp::model::mlxl {
@@ -60,6 +63,9 @@ public:
             return false;
         }
         sanitize_weights();
+        if (ffn_ == FfnKind::Moe && fuse_gate_up_enabled()) {
+            fuse_expert_gate_up();
+        }
         reset_cache();
         cfg_.vocab_size = cfg_.vocab_size > 0 ? cfg_.vocab_size : 248320;
         if (keep_vision_) {
@@ -94,6 +100,7 @@ public:
 
     void reset_cache() {
         kv_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), KVCache{});
+        qkv_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), QuantizedKVCache{});
         ssm_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), SsmCache{});
     }
 
@@ -191,6 +198,13 @@ public:
         for (auto& c : kv_caches_) {
             c.truncate_to(cp.seq_len);
         }
+        // Both halves roll back, and by the same integer assignment. A quantized cache
+        // left at the old length would keep answering with rows the bf16 offset says were
+        // discarded -- stale context that reads as fluent, which is the failure kv_cache.hpp
+        // exists to prevent.
+        for (auto& c : qkv_caches_) {
+            c.truncate_to(cp.seq_len);
+        }
         const std::size_t n = std::min(ssm_caches_.size(), cp.ssm.size());
         for (std::size_t i = 0; i < n; ++i) {
             ssm_caches_[i].restore(cp.ssm[i]);
@@ -199,6 +213,9 @@ public:
 
     void eval_caches() {
         for (auto& c : kv_caches_) {
+            c.sync();
+        }
+        for (auto& c : qkv_caches_) {
             c.sync();
         }
         for (auto& c : ssm_caches_) {
@@ -254,7 +271,8 @@ public:
         mx::array y = mx::zeros_like(x);
         if (ablation() != Ablate::routed) {
             y = lmp::model::mlxl::switch_glu(
-                x, weights_, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj", p + "switch_mlp.down_proj", inds);
+                x, weights_, p + "switch_mlp.gate_proj", p + "switch_mlp.up_proj", p + "switch_mlp.down_proj", inds,
+                p + "switch_mlp.gate_up_proj");
             y = mx::sum(mx::multiply(y, mx::expand_dims(scores, -1)), -2);
         }
 
@@ -308,7 +326,9 @@ public:
     mx::array forward_full_attn_layer(int layer, const mx::array& x, int seq_len) {
         const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
         mx::array h = rms_norm(x, p + "input_layernorm.weight");
-        mx::array attn_out = forward_self_attn(p + "self_attn.", h, kv_caches_[static_cast<std::size_t>(layer)], seq_len);
+        mx::array attn_out =
+            forward_self_attn(p + "self_attn.", h, kv_caches_[static_cast<std::size_t>(layer)],
+                              qkv_caches_[static_cast<std::size_t>(layer)], seq_len);
         h = mx::add(x, attn_out);
         mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
         return mx::add(h, forward_ffn(layer, mlp_in));
@@ -367,6 +387,7 @@ public:
             }
         }
         mtp_cache_ = KVCache{};
+        mtp_qcache_ = QuantizedKVCache{};
         mtp_loaded_ = true;
         return true;
     }
@@ -391,7 +412,8 @@ public:
 
         const std::string p = "mtp.layers.0.";
         const mx::array attn_in = rms_norm(h, p + "input_layernorm.weight");
-        h = mx::add(h, forward_self_attn(p + "self_attn.", attn_in, mtp_cache_, seq_len));
+        h = mx::add(h,
+                    forward_self_attn(p + "self_attn.", attn_in, mtp_cache_, mtp_qcache_, seq_len));
         const mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
         h = mx::add(h, dense_mlp_at(p + "mlp.", mlp_in));
         return rms_norm(h, "mtp.norm.weight");
@@ -401,10 +423,15 @@ public:
     // acceptance has to trim it explicitly (MtpProposer owns that decision).
     void mtp_trim(int n) {
         if (n > 0) {
-            mtp_cache_.truncate_to(mtp_cache_.offset > n ? mtp_cache_.offset - n : 0);
+            const int keep = mtp_cache_.offset > n ? mtp_cache_.offset - n : 0;
+            mtp_cache_.truncate_to(keep);
+            mtp_qcache_.truncate_to(keep);
         }
     }
-    void mtp_reset() { mtp_cache_ = KVCache{}; }
+    void mtp_reset() {
+        mtp_cache_ = KVCache{};
+        mtp_qcache_ = QuantizedKVCache{};
+    }
 
     // The final-normed hidden from the most recent forward, which is what the head
     // consumes and what the LM head consumes. Captured only while an MTP head is loaded:
@@ -451,10 +478,96 @@ private:
     Qwen35VisionConfig vision_cfg_{};
     Qwen35VisionTower vision_{};
     KVCache mtp_cache_{};
+    // The draft head keeps its own pair for the same reason it keeps its own KVCache:
+    // the target's rollback must never reach it.
+    QuantizedKVCache mtp_qcache_{};
     std::optional<mx::array> last_hidden_;
     WeightStore weights_;
     std::vector<KVCache> kv_caches_;
+    // Parallel to kv_caches_ and empty until a context gets long enough to be worth
+    // converting. `kv_caches_[l].offset` stays the single source of truth for the token
+    // count either way -- rope reads it, cache_seq_len() reads it, and restore() rolls it
+    // back -- so the quantized cache mirrors that number rather than owning a second one.
+    std::vector<QuantizedKVCache> qkv_caches_;
     std::vector<SsmCache> ssm_caches_;
+
+    // LMP_FUSE_GATE_UP=0 is the control arm. Default on; read once, because a getenv
+    // per layer would itself be a load-time cost and a getenv per token would be worse.
+    static bool fuse_gate_up_enabled() {
+        static const bool on = [] {
+            const char* v = std::getenv("LMP_FUSE_GATE_UP");
+            return v == nullptr || std::string_view(v) != "0";
+        }();
+        return on;
+    }
+
+    // Stack each MoE layer's gate_proj and up_proj into one quantized weight so decode
+    // issues one gather_qmm per layer instead of two. switch_glu.hpp explains why this is
+    // numerically a no-op and why the launch count is what matters.
+    //
+    // Done at LOAD, not per step: concatenating 281 MB per layer on every token would
+    // cost far more traffic than the dispatch it saves. The halves are erased as we go,
+    // so the resident total is unchanged and the transient peak is one layer's copy.
+    //
+    // The eval() before the erase is load-bearing. mx::concatenate is lazy, so dropping
+    // the map's references first would leave the fused array holding its inputs alive
+    // through the graph and free nothing -- 11 GB of experts would be resident twice.
+    void fuse_expert_gate_up() {
+        for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+            const std::string p =
+                prefix_ + "layers." + std::to_string(layer) + ".mlp.switch_mlp.";
+            const std::string g = p + "gate_proj";
+            const std::string u = p + "up_proj";
+            const std::string f = p + "gate_up_proj";
+            if (!weights_.is_quantized(g) || !weights_.is_quantized(u)) {
+                continue; // dense layer, or an unquantized export: nothing to fuse
+            }
+            const QuantWeight qg = weights_.quant(g);
+            const QuantWeight qu = weights_.quant(u);
+            // Fusing across two different quantization schemes would silently reinterpret
+            // one half's scales under the other's grouping. Refuse rather than guess --
+            // this checkpoint overrides bits per key for the ROUTER, so unequal specs
+            // inside one layer are a real shape a future export could take.
+            if (qg.group_size != qu.group_size || qg.bits != qu.bits ||
+                qg.mode != qu.mode || qg.biases.has_value() != qu.biases.has_value()) {
+                continue;
+            }
+            if (qg.weight.ndim() != 3 || qu.weight.ndim() != 3 ||
+                qg.weight.shape()[0] != qu.weight.shape()[0] ||
+                qg.weight.shape()[1] != qu.weight.shape()[1] ||
+                qg.weight.shape()[2] != qu.weight.shape()[2]) {
+                continue; // unequal halves would make split(2) the wrong cut
+            }
+            // Axis 1 is the output-row axis: [experts, out, in]. Grouping lives on the
+            // last (input) axis, so stacking rows leaves every group boundary intact.
+            mx::array w = mx::concatenate({qg.weight, qu.weight}, 1);
+            mx::array sc = mx::concatenate({qg.scales, qu.scales}, 1);
+            std::vector<mx::array> force{w, sc};
+            std::optional<mx::array> bi;
+            if (qg.biases && qu.biases) {
+                bi = mx::concatenate({*qg.biases, *qu.biases}, 1);
+                force.push_back(*bi);
+            }
+            mx::eval(force);
+            weights_.set(f + ".weight", w);
+            weights_.set(f + ".scales", sc);
+            if (bi) {
+                weights_.set(f + ".biases", *bi);
+            }
+            for (const std::string& half : {g, u}) {
+                weights_.erase(half + ".weight");
+                weights_.erase(half + ".scales");
+                weights_.erase(half + ".biases");
+            }
+        }
+        // Hand the halves back to the OS rather than leaving them in MLX's allocator
+        // cache. Measured: without this the process finishes load holding 12.79 GB of
+        // cache against 1.44 GB unfused, for the same 18.24 GB active and 19.00 GB peak.
+        // It is reclaimable and so it is not a leak, but on a 48 GB host that also runs
+        // two editors it is 11 GB of apparent headroom that is not headroom -- the exact
+        // accounting error that made 38 GB look survivable (see model_limits.cpp).
+        mx::clear_cache();
+    }
 
     void sanitize_weights() {
         auto& w = weights_.mutable_weights();
@@ -696,7 +809,31 @@ private:
         return weights_.linear(flat, p + "out_proj");
     }
 
-    mx::array forward_self_attn(const std::string& p, const mx::array& h, KVCache& cache, int /*seq_len*/) {
+    // 0 disables it entirely (the reference path). 8 is the only width worth having:
+    // 4-bit KV is a visible quality loss on a model that spends its context on code, and
+    // the bandwidth it saves over 8-bit is small once the per-group scales are counted.
+    static int kv_quant_bits() {
+        static const int b = [] {
+            const char* v = std::getenv("LMP_KV_BITS");
+            return v == nullptr ? 0 : std::atoi(v);
+        }();
+        return b;
+    }
+
+    // Below this many tokens the fused bf16 SDPA wins and the KV term is not what decode
+    // is spending its time on. Above it the cache read dominates. The default is where
+    // the roofline arithmetic says the two cross on this machine, not a tuned constant --
+    // re-derive it rather than nudging it if the model or the host changes.
+    static int kv_quant_after() {
+        static const int n = [] {
+            const char* v = std::getenv("LMP_KV_QUANT_AFTER");
+            return v == nullptr ? 8192 : std::atoi(v);
+        }();
+        return n;
+    }
+
+    mx::array forward_self_attn(const std::string& p, const mx::array& h, KVCache& cache,
+                                QuantizedKVCache& qcache, int /*seq_len*/) {
         namespace ff = mx::fast;
         const int B = static_cast<int>(h.shape()[0]);
         const int L = static_cast<int>(h.shape()[1]);
@@ -733,14 +870,39 @@ private:
         queries = ff::rope(queries, rotary_dim, false, cfg_.rope_theta, 1.0f, offset);
         k = ff::rope(k, rotary_dim, false, cfg_.rope_theta, 1.0f, offset);
 
-        auto [k_cat, v_cat] = cache.update_and_fetch(k, v);
         const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        // A single query attends to the whole cache, so decode wants no mask at all.
-        // Say that with mask_mode rather than an empty mask argument: the type of that
-        // argument changed between MLX 0.29 and 0.31 (vector<array> -> optional<array>),
-        // and naming it here is what made the build version-specific.
-        mx::array attn = ff::scaled_dot_product_attention(
-            queries, k_cat, v_cat, scale, (L > 1) ? "causal" : "");
+
+        // The conversion happens ONCE, on the first decode step of a long context, and
+        // never during prefill. L == 1 is exactly the "prefill is behind us" signal: the
+        // explicit [L, S] score matrix the quantized path builds is a loss against the
+        // fused kernel's tiling at L = 2048 and a win at L = 1, so converting any earlier
+        // would pay the cost in the phase that cannot use it.
+        if (kv_quant_bits() > 0 && !qcache.active() && L == 1 &&
+            cache.offset >= kv_quant_after()) {
+            qcache.adopt_from(cache, /*gs=*/64, kv_quant_bits());
+            // Drop the bf16 copy. Keeping it would leave the cache costing 20 KB/token
+            // AND 10.6 KB/token on a host where the KV budget is what decides how long a
+            // run can get -- the bandwidth win would be real and the memory win lost.
+            // `offset` deliberately survives: it is still the token count everything reads.
+            cache.keys.reset();
+            cache.values.reset();
+        }
+
+        mx::array attn = mx::zeros({1}, h.dtype());
+        if (qcache.active()) {
+            auto [qk, qv] = qcache.update_and_fetch(k, v);
+            cache.offset = qcache.offset;
+            attn = quantized_sdpa(queries, qk, qv, scale, /*causal=*/L > 1,
+                                  qcache.group_size, qcache.bits);
+        } else {
+            auto [k_cat, v_cat] = cache.update_and_fetch(k, v);
+            // A single query attends to the whole cache, so decode wants no mask at all.
+            // Say that with mask_mode rather than an empty mask argument: the type of that
+            // argument changed between MLX 0.29 and 0.31 (vector<array> -> optional<array>),
+            // and naming it here is what made the build version-specific.
+            attn = ff::scaled_dot_product_attention(
+                queries, k_cat, v_cat, scale, (L > 1) ? "causal" : "");
+        }
         attn = mx::reshape(mx::transpose(attn, {0, 2, 1, 3}), {B, L, n_heads * head_dim});
         attn = mx::multiply(attn, mx::sigmoid(gate));
         return weights_.linear(attn, p + "o_proj");
