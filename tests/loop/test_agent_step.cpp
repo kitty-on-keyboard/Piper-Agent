@@ -3213,7 +3213,10 @@ TEST(debug_mode_offers_writes_but_never_delete_file) {
     // a decision could only write it as text, which in a working mode IS the ending. The
     // question terminated the run instead of asking it.
     CHECK(agent.tools_guidance().find("\"ask_user\"") != std::string::npos);
-    CHECK(agent.tools_guidance().find("\"ask_question\"") != std::string::npos);
+    // `ask_question` was the SAME tool under a second name and is no longer declared, so
+    // it must not appear in the guidance -- the prompt surface is the entire cost the
+    // duplicate was imposing.
+    CHECK(agent.tools_guidance().find("\"ask_question\"") == std::string::npos);
     // Leaving plan mode, though, still means nothing outside plan mode.
     CHECK(agent.tools_guidance().find("\"exit_plan_mode\"") == std::string::npos);
     // And the mirror of that: declaring the work finished means nothing in a mode that
@@ -3353,12 +3356,12 @@ TEST(successful_shell_invalidates_workspace_freshness_before_reread) {
     CHECK(!stale_cache_note);
 }
 
-TEST(ask_question_with_options_halts_awaiting_user) {
+TEST(ask_user_with_options_halts_awaiting_user) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
 
     const std::string valid_ask =
-        "<function=ask_question>\n<parameter=question>\nnotes.txt\n</parameter>\n<parameter=options>\nOption A\nOption B\n</parameter>\n</function>\n";
+        "<function=ask_user>\n<parameter=question>\nnotes.txt\n</parameter>\n<parameter=options>\nOption A\nOption B\n</parameter>\n</function>\n";
     model::ScriptedBackend backend;
     backend.enqueue_response(call_turn(tok, valid_ask, "thinking"));
 
@@ -3383,7 +3386,7 @@ TEST(transitional_text_turn_after_tool_call_nudges_and_continues_in_plan_mode) {
     const std::string read_body =
         "<function=read_file>\n<parameter=path>\nf.txt\n</parameter>\n</function>\n";
     const std::string valid_ask =
-        "<function=ask_question>\n<parameter=question>\nnotes.txt\n</parameter>\n<parameter=options>\nOption A\nOption B\n</parameter>\n</function>\n";
+        "<function=ask_user>\n<parameter=question>\nnotes.txt\n</parameter>\n<parameter=options>\nOption A\nOption B\n</parameter>\n</function>\n";
 
     model::ScriptedBackend backend;
     backend.enqueue_response(call_turn(tok, read_body));
