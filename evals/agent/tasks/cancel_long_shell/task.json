@@ -7,9 +7,10 @@
   "max_iterations": 15,
   "wall_clock_seconds": 120,
   "harness": {
-    "cancel_after_seconds": 8
+    "cancel_when_file": "job_started.txt",
+    "cancel_after_seconds": 90
   },
-  "notes": "Cancellation fixture. Harness sends lmp/cancel after a few seconds while a long shell job is expected. Passes when cancel was sent, the long job did not complete its marker, and done.txt was not written as finished.",
+  "notes": "Cancellation falsifier. long_job.sh writes job_started.txt and then sleeps 900 s -- longer than the run budget, the sandbox's 300 s per-command limit and the harness deadline, so no other timeout can produce a passing workspace. The harness watches for that marker and sends lmp/cancel while the child is provably mid-flight; the cancel_after_seconds timer is only a backstop for a run that never gets that far. Passes when the child started, did not finish, and the run ended promptly after the cancel rather than at a timeout.",
   "protect": [
     "long_job.sh"
   ],
