@@ -150,6 +150,18 @@ struct GenResult {
     // that the dead-end path is real and being hit -- and the only evidence that will
     // confirm or refute why tool-call speculation failed the first time it shipped.
     std::uint64_t spec_abandoned = 0;
+    // Allocator cache handed back to the OS on this turn, in bytes. Non-zero only on a
+    // full re-prefill, which is the one place the backend reclaims (see the Reset arm of
+    // generate()).
+    //
+    // HERE SO THE RECLAIM IS FALSIFIABLE FROM A REAL RUN. A cache cap was once fixed by
+    // loading a model and reading two numbers, shipped, and made runs measurably worse;
+    // the standing rule out of that is that a memory change is judged by what a run DOES,
+    // not by an arithmetic that balances. This field is the other half of that rule --
+    // it puts the bytes actually returned on the `generation` event, beside the
+    // time-to-first-token of the very prefill they were returned for, so the next long
+    // run says on its own whether the reclaim helped, did nothing, or cost time.
+    std::size_t cache_reclaimed_bytes = 0;
 };
 
 class InferenceBackend {

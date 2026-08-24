@@ -9,6 +9,7 @@ export type Mode = "plan" | "debug" | "agent";
 export type TurnOutcome = "tool_call_executed" | "tool_call_refused" | "text_only" | "length_capped" | "cancelled" | "backend_error";
 export type ToolStatus = "ok" | "tool_error" | "denied" | "timeout" | "refused" | "cancelled";
 export type ModelState = "unloaded" | "loading" | "ready" | "failed";
+export type NoticeSeverity = "warning" | "error";
 
 export interface SamplingSettings {
   temperature: number;
@@ -35,6 +36,7 @@ export interface RunSettings {
   sampling: SamplingSettings;
   max_iterations: number;
   wall_clock_seconds: number;
+  stall_seconds: number;
   sandbox_tier: number;
   auto_approve_exec: boolean;
   auto_approve_writes: boolean;
@@ -71,6 +73,27 @@ export interface PerfSample {
   tokens_generated: number;
   prefill_reused_tokens: number;
   compactions: number;
+}
+
+export interface SessionSummary {
+  run_id: string;
+  mission: string;
+  workspace_root: string;
+  started_wall_ns: number;
+  finished: boolean;
+  termination_reason: string;
+  iterations: number;
+  completed: boolean;
+  observations: number;
+}
+
+export interface TranscriptEntry {
+  role: string;
+  text: string;
+  tool: string;
+  args: string;
+  is_error: boolean;
+  truncated: boolean;
 }
 
 export interface StartParams {
@@ -148,6 +171,28 @@ export interface ShutdownParams {
 }
 export interface ShutdownResult {
   ok: boolean;
+}
+
+export interface SessionsParams {
+  workspace_root: string;
+  limit: number;
+}
+export interface SessionsResult {
+  sessions: SessionSummary[];
+}
+
+export interface ResumeParams {
+  run_id: string;
+  settings: RunSettings;
+}
+export interface ResumeResult {
+  ok: boolean;
+  why: string;
+  run_id: string;
+  mission: string;
+  turns_restored: number;
+  transcript: TranscriptEntry[];
+  omitted_leading: number;
 }
 
 export interface ModelStatusNotification {
@@ -244,6 +289,14 @@ export interface RunEndNotification {
   unfinished_items: number;
 }
 
+export interface NoticeNotification {
+  run_id: string;
+  code: string;
+  severity: NoticeSeverity;
+  subject: string;
+  detail: string;
+}
+
 export const METHODS = [
   "lmp/start",
   "lmp/cancel",
@@ -254,6 +307,8 @@ export const METHODS = [
   "lmp/load_model",
   "lmp/unload_model",
   "lmp/shutdown",
+  "lmp/sessions",
+  "lmp/resume",
   "lmp/model_status",
   "lmp/token",
   "lmp/turn",
@@ -265,4 +320,5 @@ export const METHODS = [
   "lmp/code_intel",
   "lmp/perf",
   "lmp/run_end",
+  "lmp/notice",
 ] as const;

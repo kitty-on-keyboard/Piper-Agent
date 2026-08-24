@@ -15,3 +15,14 @@ lmp_add_test(test_session SOURCES test_session.cpp LABELS gate LINK lmp_surface)
 # trim dropped is wanted back -- so the reason it failed has to survive the moment.
 lmp_add_test(test_context_journal SOURCES test_context_journal.cpp LABELS gate
              LINK lmp_surface)
+
+# The run's identity. `run_id` was the JSON-RPC request counter until 2026-08-19, which
+# collided 63-to-1 in the real log and would have made resume splice unrelated runs
+# together -- a failure no single-run test can see, so the properties are asserted here.
+lmp_add_test(test_run_id SOURCES test_run_id.cpp LABELS gate LINK lmp_surface)
+
+# The transcript that goes on the wire when a run is resumed. Every case here is a BOUND:
+# one real observation in the log is 708 KB, so the failures are a reply big enough to
+# stall the host and a cut through the middle of a codepoint -- which loses the whole
+# transcript to a parse error, not just the entry it mangled.
+lmp_add_test(test_transcript SOURCES test_transcript.cpp LABELS gate LINK lmp_surface)

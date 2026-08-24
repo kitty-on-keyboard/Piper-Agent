@@ -853,6 +853,36 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             impl_->model.reset_cache();
             ledger_.clear();
             impl_->ckpt = {};
+            // AND GIVE THE BUFFERS BACK, because this is the one moment in a run when
+            // reclaim is free. reset_cache() drops the KV arrays, and MLX's allocator
+            // parks their Metal buffers in its own cache rather than returning them --
+            // ~18 GB of it, measured at every unload_model. Everything just parked
+            // belonged to a prefix that has been discarded, so nothing here will be
+            // wanted again, and the very next thing this function does is prefill the
+            // whole prompt: the largest allocation of the turn, immediately after the
+            // largest pile of dead buffers of the run.
+            //
+            // THIS IS NOT THE CACHE CAP THAT WAS REVERTED (see set_memory_ceiling). That
+            // one bounded RETENTION and so forced reclaim on every allocation in steady
+            // state, which is where its 5-6 s time-to-first-token came from. This fires
+            // only on Reset -- 22 of 73 turns on the run that prompted it -- and only
+            // where a full re-prefill is already being paid, against which a reclaim does
+            // not register. Extend and Restore, which are the steady state, do not reach
+            // this line at all.
+            //
+            // What it buys is headroom at the point of danger. The process had been
+            // holding ~35.5 GB (active + cache) on a 48 GB machine, flat, for the whole
+            // run, and died nine times between 2026-08-09 and 2026-08-17 -- every one of
+            // them at `generate_begin`, with no exception in stderr, no run_end and no
+            // crash report, which is the signature of an OS kill and not of MLX's valve.
+            // The valve could not have caught them: it sits at the device working set,
+            // ~40.2 GB, and the kills land near 38.
+            {
+                const std::size_t held = mx::get_cache_memory();
+                mx::clear_cache();
+                const std::size_t left = mx::get_cache_memory();
+                r.cache_reclaimed_bytes = held > left ? held - left : 0;
+            }
             break;
     }
     const std::size_t start = plan.prefill_from;

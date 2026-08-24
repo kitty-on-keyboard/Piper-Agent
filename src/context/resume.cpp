@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "src/context/resume.hpp"
 
 #include <algorithm>
@@ -178,6 +179,78 @@ ResumeRebuild reconstruct_context(const std::vector<platform::Event>& events,
     out.ok = true;
     out.why = out.edit_in_flight ? "rebuilt; edit in flight" : "ok";
     return out;
+}
+
+// Walks the log once and pairs each run_begin with what followed it.
+//
+// A run's END is inferred from the NEXT run_begin as well as from a run_end, because the
+// case that matters most leaves no run_end at all: the process was killed. Measured on the
+// real log, 10 of 97 runs are in exactly that state. Treating "no run_end" as "still
+// running" would offer a dead run as live; treating it as "finished" would hide the only
+// runs worth resuming. So `finished` reports what the log says and nothing more, and the
+// caller decides what an unfinished run means.
+std::vector<RunSummary> list_runs(const std::vector<platform::Event>& events) {
+    std::vector<RunSummary> out;
+    for (const platform::Event& ev : events) {
+        if (ev.kind == "run_begin") {
+            RunSummary s;
+            s.run_id = field_or(ev, "run_id");
+            s.mission = field_or(ev, "mission");
+            s.workspace_root = field_or(ev, "workspace_root");
+            s.model_identity = field_or(ev, "model_identity");
+            s.started_wall_ns = static_cast<std::uint64_t>(ev.wall_ns);
+            out.push_back(std::move(s));
+            continue;
+        }
+        if (out.empty()) {
+            continue; // events before the first run_begin belong to a run the log lost
+        }
+        RunSummary& cur = out.back();
+        if (ev.kind == "run_end") {
+            // LAST run_end wins, and the reason is not defensive -- it is what the extra
+            // events ARE. The log carries 203 run_end against 97 run_begin, and the excess
+            // is not noise or nesting: a CONVERSATIONAL YIELD writes one. A run that hands
+            // back with `awaiting_user` or `plan_ready`, gets an answer and carries on
+            // emits an end per yield -- measured, 31 runs have 2 to 4 of them, and the
+            // repeated reasons are exactly those two.
+            //
+            // So the first end is where the run first PAUSED, and the last is where it
+            // actually stands. A history panel that showed the first would label a
+            // finished conversation "awaiting_user" forever, and report the iteration
+            // count of its opening exchange.
+            {
+                cur.finished = true;
+                cur.termination_reason = field_or(ev, "termination_reason");
+                // Both spellings. The sidecar writes "true"/"false" and the older
+                // emitters (and every hand-built fixture) write "1"/"0"; reading only one
+                // of them reports every run of the other vintage as failed.
+                const std::string done = field_or(ev, "completed");
+                cur.completed = done == "true" || done == "1";
+                const std::string iters = field_or(ev, "iterations");
+                cur.iterations = iters.empty() ? 0 : std::atoi(iters.c_str());
+            }
+            continue;
+        }
+        // What a resume would actually get back. reconstruct_context replays these kinds,
+        // so counting them here answers "is there a conversation to return to" with the
+        // same rule rather than a guess.
+        if (ev.kind == "tool_result" || ev.kind == "steer" || ev.kind == "write" ||
+            ev.kind == "checklist") {
+            ++cur.observations;
+        }
+    }
+    return out;
+}
+
+std::vector<RunSummary> list_runs_from_log(const std::string& path) {
+    std::vector<platform::Event> events;
+    std::size_t skipped = 0;
+    std::string error;
+    if (!platform::read_event_log(path, events, skipped, error)) {
+        return {};
+    }
+    (void)skipped;
+    return list_runs(events);
 }
 
 ResumeRebuild reconstruct_context_from_log(const std::string& path,

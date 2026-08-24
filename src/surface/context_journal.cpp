@@ -1,5 +1,7 @@
 #include "src/surface/context_journal.hpp"
 
+#include <sys/stat.h>
+
 #include <utility>
 #include <vector>
 
@@ -56,6 +58,60 @@ void try_append(pcc::Store& store, pcc::Record rec) {
     }
 }
 
+// Keeps the store out of the user's `git status` without touching a tracked file.
+//
+// WHY .git/info/exclude AND NOT .gitignore. `.gitignore` is the user's file: it is
+// tracked, it shows up in their next diff, and it would travel to their colleagues in a
+// commit they did not write. `.git/info/exclude` is the per-clone, never-tracked
+// equivalent that exists for exactly this -- a local tool wanting a local file ignored.
+// Deleting the line undoes it completely.
+//
+// Best effort throughout. A workspace that is not a git repository, a read-only .git, a
+// worktree whose .git is a FILE rather than a directory (its exclude file lives in the
+// common directory, which is more indirection than a courtesy write deserves) -- all of
+// them simply do nothing. Failing to write an ignore rule is never a reason to fail a run.
+bool ensure_git_excludes_store(const std::string& workspace_root) {
+    const std::string git_dir = workspace_root + "/.git";
+    struct ::stat st {};
+    if (::stat(git_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return false;
+    }
+    const std::string info_dir = git_dir + "/info";
+    // EEXIST is the expected case and is not an error; any other failure falls through to
+    // the write, which will fail on its own and be ignored.
+    (void)::mkdir(info_dir.c_str(), 0755);
+
+    const std::string exclude_path = info_dir + "/exclude";
+    const platform::FileContents current =
+        platform::read_file_whole(exclude_path, 1U << 20);
+    std::string body = current.ok() ? current.bytes : std::string();
+
+    // Per PATTERN rather than per block. This runs once a mission, so an unconditional
+    // append would grow the file every time the user starts a task; and checking each
+    // pattern separately means a later version that adds one can add just that one to a
+    // repository an earlier version already wrote to.
+    std::vector<std::string> missing;
+    for (const char* pattern : kGitExcludePatterns) {
+        if (body.find(pattern) == std::string::npos) {
+            missing.emplace_back(pattern);
+        }
+    }
+    if (missing.empty()) {
+        return false;
+    }
+    if (!body.empty() && body.back() != '\n') {
+        body += '\n';
+    }
+    body += "\n# LM_Pipe's own scratch: a SQLite context store and two working\n";
+    body += "# directories. Local-only -- your tracked .gitignore is untouched, and\n";
+    body += "# deleting these lines undoes this completely.\n";
+    for (const std::string& pattern : missing) {
+        body += pattern;
+        body += "\n";
+    }
+    return platform::write_file_atomic(exclude_path, body).ok();
+}
+
 } // namespace
 
 ContextJournal::Result ContextJournal::open(const std::string& workspace_root,
@@ -82,6 +138,11 @@ ContextJournal::Result ContextJournal::open(const std::string& workspace_root,
         out.error = e.what();
         return out;
     }
+
+    // Only once the store is real. Writing an ignore rule for a database that failed to
+    // open would leave a line in the user's repository referring to a file that does not
+    // exist.
+    out.git_exclude_written = ensure_git_excludes_store(workspace.root());
 
     // Captures the raw store, not the unique_ptr: the journal owns the store and outlives
     // the ContextStore it is attached to, because the session destroys the context first.

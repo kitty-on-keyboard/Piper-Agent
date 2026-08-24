@@ -19,6 +19,8 @@ import { join } from "path";
 import {
   PROTOCOL_VERSION,
   RunSettings,
+  SessionSummary,
+  ResumeResult,
   StartParams,
   MessageResult,
   LoadModelResult,
@@ -32,6 +34,7 @@ import {
   VerificationNotification,
   PerfNotification,
   ModelStatusNotification,
+  NoticeNotification,
 } from "./protocol.generated";
 
 export interface SidecarEvents {
@@ -44,6 +47,7 @@ export interface SidecarEvents {
   code_intel: CodeIntelNotification;
   perf: PerfNotification;
   model_status: ModelStatusNotification;
+  notice: NoticeNotification;
   run_end: RunEndNotification;
   exit: { code: number | null; stderr: string };
 }
@@ -195,6 +199,26 @@ export class SidecarClient extends EventEmitter {
       model_dir: modelDir,
       draft_model_dir: draftModelDir,
     });
+  }
+
+  /** The runs this workspace can return to, newest first.
+   *
+   *  Answered from the sidecar's event log, not from extension state. The panel used to
+   *  read a Memento the extension wrote itself, which meant history knew what you had
+   *  ASKED for and nothing about what happened -- and could not be resumed, because the
+   *  thing you would resume from lives on the sidecar's side. */
+  sessions(workspaceRoot: string, limit = 50): Promise<Reply<{ sessions: SessionSummary[] }>> {
+    return this.request("lmp/sessions", { workspace_root: workspaceRoot, limit });
+  }
+
+  /** Reloads a previous run's conversation into the sidecar's session.
+   *
+   *  Does NOT restart the run: the context comes back and the sidecar stops there, so the
+   *  operator reads the history and then continues it by sending a message. `settings`
+   *  travels for the same reason start_run carries it -- the model may not be loaded, and
+   *  the sidecar reads model_dir and workspace_root out of it. */
+  resume(runId: string, settings: RunSettings): Promise<Reply<ResumeResult>> {
+    return this.request("lmp/resume", { run_id: runId, settings });
   }
 
   /** Gives the memory back without killing the process. The conversation goes with it. */

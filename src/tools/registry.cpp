@@ -649,6 +649,48 @@ std::vector<std::string> parse_read_many_paths(std::string_view raw) {
     return paths;
 }
 
+// WHERE THAT FILE ACTUALLY IS, said in the same breath as "it is not there".
+//
+// A path that does not exist was 22% of every failed tool call in the log since
+// 2026-08-08 -- second only to the over-budget read above -- and the reply was an
+// instruction to go and run `list_dir`, i.e. another turn, ~70 s, to learn something the
+// harness can answer by walking names it never opens. Almost every one of these is the
+// model naming a file by its basename, or under the wrong parent, when exactly one file
+// of that name exists in the tree.
+//
+// Names only, capped, and silent when there is no good answer: a wrong suggestion is
+// worse than none, so this matches the basename exactly rather than guessing at
+// near-misses.
+std::string Registry::suggest_paths_for(const std::string& path) const {
+    const std::size_t slash = path.rfind('/');
+    const std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (base.empty()) {
+        return {};
+    }
+    constexpr std::size_t kMaxSuggestions = 5;
+    std::vector<std::string> hits;
+    (void)walk_file_names(workspace_fs_, ".", [&](const std::string& found) {
+        const std::size_t s = found.rfind('/');
+        if ((s == std::string::npos ? found : found.substr(s + 1)) == base) {
+            hits.push_back(found);
+        }
+        return hits.size() <= kMaxSuggestions;
+    });
+    if (hits.empty()) {
+        return {};
+    }
+    std::sort(hits.begin(), hits.end());
+    std::string out = hits.size() == 1 ? ". It IS here, at '" + hits[0] + "' -- use that path."
+                                       : ". Files with that name exist at: ";
+    if (hits.size() > 1) {
+        for (std::size_t i = 0; i < hits.size() && i < kMaxSuggestions; ++i) {
+            out += (i != 0 ? ", " : "") + hits[i];
+        }
+        out += " -- pick the one you meant.";
+    }
+    return out;
+}
+
 ToolResult Registry::read_one_file(const std::string& path) {
     const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
     if (!resolved.ok()) {
@@ -665,7 +707,12 @@ ToolResult Registry::read_one_file(const std::string& path) {
                                   : ErrorClass::Malformed;
         std::string err_msg = f.error;
         if (f.status == fsx::FsStatus::NotFound) {
-            err_msg += ". File not found at '" + path + "'. If you provided a bare filename, use list_dir to find its relative path in the workspace.";
+            err_msg += ". File not found at '" + path + "'";
+            const std::string where = suggest_paths_for(path);
+            err_msg += where.empty()
+                           ? ". Nothing by that name is in the workspace -- check the name "
+                             "with find_files before reading."
+                           : where;
         }
         return ToolResult::error(ec, false, err_msg);
     }
@@ -673,14 +720,47 @@ ToolResult Registry::read_one_file(const std::string& path) {
     // 4 MiB, so a single read could hand the context store more bytes than the
     // whole 96k-token window holds -- while this description already claimed it
     // "fails honestly with the real size". It does now.
+    // OVER BUDGET IS NOT A REASON TO RETURN NOTHING. This used to be a hard error, and it
+    // was the single most common failed tool call in the log: 35% of every failure since
+    // 2026-08-08. The harness knew the file's size before the call, refused, and spent a
+    // whole turn -- ~70 s of model time -- teaching the model a fact it could have been
+    // handed along with the head of the file.
+    //
+    // So the read SUCCEEDS with as much as fits, cut at a line boundary, and the note says
+    // exactly where it stopped and how to get the rest.
+    //
+    // WHAT IT MUST NOT DO IS GRANT AN OVERWRITE. note_read_version() is deliberately NOT
+    // called here: recording the version of the whole file after showing part of it is
+    // how a model overwrites -- in good faith -- a file it has only seen the top of. The
+    // read-before-write guard stays unsatisfied, `write_file` keeps refusing, and the note
+    // says so, which points at the tool that is right for a large file anyway
+    // (replace_in_file on the section being changed).
     if (f.bytes.size() > ctx_.max_model_read_bytes) {
-        return ToolResult::error(
-            ErrorClass::Malformed, false,
-            path + " is " + std::to_string(f.bytes.size()) + " bytes over " +
-                std::to_string(count_lines(f.bytes)) +
-                " lines, above the " + std::to_string(ctx_.max_model_read_bytes) +
-                "-byte prompt budget. Use read_slice(path, start_line, end_line) "
-                "to read a range.");
+        // count_lines() counts the line after a trailing newline, which is right for its
+        // other callers and wrong for a range hint: it would send read_slice at a line
+        // one past the end of the file.
+        const std::size_t total_lines =
+            count_lines(f.bytes) - (f.bytes.empty() || f.bytes.back() != '\n' ? 0 : 1);
+        // Back up to the last newline inside the budget so the tail is never a half line;
+        // if the first line alone is over budget, take the hard cut rather than nothing.
+        std::string_view head(f.bytes.data(), ctx_.max_model_read_bytes);
+        const std::size_t nl = head.rfind('\n');
+        if (nl != std::string_view::npos && nl > 0) {
+            head = head.substr(0, nl);
+        }
+        const std::size_t shown_lines = count_lines(head);
+        return measured_read(
+            ToolResult::okay(
+                number_lines(head, 1) + "\n[TRUNCATED: showing lines 1-" +
+                std::to_string(shown_lines) + " of " + std::to_string(total_lines) +
+                ". " + path + " is " + std::to_string(f.bytes.size()) +
+                " bytes, over the " + std::to_string(ctx_.max_model_read_bytes) +
+                "-byte prompt budget. Read on with read_slice(" + path + ", " +
+                std::to_string(shown_lines + 1) + ", " +
+                std::to_string(total_lines) +
+                "). You have NOT seen this whole file, so write_file will refuse it -- "
+                "change it with replace_in_file on the section you are editing.]"),
+            head.size());
     }
     // An empty file is a FACT, and it has to be stated. Returning "" makes a
     // successful read indistinguishable from nothing happening at all -- and an
@@ -792,8 +872,9 @@ Registry::Registry(WorkspaceContext ctx)
         ToolDecl d;
         d.name = "read_file";
         d.description = "Read a file, whole, with 1-based line numbers prefixed for "
-                        "reference. Fails honestly with the real size if it exceeds the "
-                        "prompt budget; use read_slice for a line range instead. The line "
+                        "reference. A file too big for the prompt budget is not an error: "
+                        "you get as much as fits plus the line range to continue from with "
+                        "read_slice, and you will be told it was truncated. The line "
                         "numbers are display only -- never include them in old_text. "
                         "Re-reading always returns current content.";
         d.spec.name = d.name;

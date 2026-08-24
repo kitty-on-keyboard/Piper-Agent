@@ -41,9 +41,11 @@ function settingsFromConfig(): RunSettings {
     },
     // Ceilings on a runaway, not targets (see loop::Budget). They must be read together:
     // a turn limit raised on its own just moves the cutoff to the clock and ends the run
-    // for a different stated reason.
+    // for a different stated reason. Three dials, one question each -- how much work
+    // (turns), how long stuck (stall), how long alive at all (wall clock).
     max_iterations: cfg.get<number>("maxIterations", 200),
-    wall_clock_seconds: cfg.get<number>("wallClockSeconds", 4800),
+    wall_clock_seconds: cfg.get<number>("wallClockSeconds", 14400),
+    stall_seconds: cfg.get<number>("stallSeconds", 1200),
     sandbox_tier: cfg.get<number>("sandboxTier", 1),
     auto_approve_exec: cfg.get<boolean>("autoApproveExec", true),
     auto_approve_writes: cfg.get<boolean>("autoApproveWrites", true),
@@ -109,6 +111,7 @@ function validate(settings: RunSettings): string[] {
     errors.push(`sampling.topP must be in (0, 1] (got ${settings.sampling.top_p}).`);
   if (settings.max_iterations < 1) errors.push("lmPipe.maxIterations must be at least 1.");
   if (settings.wall_clock_seconds < 1) errors.push("lmPipe.wallClockSeconds must be at least 1.");
+  if (settings.stall_seconds < 1) errors.push("lmPipe.stallSeconds must be at least 1.");
   return errors;
 }
 

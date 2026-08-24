@@ -674,6 +674,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 #history { display: none; padding: 10px 0 2px; border-top: 1px solid var(--line); margin-top: 10px; }
 #history.open { display: block; animation: rise .22s var(--ease) both; }
 #history .empty { font-size: 11px; color: var(--faint); padding: 4px 0; }
+/* Only rows that can actually be opened look like they can. */
+#history .run.resumable { cursor: pointer; border-radius: 4px; }
+#history .run.resumable:hover { background: rgba(127,127,127,.14); }
+/* The third state: died mid-run. Not a failure and not a success -- the one to reopen. */
+#history .rdot.dead { background: #d0a215; }
 .run {
   display: flex; align-items: baseline; gap: 8px; padding: 7px 8px;
   border-radius: var(--r-sm); font-size: 11px;
@@ -855,7 +860,9 @@ function markup(): string {
       <label>Turn limit <b id="turnVal"></b></label>
       <input type="range" id="turnRange" min="20" max="600" step="10">
       <label style="margin-top:8px">Time limit <b id="clockVal"></b></label>
-      <input type="range" id="clockRange" min="300" max="14400" step="300">
+      <input type="range" id="clockRange" min="300" max="43200" step="300">
+      <label style="margin-top:8px">Stop if stuck for <b id="stallVal"></b></label>
+      <input type="range" id="stallRange" min="60" max="7200" step="60">
       <div class="warnbox" id="budgetWarn"></div>
     </div>
     <div class="set" id="sliders"></div>
@@ -1840,9 +1847,12 @@ function paintHistory(runs) {
   }
   for (const r of runs) {
     const row = document.createElement('div');
-    row.className = 'run';
+    row.className = 'run' + (r.resumable ? ' resumable' : '');
     const dot = document.createElement('span');
-    dot.className = 'rdot ' + (r.completed ? 'ok' : 'no');
+    // Three states, not two. A run that never reached an ending is neither a success nor
+    // a failure -- it is the one most likely worth reopening, so it must not wear the
+    // same dot as a run that finished badly.
+    dot.className = 'rdot ' + (r.finished === false ? 'dead' : (r.completed ? 'ok' : 'no'));
     const m = document.createElement('span');
     m.className = 'rmission';
     m.textContent = r.mission;
@@ -1850,11 +1860,23 @@ function paintHistory(runs) {
     // resolved by TypeScript and reaches the browser as a REAL newline -- which splits the
     // string literal across two lines and kills the entire view script at parse time.
     // tsc cannot see it: to the compiler this whole function is one string.
-    m.title = r.mission + '\\n' + r.reason;
+    m.title = r.mission + '\\n' + r.reason +
+              (r.resumable ? '\\n\\nClick to reopen this conversation.'
+                           : '\\n\\nNothing recorded to reopen.');
     const meta = document.createElement('span');
     meta.className = 'rmeta';
-    meta.textContent = r.iterations + ' turns · ' + when(r.at);
+    meta.textContent = (r.finished === false ? 'died · ' : '') +
+                       r.iterations + ' turns · ' + when(r.at);
     row.append(dot, m, meta);
+    // Only a row with something behind it is clickable. A hover state on a row that
+    // cannot open is a promise the panel cannot keep.
+    if (r.resumable && r.runId) {
+      row.onclick = () => {
+        api.postMessage({ kind: 'resume', runId: r.runId });
+        $('history').classList.remove('open');
+        $('histBtn').classList.remove('on');
+      };
+    }
     el.append(row);
   }
 }
@@ -1999,37 +2021,64 @@ $('thinkToggle').onclick = () => {
   put('showThinking', showThinking);
 };
 
-// --- the two budgets ------------------------------------------------------
-// Both, on one panel, with the consequence spelled out. A turn limit alone is a trap:
+// --- the three budgets ----------------------------------------------------
+// All three, on one panel, with the consequence spelled out. A turn limit alone is a trap:
 // raise it without the clock and the run stops at the same wall it always did, for a
-// different stated reason. The seconds-per-turn figure below is measured (12.1-12.7 s on
-// the mission the ceiling was set from), which is what makes the comparison worth showing
-// rather than guessing at.
-const SECONDS_PER_TURN = 12.5;
+// different stated reason.
+//
+// The seconds-per-turn figure is measured, and it had to be re-measured. 12.5 s came off
+// the mission the original ceiling was set from, on a text-only checkpoint with a roomy
+// context budget. A vision-enabled 27B compacting every ~5 turns costs far more, because
+// every compaction buys one full re-prefill: 73 turns of a 2026-08-17 run took 103 min of
+// model time, 85 s of it per turn, 40% of that in prefill alone. The drawer would rather
+// be right about the slow case, since the slow case is the one where the clock binds.
+const SECONDS_PER_TURN = 60;
 
 const dragging = (id, key, live) => {
   const r = $(id);
-  r.oninput = () => { live(Number(r.value)); paintBudget(Number($('turnRange').value), Number($('clockRange').value)); };
+  r.oninput = () => { live(Number(r.value)); repaintBudget(); };
   r.onchange = () => put(key, Number(r.value));
 };
+const repaintBudget = () => paintBudget(Number($('turnRange').value),
+                                        Number($('clockRange').value),
+                                        Number($('stallRange').value));
 dragging('turnRange', 'maxIterations', (v) => { $('turnVal').textContent = v + ' turns'; });
 dragging('clockRange', 'wallClockSeconds', (v) => { $('clockVal').textContent = Math.round(v / 60) + ' min'; });
+dragging('stallRange', 'stallSeconds', (v) => { $('stallVal').textContent = Math.round(v / 60) + ' min'; });
 
-function paintBudget(turns, seconds) {
-  const clockStopsAt = Math.floor(seconds / SECONDS_PER_TURN);
+// The longest single turn that is not a fault: worst measured time-to-first-token (~129 s)
+// plus a full-length generation at the measured decode rate plus a shell command riding
+// its own 300 s limit. A stall dial under this stops runs that are working.
+const LONGEST_HONEST_TURN_S = 700;
+
+function paintBudget(turns, seconds, stall) {
   const warn = $('budgetWarn');
+  // Ordered by which mistake costs the most. A stall dial set below one honest turn kills
+  // healthy runs at random, which is worse than a clock that binds early, which is worse
+  // than the intended state.
+  if (stall < LONGEST_HONEST_TURN_S) {
+    warn.className = 'warnbox';
+    warn.textContent =
+      'Stuck-limit is under one slow turn: a single generation plus a shell command can '
+      + 'honestly take ~' + Math.round(LONGEST_HONEST_TURN_S / 60) + ' min, so '
+      + Math.round(stall / 60) + ' min will stop runs that are still working. '
+      + 'Raise it, or healthy turns will read as hangs.';
+    return;
+  }
+  const clockStopsAt = Math.floor(seconds / SECONDS_PER_TURN);
   if (clockStopsAt < turns) {
     warn.className = 'warnbox';
     warn.textContent =
       'The clock stops this run first: at ~' + SECONDS_PER_TURN + 's a turn, ' +
       Math.round(seconds / 60) + ' min is about ' + clockStopsAt + ' turns, not ' + turns +
       '. Raise the time limit or the extra turns are unreachable.';
-  } else {
-    warn.className = 'warnbox calm';
-    warn.textContent =
-      'Turns run out first, which is the intent: ~' + Math.round(turns * SECONDS_PER_TURN / 60) +
-      ' min of work at the measured rate, with the clock as the backstop for a hung run.';
+    return;
   }
+  warn.className = 'warnbox calm';
+  warn.textContent =
+    'Turns run out first, which is the intent: ~' + Math.round(turns * SECONDS_PER_TURN / 60) +
+    ' min of work at the measured rate. A run that hangs is stopped after ' +
+    Math.round(stall / 60) + ' min without a turn, and the clock is only the backstop.';
 }
 
 $('promptBox').addEventListener('change', () => {
@@ -2135,9 +2184,11 @@ function paint() {
   };
   const turns = budget('turnRange', 'maxIterations', 200, 600,
     { id: 'turnVal', text: (v) => v + ' turns' });
-  const seconds = budget('clockRange', 'wallClockSeconds', 4800, 14400,
+  const seconds = budget('clockRange', 'wallClockSeconds', 14400, 43200,
     { id: 'clockVal', text: (v) => Math.round(v / 60) + ' min' });
-  paintBudget(turns, seconds);
+  const stall = budget('stallRange', 'stallSeconds', 1200, 7200,
+    { id: 'stallVal', text: (v) => Math.round(v / 60) + ' min' });
+  paintBudget(turns, seconds, stall);
 
   paintCheck();
 
@@ -2661,6 +2712,68 @@ window.addEventListener('message', (e) => {
   }
 
   if (kind === 'history') paintHistory(payload.runs);
+
+  if (kind === 'resumed') {
+    // The pane was showing a different conversation, so it is cleared rather than appended
+    // to: painting the old feed under a resumed session would show one conversation while
+    // the model answers from another.
+    //
+    // The .msg children ONLY. feed.textContent = '' takes the live row with them -- and
+    // with it the orb's WebGL context, which does not come back. Same rule as run_start.
+    closeBubble();
+    for (const el of [...feed.querySelectorAll('.msg')]) el.remove();
+    $('plan').textContent = '';
+    $('mission').textContent = payload.mission || '';
+
+    if (payload.omitted > 0) {
+      const o = document.createElement('div');
+      o.className = 'ended';
+      o.textContent = payload.omitted + ' earlier turn(s) are not shown here — the ' +
+                      'transcript was capped for the pane. The model still has all of them.';
+      add(o, '');
+    }
+    for (const e of payload.transcript || []) {
+      if (e.role === 'user') {
+        const d = document.createElement('div');
+        const who = document.createElement('div');
+        who.className = 'who';
+        who.textContent = 'You';
+        const body = document.createElement('div');
+        body.textContent = e.text;
+        d.append(who, body);
+        add(d, 'user');
+      } else if (e.role === 'assistant') {
+        // Plain text, not streamed markdown: renderMd drives a streaming parser whose
+        // state belongs to the LIVE turn, and feeding a replay through it would leave that
+        // state pointing at a conversation that already ended.
+        const d = document.createElement('div');
+        d.textContent = e.text;
+        add(d, 'assistant');
+      } else {
+        // The same collapsible row a live tool turn gets, so a resumed conversation reads
+        // identically to the one it is a picture of.
+        const d = document.createElement('details');
+        const sum = document.createElement('summary');
+        const dot = document.createElement('span');
+        dot.className = 'dot ' + (e.is_error ? 'failed' : 'ok');
+        const n = document.createElement('span');
+        n.className = 'name';
+        n.textContent = e.tool;
+        const a = document.createElement('span');
+        a.className = 'args';
+        a.textContent = e.args || '';
+        sum.append(dot, n, a);
+        const pre = document.createElement('pre');
+        pre.textContent = e.truncated ? e.text + '\\n\\n… truncated for display' : e.text;
+        d.append(sum, pre);
+        add(d, '');
+      }
+    }
+    const b = document.createElement('div');
+    b.className = 'ended';
+    b.textContent = 'Reopened · ' + payload.turns + ' turns restored. Send a message to carry on.';
+    add(b, '');
+  }
 
   if (kind === 'run_end') {
     closeBubble();

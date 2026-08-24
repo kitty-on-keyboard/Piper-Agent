@@ -68,6 +68,11 @@ struct ToolResult {
     // successful edit. Zero means "not measured or none", never an estimate parsed from
     // summary prose. Kept on the result so serial, parallel and surface paths cannot
     // report different instrumentation for the same call.
+    // Set when the harness replaced this result's content with a reference to a copy the
+    // context already holds. The result is then a POINTER, not a snapshot -- which is why
+    // the turn record must not claim an observed_path for it, or the next read of the same
+    // file measures the pointer against the file and reports the file as out of date.
+    bool content_elided = false;
     std::size_t bytes_read = 0;
     std::size_t bytes_changed = 0;
 
