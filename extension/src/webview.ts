@@ -500,6 +500,17 @@ button.ghost {
   color: #fff;
   box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
 }
+.q-opt-label {
+  display: block;
+}
+.q-opt-detail {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--dim);
+}
 .q-opt-text {
   flex: 1;
   word-break: break-word;
@@ -2225,6 +2236,23 @@ function argsPreview(argsObj, raw) {
   return line.length > 120 ? line.slice(0, 119) + '…' : line;
 }
 
+const Q_BULLET = /^\\s*[-*•]\\s+/;
+const Q_INDENT = /^\\s+\\S/;
+const Q_MARKER = /(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i;
+const Q_LEAD_MARKER = /^(?:Option\\s+[A-Za-z0-9]+\\s*[:\\)]\\s*|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i;
+
+// One block of text -> one option. The first line names it; anything under it is detail,
+// which the card shows but never makes separately clickable.
+function questionBlockToOption(block) {
+  const lines = block.split(/\\n/).map((s) => s.trim()).filter(Boolean);
+  const label = (lines.shift() || '').replace(Q_LEAD_MARKER, '').trim();
+  const detail = lines
+    .map((l) => l.replace(Q_BULLET, '').trim())
+    .filter(Boolean)
+    .join(' · ');
+  return { label: label, detail: detail };
+}
+
 // The selectable options for a question card, from the 'options' argument alone.
 //
 // It deliberately does NOT fall back to the turn's summary. That summary is the loop's own
@@ -2232,25 +2260,80 @@ function argsPreview(argsObj, raw) {
 // it into a card titled with it, offering it as the single thing to click. A question that
 // arrives without options is a malformed question, and the honest render is the plain tool
 // row, not one fabricated choice.
+//
+// EVERY LINE WAS AN OPTION until 2026-08-24. The tool description asks for "one per line"
+// and the model very reasonably writes richer than that -- measured, from real runs:
+//
+//     Fixed cinematic angles (PS1 original)
+//       - Dramatic, controlled views per encounter
+//       - Limited player freedom, strong storytelling
+//
+//     Free third-person camera (modern action games)
+//       - Full player control over camera
+//
+// Splitting that on /\\n+/ collapses the blank line that separates the two real choices and
+// offers EIGHT clickable rows, six of them fragments of the argument for one of the other
+// two. The delimiters a model actually uses, in descending order of how reliably each one
+// means "next option": a blank line, then a line that is neither indented nor bulleted,
+// then markers inside a single line.
 function questionOptions(argsObj) {
   if (Array.isArray(argsObj.options)) {
-    return argsObj.options.map((s) => String(s).trim()).filter(Boolean);
+    return argsObj.options
+      .map((s) => String(s).trim())
+      .filter(Boolean)
+      .map((label) => ({ label: label, detail: '' }));
   }
   if (typeof argsObj.options !== 'string' || !argsObj.options.trim()) {
     return [];
   }
-  // Models emit the list three ways: real newlines, the two-character escape "\\n", or one
-  // line with bullet/ordinal markers in it.
-  const normalized = argsObj.options.replace(/\\\\n/g, '\\n').replace(/\\r\\n/g, '\\n');
-  const parts = normalized.split(/\\n+/).map((s) => s.trim()).filter(Boolean);
-  if (parts.length === 1 && /(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i.test(parts[0])) {
-    const split = parts[0]
+  // Real newlines, or the two-character escape "\\n" that survives a round trip as text.
+  const normalized = argsObj.options
+    .replace(/\\\\r\\\\n/g, '\\n')
+    .replace(/\\\\n/g, '\\n')
+    .replace(/\\r\\n/g, '\\n');
+
+  // 1. A blank line is unambiguous, and the only delimiter that still reads correctly when
+  //    an option carries detail lines of its own.
+  const blocks = normalized.split(/\\n\\s*\\n/).map((s) => s.trim()).filter(Boolean);
+  if (blocks.length > 1) {
+    return blocks.map(questionBlockToOption).filter((o) => o.label);
+  }
+
+  const lines = normalized.split(/\\n/).filter((l) => l.trim());
+
+  // 2. No blank lines: a line that is neither indented nor bulleted starts an option, and
+  //    indented or bulleted lines belong to the one above it. Guarded on there BEING such
+  //    a line, because a flat "- a / - b / - c" list is bulleted all the way down and
+  //    those bullets are the options themselves, not detail.
+  const hasHeaderLine = lines.some((l) => !Q_INDENT.test(l) && !Q_BULLET.test(l));
+  if (lines.length > 1 && hasHeaderLine) {
+    const groups = [];
+    for (const line of lines) {
+      const isDetail = Q_INDENT.test(line) || Q_BULLET.test(line);
+      if (!isDetail || groups.length === 0) {
+        groups.push([line]);
+      } else {
+        groups[groups.length - 1].push(line);
+      }
+    }
+    return groups
+      .map((g) => questionBlockToOption(g.join('\\n')))
+      .filter((o) => o.label);
+  }
+
+  // 3. Everything on one line, with the markers inside it.
+  if (lines.length === 1 && Q_MARKER.test(lines[0])) {
+    const split = lines[0]
       .split(/(?=(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+))/i)
       .map((s) => s.trim())
       .filter(Boolean);
-    if (split.length > 1) return split;
+    if (split.length > 1) {
+      return split.map(questionBlockToOption).filter((o) => o.label);
+    }
   }
-  return parts;
+
+  // 4. Plain one-per-line, including the flat bulleted list from (2).
+  return lines.map((l) => questionBlockToOption(l)).filter((o) => o.label);
 }
 
 // --- inbound --------------------------------------------------------------
@@ -2396,7 +2479,7 @@ window.addEventListener('message', (e) => {
           const submitSelection = () => {
             const chosenTexts = Array.from(selectedIndices)
               .sort((a, b) => a - b)
-              .map(i => optionList[i]);
+              .map(i => optionList[i].label);
             if (chosenTexts.length === 0) return;
             const textToSubmit = chosenTexts.length === 1 ? chosenTexts[0] : chosenTexts.join('\\n\\n');
 
@@ -2409,7 +2492,7 @@ window.addEventListener('message', (e) => {
 
           submitBtn.onclick = submitSelection;
 
-          optionList.forEach((optText, idx) => {
+          optionList.forEach((opt, idx) => {
             const btn = document.createElement('button');
             btn.className = 'q-opt-btn';
             btn.type = 'button';
@@ -2419,9 +2502,21 @@ window.addEventListener('message', (e) => {
             const letterBadge = String.fromCharCode(65 + idx);
             badge.textContent = letterBadge;
 
+            // The label is the choice; the detail is the case FOR it. Both belong on the
+            // card -- the model wrote the detail to be read before choosing -- but only
+            // the label is the answer, so only the label is sent back.
             const txt = document.createElement('span');
             txt.className = 'q-opt-text';
-            txt.textContent = optText;
+            const labelEl = document.createElement('span');
+            labelEl.className = 'q-opt-label';
+            labelEl.textContent = opt.label;
+            txt.append(labelEl);
+            if (opt.detail) {
+              const detailEl = document.createElement('span');
+              detailEl.className = 'q-opt-detail';
+              detailEl.textContent = opt.detail;
+              txt.append(detailEl);
+            }
 
             btn.append(badge, txt);
 
