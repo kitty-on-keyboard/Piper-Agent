@@ -2239,7 +2239,7 @@ function argsPreview(argsObj, raw) {
 const Q_BULLET = /^\\s*[-*•]\\s+/;
 const Q_INDENT = /^\\s+\\S/;
 const Q_MARKER = /(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i;
-const Q_LEAD_MARKER = /^(?:Option\\s+[A-Za-z0-9]+\\s*[:\\)]\\s*|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i;
+const Q_LEAD_MARKER = /^(?:Option\\s+[A-Za-z0-9]+\\s*[:\\)]\\s*|[-*•]\\s+|\\d+\\s*[\\.\\)]\\s+|[A-Za-z]\\s*[\\.\\)]\\s+)/i;
 
 // One block of text -> one option. The first line names it; anything under it is detail,
 // which the card shows but never makes separately clickable.
@@ -2334,6 +2334,71 @@ function questionOptions(argsObj) {
 
   // 4. Plain one-per-line, including the flat bulleted list from (2).
   return lines.map((l) => questionBlockToOption(l)).filter((o) => o.label);
+}
+
+// An enumerated choice list written INSIDE the question text, with no 'options' argument.
+//
+// WHY THIS EXISTS. 'ask_user' takes only 'question', so it can never carry options and
+// never drew a card -- the run just yielded to the composer box. But the model uses both
+// tools for the same job: on 2026-08-24 it asked a four-way design question through
+// 'ask_user' and wrote the choices into the question itself --
+//
+//     What kind of combat style are you envisioning for this Onimusha-inspired game?
+//
+//     Option 1: Traditional combo-based (light/heavy attacks, chain combos, guard/parry)
+//     Option 2: Action-focused (fast movement, aerial combos, dodge mechanics)
+//     ...
+//
+// -- which is a perfectly good four-option question that rendered as a plain tool row and
+// a text box. Whether the card appears should not depend on which of two tools the model
+// reached for, so the options are read from where it actually put them.
+//
+// STRONG MARKERS ONLY, and at least two of them. A bulleted list inside prose is usually
+// not a choice set, and inventing a card around one would be the same mistake as the old
+// fallback that offered the loop's status string as the single thing to click. The
+// single-letter form requires exactly one character before the punctuation, so "So. Then
+// I..." is not an option and "A) ..." is.
+const Q_ENUM_LINE = /^(?:option\\s+[0-9a-z]+\\s*[:.\\)]|[0-9]{1,2}\\s*[.\\)]\\s|[a-z]\\s*[.\\)]\\s)/i;
+
+function questionFromText(text) {
+  const empty = { question: text, options: [] };
+  if (typeof text !== 'string' || !text.trim()) {
+    return empty;
+  }
+  const lines = text.replace(/\\r\\n/g, '\\n').split(/\\n/);
+  const firstMarker = lines.findIndex((l) => Q_ENUM_LINE.test(l.trim()));
+  if (firstMarker < 0) {
+    return empty;
+  }
+  const markerCount = lines.filter((l) => Q_ENUM_LINE.test(l.trim())).length;
+  if (markerCount < 2) {
+    return empty;
+  }
+
+  // Everything above the first marker is the question being asked. Blank-line padding
+  // between it and the list is presentation, not content.
+  const head = lines.slice(0, firstMarker).join(' ').trim();
+
+  // A marker line opens an option; anything after it that is not a marker is its detail,
+  // which is how a model writes a choice that needs a sentence of justification.
+  const groups = [];
+  for (const line of lines.slice(firstMarker)) {
+    if (!line.trim()) {
+      continue;
+    }
+    if (Q_ENUM_LINE.test(line.trim()) || groups.length === 0) {
+      groups.push([line.trim()]);
+    } else {
+      groups[groups.length - 1].push(line.trim());
+    }
+  }
+  const options = groups
+    .map((g) => questionBlockToOption(g.join('\\n')))
+    .filter((o) => o.label);
+  if (options.length < 2) {
+    return empty;
+  }
+  return { question: head || text, options: options };
 }
 
 // --- inbound --------------------------------------------------------------
@@ -2447,8 +2512,18 @@ window.addEventListener('message', (e) => {
     if (isQuestionTool) {
       try {
         const argsObj = parseToolArgs(payload.tool_args);
-        const questionText = argsObj.question || 'Clarification required:';
-        const optionList = questionOptions(argsObj);
+        let questionText = argsObj.question || 'Clarification required:';
+        let optionList = questionOptions(argsObj);
+        // No 'options' argument, but the model may have written the choices into the
+        // question itself -- which is what 'ask_user' forces, since its description never
+        // mentions the optional parameter it accepts.
+        if (optionList.length === 0) {
+          const embedded = questionFromText(questionText);
+          if (embedded.options.length > 1) {
+            questionText = embedded.question;
+            optionList = embedded.options;
+          }
+        }
 
         if (optionList.length > 0) {
           const qCard = document.createElement('div');

@@ -444,10 +444,10 @@ constexpr const char kCacheNote[] =
     "nothing has been written since, so it was not re-executed.)";
 
 // Named `exit_plan_mode` until that tool stopped existing outside plan mode, which made the
-// advice unfollowable in the two modes that see this note most. `ask_question` is available
+// advice unfollowable in the two modes that see this note most. `ask_user` is available
 // everywhere, so it is the one worth naming.
 constexpr const char kRepeatNote[] =
-    "\n[Note: This tool call produced identical output to a previous call. Do not repeat the same query. Explore subdirectories, inspect code files, or put the choice to the human with 'ask_question'.]";
+    "\n[Note: This tool call produced identical output to a previous call. Do not repeat the same query. Explore subdirectories, inspect code files, or put the choice to the human with 'ask_user'.]";
 
 std::string without_cache_note(std::string summary) {
     const std::string_view rnote(kRepeatNote);
@@ -1764,30 +1764,28 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
         return tools::ToolResult::okay("reported the work finished; the run stops here");
     }
 
-    if (name == "ask_user" || name == "ask_question" || name == "exit_plan_mode") {
+    // `ask_question` WAS A SECOND NAME FOR `ask_user` and is gone -- same question field,
+    // same options field, same halt, and the model had to guess which of the two offered
+    // clickable choices (see registry.cpp). Accepting the retired name here was tried and
+    // removed: the grammar constrains a call to the DECLARED set, so an undeclared name
+    // never reaches this function, and a branch for it is dead code wearing a comment that
+    // claims otherwise. tests/loop/test_agent_step.cpp proved that rather than assuming it.
+    if (name == "ask_user" || name == "exit_plan_mode") {
         if (name == "exit_plan_mode" && !policy_.conversational) {
             return tools::ToolResult::refused(
                 "'exit_plan_mode' is only available in a mode that plans");
         }
         const std::string body =
-            param_value(params, (name == "ask_user" || name == "ask_question") ? "question" : "plan");
+            param_value(params, name == "ask_user" ? "question" : "plan");
         if (body.empty()) {
             return tools::ToolResult::error(
                 tools::ErrorClass::Malformed, true,
                 "'" + name + "' needs a non-empty " +
-                    ((name == "ask_user" || name == "ask_question") ? "'question'" : "'plan'"));
-        }
-        if (name == "ask_question") {
-            const std::string options = param_value(params, "options");
-            if (options.empty()) {
-                return tools::ToolResult::error(
-                    tools::ErrorClass::Malformed, true,
-                    "'ask_question' requires a non-empty 'options' string with 2-4 selectable options");
-            }
+                    (name == "ask_user" ? "'question'" : "'plan'"));
         }
         executed = true;
         halted_ = true;
-        if (name == "ask_user" || name == "ask_question") {
+        if (name == "ask_user") {
             const std::string options = param_value(params, "options");
             halt_reason_ = "awaiting_user";
             emit(name, {{"question", body}, {"options", options}});
@@ -2539,7 +2537,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 std::to_string(consecutive_plan_only_turns_) +
                 " turns in a row without doing any of it. The panel already shows the "
                 "list; calling `plan` again changes nothing. Pick the next open item "
-                "and do it NOW -- make the edit, run the build, or call `ask_question` "
+                "and do it NOW -- make the edit, run the build, or call `ask_user` "
                 "if you are blocked. The run will end if the next turn is also only a "
                 "plan update.]";
             ctx_.add_turn(std::move(note));
@@ -2567,7 +2565,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 std::to_string(consecutive_micro_edit_turns_) +
                 " small edits in a row without running a build or closing a checklist "
                 "item. Stop polishing and verify the whole: run the build, then either "
-                "close the item you are on or call `ask_question` if you are blocked.]";
+                "close the item you are on or call `ask_user` if you are blocked.]";
             ctx_.add_turn(std::move(note));
             emit("micro_edit_warning",
                  {{"consecutive", std::to_string(consecutive_micro_edit_turns_)}});
@@ -2669,7 +2667,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                            "it again will produce the same result. Scroll up and use what is "
                            "already here: make the NEXT edit, run the build to see where you "
                            "stand, call `finish` if the work is actually done, or call "
-                           "'ask_question' if you need a decision from the human. "
+                           "'ask_user' if you need a decision from the human. "
                            "Do not re-read a file this run has already read unless something has "
                            "written to it since.]"
                     : think_truncated
@@ -2678,7 +2676,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "after the close went out as your answer, not as thinking. Nothing "
                           "ran and nothing changed. Do not resume that train of thought: decide "
                           "on what you already have and ACT this turn. Make the call you were "
-                          "working toward, or call 'ask_question' if the decision is the "
+                          "working toward, or call 'ask_user' if the decision is the "
                           "human's. Keep the next thought short -- the budget is per turn, and "
                           "spending it again the same way ends the run.]"
                     : policy_.conversational
@@ -2686,7 +2684,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "standalone text updates or commentary -- they do not reach the human. "
                           "If you were about to read something, call the tool NOW "
                           "(`read_file`, `read_many`, `list_dir`, `find_files`, `search`). "
-                          "If you have a design choice to put to the human, call 'ask_question' with 2-4 options. "
+                          "If you have a design choice to put to the human, call 'ask_user' with 2-4 options. "
                           "If your plan is ready, call 'exit_plan_mode'. "
                           "You do not need to read every file before asking or planning.]"
                         : "[Note: Your last turn called no tool. If you were about to act -- reading, "

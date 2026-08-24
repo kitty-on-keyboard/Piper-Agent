@@ -2145,6 +2145,25 @@ Registry::Registry(WorkspaceContext ctx)
     // that. The explicit tool matters in a conversational mode because it tells the
     // surface a QUESTION is waiting rather than a statement -- the two render
     // differently, and only one of them asks the operator to reply.
+    //
+    // THIS WAS TWO TOOLS UNTIL 2026-08-24, and they were the same tool. `ask_question`
+    // declared `question` + a REQUIRED `options`; `ask_user` declared `question` + an
+    // OPTIONAL `options`; the loop ran one code path for both, halting with
+    // `awaiting_user` and emitting the same pair of fields, and the view treated the two
+    // names identically. The only real difference was one validation branch.
+    //
+    // The cost of the duplicate was not tokens, it was a coin flip the model had to win.
+    // `ask_user`'s description never mentioned the `options` parameter it accepted, so a
+    // run that reached for that name had no way to know it could offer choices -- and on
+    // 2026-08-24 one did exactly that, writing "Option 1: ... Option 4: ..." into the
+    // question prose. Same intent, same information, no card, because it picked the other
+    // name for the same tool. Two tools for one job is a decision an agent can get wrong,
+    // and a smaller model gets it wrong more often; the fix is not better wording on both,
+    // it is one tool.
+    //
+    // Accepting the retired name in the loop was tried and removed: the grammar constrains
+    // a call to the DECLARED set, so an undeclared name never reaches the handler and the
+    // branch was dead code claiming otherwise.
     {
         ToolDecl d;
         d.name = "ask_user";
@@ -2153,8 +2172,12 @@ Registry::Registry(WorkspaceContext ctx)
             "answer would genuinely change the design and you cannot settle it by reading "
             "the code -- not to confirm something you already believe, and not to ask "
             "permission to continue. Ask ONE question, the most load-bearing one, and say "
-            "what each answer would change. The run ends here; their reply continues this "
-            "same conversation with everything you have read still in context.";
+            "what each answer would change. When the answer is a short closed set -- which "
+            "approach, which library, which of two designs -- pass `options` as 2 to 4 "
+            "newline-separated choices, one per line; they become buttons the human clicks "
+            "instead of typing. Leave `options` out for a genuinely open question. The run "
+            "ends here; their reply continues this same conversation with everything you "
+            "have read still in context.";
         d.spec.name = d.name;
         d.spec.params = {param("question", ParamType::Text, true),
                          param("options", ParamType::Text, false)};
@@ -2167,32 +2190,6 @@ Registry::Registry(WorkspaceContext ctx)
         declare(d, [](const std::vector<ToolParamValue>&, int) {
             return ToolResult::error(ErrorClass::Malformed, false,
                                      "internal: 'ask_user' must be handled by the loop");
-        });
-    }
-    // --- ask_question --------------------------------------------------------
-    {
-        ToolDecl d;
-        d.name = "ask_question";
-        d.description =
-            "Ask the human a question with 2 to 4 selectable options, which they answer by "
-            "clicking a card. Pass `question` (text) and `options`: one choice per line, "
-            "or -- when a choice needs justifying -- a blank line between choices with "
-            "detail lines indented beneath each. The first line of a choice is the answer "
-            "and the only thing sent back; the lines under it are shown as its rationale. "
-            "Prefer this over `ask_user` whenever the answers are a "
-            "short closed set -- which approach, which library, which of two designs -- "
-            "because clicking one is faster for them than typing it. Ask when the answer "
-            "would genuinely change what you build and reading more code would not settle "
-            "it; do not ask permission to continue. The run stops here and their choice "
-            "continues this same conversation with everything you have read still in "
-            "context.";
-        d.spec.name = d.name;
-        d.spec.params = {param("question", ParamType::Text, true),
-                         param("options", ParamType::Text, true)};
-        // Available in every mode -- see ask_user above for why.
-        declare(d, [](const std::vector<ToolParamValue>&, int) {
-            return ToolResult::error(ErrorClass::Malformed, false,
-                                     "internal: 'ask_question' must be handled by the loop");
         });
     }
     // --- exit_plan_mode -----------------------------------------------------
@@ -2241,7 +2238,7 @@ Registry::Registry(WorkspaceContext ctx)
             "handback: what you changed, and how you know it works. Do not call it while "
             "any part of the work is unstarted, unverified, or blocked -- to act, call the "
             "tool that acts; to raise something you cannot decide alone, call "
-            "`ask_question`. Your checklist is checked against this: items still open are "
+            "`ask_user`. Your checklist is checked against this: items still open are "
             "reported to the human as unfinished.";
         d.spec.name = d.name;
         d.spec.params = {param("summary", ParamType::Text, true)};
