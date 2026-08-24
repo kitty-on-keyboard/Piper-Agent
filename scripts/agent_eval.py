@@ -368,9 +368,7 @@ def load_tasks(split=None, only=None, include_heavy=False, tasks_root=TASKS):
 
 def build_start_request(meta, model_dir, workspace, sampling, contract):
     """The exact start request, split out so checker plumbing is model-free testable."""
-    return {"jsonrpc": "2.0", "id": "1", "method": "lmp/start", "params": {
-        "mission": meta["mission"],
-        "settings": {
+    settings = {
             "model_dir": model_dir, "workspace_root": workspace,
             "mode": meta.get("mode", "agent"), "sampling": sampling,
             "max_iterations": meta.get("max_iterations", 30),
@@ -382,19 +380,31 @@ def build_start_request(meta, model_dir, workspace, sampling, contract):
             # Captured from task.json before the writable workspace exists. The model
             # receives the operator's real check, but never owns or rewrites it.
             "verify_contract": contract.check,
-        },
+    }
+    # Opt-in MTP speculation. Absent the env var this is byte-identical to the request
+    # that produced the existing pins -- a draft head changes decode speed, and a pin
+    # measured with one is not comparable to a pin measured without.
+    draft_dir = os.environ.get("LMP_DRAFT_DIR", "")
+    if draft_dir:
+        settings["draft_model_dir"] = draft_dir
+    return {"jsonrpc": "2.0", "id": "1", "method": "lmp/start", "params": {
+        "mission": meta["mission"], "settings": settings,
     }}
 
 
-def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
-    """Runs one task in a throwaway copy of its workspace. Returns a score dict."""
-    contract = capture_task_contract(meta)
-    harness_dir = tempfile.mkdtemp(prefix=f"lmpeval-harness-{meta['name']}-")
-    workspace = tempfile.mkdtemp(prefix=f"lmpeval-workspace-{meta['name']}-")
-    shutil.copytree(os.path.join(TASKS, meta["name"], "workspace"), workspace,
-                    dirs_exist_ok=True)
-    prepare_harness_workspace(meta, workspace, harness_dir)
+def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
+                  verbose=False, extra_env=None):
+    """Runs one mission against the sidecar in `workspace` and returns the run state.
 
+    Split out of run_one so that a second evaluator can drive the SAME protocol loop
+    over a workspace it provisions itself. scripts/swebench_run.py checks out a real
+    repository at a base commit and diffs it afterwards; there is no fixture to copy and
+    no inline checker to run, but the wire conversation must not drift from the one the
+    pins were measured with. Owning it in one place is what keeps a SWE-bench number and
+    a pins.json number comparable statements about the same agent.
+
+    Provisioning the workspace, grading it, and deleting it stay with the caller.
+    """
     env = os.environ.copy()
     # The diagnostic trace is evaluator-owned. This does not make the workspace an
     # isolation boundary; it only keeps the trace out of the tree the agent may edit.
@@ -402,6 +412,12 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
     # External graders may read evaluator-owned paths under the harness dir.
     env["LMP_EVAL_HARNESS"] = harness_dir
     env["LMP_EVAL_WORKSPACE"] = workspace
+    # The sandbox inherits `environ` from this process (src/tools/sandbox.cpp), so this is
+    # how a caller gives the agent's shell a working interpreter. scripts/swebench_run.py
+    # uses it to put the instance's own virtualenv on PATH; without it the agent can read
+    # a repository but cannot run a line of it.
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         [SIDECAR], cwd=workspace, env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -413,10 +429,23 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
         "unfinished": 0, "approvals": 0, "denied": 0,
         "think_tokens": 0, "text_tokens": 0, "tool_tokens": 0,
         "generated_tokens": 0, "tool_calls": 0, "tool_batches": 0,
+        # Per-tool counts, not just a total. "the agent used 40 tools" cannot answer
+        # whether the context store was ever READ, which is the half of src/pcc that has
+        # historically been weak (measured at ~1% of tool calls, 46% miss).
+        "tool_names": collections.Counter(),
         "read_bytes": 0, "edit_bytes": 0, "length_capped_turns": 0,
         "cap_phases": collections.Counter(), "kv_reused_tokens": 0,
         "perf_samples": 0, "verification_runs": 0, "verification_passes": 0,
         "last_verification": None, "cancel_sent": False,
+        # Which trigger fired, and how far into the run. A cancel sent by the harness
+        # deadline and one sent because the fixture said "I am running now" grade
+        # differently, and `cancel_sent` alone cannot tell them apart.
+        "cancel_trigger": None, "cancel_at_seconds": None,
+        # Yields answered by the harness. An eval run is unattended by definition, so a
+        # run that ends `awaiting_user` is told so ONCE and continued -- the same
+        # lmp/message path an operator's reply takes. SWE-bench arm 1 ended a run this
+        # way: 18 turns, then a question into the void, empty patch, nobody home.
+        "unattended_replies": 0, "prior_yield_turns": 0,
         "emitted": {
             "thinking": {"events": 0, "bytes": 0},
             "answer": {"events": 0, "bytes": 0},
@@ -426,6 +455,11 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
     ids = [10]
     harness = meta.get("harness") or {}
     cancel_after = harness.get("cancel_after_seconds")
+    # A path, relative to the workspace, whose appearance means "the thing we intend to
+    # cancel is provably running right now". A fixed timer cannot express that: it fires
+    # while the model is still generating just as readily as while its shell child is
+    # mid-flight, and only the second of those tests cancellation at all.
+    cancel_when_file = harness.get("cancel_when_file")
 
     def send(obj):
         with lock:
@@ -435,17 +469,68 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
     started = time.monotonic()
     deadline = meta.get("wall_clock_seconds", 900) + 180  # harness slack over the run's own
 
+    def request_cancel(trigger):
+        """Sends lmp/cancel at most once, from whichever thread got there first."""
+        with lock:
+            if state["cancel_sent"]:
+                return False
+            state["cancel_sent"] = True
+            state["cancel_trigger"] = trigger
+            state["cancel_at_seconds"] = round(time.monotonic() - started, 2)
+            try:
+                proc.stdin.write(json.dumps({
+                    "jsonrpc": "2.0", "id": "99", "method": "lmp/cancel",
+                    "params": {"run_id": "1"},
+                }) + "\n")
+                proc.stdin.flush()
+            except OSError:
+                # The watchdog races with process exit by design; a cancel aimed at a
+                # sidecar that just died has nothing left to cancel.
+                pass
+        return True
+
+    # THE CANCEL RUNS ON ITS OWN THREAD, and it must.
+    #
+    # It used to be sent from inside the `for raw in proc.stdout` loop below, which meant
+    # the schedule was only consulted when the sidecar happened to emit a line. Nothing is
+    # emitted while a tool executes -- loop::Observer has hooks for tokens, turns,
+    # verification and perf, and none for "a tool is running" -- so a cancel aimed at a
+    # long shell command was never SENT, and the job ran to completion. That read as a
+    # race in the agent (bimodal 8.1 s vs 127 s: cancel landed only when generation
+    # happened to still be streaming at the appointed second) and cost a real
+    # investigation. The product path never had this shape: the extension sends cancel
+    # from the VS Code command handler, on its own event loop.
+    #
+    # The same reasoning applies to `deadline`. A sidecar that wedges emits nothing, so a
+    # deadline evaluated on receipt could not fire on the one run that needs it, and the
+    # reader loop would block forever.
+    finished = threading.Event()
+
+    def watchdog():
+        cancel_file = (os.path.join(workspace, cancel_when_file)
+                       if cancel_when_file else None)
+        while not finished.wait(0.1):
+            elapsed = time.monotonic() - started
+            if elapsed > deadline:
+                # Past the harness's own patience. Ask once, then stop asking: if the
+                # process is still alive well after that, it is not going to answer, and
+                # a hung run must become a recorded failure rather than a hung harness.
+                request_cancel("harness_deadline")
+                if elapsed > deadline + 120:
+                    proc.kill()
+                    return
+                continue
+            if cancel_file is not None and os.path.exists(cancel_file):
+                request_cancel("file")
+                return
+            if cancel_after is not None and elapsed >= float(cancel_after):
+                request_cancel("timer")
+                return
+
+    watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+    watchdog_thread.start()
+
     for raw in proc.stdout:
-        elapsed = time.monotonic() - started
-        if elapsed > deadline and not state["cancel_sent"]:
-            send({"jsonrpc": "2.0", "id": "99", "method": "lmp/cancel",
-                  "params": {"run_id": "1"}})
-            state["cancel_sent"] = True
-        elif (cancel_after is not None and elapsed >= float(cancel_after)
-              and not state["cancel_sent"]):
-            send({"jsonrpc": "2.0", "id": "99", "method": "lmp/cancel",
-                  "params": {"run_id": "1"}})
-            state["cancel_sent"] = True
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
@@ -477,6 +562,7 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
             )
             if params.get("tool_name"):
                 state["tool_calls"] += 1
+                state["tool_names"][params["tool_name"]] += 1
             if int(params.get("batch_count", 0) or 0) > 0 and (
                     int(params.get("batch_index", 0) or 0) == 0):
                 state["tool_batches"] += 1
@@ -523,17 +609,53 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
                 "detail_truncated": len(detail) > 4096,
             }
         elif method == "lmp/run_end":
-            state["completed"] = bool(params.get("completed"))
-            state["reason"] = params.get("termination_reason")
-            state["iterations"] = int(params.get("iterations", 0) or 0)
-            state["unfinished"] = params.get("unfinished_items", 0)
-            send({"jsonrpc": "2.0", "id": "98", "method": "lmp/shutdown", "params": {}})
+            reason = params.get("termination_reason")
+            # Each yield's run_end reports ITS OWN iteration count (run_loop builds a
+            # fresh Agent per continuation), so turns are summed across yields here.
+            yield_turns = int(params.get("iterations", 0) or 0)
+            if reason == "awaiting_user" and state["unattended_replies"] == 0:
+                state["unattended_replies"] = 1
+                state["prior_yield_turns"] += yield_turns
+                send({"jsonrpc": "2.0", "id": str(ids[0]), "method": "lmp/message",
+                      "params": {"text": (
+                          "(unattended run) No operator is available to answer. Decide "
+                          "yourself, on the best reading of the code, state the "
+                          "assumption in one line, and continue. If it genuinely cannot "
+                          "be settled, finish with your best complete attempt."
+                      )}})
+                ids[0] += 1
+            else:
+                state["completed"] = bool(params.get("completed"))
+                state["reason"] = reason
+                state["iterations"] = state["prior_yield_turns"] + yield_turns
+                state["unfinished"] = params.get("unfinished_items", 0)
+                send({"jsonrpc": "2.0", "id": "98", "method": "lmp/shutdown",
+                      "params": {}})
+
+    finished.set()
+    watchdog_thread.join(timeout=5)
 
     try:
         proc.wait(timeout=60)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+
+    state["seconds"] = round(time.monotonic() - started, 1)
+    return state
+
+
+def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
+    """Runs one task in a throwaway copy of its workspace. Returns a score dict."""
+    contract = capture_task_contract(meta)
+    harness_dir = tempfile.mkdtemp(prefix=f"lmpeval-harness-{meta['name']}-")
+    workspace = tempfile.mkdtemp(prefix=f"lmpeval-workspace-{meta['name']}-")
+    shutil.copytree(os.path.join(TASKS, meta["name"], "workspace"), workspace,
+                    dirs_exist_ok=True)
+    prepare_harness_workspace(meta, workspace, harness_dir)
+
+    state = drive_sidecar(meta, model_dir, workspace, harness_dir, sampling,
+                          contract, verbose)
 
     # --- ground truth, measured after the fact and never asked of the agent ---
     # Verify before AND after the checker. The captured command is authoritative even if
@@ -544,6 +666,15 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
     grade_env["LMP_EVAL_WORKSPACE"] = workspace
     grade_env["LMP_EVAL_CANCEL_SENT"] = "1" if state["cancel_sent"] else "0"
     grade_env["LMP_EVAL_TERMINATION"] = state["reason"] or ""
+    # A cancellation grader needs to know that the run ended BECAUSE of the cancel. Wall
+    # clock separates a killed child from one the sandbox timed out at
+    # shell_wall_clock_seconds, and the trigger separates the fixture's own cancel from
+    # the harness giving up on a run that overran.
+    grade_env["LMP_EVAL_RUN_SECONDS"] = str(state.get("seconds", ""))
+    grade_env["LMP_EVAL_CANCEL_TRIGGER"] = state["cancel_trigger"] or ""
+    grade_env["LMP_EVAL_CANCEL_AT_SECONDS"] = (
+        "" if state["cancel_at_seconds"] is None else str(state["cancel_at_seconds"])
+    )
     try:
         check = subprocess.run(
             ["/bin/sh", "-c", contract.check], cwd=workspace, env=grade_env,
@@ -579,6 +710,9 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
         "reason": state["reason"], "unfinished": state["unfinished"],
         "approvals": state["approvals"], "denied": state["denied"],
         "cancel_sent": state["cancel_sent"],
+        "cancel_trigger": state["cancel_trigger"],
+        "cancel_at_seconds": state["cancel_at_seconds"],
+        "unattended_replies": state["unattended_replies"],
         "metrics": {
             "think_tokens": state["think_tokens"],
             "text_tokens": state["text_tokens"],
@@ -593,6 +727,7 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
             "cap_phases": dict(state["cap_phases"]),
             "kv_reused_tokens": state["kv_reused_tokens"],
             "perf_samples": state["perf_samples"],
+            "tool_names": dict(state["tool_names"]),
         },
         "verification": {
             "runs": state["verification_runs"],
@@ -605,7 +740,7 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
             "path": contract.grader_path or None,
             "command": contract.check,
         },
-        "seconds": round(time.monotonic() - started, 1),
+        "seconds": state["seconds"],
     }
     shutil.rmtree(workspace, ignore_errors=True)
     shutil.rmtree(harness_dir, ignore_errors=True)
@@ -1083,9 +1218,84 @@ def self_test():
         with open(planted["outside_secret"], encoding="utf-8") as fh:
             check(fh.read().strip() == "S3CR3T", "planted secret must be readable via link")
 
+    # 14. The cancel is sent even while the sidecar is SILENT. This pins the harness
+    #     defect behind "cancellation is bimodal" (AGENT_DEFECTS_SWEBENCH entry 6): the
+    #     cancel used to be sent from inside the stdout loop, so it was only considered
+    #     when a line arrived -- and nothing arrives while a tool executes. The fake
+    #     sidecar below reproduces exactly that shape: it starts a real child process,
+    #     emits nothing, and ends the run only if a cancel actually reaches it. Under the
+    #     old harness this scenario deadlocks until the child finishes; under the
+    #     watchdog it ends in a couple of seconds via the cancel_when_file trigger.
+    global SIDECAR
+    with tempfile.TemporaryDirectory(prefix="agent-eval-cancelwd-") as tmp:
+        workspace = os.path.join(tmp, "ws")
+        harness_dir = os.path.join(tmp, "harness")
+        os.makedirs(workspace)
+        os.makedirs(harness_dir)
+        fake = os.path.join(tmp, "fake_sidecar.py")
+        with open(fake, "w", encoding="utf-8") as fh:
+            # Raw: the template is SOURCE for another interpreter, and its "\n" must
+            # arrive there as an escape, not as a newline this file already spent.
+            fh.write(r"""#!%s
+import json, os, signal, subprocess, sys
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+emit({"jsonrpc": "2.0", "method": "lmp/ready", "params": {}})
+child = None
+for raw in sys.stdin:
+    msg = json.loads(raw)
+    method = msg.get("method")
+    if method == "lmp/start":
+        # The long tool call: a real child that writes its started marker and then
+        # sleeps far longer than the scenario is willing to wait. While it runs this
+        # process emits NOTHING, exactly like the sidecar mid shell tool.
+        child = subprocess.Popen(
+            ["/bin/sh", "-c",
+             "echo started > job_started.txt; sleep 300; echo finished > job_finished.txt"],
+            cwd=os.getcwd(), start_new_session=True)
+    elif method == "lmp/cancel":
+        if child is not None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        emit({"jsonrpc": "2.0", "method": "lmp/run_end",
+              "params": {"completed": False, "termination_reason": "cancelled",
+                         "iterations": 1}})
+    elif method == "lmp/shutdown":
+        break
+""" % sys.executable)
+        os.chmod(fake, 0o755)
+        meta = {"name": "cancel_watchdog_selftest", "mission": "irrelevant",
+                "mode": "agent", "wall_clock_seconds": 60,
+                "harness": {"cancel_when_file": "job_started.txt"}}
+        contract = TaskContract("true", os.path.join(tmp, "task.json"), b"{}", ())
+        sampling = {"seed": 7, "temperature": 0.6}
+        saved_sidecar = SIDECAR
+        SIDECAR = fake
+        try:
+            began = time.monotonic()
+            wd_state = drive_sidecar(meta, "/nonexistent-model", workspace,
+                                     harness_dir, sampling, contract)
+            took = time.monotonic() - began
+        finally:
+            SIDECAR = saved_sidecar
+        check(wd_state["cancel_sent"], "watchdog must send cancel while stdout is silent")
+        check(wd_state["cancel_trigger"] == "file",
+              "cancel must be triggered by the child's started marker, got "
+              f"{wd_state['cancel_trigger']!r}")
+        check(wd_state["reason"] == "cancelled",
+              f"run must end cancelled, got {wd_state['reason']!r}")
+        check(os.path.isfile(os.path.join(workspace, "job_started.txt")),
+              "the child must have provably started")
+        check(not os.path.exists(os.path.join(workspace, "job_finished.txt")),
+              "the cancelled child must not have finished")
+        check(took < 30, f"cancel must land promptly, took {took:.1f}s")
+
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  agent_eval self-test: 13 scenario(s), {len(failures)} failure(s)")
+    print(f"  agent_eval self-test: 14 scenario(s), {len(failures)} failure(s)")
     return 1 if failures else 0
 
 
