@@ -44,8 +44,13 @@ if (a < 0 || b < 0 || b <= a) {
 const block = SRC.slice(a, b).replace(/\\\\/g, "\\");
 
 let questionOptions;
+let questionFromText;
 try {
-  questionOptions = new Function(`${block}; return questionOptions;`)();
+  const exported = new Function(
+    `${block}; return { questionOptions: questionOptions, questionFromText: questionFromText };`
+  )();
+  questionOptions = exported.questionOptions;
+  questionFromText = exported.questionFromText;
 } catch (err) {
   console.error("FAIL: sliced block does not parse: " + err.message);
   process.exit(1);
@@ -143,8 +148,53 @@ check(
   ["First", "Second", "Third"]
 );
 
+// --- options written INSIDE the question text, with no `options` argument -------------
+//
+// `ask_user` carried an optional `options` its description never mentioned, so a model
+// picking that name wrote the choices into the prose instead. Verbatim from the run that
+// was reported: four real choices, rendered as a plain tool row and a text box.
+const embedded =
+  "What kind of combat style are you envisioning for this Onimusha-inspired game?\n" +
+  "\n" +
+  "Option 1: Traditional combo-based (light/heavy attacks, chain combos, guard/parry)\n" +
+  "Option 2: Action-focused (fast movement, aerial combos, dodge mechanics)\n" +
+  "Option 3: Souls-like (stamina management, positioning, heavy hits)\n" +
+  "Option 4: Arcade-style (simple inputs, flashy combos, fast-paced)";
+const parsed = questionFromText(embedded);
+check("an embedded Option list is four options", labels(parsed.options), [
+  "Traditional combo-based (light/heavy attacks, chain combos, guard/parry)",
+  "Action-focused (fast movement, aerial combos, dodge mechanics)",
+  "Souls-like (stamina management, positioning, heavy hits)",
+  "Arcade-style (simple inputs, flashy combos, fast-paced)",
+]);
+check(
+  "the question keeps only the text above the list",
+  parsed.question,
+  "What kind of combat style are you envisioning for this Onimusha-inspired game?"
+);
+
+check(
+  "numbered lists embedded in prose are read",
+  labels(questionFromText("Pick one:\n1) Rewrite\n2) Patch").options),
+  ["Rewrite", "Patch"]
+);
+
+// Prose must NOT become a card. Inventing choices around ordinary sentences is the same
+// mistake as the old fallback that offered the loop's status string as the only button.
+check(
+  "ordinary prose yields no options",
+  questionFromText("I read the file. So. Then I checked the tests and they pass.").options,
+  []
+);
+check(
+  "a single marker is not a list",
+  questionFromText("Here is the plan:\n1. Do the thing and then report back").options,
+  []
+);
+check("empty text yields no options", questionFromText("").options, []);
+
 if (failures > 0) {
   console.error(`verify-question-options: ${failures} failure(s)`);
   process.exit(1);
 }
-console.log("verify-question-options: ok, 12 assertion(s)");
+console.log("verify-question-options: ok, 18 assertion(s)");
