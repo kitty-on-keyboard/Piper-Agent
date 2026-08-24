@@ -178,16 +178,44 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // stored matches that", and runs asked anyway, often enough to trip break_repeat and
     // then escalated_hold. Telling the model up front what a miss MEANS is cheaper than
     // suppressing the repeat after the fact.
-    if (recall_sessions_ > 1 && recall_items_ > 0) {
-        system += "\n\n# What this workspace already remembers\n\nEarlier sessions here "
-                  "left " + std::to_string(recall_items_) + " stored items across " +
-                  std::to_string(recall_sessions_) +
-                  " sessions -- their turns, the files they read and what they worked "
-                  "out. `context_recall` searches all of it. Reach for it before "
-                  "re-deriving something this project may have already settled, and "
-                  "before re-reading a file an earlier session read. If it comes back "
-                  "empty, that is a real answer: the fact is not stored, so go to the "
-                  "files instead rather than asking again.";
+    // recall_items_ > 0 is also the proxy for "a journal opened at all": set_recall_scope
+    // is only called when one did, and it always counts at least this mission's own row.
+    // Without a journal the recall tools are never declared, and naming a tool the model
+    // cannot call is worse than saying nothing.
+    const bool earlier_sessions = recall_sessions_ > 1 && recall_items_ > 0;
+    // THIS run's own trimmed turns. Everything above is about what an EARLIER session
+    // left, which is the only case the store was measured to be useful for -- and it left
+    // a real gap: a long run compacts, its early turns leave the window, and their full
+    // text is sitting in the store where nothing tells the model to look for it.
+    //
+    // Adding it HERE is free. A trim rewrites the front of the prompt, so compaction
+    // already pays a zero-reuse re-prefill every time it fires (measured: 43.5 s, and
+    // roughly half the wall clock of a long run). Changing the system prompt at any other
+    // moment would cost that same re-prefill for nothing; changing it at the moment the
+    // bill is already being paid costs nothing at all.
+    const bool trimmed_this_run = recall_items_ > 0 && !spans_.empty();
+    if (earlier_sessions || trimmed_this_run) {
+        system += "\n\n# What this workspace already remembers\n";
+        if (earlier_sessions) {
+            system += "\nEarlier sessions here left " + std::to_string(recall_items_) +
+                      " stored items across " + std::to_string(recall_sessions_) +
+                      " sessions -- their turns, the files they read and what they worked "
+                      "out. `context_recall` searches all of it. Reach for it before "
+                      "re-deriving something this project may have already settled, and "
+                      "before re-reading a file an earlier session read.";
+        }
+        if (trimmed_this_run) {
+            system += "\nYour own earlier turns in this run have been summarised to save "
+                      "room, and the summaries above are shorter than what they replaced. "
+                      "The full text is still stored: `context_rehydrate` brings back a "
+                      "span of them and `context_recall` searches them. Use it rather "
+                      "than re-reading a file you already read this run.";
+        }
+        // The closing instruction is not padding. An empty recall already answers
+        // "nothing stored matches that", and runs asked anyway, often enough to trip
+        // break_repeat and then escalated_hold.
+        system += "\nIf it comes back empty, that is a real answer: the fact is not "
+                  "stored, so go to the files instead rather than asking again.";
     }
     if (!project_instructions_.empty()) {
         system += "\n\n# Project conventions\n\n" + project_instructions_;

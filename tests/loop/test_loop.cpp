@@ -822,6 +822,69 @@ TEST(a_workspace_with_earlier_sessions_is_told_recall_is_worth_using) {
     CHECK(sys.find("that is a real answer") != std::string::npos);
 }
 
+// THE GAP THE SESSIONS>1 RULE LEFT. A long run compacts, its early turns leave the
+// window, and their full text sits in the store with nothing telling the model it is
+// there. That is a FIRST session, so the earlier-sessions rule above is silent about it.
+TEST(a_run_that_has_compacted_is_told_its_own_turns_are_recoverable) {
+    context::ContextStore ctx("do the thing");
+    ctx.set_workspace_root("/w");
+    // One session, and it is this one: the earlier-sessions branch stays quiet.
+    ctx.set_recall_scope(1, 1);
+    for (std::uint64_t i = 1; i <= 6; ++i) {
+        context::TurnRecord t;
+        t.tool_name = "read_file";
+        t.observation = "line " + std::to_string(i);
+        t.first_event_seq = i;
+        t.last_event_seq = i;
+        ctx.add_turn(t);
+    }
+    REQUIRE(ctx.compact_oldest(2) > 0);
+
+    const std::vector<model::Message> msgs2 = ctx.render("");
+    REQUIRE(!msgs2.empty());
+    const std::string& sys = msgs2[0].content;
+    CHECK(sys.find("What this workspace already remembers") != std::string::npos);
+    CHECK(sys.find("context_rehydrate") != std::string::npos);
+    CHECK(sys.find("that is a real answer") != std::string::npos);
+    // Still not claiming an earlier session left anything, because none did.
+    CHECK(sys.find("Earlier sessions here left") == std::string::npos);
+}
+
+// The nudge is free ONLY because a trim already rewrote the front of the prompt and paid
+// the re-prefill. Before any trim there is nothing recoverable and nothing to say.
+TEST(a_run_that_has_not_compacted_is_still_told_nothing) {
+    context::ContextStore ctx("do the thing");
+    ctx.set_workspace_root("/w");
+    ctx.set_recall_scope(1, 1);
+    for (std::uint64_t i = 1; i <= 3; ++i) {
+        context::TurnRecord t;
+        t.tool_name = "read_file";
+        t.observation = "line " + std::to_string(i);
+        t.first_event_seq = i;
+        t.last_event_seq = i;
+        ctx.add_turn(t);
+    }
+    CHECK(ctx.render("")[0].content.find("already remembers") == std::string::npos);
+}
+
+// No journal opened, so declare_context_tools never ran and neither recall tool exists.
+// Naming a tool the model cannot call is worse than saying nothing.
+TEST(a_compacted_run_with_no_journal_is_told_nothing) {
+    context::ContextStore ctx("do the thing");
+    ctx.set_workspace_root("/w");
+    // set_recall_scope is never called when the journal is null, so both stay zero.
+    for (std::uint64_t i = 1; i <= 6; ++i) {
+        context::TurnRecord t;
+        t.tool_name = "read_file";
+        t.observation = "line " + std::to_string(i);
+        t.first_event_seq = i;
+        t.last_event_seq = i;
+        ctx.add_turn(t);
+    }
+    REQUIRE(ctx.compact_oldest(2) > 0);
+    CHECK(ctx.render("")[0].content.find("already remembers") == std::string::npos);
+}
+
 // THE ONE THE MEASUREMENT ARGUES FOR. 46% of real context_recall calls came back empty,
 // and pointing a fresh workspace at an empty store manufactures exactly that. A first run
 // in a new workspace must not be told to search anything.
