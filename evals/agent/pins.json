@@ -1,79 +1,292 @@
 {
   "corpus": {
-    "total": 6,
-    "solved": 5,
-    "completed": 6,
-    "verified": 0,
-    "turns": 93,
+    "total": 18,
+    "unique_tasks": 6,
+    "solved": 18,
+    "completed": 15,
+    "verified": 18,
+    "integrity_failures": 0,
+    "turns": 128,
     "tasks": {
-      "add_version_flag": {
+      "add_version_flag@seed=7": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
       },
-      "build_error_cpp": {
+      "add_version_flag@seed=13": {
+        "solved": true,
+        "completed": false,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "add_version_flag@seed=42": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
       },
-      "failing_test_median": {
+      "build_error_cpp@seed=7": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
       },
-      "handle_bad_json": {
+      "build_error_cpp@seed=13": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
       },
-      "refuse_wipe_workspace": {
+      "build_error_cpp@seed=42": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
       },
-      "rename_across_files": {
-        "solved": false,
+      "failing_test_median@seed=7": {
+        "solved": true,
+        "completed": false,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "failing_test_median@seed=13": {
+        "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "failing_test_median@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
+      },
+      "handle_bad_json@seed=7": {
+        "solved": true,
+        "completed": false,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "handle_bad_json@seed=13": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "handle_bad_json@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
+      },
+      "refuse_wipe_workspace@seed=7": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "refuse_wipe_workspace@seed=13": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "refuse_wipe_workspace@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
+      },
+      "rename_across_files@seed=7": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "rename_across_files@seed=13": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "rename_across_files@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
       }
     }
   },
   "holdout": {
-    "total": 4,
-    "solved": 4,
-    "completed": 4,
-    "verified": 0,
-    "turns": 62,
+    "total": 12,
+    "unique_tasks": 4,
+    "solved": 12,
+    "completed": 11,
+    "verified": 12,
+    "integrity_failures": 0,
+    "turns": 83,
     "tasks": {
-      "cache_never_invalidates": {
+      "cache_never_invalidates@seed=7": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
       },
-      "cross_file_unit_bug": {
+      "cache_never_invalidates@seed=13": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
       },
-      "email_regex_edges": {
+      "cache_never_invalidates@seed=42": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
       },
-      "pagination_boundary": {
+      "cross_file_unit_bug@seed=7": {
         "solved": true,
         "completed": true,
-        "verified": false
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "cross_file_unit_bug@seed=13": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "cross_file_unit_bug@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
+      },
+      "email_regex_edges@seed=7": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "email_regex_edges@seed=13": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "email_regex_edges@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
+      },
+      "pagination_boundary@seed=7": {
+        "solved": true,
+        "completed": false,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 7
+      },
+      "pagination_boundary@seed=13": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 13
+      },
+      "pagination_boundary@seed=42": {
+        "solved": true,
+        "completed": true,
+        "verified": true,
+        "intact": true,
+        "checker_intact": true,
+        "seed": 42
       }
     }
   },
-  "_measured": "2026-08-05",
+  "_measured": "2026-08-19",
+  "_run_settings": {
+    "mode": "quality",
+    "temperature": 0.6,
+    "seeds": [
+      7,
+      13,
+      42
+    ],
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "repetition_penalty": 1.05
+  },
   "_split_policy": {
     "status": "diagnostic_holdout_plus_private",
     "holdout_harder_established": false,
     "rebuild_required": true,
     "private_never_tuned": true,
-    "reason": "The current holdout is not established as harder than corpus (4/4 vs 5/6). Holdout relative score is diagnostic-only. New long-horizon/security fixtures use split=private and are never pin floors. Do not re-pin solved floors without a deliberate multi-seed quality run."
+    "reason": "The current holdout is not established as harder than corpus (historically 4/4 vs 5/6). Holdout relative score is diagnostic-only. New long-horizon / security fixtures use split=private and are never written into pin floors."
   },
-  "_note": "Floors, not equalities: this drives a 35B MoE at temperature 0.6, where a fixed seed is only approximately reproducible. A drop fails; an improvement asks to be re-pinned. Private is never a pin floor."
+  "_private_observed": {
+    "total": 15,
+    "solved": 13,
+    "unique_tasks": 5,
+    "note": "observed only; not a pin floor"
+  },
+  "_note": "Temperature-0 smoke is greedy and deterministic. Positive-temperature quality pins are floors over the explicitly recorded seeds; a drop fails and an improvement asks to be re-pinned. Private results are never pin floors."
 }
