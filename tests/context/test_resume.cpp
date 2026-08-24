@@ -162,3 +162,87 @@ TEST(edit_end_clears_in_flight) {
     CHECK(!rebuilt.edit_in_flight);
     CHECK_EQ(rebuilt.identity.last_acked_edit_id, std::string("e1"));
 }
+
+// --- listing runs, which is what a history panel needs -----------------------
+
+TEST(listing_runs_pairs_each_begin_with_how_it_ended) {
+    const std::vector<RunSummary> runs = list_runs(sample_run());
+    REQUIRE(runs.size() == 1);
+    CHECK_EQ(runs[0].run_id, std::string{"r1"});
+    CHECK_EQ(runs[0].mission, std::string{"fix the bug"});
+    CHECK_EQ(runs[0].workspace_root, std::string{"/tmp/ws"});
+    CHECK(runs[0].finished);
+    CHECK(runs[0].completed);
+    CHECK_EQ(runs[0].termination_reason, std::string{"completed"});
+    // Two tool_results, a write and a steer -- the four kinds a resume replays.
+    CHECK_EQ(runs[0].observations, 4);
+}
+
+TEST(a_run_that_died_without_a_run_end_is_listed_as_unfinished) {
+    // THE CASE RESUME EXISTS FOR, and the one a naive pairing hides: the process was
+    // killed, so there is no run_end at all and the next run_begin is the only boundary.
+    std::vector<Event> events = sample_run();
+    events.pop_back(); // drop the run_end
+    events.push_back(make(7, "run_begin",
+                          {{"run_id", "r2"},
+                           {"mission", "second mission"},
+                           {"workspace_root", "/tmp/ws"},
+                           {"model_identity", "/models/qwen"},
+                           {"protocol_version", "1.0.0"},
+                           {"tool_schema_hash", "abc"}}));
+    events.push_back(make(8, "tool_result",
+                          {{"run_id", "r2"}, {"tool", "read_file"}, {"summary", "x"}}));
+
+    const std::vector<RunSummary> runs = list_runs(events);
+    REQUIRE(runs.size() == 2);
+    CHECK(!runs[0].finished);
+    CHECK(!runs[0].completed);
+    // Its observations still belong to IT, not to the run that followed.
+    CHECK_EQ(runs[0].observations, 4);
+    CHECK_EQ(runs[1].run_id, std::string{"r2"});
+    CHECK_EQ(runs[1].observations, 1);
+}
+
+TEST(a_conversational_yield_is_not_the_end_of_the_run) {
+    // The log holds 203 run_end against 97 run_begin, and the excess is not noise: a run
+    // that hands back with `awaiting_user`, gets an answer and carries on writes one END
+    // PER YIELD. Measured, 31 runs have between 2 and 4. So the first end is where the run
+    // first paused and the LAST is where it stands -- showing the first would label a
+    // finished conversation "awaiting_user" forever.
+    std::vector<Event> events = sample_run();
+    // sample_run() ends in `completed`; make that the yield and finish properly after it.
+    events.back() = make(6, "run_end",
+                         {{"run_id", "r1"}, {"termination_reason", "awaiting_user"},
+                          {"completed", "0"}, {"iterations", "2"}});
+    events.push_back(make(7, "steer", {{"run_id", "r1"}, {"text", "carry on"}}));
+    events.push_back(make(8, "run_end",
+                          {{"run_id", "r1"}, {"termination_reason", "completed"},
+                           {"completed", "1"}, {"iterations", "9"}}));
+    const std::vector<RunSummary> runs = list_runs(events);
+    REQUIRE(runs.size() == 1);
+    CHECK_EQ(runs[0].termination_reason, std::string{"completed"});
+    CHECK(runs[0].completed);
+    // And the iteration count is the whole run's, not the opening exchange's.
+    CHECK_EQ(runs[0].iterations, 9);
+}
+
+TEST(events_before_any_run_begin_are_not_attributed_to_a_run) {
+    // A log can start mid-run: it is append-only across sidecar restarts and gets rotated.
+    // Those orphans must not be counted against the first run that follows them.
+    std::vector<Event> events;
+    events.push_back(make(1, "tool_result", {{"tool", "read_file"}, {"summary", "orphan"}}));
+    for (const Event& e : sample_run()) {
+        events.push_back(e);
+    }
+    const std::vector<RunSummary> runs = list_runs(events);
+    REQUIRE(runs.size() == 1);
+    CHECK_EQ(runs[0].observations, 4);
+}
+
+TEST(a_run_end_that_says_completed_as_a_bare_one_is_read_as_completed) {
+    // Two emitter vintages: "true"/"false" from the sidecar, "1"/"0" from older writers.
+    std::vector<Event> events = sample_run();
+    const std::vector<RunSummary> runs = list_runs(events);
+    REQUIRE(runs.size() == 1);
+    CHECK(runs[0].completed);
+}

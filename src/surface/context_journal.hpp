@@ -36,6 +36,11 @@ class ContextJournal {
         // sidecar's stderr is a subprocess pipe no client reads. The caller has an
         // event log, which is the record that outlives the run (S6).
         std::string error;
+
+        // True when this call added the store to the repository's local exclude file.
+        // Reported so the caller can record a write it made to the user's repository
+        // rather than performing it silently; see ensure_git_excludes_store.
+        bool git_exclude_written = false;
     };
 
     // Opens (or creates) the store under `workspace_root` and attaches it to `ctx` as the
@@ -60,9 +65,35 @@ class ContextJournal {
     std::string session_;
 };
 
-// A single dotfile beside .lmp-memory.md, for the same reason that one is: nothing has to
-// create a directory. SQLite adds -wal and -shm siblings in WAL mode, so .gitignore covers
-// the stem with a wildcard.
+// A single dotfile at the workspace root. SQLite adds -wal and -shm siblings in WAL mode.
+//
+// THIS IS NOT THE SAME CASE AS .lmp-memory.md, though it sat next to it and was justified
+// by the comparison. The memory file is 16 KiB of text the user can read, review and
+// reasonably choose to commit. This is a SQLite database that reached 1.8 MB after a
+// single 26-turn task, and it is binary, unreviewable and rebuildable. Left to itself it
+// turns up as an untracked file in the user's own `git status` -- and, measured while
+// building the SWE-bench harness, went straight into a `git add -A` and out into every
+// generated patch.
+//
+// The header used to say ".gitignore covers the stem with a wildcard", which was an
+// assumption about the user's file rather than anything this program did. Nothing wrote
+// it. See ensure_git_excludes_store for what does now.
 inline constexpr const char* kContextDbName = ".lmp-context.db";
+
+// Everything this program leaves in a workspace that the user did not ask for, written
+// into .git/info/exclude. All anchored with a leading slash: these live at the workspace
+// root, and an unanchored pattern would also hide a file of the same name anywhere in the
+// user's tree. The trailing wildcard on the store covers SQLite's -wal and -shm siblings.
+//
+// .lmp-memory.md is DELIBERATELY ABSENT. It is 16 KiB of readable text the user can
+// review, and a team may reasonably want it committed; hiding it would be this program
+// deciding that for them. The three below are a binary database and two scratch
+// directories -- src/tools/ignore_dirs.hpp records one workspace that accumulated a
+// 6.9 MB store and 824 leaked temp directories at its root.
+inline constexpr const char* kGitExcludePatterns[] = {
+    "/.lmp-context.db*",
+    "/.lmp_tmp/",
+    "/.lmp_spool/",
+};
 
 } // namespace lmp::surface

@@ -12,6 +12,7 @@
 // So the property under test is not "it fails". It is that a run whose compacted turns
 // are about to become unrecoverable can SAY SO, and still runs.
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdlib>
@@ -126,4 +127,67 @@ TEST(an_opened_journal_keeps_what_the_trim_drops) {
     const lmp::pcc::Recall out = lmp::pcc::rehydrate(r.journal->store(), 1, 5, 4000);
     CHECK_EQ(out.included, std::size_t{5});
     CHECK(out.text.find("continuation byte is 0x80") != std::string::npos);
+}
+
+TEST(an_opened_journal_keeps_its_database_out_of_git) {
+    // The store reached 1.8 MB after one 26-turn task and sat at the workspace root, so
+    // it showed up in the USER's `git status` and went into `git add -A`. This is the
+    // property that stops that, and the two halves matter separately: the local exclude
+    // gains the pattern, and the tracked .gitignore is not touched at all.
+    ContextStore ctx("mission");
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(::mkdir((root + "/.git").c_str(), 0755) == 0);
+    const std::string tracked = root + "/.gitignore";
+    REQUIRE(lmp::platform::write_file_atomic(tracked, "build/\n").ok());
+
+    const ContextJournal::Result r = ContextJournal::open(root, "sess-1", ctx);
+    REQUIRE(r.journal != nullptr);
+    CHECK(r.git_exclude_written);
+
+    const std::string exclude =
+        lmp::platform::read_file_whole(root + "/.git/info/exclude", 1 << 20).bytes;
+    for (const char* pattern : lmp::surface::kGitExcludePatterns) {
+        CHECK(exclude.find(pattern) != std::string::npos);
+    }
+
+    // The user's own file, byte for byte. A tool that "helpfully" edits a tracked file
+    // puts a line into a commit the user did not write.
+    CHECK_EQ(lmp::platform::read_file_whole(tracked, 1024).bytes, std::string("build/\n"));
+}
+
+TEST(the_git_exclude_line_is_written_once_not_once_per_mission) {
+    // open() runs per mission. An append that did not check would grow .git/info/exclude
+    // by three lines every time the user started a task in the same workspace.
+    ContextStore first("mission");
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(::mkdir((root + "/.git").c_str(), 0755) == 0);
+
+    const ContextJournal::Result a = ContextJournal::open(root, "sess-1", first);
+    REQUIRE(a.journal != nullptr);
+    CHECK(a.git_exclude_written);
+    const std::string after_first =
+        lmp::platform::read_file_whole(root + "/.git/info/exclude", 1 << 20).bytes;
+
+    ContextStore second("mission");
+    const ContextJournal::Result b = ContextJournal::open(root, "sess-2", second);
+    REQUIRE(b.journal != nullptr);
+    CHECK(!b.git_exclude_written);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/.git/info/exclude", 1 << 20).bytes,
+             after_first);
+}
+
+TEST(a_workspace_that_is_not_a_repository_is_left_alone) {
+    // No .git, nothing to do, and specifically: no .git created. A workspace is the
+    // user's directory, not somewhere to leave scaffolding.
+    ContextStore ctx("mission");
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    const ContextJournal::Result r = ContextJournal::open(root, "sess-1", ctx);
+    REQUIRE(r.journal != nullptr);
+    CHECK(!r.git_exclude_written);
+    struct ::stat st {};
+    CHECK(::stat((root + "/.git").c_str(), &st) != 0);
 }

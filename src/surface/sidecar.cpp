@@ -33,6 +33,9 @@
 #include "src/platform/fs.hpp"
 #include "src/surface/protocol_generated.hpp"
 #include "src/surface/mcp_settings.hpp"
+#include "src/context/resume.hpp"
+#include "src/surface/run_id.hpp"
+#include "src/surface/transcript.hpp"
 #include "src/surface/session.hpp"
 #include "src/surface/transport.hpp"
 #include "src/surface/wire.hpp"
@@ -698,12 +701,15 @@ class RunInbox {
     }
     std::int32_t max_iters = config.budget.max_iterations;
     std::int32_t wall = config.budget.wall_clock_seconds;
+    std::int32_t stall = config.budget.stall_seconds;
     if (!positive_i32("max_iterations", max_iters, &max_iters) ||
-        !positive_i32("wall_clock_seconds", wall, &wall)) {
+        !positive_i32("wall_clock_seconds", wall, &wall) ||
+        !positive_i32("stall_seconds", stall, &stall)) {
         return false;
     }
     config.budget.max_iterations = static_cast<int>(max_iters);
     config.budget.wall_clock_seconds = static_cast<int>(wall);
+    config.budget.stall_seconds = static_cast<int>(stall);
 
     // The operator's check -- the only verification the harness runs. Absent keeps the
     // config default (empty: no check), same rule as every field above.
@@ -720,6 +726,43 @@ class RunInbox {
 // attaches at any moment is told the truth rather than inferring it. Before this the
 // only evidence a model was loaded was the absence of an error, and the absence of an
 // error is exactly what a 19 GB load in progress looks like.
+// One place that both turns a journal failure into an operator-visible notice and records
+// the ignore rule when one was written.
+//
+// The failure was ALREADY logged before this existed, and being logged was not enough: a
+// run that quietly loses its durable context behaves subtly worse for every turn that
+// follows and never says so, and the only trace was a line in a file nobody opens unless
+// they already suspect something. The event log is the record that outlives the run; the
+// notice is what reaches the person while the run is still happening. Both, not either.
+void report_journal(const surface::ContextJournal::Result& journal,
+                    const std::string& run_id, const std::string& workspace,
+                    platform::EventLogWriter& log, const platform::Clock& clock) {
+    if (!journal.error.empty()) {
+        platform::Event ev;
+        ev.kind = "context_journal";
+        ev.fields = {{"run_id", run_id}, {"opened", "0"}, {"error", journal.error}};
+        log.append(ev, clock);
+
+        protocol::NoticeNotification n;
+        n.run_id = run_id;
+        n.code = "context_journal_unavailable";
+        n.severity = protocol::noticeseverity_values::kWarning;
+        n.subject = workspace;
+        // Verbatim SQLite, not a paraphrase: "unable to open database file" tells an
+        // operator which of the two plausible causes they have.
+        n.detail = journal.error;
+        surface::wire::notify(n);
+    }
+    if (journal.git_exclude_written) {
+        // A write this program made to the user's repository. Small, local and
+        // reversible, but theirs -- so it is recorded rather than done invisibly.
+        platform::Event ev;
+        ev.kind = "git_exclude_written";
+        ev.fields = {{"run_id", run_id}, {"workspace", workspace}};
+        log.append(ev, clock);
+    }
+}
+
 void notify_model(const char* state, const std::string& model_dir,
                   const std::string& detail = {}, double elapsed_ms = 0.0) {
     protocol::ModelStatusNotification n;
@@ -899,7 +942,15 @@ bool start_mission(const std::string& id, const std::string& message,
                         "none may be empty (S7.5: no defaultable security input)");
         return false;
     }
-    reply_result(id, R"({"run_id":")" + id + R"("})");
+    // MINTED HERE, and `id` is not it. `id` is the JSON-RPC correlation token for this one
+    // request -- a counter that restarts with the extension host -- so everything below
+    // takes `run_id` instead: the event log, the PCC session, and every notification the
+    // surface correlates by. The only things that keep using `id` are reply_result and
+    // reply_error, which are answering the request rather than naming the run.
+    // See src/surface/run_id.hpp for what collided before this existed.
+    const std::string run_id = surface::mint_run_id(clock);
+    session.run_id = run_id;
+    reply_result(id, R"({"run_id":")" + run_id + R"("})");
 
     loop::AgentConfig config;
     if (!apply_settings(id, message, config)) {
@@ -913,7 +964,7 @@ bool start_mission(const std::string& id, const std::string& message,
     // blocks, and the run_end below carries the loader's own words when it cannot.
     const surface::ModelLoad loaded = ensure_model(session, model_dir, draft_model_dir, log, clock);
     if (!loaded.ok) {
-        end_run(id, loaded.error);
+        end_run(run_id, loaded.error);
         return false;
     }
 
@@ -925,7 +976,7 @@ bool start_mission(const std::string& id, const std::string& message,
             session.config.context_budget_tokens = session.model_max_sequence_tokens;
         }
         if (session.config.max_new_tokens > session.model_max_sequence_tokens) {
-            end_run(id, "max_new_tokens (" + std::to_string(session.config.max_new_tokens) +
+            end_run(run_id, "max_new_tokens (" + std::to_string(session.config.max_new_tokens) +
                             ") exceeds model maximum sequence length (" +
                             std::to_string(session.model_max_sequence_tokens) + ")");
             return false;
@@ -933,7 +984,7 @@ bool start_mission(const std::string& id, const std::string& message,
         const auto room =
             session.model_max_sequence_tokens - session.config.context_budget_tokens;
         if (room < 1) {
-            end_run(id, "context_budget_tokens leaves no room for generation under the "
+            end_run(run_id, "context_budget_tokens leaves no room for generation under the "
                         "model maximum sequence length (" +
                             std::to_string(session.model_max_sequence_tokens) + ")");
             return false;
@@ -1014,7 +1065,7 @@ bool start_mission(const std::string& id, const std::string& message,
         const std::optional<model::ReasoningEffort> level =
             model::parse_reasoning_effort(requested);
         if (!level.has_value()) {
-            end_run(id, "reasoning_effort must be one of low, medium or xhigh (got \"" +
+            end_run(run_id, "reasoning_effort must be one of low, medium or xhigh (got \"" +
                             requested + "\"); note that this checkpoint family has no "
                                         "'high' -- xhigh is the top level");
             return false;
@@ -1075,14 +1126,8 @@ bool start_mission(const std::string& id, const std::string& message,
     // trimmed, which is invisible at the time and matters later -- exactly the shape of
     // thing the event log exists for.
     surface::ContextJournal::Result journal =
-        surface::ContextJournal::open(canonical_workspace, id, *session.ctx);
-    if (!journal.error.empty()) {
-        platform::Event ev;
-        ev.kind = "context_journal";
-        ev.fields.push_back({"opened", "0"});
-        ev.fields.push_back({"error", journal.error});
-        log.append(ev, clock);
-    }
+        surface::ContextJournal::open(canonical_workspace, run_id, *session.ctx);
+    report_journal(journal, run_id, canonical_workspace, log, clock);
     session.journal = std::move(journal.journal);
 
     // TELL THE PROMPT WHETHER RECALL IS WORTH REACHING FOR. Asked once, here, because the
@@ -1147,7 +1192,7 @@ bool start_mission(const std::string& id, const std::string& message,
         platform::Event begin;
         begin.kind = "run_begin";
         begin.fields = {
-            {"run_id", id},
+            {"run_id", run_id},
             {"mission", mission},
             {"workspace_root", canonical_workspace},
             {"model_identity", model_dir},
@@ -1158,7 +1203,7 @@ bool start_mission(const std::string& id, const std::string& message,
         log.append(begin, clock);
     }
 
-    return run_loop(id, session, inbox, cancel, log, clock);
+    return run_loop(run_id, session, inbox, cancel, log, clock);
 }
 
 // Load the weights, as its own act (S12.2). Answers when the load is over; the surface
@@ -1167,6 +1212,231 @@ bool start_mission(const std::string& id, const std::string& message,
 // The reply carries the loader's verbatim error rather than a JSON-RPC error, because
 // "this checkpoint has no safetensors" is an ordinary answer to a reasonable question --
 // the request was well-formed and was serviced. A protocol error would say the opposite.
+// The runs this workspace can return to.
+//
+// Derived from the event log, never from a side index. The log is what
+// reconstruct_context replays, so anything listed here can actually be rebuilt -- an index
+// maintained alongside it would eventually offer a session the log no longer holds, and
+// the operator would learn that only after clicking it.
+//
+// TWO FILTERS, and both are load-bearing:
+//
+//   * WORKSPACE. Run history is per-repo. Offering another project's conversations would
+//     be noise at best, and at worst shows one workspace's missions inside another.
+//   * A MINTED id. Runs whose id is the old JSON-RPC counter are refused by inspection,
+//     because those ids collided -- 97 runs over 6 values in the log this was written
+//     against, `2` alone used 63 times. Resuming one would filter the log by "2" and
+//     splice 63 unrelated conversations into one context. They are unlistable rather than
+//     merely unresumable: an entry the operator cannot act on is worse than no entry.
+void handle_sessions(const std::string& id, const std::string& message,
+                     const std::string& log_path) {
+    const std::string workspace = surface::string_field(message, "workspace_root");
+    if (workspace.empty()) {
+        reply_error(id, "lmp/sessions requires a non-empty 'workspace_root'; run history "
+                        "is per-workspace and an unfiltered list would cross projects");
+        return;
+    }
+    // double_field, because the transport has no integer reader and a limit is small
+    // enough that a double represents it exactly. Anything non-positive or absent takes
+    // the default rather than being refused: a listing is a UI affordance, and a surface
+    // that forgot to send a cap should get a sane list, not an error.
+    const double asked = surface::double_field(message, "limit", 0.0);
+    const std::size_t limit =
+        asked >= 1.0 ? static_cast<std::size_t>(asked) : std::size_t{50};
+
+    std::vector<context::RunSummary> runs = context::list_runs_from_log(log_path);
+    protocol::SessionsResult out;
+    // Newest first: the list is read top-down and the run you want back is nearly always
+    // the one that just died.
+    for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
+        if (out.sessions.size() >= limit) {
+            break;
+        }
+        if (it->workspace_root != workspace || !surface::is_minted_run_id(it->run_id)) {
+            continue;
+        }
+        protocol::SessionSummary sum;
+        sum.run_id = it->run_id;
+        sum.mission = it->mission;
+        sum.workspace_root = it->workspace_root;
+        sum.started_wall_ns = static_cast<std::int64_t>(it->started_wall_ns);
+        sum.finished = it->finished;
+        sum.termination_reason = it->termination_reason;
+        sum.iterations = it->iterations;
+        sum.completed = it->completed;
+        sum.observations = it->observations;
+        out.sessions.push_back(std::move(sum));
+    }
+    // Hand-built, like every other reply here: the generator emits append_value for
+    // STRUCTS and for notifications, not for request RESULTS. The vector overload it does
+    // emit handles the array, so the escaping stays in one place -- the platform layer,
+    // where the event log's escaping also lives.
+    std::string body = R"({"sessions":)";
+    protocol::append_value(body, out.sessions);
+    body += "}";
+    reply_result(id, body);
+}
+
+// Reload a previous run's conversation into this session.
+//
+// WHAT THIS DELIBERATELY DOES NOT DO IS RESTART THE RUN. The context is rebuilt and the
+// sidecar stops there; the operator reads the history and continues it with lmp/message.
+// A resume that immediately started turning would take a run the operator recovered in
+// order to LOOK at and set it working again from a state nobody had inspected -- and the
+// runs worth resuming are exactly the ones that died in a way nobody understood yet.
+//
+// The model is loaded first, because a resumed session that cannot generate is not
+// resumed, and because the identity gate below needs to compare against the model this
+// session would actually run.
+// Every exit from handle_resume answers the request, and they all answer with the same
+// shape -- a refusal is a RESULT here, not an error, because "this run cannot be resumed
+// and here is why" is information the surface renders rather than a protocol fault.
+void reply_resume(const std::string& id, const protocol::ResumeResult& r) {
+    std::string body = R"({"ok":)";
+    body += r.ok ? "true" : "false";
+    body += R"(,"why":)" + json_escape(r.why);
+    body += R"(,"run_id":)" + json_escape(r.run_id);
+    body += R"(,"mission":)" + json_escape(r.mission);
+    body += R"(,"turns_restored":)" + std::to_string(r.turns_restored);
+    body += R"(,"omitted_leading":)" + std::to_string(r.omitted_leading);
+    body += R"(,"transcript":)";
+    protocol::append_value(body, r.transcript);
+    body += "}";
+    reply_result(id, body);
+}
+
+void handle_resume(const std::string& id, const std::string& message,
+                   surface::Session& session, const std::string& log_path,
+                   platform::EventLogWriter& log, const platform::Clock& clock) {
+    const std::string run_id = surface::string_field(message, "run_id");
+    const std::string workspace = surface::string_field(message, "workspace_root");
+    const std::string model_dir = surface::string_field(message, "model_dir");
+    protocol::ResumeResult out;
+    out.run_id = run_id;
+    if (run_id.empty() || workspace.empty() || model_dir.empty()) {
+        out.why = "lmp/resume requires run_id, workspace_root and model_dir";
+        reply_resume(id, out);
+        return;
+    }
+    if (!surface::is_minted_run_id(run_id)) {
+        out.why = "'" + run_id +
+                  "' is a legacy run id from before runs had identities. Those ids were "
+                  "reused across runs, so replaying the log for one would mix unrelated "
+                  "conversations together. It cannot be resumed.";
+        reply_resume(id, out);
+        return;
+    }
+
+    loop::AgentConfig config;
+    if (!apply_settings(id, message, config)) {
+        return; // apply_settings has already answered the request
+    }
+    const std::string draft_model_dir = surface::string_field(message, "draft_model_dir");
+    const surface::ModelLoad loaded =
+        ensure_model(session, model_dir, draft_model_dir, log, clock);
+    if (!loaded.ok) {
+        out.why = loaded.error;
+        reply_resume(id, out);
+        return;
+    }
+
+    context::ResumeRebuild rebuilt = context::reconstruct_context_from_log(log_path, run_id);
+    if (!rebuilt.ok) {
+        out.why = rebuilt.why.empty() ? "that run could not be rebuilt from the event log"
+                                      : rebuilt.why;
+        reply_resume(id, out);
+        return;
+    }
+
+    // The gate compares what the run was BOUND to against what it would run under now.
+    // Everything it checks can change between the crash and the recovery, and each one
+    // silently invalidates the conversation: a different workspace makes every path in it
+    // wrong, a different model makes the tokenized history a different prompt, and a
+    // different tool schema means the transcript describes calls this build cannot make.
+    // The session is brought up to the SAME shape lmp/start leaves it in, before the gate,
+    // for two reasons that coincide: a resumed session needs all of it to continue, and
+    // `tools_json` is what the gate's hash is taken over.
+    //
+    // Taking the hash from the rebuilt identity instead -- which is what this did first --
+    // makes the comparison vacuous: it checks the recorded value against itself and passes
+    // a build whose tools changed completely, which is the one thing the check is for.
+    //
+    // THE CONTEXT TOOLS ARE PART OF THE TOOL SET, and forgetting them is why the first real
+    // resume was refused with "tool-schema hash mismatch" against a run started minutes
+    // earlier by the same binary. `declare_context_tools` adds the PCC recall tools when a
+    // journal opened, so a session without a journal has a strictly smaller schema and
+    // hashes differently. The gate was right; the setup was short.
+    //
+    // BUILT AS CANDIDATES, committed only once the gate allows it. The journal installs a
+    // sink into the store it is opened against, so it must be opened against the REBUILT
+    // store rather than whatever the session was holding -- and if the gate then refuses,
+    // both are dropped and the session keeps what it had.
+    session.config = config;
+    surface::ensure_registry(session, workspace, message, log, clock);
+
+    auto candidate = std::make_unique<context::ContextStore>(std::move(rebuilt.store));
+    surface::ContextJournal::Result journal =
+        surface::ContextJournal::open(workspace, run_id, *candidate);
+    report_journal(journal, run_id, workspace, log, clock);
+    std::unique_ptr<surface::ContextJournal> candidate_journal = std::move(journal.journal);
+    if (candidate_journal != nullptr && session.registry != nullptr) {
+        surface::ContextJournal* jp = candidate_journal.get();
+        (void)session.registry->declare_context_tools(
+            [jp] {
+                tools::Registry::ContextSource src;
+                src.store = &jp->store();
+                src.session = jp->session_id();
+                return src;
+            },
+            [&session](std::string_view text) {
+                return session.tok != nullptr ? session.tok->encode_content(text).size()
+                                              : pcc::estimate_tokens(text);
+            });
+    }
+
+    context::ResumeIdentity current;
+    current.workspace_root = workspace;
+    current.run_id = run_id;
+    current.model_identity = model_dir;
+    current.protocol_version = protocol::kProtocolVersion;
+    current.tool_schema_hash =
+        session.registry == nullptr
+            ? std::string{}
+            : platform::content_sha256_hex(session.registry->tools_json());
+    const context::ResumeGate gate =
+        context::can_auto_resume(rebuilt.identity, current, rebuilt.edit_in_flight);
+    if (!gate.allowed) {
+        out.why = gate.why;
+        // The registry's context tools captured a pointer into `candidate_journal`, which
+        // is about to be destroyed. Dropping the registry with it keeps that capture from
+        // outliving what it points at; the next start or resume rebuilds one.
+        session.registry.reset();
+        reply_resume(id, out);
+        return;
+    }
+
+    session.ctx = std::move(candidate);
+    session.journal = std::move(candidate_journal);
+    // The resumed session IS that run: a turn added after this must land in the same
+    // history, or the next resume would find the conversation split across two ids.
+    session.run_id = run_id;
+    out.ok = true;
+    out.mission = session.ctx->mission();
+    out.turns_restored = static_cast<int>(session.ctx->recent().size());
+    int omitted = 0;
+    out.transcript = surface::transcript::build(*session.ctx, omitted);
+    out.omitted_leading = omitted;
+
+    platform::Event ev;
+    ev.kind = "run_resumed";
+    ev.fields = {{"run_id", run_id},
+                 {"workspace_root", workspace},
+                 {"turns_restored", std::to_string(out.turns_restored)}};
+    log.append(ev, clock);
+
+    reply_resume(id, out);
+}
+
 void handle_load_model(const std::string& id, const std::string& message,
                        surface::Session& session, platform::EventLogWriter& log,
                        const platform::Clock& clock) {
@@ -1229,10 +1499,14 @@ bool continue_session(const std::string& id, const std::string& message,
         reply_error(id, "there is no session to continue; send lmp/start first");
         return false;
     }
-    reply_result(id, R"({"accepted":true,"run_id":")" + id + R"(","started_run":true})");
+    // The run this session IS, not the id of the request asking it to continue. A turn
+    // added under a fresh per-request id would be invisible to any later resume of the run
+    // it actually belongs to.
+    reply_result(id, R"({"accepted":true,"run_id":")" + session.run_id +
+                         R"(","started_run":true})");
     session.ctx->add_user_message(text,
                                   surface::parse_string_array(message, "image_paths"));
-    return run_loop(id, session, inbox, cancel, log, clock);
+    return run_loop(session.run_id, session, inbox, cancel, log, clock);
 }
 
 // Routes ONE framed message. Returns true when the process should not survive it.
@@ -1262,6 +1536,14 @@ bool dispatch_one(const std::string& message, surface::Session& session,
         // An approval with no run waiting on it. Answering a card after the run that
         // raised it has ended must not silently look like it landed.
         reply_result(id, R"({"accepted":false})");
+        return false;
+    }
+    if (method == "lmp/sessions") {
+        handle_sessions(id, message, log.path());
+        return false;
+    }
+    if (method == "lmp/resume") {
+        handle_resume(id, message, session, log.path(), log, clock);
         return false;
     }
     if (method == "lmp/load_model") {
