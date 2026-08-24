@@ -2175,8 +2175,11 @@ Registry::Registry(WorkspaceContext ctx)
         d.name = "ask_question";
         d.description =
             "Ask the human a question with 2 to 4 selectable options, which they answer by "
-            "clicking a card. Pass `question` (text) and `options` (newline-separated "
-            "choices, one per line). Prefer this over `ask_user` whenever the answers are a "
+            "clicking a card. Pass `question` (text) and `options`: one choice per line, "
+            "or -- when a choice needs justifying -- a blank line between choices with "
+            "detail lines indented beneath each. The first line of a choice is the answer "
+            "and the only thing sent back; the lines under it are shown as its rationale. "
+            "Prefer this over `ask_user` whenever the answers are a "
             "short closed set -- which approach, which library, which of two designs -- "
             "because clicking one is faster for them than typing it. Ask when the answer "
             "would genuinely change what you build and reading more code would not settle "
