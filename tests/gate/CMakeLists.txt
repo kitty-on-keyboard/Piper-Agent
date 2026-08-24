@@ -61,6 +61,15 @@ if(LMP_NODE)
     COMMAND "${LMP_NODE}"
             "${PROJECT_SOURCE_DIR}/extension/scripts/verify-inline-code-order.js"
     LABELS gate)
+  # A question card must offer the choices the model meant. `ask_question` asks for "one
+  # per line" and models write richer than that -- a blank line between choices, detail
+  # bulleted underneath each -- so splitting on newlines turned a three-way choice into
+  # twelve clickable rows, nine of them fragments. Shipped, and reported from the
+  # installed extension. Reads src/webview.ts directly, so it needs only node.
+  lmp_add_script_test(test_question_options
+    COMMAND "${LMP_NODE}"
+            "${PROJECT_SOURCE_DIR}/extension/scripts/verify-question-options.js"
+    LABELS gate)
   # THAT THE VIEW SCRIPT PARSES AT ALL, which nothing above checks. tsc reads it as one
   # string (it is a template literal), so a syntax error inside it typechecks clean,
   # packages, and installs a pane where every button is dead -- the script stops before a
