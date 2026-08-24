@@ -2055,10 +2055,12 @@ TEST(a_repeated_read_is_answered_and_the_older_copy_is_collapsed) {
     platform::SystemClock clock;
     loop::AgentConfig config;
     config.auto_syntax_check = false;
-    // The collapse only runs under context pressure, because it rewrites a record inside
-    // the KV-cached prefix and so costs a full re-prefill -- see collapse_duplicate_read().
-    // This budget puts the run above that mark; it stays clear of compaction, which needs
-    // more than kMinRecentTurns records before it drops one.
+    // The collapse is QUEUED when the repeat is seen and APPLIED by compact_to_budget,
+    // because rewriting a record inside the KV-cached prefix costs a full re-prefill and
+    // compaction is the one moment that prefill is already being paid -- see
+    // collapse_duplicate_read(). This budget is small enough that the trim fires, which is
+    // what drains the queue; kMinRecentTurns still stops it dropping a real turn here, so
+    // the collapse is the only thing that reclaims anything.
     config.context_budget_tokens = 100;
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
     const model::CancelToken cancel;
@@ -2859,10 +2861,131 @@ TEST(plan_refuses_one_item_that_carries_the_whole_list) {
 //     turns where a collapse fired (n=15)   median TTFT  21,011 ms
 //     turns where none fired      (n=22)    median TTFT     940 ms
 //
-// So a run with room to spare keeps its cache AND its duplicate. The companion case above
-// (a_repeated_read_is_answered_and_the_older_copy_is_collapsed) holds the other half: once
-// the context is genuinely short, the collapse runs, because then it may spare a compaction
-// that costs the same prefill and destroys information the collapse keeps.
+// So a run with room to spare keeps its cache. It used to keep the duplicate too, and that
+// is what changed on 2026-08-19: reads turned out to be 84.5% of all context growth, with
+// ~422k tokens of it content the prompt was already holding verbatim. The duplicate is now
+// never created -- the second read is answered with a reference -- which preserves the
+// cache for the same reason the old behaviour did (nothing is rewritten) while also not
+// paying for the copy. The collapse remains for the case a reference cannot cover: copies
+// that are NOT identical, i.e. snapshots an edit has invalidated.
+// PREVENTION: the bytes are withheld only when the context is already holding them.
+//
+// Reads are 84.5% of all context growth on this harness, and ~16% of everything the
+// context ever grew by was content already sitting in the prompt verbatim. Answering that
+// case with a reference costs one append; the alternative -- letting the copy in and
+// reclaiming it later -- costs a rewritten history and the whole KV cache with it.
+//
+// The three cases below are the three ways this becomes a lie, and each is asserted
+// separately, because a mechanism that withholds bytes is only safe if it withholds them
+// in exactly one situation.
+TEST(a_byte_identical_reread_is_answered_with_a_reference_not_the_bytes) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_elide_identical_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    std::string body = "// header\n";
+    for (int i = 0; i < 60; ++i) {
+        body += "let value" + std::to_string(i) + " = compute()\n";
+    }
+    { std::ofstream f(root + "/App.swift"); f << body; }
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nApp.swift\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body, "first look"));
+    backend.enqueue_response(call_turn(tok, read_body, "again"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    std::size_t verbatim = 0;
+    std::size_t referenced = 0;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("let value59") != std::string::npos) {
+            ++verbatim;
+        }
+        if (t.observation.find("byte-for-byte identical") != std::string::npos) {
+            ++referenced;
+        }
+    }
+    CHECK_EQ(verbatim, std::size_t{1});
+    CHECK_EQ(referenced, std::size_t{1});
+    // A reference nobody can follow is worse than the bytes. It must name the file.
+    bool usable = false;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("byte-for-byte identical") != std::string::npos &&
+            t.observation.find("App.swift") != std::string::npos) {
+            usable = true;
+        }
+    }
+    CHECK(usable);
+}
+
+// THE CASE THAT MUST NEVER ELIDE. A re-read after an edit is the whole reason reads are
+// re-answered at all: the bytes differ, so the model is holding a copy that is now false.
+// If prevention ever fires here it feeds the run stale content while telling it the file
+// is unchanged -- the worst failure this codebase has, and silent.
+TEST(a_reread_after_an_edit_still_returns_the_new_bytes_in_full) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_elide_after_edit_test";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+    std::string before = "// header\n";
+    for (int i = 0; i < 60; ++i) {
+        before += "let value" + std::to_string(i) + " = compute()\n";
+    }
+    { std::ofstream f(root + "/App.swift"); f << before; }
+
+    const std::string read_body =
+        "<function=read_file>\n<parameter=path>\nApp.swift\n</parameter>\n</function>\n";
+    const std::string edit_body =
+        "<function=replace_in_file>\n<parameter=path>\nApp.swift\n</parameter>\n"
+        "<parameter=old_text>\n// header\n</parameter>\n"
+        "<parameter=new_text>\n// CHANGED HEADER\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, read_body, "first look"));
+    backend.enqueue_response(call_turn(tok, edit_body, "editing"));
+    backend.enqueue_response(call_turn(tok, read_body, "looking again"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("edit it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    bool has_changed_bytes = false;
+    std::size_t referenced = 0;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("CHANGED HEADER") != std::string::npos &&
+            t.observation.find("let value59") != std::string::npos) {
+            has_changed_bytes = true;
+        }
+        if (t.observation.find("byte-for-byte identical") != std::string::npos) {
+            ++referenced;
+        }
+    }
+    // The post-edit read was answered with the NEW file, in full, and nothing claimed it
+    // was identical to anything.
+    CHECK(has_changed_bytes);
+    CHECK_EQ(referenced, std::size_t{0});
+}
+
 TEST(a_run_with_context_to_spare_keeps_its_kv_cache_instead_of_collapsing) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
@@ -2895,6 +3018,7 @@ TEST(a_run_with_context_to_spare_keeps_its_kv_cache_instead_of_collapsing) {
 
     std::size_t verbatim = 0;
     std::size_t collapsed = 0;
+    std::size_t referenced = 0;
     for (const context::TurnRecord& t : ctx.recent()) {
         if (t.observation.find("alpha") != std::string::npos &&
             t.observation.find("padding line") != std::string::npos) {
@@ -2903,11 +3027,28 @@ TEST(a_run_with_context_to_spare_keeps_its_kv_cache_instead_of_collapsing) {
         if (t.observation.find("collapsed to keep one copy") != std::string::npos) {
             ++collapsed;
         }
+        if (t.observation.find("byte-for-byte identical") != std::string::npos) {
+            ++referenced;
+        }
     }
-    // Both reads answered in full, and HISTORY WAS NOT REWRITTEN -- which is the property
-    // the KV cache depends on. The duplicate copy is the cheaper of the two things to lose.
-    CHECK_EQ(verbatim, std::size_t{2});
+    // HISTORY WAS NOT REWRITTEN, which is the property the KV cache depends on and the
+    // reason this test exists. That has not changed.
     CHECK_EQ(collapsed, std::size_t{0});
+    // What DID change: the duplicate is never created rather than reclaimed later. The
+    // second read is answered with a reference to the copy the context already holds, so
+    // the bytes appear exactly once and the prompt never grew by a second copy at all.
+    CHECK_EQ(verbatim, std::size_t{1});
+    CHECK_EQ(referenced, std::size_t{1});
+    // And the reference has to be USABLE: it must name the file, or the model is told its
+    // read succeeded and given nothing to act on.
+    bool names_the_file = false;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.observation.find("byte-for-byte identical") != std::string::npos &&
+            t.observation.find("f.txt") != std::string::npos) {
+            names_the_file = true;
+        }
+    }
+    CHECK(names_the_file);
 }
 
 // --- conversational modes yield; working modes end ----------------------------
@@ -3421,3 +3562,266 @@ TEST(many_micro_edits_without_a_build_warns_the_model) {
 }
 
 
+
+// --- "hung" and "long" are different questions (loop::Budget) ---------------
+//
+// One dial answered both until 2026-08-18, and the run that exposed it did nothing wrong:
+// 48 turns of a 200-turn budget, ended `wall_clock`, because a vision-enabled checkpoint
+// with a clamped context budget compacted every ~5 turns and every compaction costs one
+// full re-prefill (13 of 13, median 84 s of time-to-first-token). The operator's only
+// remedy was to retype `continue`. These two cases pin the split so it cannot be
+// collapsed back into a single number.
+//
+// The clock is driven from the turn observer rather than by a real sleep, so both cases
+// are exact: on_turn fires once per completed turn, after the loop has taken its progress
+// timestamp, which is precisely the gap the stall dial measures.
+TEST(a_long_run_that_keeps_completing_turns_is_not_stopped_by_the_clock) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // A DIFFERENT file each turn, because a run repeating one call is stalled for a
+    // reason that has nothing to do with the clock -- the repeat cache ends it as
+    // `stalled` and the case would pass or fail for the wrong reason.
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 9; ++i) {
+        const std::string name = "f" + std::to_string(i) + ".txt";
+        write_text(root + "/" + name, "contents of " + name);
+        backend.enqueue_response(call_turn(
+            tok,
+            "<function=read_file>\n<parameter=path>\n" + name + "\n</parameter>\n</function>\n",
+            "step " + std::to_string(i)));
+    }
+    // Several, not one: the run ends on the first of them, and the spares keep the case
+    // asserting the ENDING rather than accidentally asserting a script length.
+    for (int i = 0; i < 4; ++i) {
+        backend.enqueue_response(text_turn(tok, "wrapping up", "Done."));
+    }
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("take your time");
+    platform::EventLogWriter log;
+    platform::ManualClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    // Ten minutes a turn: slower than any real turn measured, and still WORKING. Ten of
+    // them is 6000 s, which is past the 4800 s ceiling this used to die on.
+    loop::Observer obs;
+    obs.on_turn = [&](const loop::TurnResult&, double) {
+        clock.advance(std::chrono::seconds(600));
+    };
+    agent.set_observer(std::move(obs));
+
+    const auto started = clock.mono();
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // The ONLY assertion that matters: a run that is working is not stopped for working.
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    CHECK(report.iterations >= 10);
+    // And it really did outlive the ceiling it used to die on, so this cannot quietly
+    // stop testing the clock if turn costs change.
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::seconds>(clock.mono() - started).count();
+    CHECK(elapsed > 4800);
+}
+
+TEST(a_run_that_completes_no_turn_inside_the_stall_window_is_stopped_as_stalled_no_turn) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 6; ++i) {
+        backend.enqueue_response(call_turn(tok, body, "step " + std::to_string(i)));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("wedge yourself");
+    platform::EventLogWriter log;
+    platform::ManualClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.budget.stall_seconds = 1200;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    // Past the stall window between one completed turn and the next.
+    loop::Observer obs;
+    obs.on_turn = [&](const loop::TurnResult&, double) {
+        clock.advance(std::chrono::seconds(1500));
+    };
+    agent.set_observer(std::move(obs));
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // Its own reason, not `wall_clock` and not the inert-turn `stalled`. Which one fired
+    // decides which dial the operator should reach for, and that was the whole complaint.
+    CHECK_EQ(report.termination_reason, std::string("stalled_no_turn"));
+    // Stopped promptly rather than riding out the total-duration ceiling.
+    CHECK(report.iterations < 6);
+}
+
+// The dial is not the ceiling. A run under a generous stall window still stops at
+// max_iterations, so raising the clock cannot turn the turn budget into a suggestion.
+TEST(a_generous_stall_window_does_not_lift_the_turn_ceiling) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 12; ++i) {
+        backend.enqueue_response(call_turn(tok, body, "step " + std::to_string(i)));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("go forever");
+    platform::EventLogWriter log;
+    platform::ManualClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.budget.max_iterations = 4;
+    config.budget.stall_seconds = 86400;
+    config.budget.wall_clock_seconds = 86400;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("max_turns"));
+    CHECK_EQ(report.iterations, 4);
+}
+
+// --- the plan spin (measured, 2026-08-18) ----------------------------------
+//
+// `plan` was 24.2% of every turn across the 14 runs that ended `stalled` since
+// 2026-08-08, against 4.4% across the runs that ended -- the sharpest single difference
+// between a run that works and a run that does not. 54% of those calls left the checklist
+// byte-identical, and the reply they got was "checklist set: 3/17 done", indistinguishable
+// from a plan that ticked something.
+//
+// Both halves of the fix are pinned here: the model is TOLD when it changed nothing, and
+// the spin counter survives the interleaving that used to defeat it.
+TEST(resending_an_identical_checklist_is_reported_as_changing_nothing) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string items =
+        "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, items, "listing the work"));
+    backend.enqueue_response(call_turn(tok, items, "listing it again"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult first = agent.step(cancel);
+    CHECK(first.tool_result.ok());
+    // The first one SET something, and must not be scolded for it.
+    CHECK(first.tool_result.summary.find("IDENTICAL") == std::string::npos);
+
+    const loop::TurnResult second = agent.step(cancel);
+    // Still a success -- an error here would make the turn ToolCallRefused, which is
+    // exempt from the inert counter and resets the plan-only counter, i.e. it would make
+    // the spin CHEAPER. It says what happened instead.
+    CHECK(second.tool_result.ok());
+    CHECK(second.tool_result.summary.find("IDENTICAL") != std::string::npos);
+    // And it names the next thing to do, because "you did nothing" without "do this" is
+    // the advice that produced the loop in the first place.
+    CHECK(second.tool_result.summary.find("one") != std::string::npos);
+}
+
+TEST(a_plan_spin_interleaved_with_inert_reads_still_ends_the_run) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    write_text(root + "/same.txt", "unchanging contents");
+    const std::string items =
+        "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
+    const std::string reread =
+        "<function=read_file>\n<parameter=path>\nsame.txt\n</parameter>\n</function>\n";
+
+    // THE SHAPE FROM THE LOG: plan, stale re-read, plan, stale re-read. Neither detector
+    // saw it -- `plan` is never consecutive with itself, and the re-read counted as
+    // "something else entirely" and reset the plan counter.
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(call_turn(tok, items, "restating"));
+        backend.enqueue_response(call_turn(tok, reread, "re-reading"));
+    }
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    // Well inside the 16 scripted turns: the point is that it ends at all, and soon.
+    CHECK(report.iterations <= 10);
+}
+
+// The other side of the same rule: real work between plan calls must still clear the
+// counter, or a healthy run that keeps its checklist current gets killed for doing so.
+TEST(real_progress_between_plan_calls_clears_the_spin_counter) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    model::ScriptedBackend backend;
+    // Each plan TICKS one more item, and each edit is a real write, so this is exactly
+    // what a working run looks like.
+    for (int i = 0; i < 5; ++i) {
+        const std::string done(static_cast<std::size_t>(i), 'x');
+        std::string list = "<function=plan>\n<parameter=items>\n";
+        for (int j = 0; j < 5; ++j) {
+            list += (j < i ? "[x] item " : "[ ] item ") + std::to_string(j) + "\n";
+        }
+        list += "</parameter>\n</function>\n";
+        backend.enqueue_response(call_turn(tok, list, "ticking"));
+        backend.enqueue_response(call_turn(
+            tok,
+            "<function=write_file>\n<parameter=path>\nf" + std::to_string(i) +
+                ".txt\n</parameter>\n<parameter=content>\nbody " + std::to_string(i) +
+                "\n</parameter>\n</function>\n",
+            "writing"));
+    }
+    backend.enqueue_response(text_turn(tok, "all done", "Finished."));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    agent.set_approver([](const std::string&, const std::string&, const std::string&,
+                          const tools::RiskHint&) { return true; });
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // NOT stalled: every plan call here was earned by a write.
+    CHECK(report.termination_reason != std::string("stalled"));
+    CHECK(report.iterations >= 10);
+}

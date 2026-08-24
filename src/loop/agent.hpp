@@ -239,9 +239,16 @@ struct Observer {
 };
 
 struct RunReport {
-    // The one unambiguous signal for WHICH ENDING a run took (S14). Exactly seven:
+    // The one unambiguous signal for WHICH ENDING a run took (S14). Exactly eight:
     // `ended` (the model answered in text), `awaiting_user`, `plan_ready`, `max_turns`,
-    // `wall_clock`, `cancelled`, `backend_error`.
+    // `stalled_no_turn`, `wall_clock`, `cancelled`, `backend_error`.
+    //
+    // `stalled_no_turn` and `wall_clock` are deliberately not one reason. The first says
+    // no turn completed inside Budget::stall_seconds -- the run is wedged. The second says
+    // the run outlived Budget::wall_clock_seconds while still completing turns -- it was
+    // working, and hit the stop of last resort. They were one reason until 2026-08-18, and
+    // reading a productive run's ending as a hang is what sent the operator back to the
+    // keyboard to type `continue`.
     std::string termination_reason;
     int iterations = 0;
     // The model answered AND, when an operator check is configured, its last reading
@@ -297,18 +304,54 @@ class Agent {
     //
     // Two marks rather than one because trimming AT the budget leaves no slack: the next
     // turn's observation puts the prompt straight back over, so every turn from then on
-    // pays a compaction. Starting at 75% and going to 55% means a trim buys room for
-    // several turns, and the run is never rendering a prompt at the very edge of the
-    // budget when the model is about to add a 4k-token generation to it.
+    // pays a compaction. A trim has to buy room for several turns, and the run must never
+    // render a prompt at the very edge of the budget when the model is about to add a
+    // 4k-token generation to it.
+    //
+    // THE LOW MARK MOVED 55 -> 35 ON 2026-08-19, AND IT IS THE SINGLE LARGEST WALL-CLOCK
+    // LEVER IN THE HARNESS. What justifies it is a measurement nobody had taken: a
+    // compaction invalidates the KV prefix, so the turn after one is a FULL re-prefill --
+    // 48 of 48 in the event log reused zero tokens, at a median TTFT of 43.5 s against
+    // 1.8 s for an ordinary turn. That is not a tail event. It was 5.45 s of every
+    // 11.46 s per turn, i.e. 48% of the run's wall clock, spent re-reading context the
+    // model had already been shown.
+    //
+    // The arithmetic, with every input measured from real runs rather than assumed:
+    //
+    //     amortized cost per turn = (low / (high - low)) * growth_per_turn / prefill_rate
+    //
+    // The BUDGET CANCELS. Both the size of the re-prefill and the number of turns a trim
+    // buys scale with it, so no `contextBudgetTokens` setting can touch this -- raising
+    // the budget buys longer cycles at exactly proportionally higher cost, and lowering it
+    // the reverse. Only the ratio moves it. At growth 2,323 tok/turn and a re-prefill rate
+    // of 1,172 tok/s (both measured on the A3B at ~50k):
+    //
+    //     75/55 -> 5.45 s/turn   (8.3 turns per cycle)   <- was here
+    //     75/45 -> 2.97 s/turn  (12.4)
+    //     75/35 -> 1.73 s/turn  (16.5)                   <- now here
+    //
+    // Trimming deeper wins twice: the re-prefill is smaller AND it buys twice as many
+    // turns before the next one.
+    //
+    // What it costs, and why the margin covers it: discarded context gets re-read later at
+    // the cost of a turn (S8.3), which is why this mark was conservative. A re-read costs
+    // ~11.5 s; the change saves ~3.7 s/turn over a 16.5-turn cycle, about 61 s. So it pays
+    // for roughly five extra re-reads per cycle before it breaks even, and the PCC store
+    // exists precisely so that discarded context is recoverable without one.
+    //
+    // THAT MARGIN IS MODELLED, NOT MEASURED. The speed side is measured; whether trimming
+    // to 35% makes the model re-read more is a question only real runs answer. If runs get
+    // worse, this is the first constant to put back -- move it, do not delete the note.
     static constexpr std::size_t kCompactAtPercent = 75;
-    static constexpr std::size_t kCompactToPercent = 55;
-    // Where the duplicate collapse starts paying for itself, as a percentage of the same
-    // budget. Deliberately equal to the low-water mark and deliberately NOT the same
-    // constant: this one answers "is the saving worth a full re-prefill", which is a
-    // different question from "how far should a trim go", and the two must be free to move
-    // apart. See collapse_duplicate_read() for the measurement -- a 22x TTFT penalty paid
-    // 33 times in a run that never used more than a third of its context.
-    static constexpr std::size_t kCollapseAtPercent = 55;
+    static constexpr std::size_t kCompactToPercent = 35;
+    // kCollapseAtPercent IS GONE, and no percentage replaces it. It asked "is this
+    // collapse's saving worth a full re-prefill", and the answer measured on 54 real
+    // collapses was no, at every value the constant could have taken: a prompt is
+    // compacted at render once it reaches kCompactAtPercent, so the mark could never be
+    // set high enough to coincide with a compaction, and below that it only ever bought a
+    // 58.8 s re-prefill to reclaim a few seconds' worth of deferred trimming. The collapse
+    // now waits for compact_to_budget, where the prefill is already spent and it costs
+    // nothing. See collapse_duplicate_read() for the full measurement.
 
     void emit(const std::string& kind, std::vector<platform::EventField> fields);
     // The HITL gate: mode policy, then writes, then commands. Returns the refusal when a
@@ -360,6 +403,28 @@ class Agent {
     // Collapses an earlier byte-identical copy of this read's result, leaving the newest
     // one live. Called after a successful content read; never refuses or alters the result
     // the model receives.
+    // A collapse the run has decided is worth doing but has NOT applied yet. Held until
+    // compact_to_budget() is already rewriting history -- see collapse_duplicate_read().
+    // One entry per path: a later read of the same file supersedes the earlier plan, and
+    // its content is the one every stale copy is measured against.
+    struct PendingCollapse {
+        std::string tool;
+        std::string path;
+        std::string range;
+        std::string current;
+    };
+    std::vector<PendingCollapse> pending_collapses_;
+    // Applies every pending collapse and clears the list. Called ONLY from
+    // compact_to_budget, and only once the trim is known to be happening.
+    std::size_t apply_pending_collapses();
+    std::size_t apply_one_collapse(const PendingCollapse& pc);
+
+    // Replaces a byte-identical re-read's payload with a reference to the copy the
+    // context already holds. Returns whether it did. An append, never a rewrite.
+    [[nodiscard]] bool elide_redundant_reread(const std::string& name,
+                                              const std::vector<tools::ToolParamValue>& params,
+                                              tools::ToolResult& result);
+
     void collapse_duplicate_read(const std::string& name,
                                  const std::vector<tools::ToolParamValue>& params,
                                  const tools::ToolResult& result);
