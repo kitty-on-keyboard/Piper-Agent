@@ -144,6 +144,14 @@ class EventLogWriter {
     [[nodiscard]] std::size_t bytes_in_current_file() const noexcept { return cur_bytes_; }
     [[nodiscard]] std::uint64_t rotations() const noexcept { return rotations_; }
 
+    // Where this writer is actually writing. Exposed because the log is not only an
+    // output: src/context/resume.cpp READS it back to rebuild a run, and the reader must
+    // be pointed at the same file the writer chose. Recomputing the path at the read site
+    // would mean two answers to "where is the log", and the one that matters is this one
+    // -- default_event_log_path resolves LMP_EVENT_LOG and $HOME, and a caller that
+    // re-derived it under a different environment would silently read an empty file.
+    [[nodiscard]] const std::string& path() const noexcept { return path_; }
+
   private:
     void rotate();
 

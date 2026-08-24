@@ -199,21 +199,46 @@ class RepeatDetector {
 // shell call, each compile error is a read and an edit.
 //
 // 200 turns is the ceiling for a mission of that size with room to iterate, and it is
-// still a ceiling: a run that hangs or loops is caught by the wall clock long before, and
-// the repeat cache starves the cheap loops of anything to do.
+// still a ceiling: a run that hangs is caught by stall_seconds long before, and the repeat
+// cache starves the cheap loops of anything to do.
 //
-// The two must move TOGETHER. Turns measured 12.1-12.7 s on the KV mission, so 200 turns
-// is ~2500 s of wall clock; the old 1800 s would have ended every long run on time before
-// it ended on turns -- swapping one arbitrary cutoff for another while looking like a fix.
-// 4800 s is ~1.9x the measured rate, which absorbs the slow turns (a 3000-token write is
-// ~40 s) without letting a genuinely hung run sit forever.
+// "HUNG" AND "LONG" ARE DIFFERENT QUESTIONS AND GET DIFFERENT DIALS. They shared one for a
+// while, and the sharing is what broke: wall_clock_seconds was calibrated at 12.1-12.7 s
+// per turn on the KV mission, so 4800 s was ~1.9x the room 200 turns needed. Then turns
+// got expensive for a reason that has nothing to do with hanging. On a 2026-08-17 run
+// against a vision-enabled 27B, the context budget clamped to 46,797 tokens, compaction
+// fired every ~5 turns, and every compaction costs one full re-prefill -- 13 of 13,
+// median 84 s of time-to-first-token. 40% of the clock went to re-prefill and the run
+// ended `wall_clock` on turn 48 of 200, having done nothing wrong. The operator's only
+// move was to retype `continue`, repeatedly, which is the harness asking a human to do
+// its accounting.
 //
-// Both are operator-settable -- lmPipe.maxIterations and lmPipe.wallClockSeconds, live in
-// the sidebar drawer -- and the drawer says which of the two will stop the run first,
-// because a raised turn limit under an unraised clock does nothing at all.
+// So the clock now measures the thing it was always FOR. A run that has completed a turn
+// recently is working, however long it has been working; a run that has not completed one
+// in stall_seconds is stuck, however briefly it has been running.
+//
+//   max_iterations   how much work a run may do        -- the ceiling that should bind
+//   stall_seconds    how long it may do nothing        -- the hang detector
+//   wall_clock_seconds  how long it may exist at all   -- runaway stop of last resort
+//
+// stall_seconds = 1200 is sized off the longest LEGITIMATE turn, not off an average. The
+// worst observed time-to-first-token is 129 s; a 4096-token generation at the measured
+// 16 tok/s adds ~256 s; a shell tool can hold its own 300 s (session.cpp). That is ~700 s
+// of honest single turn, so 1200 s clears it with room and still ends a wedged run inside
+// twenty minutes.
+//
+// wall_clock_seconds = 14400 restores the property the old comment was right to insist on:
+// the turn ceiling, not the clock, decides. 200 turns at the ~60 s/turn this workload
+// actually costs is ~12,000 s, so four hours sits above a full-budget run rather than
+// cutting it at a quarter.
+//
+// All three are operator-settable -- lmPipe.maxIterations, lmPipe.stallSeconds and
+// lmPipe.wallClockSeconds, live in the sidebar drawer -- and the drawer says which will
+// stop the run first, because a raised turn limit under an unraised clock does nothing.
 struct Budget {
     int max_iterations = 200;
-    int wall_clock_seconds = 4800;
+    int wall_clock_seconds = 14400;
+    int stall_seconds = 1200;
 };
 
 // How many iterations before the limit the run is told, once, how much room is left.

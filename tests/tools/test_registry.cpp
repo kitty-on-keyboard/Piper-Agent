@@ -591,7 +591,13 @@ TEST(code_intel_sink_failure_falls_back_to_ranked_walk) {
 }
 
 // --- G4: the prompt read budget ---------------------------------------------
-TEST(read_file_over_the_prompt_budget_fails_honestly) {
+//
+// This case USED to assert that the read failed. It was a fair contract -- the numbers
+// were real and the remedy was named -- and it was still the most expensive line in the
+// log: 35% of every failed tool call since 2026-08-08, each one a turn spent being told
+// a size the harness measured before it answered. The honesty is kept and the refusal is
+// not: same numbers, same remedy, plus the head of the file.
+TEST(read_file_over_the_prompt_budget_truncates_honestly) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root); // max_model_read_bytes = 16384
     std::string big;
@@ -601,12 +607,14 @@ TEST(read_file_over_the_prompt_budget_fails_honestly) {
     (void)reg.execute("write_file", args({{"path", "big.txt"}, {"content", big}}), 1);
 
     const ToolResult r = reg.execute("read_file", args({{"path", "big.txt"}}), 1);
-    CHECK(!r.ok());
-    // The REAL numbers, and the tool to use instead -- which is what read_file's
-    // description has always claimed and, until the budget was split, did not do.
+    CHECK(r.ok());
+    // The REAL numbers, and the tool to continue with.
     CHECK(r.summary.find(std::to_string(big.size())) != std::string::npos);
-    CHECK(r.summary.find("4001 lines") != std::string::npos);
+    // 4000, not 4001: the trailing newline does not open a line to read.
+    CHECK(r.summary.find("of 4000") != std::string::npos);
     CHECK(r.summary.find("read_slice") != std::string::npos);
+    // Content, not just an explanation.
+    CHECK(r.summary.find("some line of source") != std::string::npos);
 }
 
 TEST(read_slice_over_the_budget_says_where_to_resume) {
@@ -1562,4 +1570,77 @@ TEST(view_image_declares_itself_read_only) {
     CHECK(!d->mutates_workspace);
     CHECK(!d->executes_commands);
     CHECK(!d->irreversible);
+}
+
+// --- the two commonest wasted turns in the log (2026-08-18) ----------------
+//
+// Measured across every failed tool call since 2026-08-08: an over-budget `read_file`
+// was 35% of them and a path that does not exist was 22%. Both were answered with a
+// refusal that spent a whole turn -- ~70 s of model time -- delivering a fact the harness
+// already had. Both now answer with the fact itself.
+TEST(a_file_over_the_prompt_budget_is_truncated_rather_than_refused) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    // Comfortably over the 16 KiB model-read budget, with countable lines.
+    std::string body;
+    for (int i = 1; i <= 4000; ++i) {
+        body += "line " + std::to_string(i) + "\n";
+    }
+    REQUIRE(lmp::platform::write_file_atomic(root + "/big.txt", body).ok());
+
+    const ToolResult r = reg.execute("read_file", args({{"path", "big.txt"}}), 1);
+
+    // SUCCEEDS. The turn buys content, not an instruction to try a different tool.
+    CHECK(r.ok());
+    CHECK(r.summary.find("line 1\n") != std::string::npos);
+    // And is honest about being partial, in the terms the next call needs.
+    CHECK(r.summary.find("TRUNCATED") != std::string::npos);
+    CHECK(r.summary.find("of 4000") != std::string::npos);
+    CHECK(r.summary.find("read_slice") != std::string::npos);
+    // Never more than the budget, or the truncation would not have done its job.
+    CHECK(r.summary.size() < 24U * 1024U);
+}
+
+// The hazard the truncation must not open: a partial read cannot be a licence to replace
+// the whole file. If this ever passes, a model that read the top of a 4000-line file can
+// overwrite it with the 300 lines it saw.
+TEST(a_truncated_read_does_not_permit_a_whole_file_overwrite) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    std::string body;
+    for (int i = 1; i <= 4000; ++i) {
+        body += "line " + std::to_string(i) + "\n";
+    }
+    REQUIRE(lmp::platform::write_file_atomic(root + "/big.txt", body).ok());
+
+    REQUIRE(reg.execute("read_file", args({{"path", "big.txt"}}), 1).ok());
+    const ToolResult w =
+        reg.execute("write_file", args({{"path", "big.txt"}, {"content", "gone\n"}}), 1);
+    CHECK(!w.ok());
+    // And the file is untouched.
+    CHECK(lmp::platform::read_file_whole(root + "/big.txt", 1U << 20).bytes == body);
+}
+
+TEST(a_missing_path_is_told_where_the_file_actually_is) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    // Through the tool, so the intermediate directories are created for us.
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "game/scripts/hud.gd"}, {"content", "extends Node\n"}}),
+                        1)
+                .ok());
+
+    // The model's commonest miss: the bare basename, with the real file one or more
+    // directories down.
+    const ToolResult r = reg.execute("read_file", args({{"path", "hud.gd"}}), 1);
+    CHECK(!r.ok());
+    CHECK(r.summary.find("game/scripts/hud.gd") != std::string::npos);
+
+    // And when there is genuinely nothing by that name, it says THAT rather than
+    // suggesting something wrong.
+    const ToolResult none = reg.execute("read_file", args({{"path", "nowhere.gd"}}), 1);
+    CHECK(!none.ok());
+    CHECK(none.summary.find("Nothing by that name") != std::string::npos);
 }

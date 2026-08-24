@@ -412,6 +412,11 @@ class Registry {
     // read_many so a batch cannot drift from the single-path tool.
     [[nodiscard]] ToolResult read_one_file(const std::string& path);
 
+    // "Not found" plus WHERE IT ACTUALLY IS, when the basename matches something in the
+    // tree. Empty when there is no confident answer. See the definition for the measured
+    // cost of the turn this saves.
+    [[nodiscard]] std::string suggest_paths_for(const std::string& path) const;
+
     // Runs `git <args>` in the workspace under the same sandbox as any other command.
     // `args` is composed by the registry, never supplied by the model.
     [[nodiscard]] ToolResult run_git(const std::string& args, int approved_tier);

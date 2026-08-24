@@ -9,7 +9,7 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 47
+count 49
 
 test_agent_step
 test_arena
@@ -57,10 +57,12 @@ test_session
 test_syntax_check
 test_ratchets_falsifiable
 test_spsc_channel
+test_run_id
+test_transcript
 test_transport
 
 # Real-model tests are labelled `realmodel` and excluded from the gate (S11.6). They also
 # must never run in parallel: concurrent large model loads exhaust unified memory and take
 # the machine down. Zero until phase 3 lands the MLX backend; the day it does, this pin
 # fails and someone has to state the new number rather than discover it later.
-realmodel_count 8
+realmodel_count 9

@@ -519,6 +519,34 @@ bool is_content_read(const std::string& tool) {
     return tool == "read_file" || tool == "read_slice";
 }
 
+// Reads whose payload is file CONTENT, and therefore worth eliding when the context is
+// already holding it verbatim. Wider than is_content_read on purpose: `read_many` carries
+// no `path` parameter, so it can never take the collapse path -- and it is the single
+// largest source of context growth in the log (47%, median 8,198 tokens a call). Excluding
+// it from the cheap fix because it does not fit the expensive one would be backwards.
+bool is_bulk_read(const std::string& tool) {
+    return is_content_read(tool) || tool == "read_many";
+}
+
+// Below this the reference costs more than the bytes it replaces.
+constexpr std::size_t kMinElideBytes = 512;
+
+// WHAT A REDUNDANT RE-READ IS ANSWERED WITH, in place of repeating the bytes.
+//
+// This is deliberately NOT a refusal, and the difference is the whole design. The read
+// RAN: the file was opened and compared this instant, and the answer -- "identical to the
+// copy you already have" -- is a fresh observation, not a rebuff. Nothing is withheld that
+// the run does not already hold, and the last sentence is the escape hatch for the one
+// case that can go wrong (the earlier copy trimmed away by a later compaction), which
+// resolves itself because the next read finds no live copy and serves the full text.
+std::string elision_note(const std::string& what) {
+    return "[Note: " + what +
+           " was re-read just now and is byte-for-byte identical to the copy already in "
+           "this conversation, so the harness has not repeated the contents here. That "
+           "earlier copy is current -- use it. If you cannot see it, read the file again "
+           "and the full text will be returned.]";
+}
+
 } // namespace
 
 // The build command this workspace obviously has, or empty when it is not obvious.
@@ -724,6 +752,41 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     const std::size_t open = static_cast<std::size_t>(std::count_if(
         items.begin(), items.end(), [](const context::ChecklistItem& c) { return !c.done; }));
     const std::size_t total = items.size();
+
+    // SAY SO WHEN THE LIST DID NOT CHANGE. Resending the identical checklist is the single
+    // most common thing a stalled run does -- 54% of the 135 `plan` calls across the 14
+    // stalled runs since 2026-08-08 -- and the reply it got back was
+    // "checklist set: 3/17 done", which is what a plan that DID something says. The model
+    // has no way to tell the two apart, so it reads a no-op as a working turn and does it
+    // again.
+    //
+    // Reported as a SUCCESS and not an error, deliberately, and the distinction is the
+    // whole reason this is here rather than in the refusal block above. A refused call is
+    // `ToolCallRefused`, which is exempt from the inert counter AND resets the plan-only
+    // counter -- so turning the commonest no-op in the log into an error would have
+    // removed it from both detectors and made the spin cheaper, not dearer. Kept as a
+    // successful display-only call, it still increments consecutive_plan_only_turns_ and
+    // still cannot reset the inert streak, and now it also tells the model what happened.
+    const bool unchanged = [&] {
+        const std::vector<context::ChecklistItem>& now = ctx_.checklist();
+        if (now.size() != items.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < now.size(); ++i) {
+            if (now[i].done != items[i].done || now[i].text != items[i].text) {
+                return false;
+            }
+        }
+        return true;
+    }();
+    std::string next_open;
+    for (const context::ChecklistItem& c : items) {
+        if (!c.done) {
+            next_open = c.text;
+            break;
+        }
+    }
+
     ctx_.set_checklist(std::move(items));
     emit("plan", {{"items", std::to_string(total)}, {"open", std::to_string(open)}});
     // THE PARSED ITEMS, not just how many. `plan` reports a count, and a count is exactly
@@ -745,6 +808,19 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     }
     if (observer_.on_checklist) {
         observer_.on_checklist(ctx_.checklist());
+    }
+    if (unchanged) {
+        emit("plan_unchanged", {{"items", std::to_string(total)},
+                                {"open", std::to_string(open)}});
+        return {true,
+                "the checklist you sent is IDENTICAL to the one already showing -- " +
+                    std::to_string(total - open) + "/" + std::to_string(total) +
+                    " done, nothing ticked, nothing added. This turn changed nothing. "
+                    "The panel already has this list; do not send it again until an item "
+                    "actually lands." +
+                    (next_open.empty()
+                         ? std::string(" Every item is ticked: say what you did and finish.")
+                         : " Do the next open item NOW: " + next_open)};
     }
     return {true, "checklist set: " + std::to_string(total - open) + "/" +
                       std::to_string(total) + " done"};
@@ -1021,6 +1097,12 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           {"spec_drafted", std::to_string(turn.generation.spec_drafted)},
           {"spec_accepted", std::to_string(turn.generation.spec_accepted)},
           {"spec_abandoned", std::to_string(turn.generation.spec_abandoned)},
+          // Beside ttft_ms deliberately: these are the bytes the allocator gave back
+          // immediately BEFORE the prefill that ttft_ms times, so the cost of the reclaim
+          // and its benefit are on one line of one event. Non-zero only on a full
+          // re-prefill. See the Reset arm of MlxBackend::generate.
+          {"cache_reclaimed_bytes",
+           std::to_string(turn.generation.cache_reclaimed_bytes)},
           // THE BACKEND'S OWN ACCOUNT OF WHY IT STOPPED, which until now went nowhere.
           // `status` said BackendError and the string that explains it -- the only thing
           // carrying the state the failure happened in -- was dropped on the floor. Two
@@ -1354,6 +1436,49 @@ bool Agent::turn_made_progress(const TurnResult& turn) noexcept {
 // A call with no prior is new by definition. A FAILED call is treated as new -- an error
 // is information, and two identical failures in a row are caught by the inert-turn count
 // rather than by pretending the second one said nothing.
+// Answer a byte-identical re-read with a reference instead of the bytes.
+//
+// PREVENTION, WHERE collapse_duplicate_read IS CURE, and the asymmetry is the point. The
+// collapse rewrites a record already inside the KV-cached prefix, so it costs a full
+// re-prefill; this appends a short note and rewrites nothing, so it costs zero. Measured
+// on the log this was built from: reads are 84.5% of all context growth, and 1,478,543
+// bytes of it -- about 422k tokens, ~16% of everything the context ever grew by -- was
+// content already sitting in the prompt verbatim.
+//
+// THE THREE GUARDS, each closing a way this becomes a lie:
+//
+//  1. The bytes must be LIVE in the context right now (has_observation). A reference to a
+//     copy that was never there, or has already been trimmed, is worse than the bytes.
+//  2. The context must hold no STALE copy of the same path. If it does, the run is holding
+//     contradictory versions and needs note_stale_copies to say which is real -- so fall
+//     through to the existing machinery rather than adding a reference to the confusion.
+//  3. The payload must be big enough to be worth a sentence.
+//
+// What this does NOT do is predict staleness. The file was read; the bytes were compared;
+// identical bytes cannot be out of date. That is the same argument byte-identity collapse
+// rests on, and it is why there is no freshness rule here to get wrong.
+bool Agent::elide_redundant_reread(const std::string& name,
+                                   const std::vector<tools::ToolParamValue>& params,
+                                   tools::ToolResult& result) {
+    if (!is_bulk_read(name) || !result.ok()) {
+        return false;
+    }
+    const std::string current = without_cache_note(result.summary);
+    if (current.size() < kMinElideBytes || !ctx_.has_observation(current)) {
+        return false;
+    }
+    const std::string path = param_value(params, "path");
+    if (!path.empty() && ctx_.stale_copies_of_path(path, current) > 0) {
+        return false;
+    }
+    emit("reread_elided", {{"tool", name},
+                           {"path", path},
+                           {"bytes_not_repeated", std::to_string(current.size())}});
+    result.summary = elision_note(path.empty() ? "that read" : path);
+    result.content_elided = true;
+    return true;
+}
+
 bool Agent::observation_is_new(const std::string& name,
                                const std::vector<tools::ToolParamValue>& params,
                                const tools::ToolResult& result) const {
@@ -1399,6 +1524,7 @@ bool Agent::adopt_readonly_result(const std::string& name,
     // Annotate before collapse so the prior observation is still byte-identical to the
     // fresh result when measuring redundant re-reads.
     const std::size_t prior_seen = repeats_.seen_count(name, params);
+    bool elided = false;
     if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
         const bool unchanged = !observation_is_new(name, params, result);
         emit("repeat_reread",
@@ -1413,17 +1539,29 @@ bool Agent::adopt_readonly_result(const std::string& name,
                       {"bytes", std::to_string(result.bytes_read)},
                       {"path", param_value(params, "path")}});
             }
-            result.summary += kRepeatNote;
+            elided = elide_redundant_reread(name, params, result);
+            if (!elided) {
+                result.summary += kRepeatNote;
+            }
         }
     }
-    // Same duplicate collapse as the serial path. Safe here for the same reason this path
-    // exists at all: a call is only eligible for it if it mutates nothing and executes
-    // nothing, and the collapse touches only records already in the context.
-    collapse_duplicate_read(name, params, result);
-    // LAST: the two mechanisms above both compare against the un-annotated bytes.
-    if (is_content_read(name) && result.ok()) {
-        note_stale_copies(ctx_, param_value(params, "path"),
-                          without_cache_note(result.summary), result);
+    // Both of these are skipped when the bytes were elided, and neither is merely
+    // redundant then -- they would be WRONG. The collapse would supersede the one live
+    // verbatim copy, leaving the run holding a reference and nothing to reference; and
+    // note_stale_copies compares the context against `result.summary`, which is now the
+    // note, so every real copy of the file would be reported as out of date. That second
+    // failure has happened before, from a note added ahead of a comparison rather than
+    // after one.
+    if (!elided) {
+        // Same duplicate collapse as the serial path. Safe here for the same reason this
+        // path exists at all: a call is only eligible for it if it mutates nothing and
+        // executes nothing, and the collapse touches only records already in the context.
+        collapse_duplicate_read(name, params, result);
+        // LAST: the two mechanisms above both compare against the un-annotated bytes.
+        if (is_content_read(name) && result.ok()) {
+            note_stale_copies(ctx_, param_value(params, "path"),
+                              without_cache_note(result.summary), result);
+        }
     }
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
@@ -1471,29 +1609,33 @@ void Agent::collapse_duplicate_read(const std::string& name,
     if (!is_content_read(name) || !result.ok()) {
         return;
     }
-    // ONLY UNDER CONTEXT PRESSURE -- because this rewrites HISTORY, and rewritten history
-    // is a KV cache thrown away.
+    // THIS NO LONGER APPLIES THE COLLAPSE. It decides one is warranted and QUEUES it, and
+    // compact_to_budget() applies the queue at the moment it is already rewriting history.
     //
-    // The collapse edits a turn record that sits INSIDE the stable prefix the backend
-    // checkpoints. plan_turn_reuse() finds the divergence at the rewritten message and
-    // correctly returns a full re-prefill from token zero. Nothing is stale and nothing
-    // is wrong; the saving is simply bought with the entire prefill.
+    // Why the threshold could not be tuned into working. The collapse edits a turn record
+    // INSIDE the stable prefix the backend checkpoints, so plan_turn_reuse() finds the
+    // divergence and correctly re-prefills from token zero. That was known and accepted;
+    // the mark existed to fire only when the saving justified the prefill. It never did:
     //
-    // MEASURED, and the separation is total:
+    //     turn after a collapse    (n=50)   median TTFT  58.8 s   zero-reuse 50/50
+    //     turn after a compaction  (n=47)   median TTFT  43.7 s   zero-reuse 47/47
+    //     neither                (n=1126)   median TTFT   1.7 s
     //
-    //     turns where a collapse fired (n=15)   median TTFT  21,011 ms
-    //     turns where none fired      (n=22)    median TTFT     940 ms
+    // A collapse cost MORE than the compaction it was supposed to spare -- it re-prefills
+    // the untrimmed context, where a compaction re-prefills the trimmed one -- and it did
+    // not spare it: both fired, 50 and 47 times, in the same population. 2,993 s of wall
+    // clock went into post-collapse re-prefills to reclaim 577 KB, about 3,058 tokens a
+    // time, which defers a compaction by roughly 1.3 turns and is worth single-digit
+    // seconds. And the old mark could only ever fire in the wasteful band: **54 of 54
+    // collapses landed between 55% and 72% of budget**, median 63%, never once at the 75%
+    // where a compaction was due -- because a prompt that reaches 75% is compacted at
+    // render, so `last_prompt_tokens_` cannot exceed it. The gate was unreachable in the
+    // only region where it paid.
     //
-    // -- a 22x penalty, with no overlap between the two groups. The run peaked at 34,096
-    // tokens against a 96,000-token budget, so all 33 collapses were reclaiming a few KB
-    // of a context that was two thirds empty. Below the mark a compaction would trim TO,
-    // the bytes are free and the cache is worth more; above it, a collapse spares the run
-    // a compaction that costs the same prefill AND destroys information the collapse
-    // keeps -- so at that point it is strictly the better of the two.
-    const auto budget = static_cast<std::size_t>(std::max(1, config_.context_budget_tokens));
-    if (last_prompt_tokens_ <= budget * kCollapseAtPercent / 100) {
-        return;
-    }
+    // Queuing fixes the trade completely rather than moving it. At compaction the prefill
+    // is already lost, so the collapse is free -- and it now runs BEFORE the trim, so the
+    // bytes it reclaims are bytes the trim does not have to drop. The mechanism went from
+    // costing a re-prefill to saving turns of real history.
 
     // Below this, the pointer costs more than the bytes it replaces and the collapse is
     // pure loss -- and short results are things like "(empty file)", where two identical
@@ -1505,6 +1647,32 @@ void Agent::collapse_duplicate_read(const std::string& name,
     const std::string path = param_value(params, "path");
     const std::string range = read_range(name, params);
     const std::string current = without_cache_note(result.summary);
+    // One entry per path. A later read of the same file is the copy every stale snapshot
+    // must be measured against, so it replaces any earlier plan rather than queuing beside
+    // it -- two entries for one path would have the second find nothing left to supersede.
+    for (auto it = pending_collapses_.begin(); it != pending_collapses_.end(); ++it) {
+        if (it->path == path) {
+            pending_collapses_.erase(it);
+            break;
+        }
+    }
+    pending_collapses_.push_back({name, path, range, current});
+}
+
+std::size_t Agent::apply_pending_collapses() {
+    std::size_t total = 0;
+    for (const PendingCollapse& pc : pending_collapses_) {
+        total += apply_one_collapse(pc);
+    }
+    pending_collapses_.clear();
+    return total;
+}
+
+std::size_t Agent::apply_one_collapse(const PendingCollapse& pc) {
+    const std::string& name = pc.tool;
+    const std::string& path = pc.path;
+    const std::string& range = pc.range;
+    const std::string& current = pc.current;
     std::size_t collapsed = ctx_.supersede_duplicate_observation(
         current, "(" + path + (range.empty() ? "" : " lines " + range) +
                      " was read again below and is unchanged; this earlier identical copy "
@@ -1522,7 +1690,7 @@ void Agent::collapse_duplicate_read(const std::string& name,
             " was edited after this snapshot was taken and read again below; this earlier "
             "copy is out of date and has been dropped. The current content is further down.)");
     if (collapsed == 0) {
-        return;
+        return 0;
     }
     // The saving, named. This is the number that justifies the mechanism, and if it stops
     // being large the mechanism should go rather than be tuned.
@@ -1531,7 +1699,8 @@ void Agent::collapse_duplicate_read(const std::string& name,
           {"path", path},
           {"range", range.empty() ? "<whole-file>" : range},
           {"copies_collapsed", std::to_string(collapsed)},
-          {"bytes_reclaimed", std::to_string(collapsed * result.summary.size())}});
+          {"bytes_reclaimed", std::to_string(collapsed * current.size())}});
+    return collapsed;
 }
 
 tools::ToolResult Agent::dispatch_call(const std::string& name,
@@ -1685,7 +1854,10 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
               {"writes", std::to_string(ctx_.workspace_writes())}});
     }
 
-    // Annotate a revalidated repeat; never withhold the fresh bytes.
+    // Annotate a revalidated repeat. The bytes are withheld in exactly one case -- when
+    // the context is already holding them, verbatim and unsuperseded -- and then a
+    // reference stands in their place; see elide_redundant_reread().
+    bool elided = false;
     if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
         const bool unchanged = !observation_is_new(name, params, result);
         emit("repeat_reread",
@@ -1700,11 +1872,14 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
                       {"bytes", std::to_string(result.bytes_read)},
                       {"path", param_value(params, "path")}});
             }
-            // THE CONSTANT, not a copy of its text. without_cache_note() strips this exact
-            // string back off before the summary is cached, so a literal here that drifts
-            // from kRepeatNote silently stops being stripped and the notes stack up: two on
-            // the third repeat, three on the fourth.
-            result.summary += kRepeatNote;
+            elided = elide_redundant_reread(name, params, result);
+            if (!elided) {
+                // THE CONSTANT, not a copy of its text. without_cache_note() strips this
+                // exact string back off before the summary is cached, so a literal here
+                // that drifts from kRepeatNote silently stops being stripped and the notes
+                // stack up: two on the third repeat, three on the fourth.
+                result.summary += kRepeatNote;
+            }
         }
     }
 
@@ -1789,11 +1964,16 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
 
     // The duplicate collapse, on the SAME success condition as everything above it: a call
     // that was refused or failed read nothing, so there is nothing to have duplicated.
-    collapse_duplicate_read(name, params, result);
-    // LAST: the two mechanisms above both compare against the un-annotated bytes.
-    if (is_content_read(name) && result.ok()) {
-        note_stale_copies(ctx_, param_value(params, "path"),
-                          without_cache_note(result.summary), result);
+    // Skipped when the bytes were elided: the collapse would supersede the only live
+    // verbatim copy, and the stale note would measure every real copy against the
+    // reference that replaced them. See elide_redundant_reread().
+    if (!elided) {
+        collapse_duplicate_read(name, params, result);
+        // LAST: the two mechanisms above both compare against the un-annotated bytes.
+        if (is_content_read(name) && result.ok()) {
+            note_stale_copies(ctx_, param_value(params, "path"),
+                              without_cache_note(result.summary), result);
+        }
     }
 
     emit("tool_result", {{"tool", name},
@@ -1846,6 +2026,22 @@ void Agent::compact_to_budget() {
     std::size_t tokens = prompt_tokens();
     if (tokens <= high_water) {
         return;
+    }
+    // FIRST, and this order is the whole point. Every queued collapse rewrites history,
+    // which costs a full re-prefill -- but the trim below is about to cost exactly that
+    // anyway, so applying them here is free. It also runs BEFORE the trim measures, so
+    // bytes reclaimed from duplicate and stale copies are bytes the trim does not have to
+    // buy by dropping a real turn. See collapse_duplicate_read for what this used to cost.
+    if (apply_pending_collapses() > 0) {
+        tokens = prompt_tokens();
+        if (tokens <= high_water) {
+            // The collapse alone got us under. No turn needs to be dropped at all, and the
+            // run keeps history it would otherwise have lost.
+            emit("compaction_avoided_by_collapse",
+                 {{"tokens_after", std::to_string(tokens)},
+                  {"high_water", std::to_string(high_water)}});
+            return;
+        }
     }
     const std::size_t before = tokens;
     const std::size_t turns_before = ctx_.recent().size();
@@ -2030,6 +2226,9 @@ RunReport Agent::run(const model::CancelToken& cancel) {
     inert_streak_had_tool_call_ = false;
     executed_tool_calls_in_run_ = 0;
     const auto started = clock_.mono();
+    // Moves on every completed turn. The stall dial is measured against THIS, not against
+    // `started` -- see the budget block below and loop::Budget.
+    auto last_progress = started;
     // Run-scoped so shell / git / MCP observe the same token from every execute(),
     // including the parallel read path. Cleared on every exit from this function.
     registry_.set_cancel_token(&cancel);
@@ -2048,16 +2247,31 @@ RunReport Agent::run(const model::CancelToken& cancel) {
 
         // --- budgets, checked before a turn is spent -----------------------
         //
-        // Ceilings on a runaway, not judgements. Which of the two fired is named in the
-        // reason, because "budget_exhausted" once meant two different limits and the
-        // wrong dial got raised.
+        // Ceilings on a runaway, not judgements. Which one fired is named in the reason,
+        // because "budget_exhausted" once meant two different limits and the wrong dial
+        // got raised. `wall_clock` had since acquired the same ambiguity from the other
+        // direction -- it ended runs that were hung AND runs that were merely long, under
+        // one name -- so the hang now has its own dial and its own reason. See
+        // loop::Budget for the run that forced the split.
         if (report.iterations >= config_.budget.max_iterations) {
             report.termination_reason = "max_turns";
             break;
         }
-        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                 clock_.mono() - started)
-                                 .count();
+        const auto now = clock_.mono();
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::seconds>(now - started).count();
+        // Since the last turn that COMPLETED, not since the run began. A turn that is
+        // still running has not stalled, however long the run has been going.
+        const auto since_progress =
+            std::chrono::duration_cast<std::chrono::seconds>(now - last_progress).count();
+        if (since_progress >= config_.budget.stall_seconds) {
+            report.termination_reason = "stalled_no_turn";
+            emit("stalled_no_turn",
+                 {{"seconds_without_a_turn", std::to_string(since_progress)},
+                  {"limit_seconds", std::to_string(config_.budget.stall_seconds)},
+                  {"iterations", std::to_string(report.iterations)}});
+            break;
+        }
         if (elapsed >= config_.budget.wall_clock_seconds) {
             report.termination_reason = "wall_clock";
             break;
@@ -2085,6 +2299,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         const std::size_t writes_before_turn = ctx_.workspace_writes();
         TurnResult turn = step(cancel);
         ++report.iterations;
+        // A turn came back, so the run is not wedged -- whatever the turn decided, and
+        // however long it took to decide it. Taken after step() rather than before, so a
+        // turn that takes ten minutes is measured as progress once, not as ten minutes of
+        // silence.
+        last_progress = clock_.mono();
 
         // ONE LINE PER TURN, always. The log had every ingredient of a turn and no record
         // of the turn itself, so reconstructing "what did iteration 41 actually do" meant
@@ -2130,7 +2349,12 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         rec.tool_call_text = call_surface_form(turn.tool_name, turn.tool_params);
         // Whole-file reads are SNAPSHOTS, and the context has to be able to find the ones
         // a later edit has invalidated. See ContextStore::stale_copies_of_path.
-        if (is_content_read(turn.tool_name) && turn.tool_result.ok()) {
+        // ...but an elided re-read is a POINTER to a snapshot, not one. Claiming a path
+        // for it makes the next read of that file compare the pointer's text against the
+        // file's and report every real copy as out of date -- measured the first time this
+        // was written without the guard.
+        if (is_content_read(turn.tool_name) && turn.tool_result.ok() &&
+            !turn.tool_result.content_elided) {
             rec.observed_path = param_value(turn.tool_params, "path");
         }
         rec.observation = turn.tool_result.summary;
@@ -2216,15 +2440,26 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // A turn that called only `plan` is not progress, and a run that keeps doing it
         // is not working -- it is performing progress for the operator's panel. The
         // inert counter alone cannot see it because any real edit between two `plan`
-        // calls resets the streak; this counter does not reset on an edit, only on a
-        // turn that did something else entirely.
+        // calls resets the streak.
+        //
+        // RESET ON PROGRESS, NOT ON ACTIVITY. This used to reset on any turn that was not
+        // a display-only call, which sounds equivalent and is not: it handed the counter
+        // to any tool call at all, including one that learned nothing. The shape that
+        // actually occurs is plan / stale re-read / plan / stale re-read, and it defeated
+        // both detectors at once -- the inert counter because `plan` is not consecutive
+        // with itself, this one because a re-read is "something else entirely".
+        //
+        // Measured across the 14 stalled runs in events.jsonl since 2026-08-08: 135 `plan`
+        // calls, 24.2% of every turn spent (against 4.4% in the runs that ended), 54% of
+        // them leaving the checklist byte-identical -- and 61 of the streaks were a single
+        // call, so the >= 3 guard below almost never fired. ~157 minutes of model time
+        // restating lists that had not changed.
         const bool plan_only_turn =
             turn.outcome == Outcome::ToolCallExecuted && turn.extra_calls.empty() &&
             is_display_only(turn.tool_name);
         if (plan_only_turn) {
             ++consecutive_plan_only_turns_;
-        } else if (turn.outcome != Outcome::ToolCallExecuted ||
-                   !is_display_only(turn.tool_name)) {
+        } else if (progressed) {
             consecutive_plan_only_turns_ = 0;
         }
 
@@ -2260,7 +2495,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             // showed one call and three tool_responses with nothing that produced them,
             // which is the same missing-call defect at four times the rate.
             er.tool_call_text = call_surface_form(extra.tool_name, extra.params);
-            if (is_content_read(extra.tool_name) && extra.result.ok()) {
+            if (is_content_read(extra.tool_name) && extra.result.ok() &&
+                !extra.result.content_elided) {
                 er.observed_path = param_value(extra.params, "path");
             }
             er.observation = extra.result.summary;
