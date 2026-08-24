@@ -60,7 +60,8 @@ inline mx::array switch_glu_impl(const mx::array& x,
                                  const std::string& gate_base,
                                  const std::string& up_base,
                                  const std::string& down_base,
-                                 const mx::array& indices) {
+                                 const mx::array& indices,
+                                 const std::string& gate_up_base) {
     // Both axes in one op, as mlx-lm's x[:, None, None, :] does. Two chained
     // expand_dims built two nodes where one will do. Note the axes are {-3, -2}, not
     // {-2, -2}: multi-axis expand_dims indexes into the OUTPUT shape, so the two
@@ -79,9 +80,32 @@ inline mx::array switch_glu_impl(const mx::array& x,
         idx_shape.assign(s.begin(), s.end());
     }
 
-    const mx::array x_up = switch_linear(work, ws, up_base, idx, do_sort);
-    const mx::array x_gate = switch_linear(work, ws, gate_base, idx, do_sort);
-    const mx::array activated = swiglu(x_gate, x_up);
+    // ONE gather_qmm where there were two. gate_proj and up_proj consume the same
+    // `work` rows and the same expert indices and differ only in their weights, so a
+    // checkpoint whose two matrices have been stacked along the output axis answers both
+    // in a single dispatch -- see fuse_expert_gate_up() in qwen35_moe_model.hpp, which
+    // builds the stacked entry at load and erases the halves.
+    //
+    // This reads the same bytes and computes the same products; the only thing that
+    // changes is how many kernel launches the step costs. That matters here and not in
+    // prefill: at decode this model gathers 8 of 256 experts for a single row, so
+    // gather_qmm is launch-latency-bound, and 40 layers x 1 saved launch is 40 fewer
+    // per token. Numerically it is a no-op -- each output row is an independent dot
+    // product and affine grouping runs along the INPUT axis, which concatenating output
+    // rows does not touch -- so the fused and unfused paths must agree bit for bit.
+    // tests/model/test_switch_glu_fusion.cpp asserts exactly that.
+    const bool fused = !gate_up_base.empty() && ws.is_quantized(gate_up_base);
+    const mx::array activated = [&] {
+        if (fused) {
+            const mx::array gu = switch_linear(work, ws, gate_up_base, idx, do_sort);
+            // gate first, then up -- the order fuse_expert_gate_up() concatenated in.
+            const std::vector<mx::array> half = mx::split(gu, 2, -1);
+            return swiglu(half[0], half[1]);
+        }
+        const mx::array x_up = switch_linear(work, ws, up_base, idx, do_sort);
+        const mx::array x_gate = switch_linear(work, ws, gate_base, idx, do_sort);
+        return swiglu(x_gate, x_up);
+    }();
     mx::array out = switch_linear(activated, ws, down_base, idx, do_sort);
 
     if (do_sort) {
@@ -90,13 +114,16 @@ inline mx::array switch_glu_impl(const mx::array& x,
     return mx::squeeze(out, -2);
 }
 
+// `gate_up_base` is optional: empty (the default) is the two-dispatch path, which is
+// what the diag drivers and any checkpoint that was not fused at load still take.
 inline mx::array switch_glu(const mx::array& x,
                             const WeightStore& ws,
                             const std::string& gate_base,
                             const std::string& up_base,
                             const std::string& down_base,
-                            const mx::array& indices) {
-    return switch_glu_impl(x, ws, gate_base, up_base, down_base, indices);
+                            const mx::array& indices,
+                            const std::string& gate_up_base = {}) {
+    return switch_glu_impl(x, ws, gate_base, up_base, down_base, indices, gate_up_base);
 }
 
 inline std::pair<mx::array, mx::array> moe_topk(const mx::array& gate_logits, int top_k, bool norm_topk) {

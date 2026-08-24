@@ -93,6 +93,12 @@ lmp_add_test(test_vision_tower SOURCES test_vision_tower.cpp LABELS realmodel
 lmp_stage_metallib(test_vision_tower)
 lmp_stage_metallib(test_kv_reuse_realmodel)
 lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK lmp_model simdjson TIMEOUT 900)
+# The gate/up fusion is a claim about arithmetic -- stacking two quantized weight matrices
+# on the OUTPUT axis cannot move an affine group boundary -- so it is asserted as exact
+# equality on synthetic experts rather than as a tolerance on the checkpoint. It needs
+# Metal but no weights, which is why it is `realmodel` yet finishes in milliseconds.
+lmp_add_test(test_switch_glu_fusion SOURCES test_switch_glu_fusion.cpp LABELS realmodel
+             LINK lmp_model simdjson TIMEOUT 120)
 lmp_stage_metallib(test_spec_cache)
 # Same relaxation mlx_backend.cpp and the diag driver carry: this TU includes the vendored
 # MLX numerics directly, to drive Qwen35MoeModel's cache API below the backend seam.
