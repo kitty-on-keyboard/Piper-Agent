@@ -40,6 +40,10 @@
       "loading",
       "ready",
       "failed"
+    ],
+    "NoticeSeverity": [
+      "warning",
+      "error"
     ]
   },
   "structs": {
@@ -123,8 +127,13 @@
         "type": "int"
       },
       {
-        "_comment": "Positive int32 only; negatives and overflows are refused at the sidecar boundary.",
+        "_comment": "Ceiling on a run's TOTAL duration. Positive int32 only; negatives and overflows are refused at the sidecar boundary. This is the runaway stop of last resort, not the dial that should normally end a run -- that is max_iterations. A run doing useful work for hours is not a fault, so this sits far above any honest run and stall_seconds catches the hangs.",
         "name": "wall_clock_seconds",
+        "type": "int"
+      },
+      {
+        "_comment": "Seconds a run may go WITHOUT COMPLETING A TURN before it is stopped, reported as `stalled_no_turn`. Positive int32 only. Separate from wall_clock_seconds because 'this run is hung' and 'this run is long' are different questions and one number cannot answer both -- conflating them is what ended productive 48-turn runs at a 200-turn budget and made the operator retype `continue`.",
+        "name": "stall_seconds",
         "type": "int"
       },
       {
@@ -264,6 +273,77 @@
       {
         "name": "compactions",
         "type": "int"
+      }
+    ],
+    "SessionSummary": [
+      {
+        "_comment": "The sidecar-minted run identity (see src/surface/run_id.hpp). Runs whose id is a legacy request counter are NOT listed: those ids collided across runs -- 97 runs over 6 values in the log this was built against -- so resuming one would splice unrelated conversations together.",
+        "name": "run_id",
+        "type": "string"
+      },
+      {
+        "name": "mission",
+        "type": "string"
+      },
+      {
+        "name": "workspace_root",
+        "type": "string"
+      },
+      {
+        "_comment": "Wall-clock nanoseconds at run_begin. Sent as the raw stamp rather than a formatted date because 'when' is a rendering decision and the surface already turns it into '3h ago'.",
+        "name": "started_wall_ns",
+        "type": "int"
+      },
+      {
+        "_comment": "A run_end was seen. Its ABSENCE is the interesting case -- the process died mid-run, which is what resume exists for -- so this is reported rather than folded into `resumable`.",
+        "name": "finished",
+        "type": "bool"
+      },
+      {
+        "name": "termination_reason",
+        "type": "string"
+      },
+      {
+        "name": "iterations",
+        "type": "int"
+      },
+      {
+        "name": "completed",
+        "type": "bool"
+      },
+      {
+        "_comment": "How many observations a resume would restore. Zero means there is nothing to return to however healthy the run looks, which is why the surface shows it.",
+        "name": "observations",
+        "type": "int"
+      }
+    ],
+    "TranscriptEntry": [
+      {
+        "_comment": "\"user\", \"assistant\" or \"tool\" -- the three shapes the pane already paints for a live run. Kept as a role string rather than split into three arrays so the ORDER of the conversation survives the wire, which is the whole point of sending it.",
+        "name": "role",
+        "type": "string"
+      },
+      {
+        "name": "text",
+        "type": "string"
+      },
+      {
+        "_comment": "Tool name and its one-line argument preview, both empty unless role is \"tool\". These are what the live turn row shows in its summary, so a resumed row can be built from the same parts.",
+        "name": "tool",
+        "type": "string"
+      },
+      {
+        "name": "args",
+        "type": "string"
+      },
+      {
+        "name": "is_error",
+        "type": "bool"
+      },
+      {
+        "_comment": "This entry's text was cut to fit. Said per entry rather than once for the whole transcript because the reader needs to know WHICH observation they are seeing part of -- a silently shortened file is indistinguishable from a short file.",
+        "name": "truncated",
+        "type": "bool"
       }
     ]
   },
@@ -502,6 +582,76 @@
         {
           "name": "ok",
           "type": "bool"
+        }
+      ]
+    },
+    "lmp/sessions": {
+      "_comment": "The runs this workspace can return to, newest first, derived from the event log rather than from a side index -- the log is what resume replays, so a session listed here can always be rebuilt. `workspace_root` filters to the caller's workspace: run history is per-repo, and offering another project's conversations would be both noise and a leak.",
+      "params": [
+        {
+          "name": "workspace_root",
+          "type": "string"
+        },
+        {
+          "_comment": "0 or absent means the sidecar's own default cap. A listing is a UI affordance, not a query API.",
+          "name": "limit",
+          "type": "int"
+        }
+      ],
+      "result": [
+        {
+          "name": "sessions",
+          "type": "SessionSummary",
+          "repeated": true
+        }
+      ]
+    },
+    "lmp/resume": {
+      "_comment": "Reload a previous run's conversation into this session WITHOUT re-executing any tool. The context is rebuilt from the event log; the run does not restart, so the operator sees the history and then continues it with lmp/message. Refused when the bound identity no longer matches (different workspace, model, protocol or tool schema) or when an edit was in flight when the run died -- resuming across either would put the model in a conversation about a world that no longer exists.",
+      "params": [
+        {
+          "name": "run_id",
+          "type": "string"
+        },
+        {
+          "_comment": "The same settings lmp/start takes: the model may not be loaded, and the resumed session has to run under a known configuration rather than whatever the last run left behind.",
+          "name": "settings",
+          "type": "RunSettings"
+        }
+      ],
+      "result": [
+        {
+          "name": "ok",
+          "type": "bool"
+        },
+        {
+          "_comment": "Empty on success; otherwise the refusal in the resume gate's own words, which name which bound field changed.",
+          "name": "why",
+          "type": "string"
+        },
+        {
+          "name": "run_id",
+          "type": "string"
+        },
+        {
+          "name": "mission",
+          "type": "string"
+        },
+        {
+          "_comment": "Observations restored into the context. The surface shows this because 'resumed' with a zero here is a real outcome and looks identical to success otherwise.",
+          "name": "turns_restored",
+          "type": "int"
+        },
+        {
+          "_comment": "The restored conversation, oldest first, for the pane to repaint. BOUNDED: a single observation in the real log reaches 708 KB, so entries are capped individually and the whole transcript is capped again, oldest entries dropped first. The model's context is unaffected -- this is only what the surface is shown.",
+          "name": "transcript",
+          "type": "TranscriptEntry",
+          "repeated": true
+        },
+        {
+          "_comment": "How many leading entries were dropped to fit the cap. Non-zero means the pane is showing the TAIL of a longer conversation, which it must say rather than imply the run began where the paint begins.",
+          "name": "omitted_leading",
+          "type": "int"
         }
       ]
     }
@@ -793,6 +943,33 @@
         "_comment": "Checklist items still open when the run ended. The checklist is the model's own progress display and holds no authority over the ending; this field reports what it said, so completed=true with unfinished_items>0 is visible to the human rather than resolved silently.",
         "name": "unfinished_items",
         "type": "int"
+      }
+    ],
+    "lmp/notice": [
+      {
+        "_comment": "A degradation the run SURVIVED, told to the operator instead of only to the event log. There is a class of these and they all failed the same way: the context journal not opening, an MCP server not connecting. Each is deliberately non-fatal -- wedging an agent because a disk is full or a server is down would be a worse trade -- and each was therefore invisible, because the only record was a line in a log nobody reads unless they already suspect something. A run that quietly lost its durable context behaves subtly worse for the rest of its life and never says so. This is the channel that says so.",
+        "name": "run_id",
+        "type": "string"
+      },
+      {
+        "_comment": "Stable machine-readable identifier, so a surface can decide how to render one without matching on prose.",
+        "name": "code",
+        "type": "string"
+      },
+      {
+        "_comment": "`warning` means the run continues with something switched off. `error` is reserved for a notice that also ends the run, so a surface can style the two differently without inspecting the code.",
+        "name": "severity",
+        "type": "NoticeSeverity"
+      },
+      {
+        "_comment": "What the notice is ABOUT -- a path, a server name. Separate from `detail` so a surface can show the short thing and keep the long one for a tooltip.",
+        "name": "subject",
+        "type": "string"
+      },
+      {
+        "_comment": "Verbatim underlying reason, never a paraphrase. \"unable to open database file\" tells an operator which of two causes they have; \"context unavailable\" does not.",
+        "name": "detail",
+        "type": "string"
       }
     ]
   }

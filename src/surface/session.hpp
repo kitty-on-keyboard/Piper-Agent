@@ -35,6 +35,11 @@ namespace lmp::surface {
 struct Session {
     std::string model_dir;
     std::string draft_model_dir;
+    // The identity of the run currently loaded into this session, minted by the sidecar at
+    // lmp/start (see run_id.hpp). Held HERE rather than taken from each message, because
+    // the sidecar is the only party that knows which run its context belongs to -- a
+    // client that sent the wrong one would append a turn to another run's history.
+    std::string run_id;
     std::string workspace;
     // From the checkpoint's text_config.max_position_embeddings. 0 when unknown (no
     // model loaded yet, or the field was absent). Copied into AgentConfig at run start

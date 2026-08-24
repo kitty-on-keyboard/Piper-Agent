@@ -70,6 +70,12 @@ inline constexpr const char* kReady = "ready";
 inline constexpr const char* kFailed = "failed";
 }
 
+// NoticeSeverity: crosses the wire as one of these literals.
+namespace noticeseverity_values {
+inline constexpr const char* kWarning = "warning";
+inline constexpr const char* kError = "error";
+}
+
 struct SamplingSettings {
     double temperature = 0.0;
     double top_p = 0.0;
@@ -134,6 +140,7 @@ struct RunSettings {
     SamplingSettings sampling;
     std::int64_t max_iterations = 0;
     std::int64_t wall_clock_seconds = 0;
+    std::int64_t stall_seconds = 0;
     std::int64_t sandbox_tier = 0;
     bool auto_approve_exec = false;
     bool auto_approve_writes = false;
@@ -170,6 +177,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"wall_clock_seconds\":";
     append_value(out, v.wall_clock_seconds);
+    out += ",";
+    out += "\"stall_seconds\":";
+    append_value(out, v.stall_seconds);
     out += ",";
     out += "\"sandbox_tier\":";
     append_value(out, v.sandbox_tier);
@@ -292,6 +302,78 @@ inline void append_value(std::string& out, const PerfSample& v) {
     out += "}";
 }
 
+struct SessionSummary {
+    std::string run_id;
+    std::string mission;
+    std::string workspace_root;
+    std::int64_t started_wall_ns = 0;
+    bool finished = false;
+    std::string termination_reason;
+    std::int64_t iterations = 0;
+    bool completed = false;
+    std::int64_t observations = 0;
+};
+inline void append_value(std::string& out, const SessionSummary& v) {
+    out += "{";
+    out += "\"run_id\":";
+    append_value(out, v.run_id);
+    out += ",";
+    out += "\"mission\":";
+    append_value(out, v.mission);
+    out += ",";
+    out += "\"workspace_root\":";
+    append_value(out, v.workspace_root);
+    out += ",";
+    out += "\"started_wall_ns\":";
+    append_value(out, v.started_wall_ns);
+    out += ",";
+    out += "\"finished\":";
+    append_value(out, v.finished);
+    out += ",";
+    out += "\"termination_reason\":";
+    append_value(out, v.termination_reason);
+    out += ",";
+    out += "\"iterations\":";
+    append_value(out, v.iterations);
+    out += ",";
+    out += "\"completed\":";
+    append_value(out, v.completed);
+    out += ",";
+    out += "\"observations\":";
+    append_value(out, v.observations);
+    out += "}";
+}
+
+struct TranscriptEntry {
+    std::string role;
+    std::string text;
+    std::string tool;
+    std::string args;
+    bool is_error = false;
+    bool truncated = false;
+};
+inline void append_value(std::string& out, const TranscriptEntry& v) {
+    out += "{";
+    out += "\"role\":";
+    append_value(out, v.role);
+    out += ",";
+    out += "\"text\":";
+    append_value(out, v.text);
+    out += ",";
+    out += "\"tool\":";
+    append_value(out, v.tool);
+    out += ",";
+    out += "\"args\":";
+    append_value(out, v.args);
+    out += ",";
+    out += "\"is_error\":";
+    append_value(out, v.is_error);
+    out += ",";
+    out += "\"truncated\":";
+    append_value(out, v.truncated);
+    out += "}";
+}
+
 // request "lmp/start"
 struct StartParams {
     std::string mission;
@@ -376,6 +458,30 @@ struct ShutdownParams {
 };
 struct ShutdownResult {
     bool ok = false;
+};
+
+// request "lmp/sessions"
+struct SessionsParams {
+    std::string workspace_root;
+    std::int64_t limit = 0;
+};
+struct SessionsResult {
+    std::vector<SessionSummary> sessions;
+};
+
+// request "lmp/resume"
+struct ResumeParams {
+    std::string run_id;
+    RunSettings settings;
+};
+struct ResumeResult {
+    bool ok = false;
+    std::string why;
+    std::string run_id;
+    std::string mission;
+    std::int64_t turns_restored = 0;
+    std::vector<TranscriptEntry> transcript;
+    std::int64_t omitted_leading = 0;
 };
 
 // notification "lmp/model_status"
@@ -717,6 +823,35 @@ struct RunEndNotification {
     out += ",";
     out += "\"unfinished_items\":";
     append_value(out, n.unfinished_items);
+    out += "}";
+    return out;
+}
+
+// notification "lmp/notice"
+struct NoticeNotification {
+    std::string run_id;
+    std::string code;
+    std::string severity;
+    std::string subject;
+    std::string detail;
+    static constexpr const char* kMethod = "lmp/notice";
+};
+[[nodiscard]] inline std::string to_json(const NoticeNotification& n) {
+    std::string out = "{";
+    out += "\"run_id\":";
+    append_value(out, n.run_id);
+    out += ",";
+    out += "\"code\":";
+    append_value(out, n.code);
+    out += ",";
+    out += "\"severity\":";
+    append_value(out, n.severity);
+    out += ",";
+    out += "\"subject\":";
+    append_value(out, n.subject);
+    out += ",";
+    out += "\"detail\":";
+    append_value(out, n.detail);
     out += "}";
     return out;
 }

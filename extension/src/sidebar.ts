@@ -23,8 +23,10 @@ import {
   CodeIntelNotification,
   PerfNotification,
   ModelStatusNotification,
+  NoticeNotification,
   PlanReadyNotification,
   RunEndNotification,
+  SessionSummary,
 } from "./protocol.generated";
 import { editPreconditionError } from "./edit_version";
 import { handleCodeIntel } from "./code_intel";
@@ -90,6 +92,20 @@ function extensionOf(name: string): string {
   const ext = (m ? m[1] : "").toLowerCase();
   const allowed = ["png", "jpg", "jpeg", "heic", "heif", "gif", "bmp", "tif", "tiff", "webp"];
   return allowed.includes(ext) ? `.${ext}` : ".png";
+}
+
+/** Prose for a notice code. The CODE is the contract and the wording is this side's
+ *  business, so a surface can improve the sentence without the sidecar shipping a new
+ *  string -- and an unrecognised code still says something true rather than nothing. */
+function describeNotice(n: NoticeNotification): string {
+  switch (n.code) {
+    case "context_journal_unavailable":
+      return "durable context is unavailable for this run, so compacted turns cannot be recovered later";
+    case "mcp_server_unavailable":
+      return "an MCP server did not connect, so its tools are not available";
+    default:
+      return n.detail || n.code;
+  }
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -173,6 +189,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
       this.post("model", n);
     });
+    // A degradation the run survived. These used to reach the event log and nowhere
+    // else, which meant a run could lose its durable context store on turn one and
+    // behave subtly worse for the rest of its life without anyone being told. Shown
+    // once, non-modally, and never as an error: the run is still going, and interrupting
+    // it with a dialog would be a worse trade than the thing being reported.
+    this.client.on("notice", (n: NoticeNotification) => {
+      const where = n.subject ? ` (${n.subject})` : "";
+      const text = `LM_Pipe: ${describeNotice(n)}${where}`;
+      if (n.severity === "error") {
+        void vscode.window.showErrorMessage(text, { detail: n.detail, modal: false });
+      } else {
+        void vscode.window.showWarningMessage(text, { detail: n.detail, modal: false });
+      }
+    });
     // The sidecar died. The view is mid-"Thinking" whenever this happens during a run,
     // and nothing else will ever arrive to move it off that.
     this.client.on("exit", ({ code }: { code: number | null }) => {
@@ -218,6 +248,77 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   private history(): RunRecord[] {
     return this.memento.get<RunRecord[]>("runHistory", []);
+  }
+
+  /** Sessions from the SIDECAR, with the local Memento as the fallback.
+   *
+   *  The sidecar's list is authoritative -- it is derived from the event log, which is the
+   *  same stream a resume replays, so every row it returns can actually be opened. The
+   *  Memento is kept for the case where there is no sidecar yet (a cold window that has
+   *  never loaded a model): it still answers "what did I ask this repo to do", which is
+   *  what the panel was before, and its rows are simply not resumable. */
+  private async sendHistory(): Promise<void> {
+    const root = this.host.settings().workspace_root;
+    // No ready() here on purpose: opening the history panel must not start a sidecar or
+    // load 19 GB of weights. If one is already up its list is used, and if not the panel
+    // falls back to what this window remembers.
+    if (root && this.client.running) {
+      const reply = await this.client.sessions(root);
+      if (!reply.error && reply.sessions) {
+        this.post("history", {
+          runs: reply.sessions.map((s: SessionSummary) => ({
+            runId: s.run_id,
+            mission: s.mission,
+            reason: s.termination_reason || (s.finished ? "" : "died mid-run"),
+            iterations: s.iterations,
+            completed: s.completed,
+            finished: s.finished,
+            observations: s.observations,
+            at: Math.round(s.started_wall_ns / 1e6),
+            resumable: s.observations > 0,
+          })),
+        });
+        return;
+      }
+    }
+    // No sidecar, or it refused: show what this window remembers, unresumable.
+    this.post("history", {
+      runs: this.history().map((r) => ({ ...r, runId: "", resumable: false })),
+    });
+  }
+
+  /** Reopens a previous run's conversation. Restores context; does not restart the run. */
+  private async resume(runId: string): Promise<void> {
+    // ready() is the same gate a first prompt passes: it is what starts the sidecar and
+    // loads the weights if the operator has not yet. Resuming is exactly as much of a
+    // reason to do that as sending a message is.
+    if (!(await this.ready())) return;
+    this.post("status", { text: "Resuming…" });
+    const reply = await this.client.resume(runId, this.host.settings());
+    // Two different failures, and both land here: `error` is the transport's (no sidecar,
+    // malformed reply) and `ok === false` is the resume gate's considered refusal, which
+    // carries the reason the operator needs -- which workspace, model or tool schema
+    // stopped matching.
+    if (reply.error || !reply.ok) {
+      const why = reply.why || reply.error || "that run could not be resumed";
+      this.post("status", { text: "" });
+      void vscode.window.showWarningMessage("LM_Pipe: " + why);
+      return;
+    }
+    // The pane is showing a DIFFERENT conversation from the one it has painted, so it is
+    // cleared and repainted from the transcript the sidecar returned. That transcript is
+    // BOUNDED (see src/surface/transcript.hpp) and `omitted` says how many leading turns
+    // it left out, which the view prints rather than implying the run began where the
+    // paint begins.
+    this.post("resumed", {
+      runId,
+      mission: reply.mission ?? "",
+      turns: reply.turns_restored ?? 0,
+      transcript: reply.transcript ?? [],
+      omitted: reply.omitted_leading ?? 0,
+    });
+    this.currentRunId = runId;
+    this.missionInFlight = reply.mission ?? "";
   }
 
   /** Applies a workspace edit through VS Code, then answers the sidecar.
@@ -484,11 +585,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     "sampling.topK",
     "sampling.minP",
     "sampling.repetitionPenalty",
-    // Both budgets, together. The turn limit is the one that keeps ending real missions
-    // mid-work, and it is worthless on the drawer on its own: raised without the clock it
-    // just moves the cutoff to `wall_clock` at the same wall.
+    // All three budgets, together. The turn limit is the one that keeps ending real
+    // missions mid-work, and it is worthless on the drawer on its own: raised without the
+    // clock it just moves the cutoff to `wall_clock` at the same wall. The stall dial is
+    // here for the opposite reason -- it is what lets the clock be raised safely, since
+    // it, not the clock, is what now catches a hung run.
     "maxIterations",
     "wallClockSeconds",
+    "stallSeconds",
     "prompts.agent",
     "prompts.plan",
     "prompts.debug",
@@ -518,6 +622,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         images?: string[];
         data?: string;
         name?: string;
+        // The session a history row asks to reopen.
+        runId?: string;
       }) => {
         if (msg.kind === "approve" && msg.id !== undefined) {
           // "Always allow" is an approval PLUS a remembered rule. The rule is stored on
@@ -548,7 +654,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           void vscode.commands.executeCommand("lmPipe.cancel");
         }
         if (msg.kind === "history") {
-          this.post("history", { runs: this.history() });
+          void this.sendHistory();
+        }
+        if (msg.kind === "resume" && typeof msg.runId === "string") {
+          void this.resume(msg.runId);
         }
         if (msg.kind === "message" && msg.text) {
           void this.send(msg.text, Array.isArray(msg.images) ? msg.images : []);

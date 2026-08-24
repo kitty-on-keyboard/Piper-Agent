@@ -7,6 +7,7 @@
 // event stream. Auto-resume is refused when an edit was in flight or when the bound
 // workspace / model / protocol / tool-schema identity no longer matches.
 //
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -54,6 +55,32 @@ struct ResumeRebuild {
 // Convenience: read path then reconstruct. File-open failure sets ok=false.
 [[nodiscard]] ResumeRebuild reconstruct_context_from_log(const std::string& path,
                                                          std::string_view run_id_filter = {});
+
+// ONE RUN, as a chooser needs to see it -- enough to decide whether to resume, and
+// nothing that would require replaying the run to compute.
+struct RunSummary {
+    std::string run_id;
+    std::string mission;
+    std::string workspace_root;
+    std::string model_identity;
+    std::uint64_t started_wall_ns = 0;
+    // A `run_end` was seen for this run. Its ABSENCE is the interesting case: it means the
+    // process died mid-run, which is exactly what resume exists for.
+    bool finished = false;
+    std::string termination_reason;
+    int iterations = 0;
+    bool completed = false;
+    // Observations recoverable from the log, i.e. how much conversation a resume gets
+    // back. Zero means there is nothing to resume TO, however healthy the run looks.
+    int observations = 0;
+};
+
+// Every run the log knows about, oldest first. Derived from the SAME event stream
+// reconstruct_context replays, so a run that appears here can always be rebuilt -- a
+// separate index could drift from the log and offer runs that no longer exist.
+[[nodiscard]] std::vector<RunSummary> list_runs(const std::vector<platform::Event>& events);
+
+[[nodiscard]] std::vector<RunSummary> list_runs_from_log(const std::string& path);
 
 // Field helpers shared with the sidecar emitter.
 [[nodiscard]] std::string field_or(const platform::Event& ev, std::string_view key);

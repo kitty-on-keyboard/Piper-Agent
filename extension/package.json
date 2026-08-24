@@ -162,14 +162,21 @@
           "default": 200,
           "minimum": 1,
           "maximum": 2000,
-          "description": "Turns a run may take before it is cut off. A ceiling on a runaway, not a target. Measured: a build-and-test mission finished on turn 41, and a five-file macOS app was still writing source when 80 turns ran out. Raise wallClockSeconds with this -- at ~13s a turn the two must not disagree about which one stops the run. Also on the sidebar drawer, which shows which limit fires first."
+          "description": "Turns a run may take before it is cut off, and the limit that SHOULD normally end a long run. A ceiling on a runaway, not a target. Measured: a build-and-test mission finished on turn 41, and a five-file macOS app was still writing source when 80 turns ran out. Raise wallClockSeconds with this -- at ~60s a turn on a vision-enabled checkpoint the two must not disagree about which one stops the run. Also on the sidebar drawer, which shows which limit fires first."
         },
         "lmPipe.wallClockSeconds": {
           "type": "number",
-          "default": 4800,
+          "default": 14400,
+          "minimum": 1,
+          "maximum": 86400,
+          "description": "Seconds a run may exist at all, counted from its first turn. The runaway stop of LAST resort -- a hung run is caught by stallSeconds long before this, and the limit that should normally end a run is maxIterations. Keep it comfortably above maxIterations x the per-turn time, or it ends healthy runs on the clock before they end on turns: at 4800s it was ending 200-turn runs on turn 48."
+        },
+        "lmPipe.stallSeconds": {
+          "type": "number",
+          "default": 1200,
           "minimum": 1,
           "maximum": 43200,
-          "description": "Seconds a run may take. A ceiling on a hung run, not a target: keep it comfortably above maxIterations x the per-turn time, or it ends healthy runs on time before they end on turns."
+          "description": "Seconds a run may go without completing a single turn before it is stopped as `stalled_no_turn`. This is the real hang detector, and it is separate from wallClockSeconds because a run that is working is not a run that is stuck, however long it has been working. Sized off the longest honest turn -- ~129s to first token, plus a full-length generation, plus a 300s shell command -- so 1200 clears it with room."
         },
         "lmPipe.contextBudgetTokens": {
           "type": "number",
@@ -189,16 +196,16 @@
           ],
           "enumDescriptions": [
             "Think briefly and move to the conclusion.",
-            "No instruction either way — the checkpoint's untouched behaviour, and what every run got before this setting existed.",
+            "No instruction either way \u2014 the checkpoint's untouched behaviour, and what every run got before this setting existed.",
             "Think carefully, validate assumptions and weigh alternatives. The most thorough level, and the slowest."
           ],
           "default": "medium",
-          "markdownDescription": "How hard the model should think. Only some checkpoints understand this — Qwen3.8-27B does, Qwen3.6-35B-A3B has no notion of it and the setting is ignored (the panel greys the control out and the sidecar logs a `reasoning_effort` event saying so). There is deliberately no `high`: the checkpoint's own template accepts only `low`, `medium` and `xhigh`, and raises on anything else. Changing this rewrites the front of the prompt, so it takes effect on the next turn and that turn re-reads the conversation."
+          "markdownDescription": "How hard the model should think. Only some checkpoints understand this \u2014 Qwen3.8-27B does, Qwen3.6-35B-A3B has no notion of it and the setting is ignored (the panel greys the control out and the sidecar logs a `reasoning_effort` event saying so). There is deliberately no `high`: the checkpoint's own template accepts only `low`, `medium` and `xhigh`, and raises on anything else. Changing this rewrites the front of the prompt, so it takes effect on the next turn and that turn re-reads the conversation."
         },
         "lmPipe.verifyContract": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Shell command the harness runs after any turn that writes a file — its output is shown to the model and exit 0 counts as pass. A run's final `Complete` requires the last reading to have passed. Empty disables the check. Example: `cd /path/to/project && swift build`."
+          "markdownDescription": "Shell command the harness runs after any turn that writes a file \u2014 its output is shown to the model and exit 0 counts as pass. A run's final `Complete` requires the last reading to have passed. Empty disables the check. Example: `cd /path/to/project && swift build`."
         },
         "lmPipe.autoApproveExec": {
           "type": "boolean",
@@ -290,7 +297,8 @@
     "vscode:prepublish": "npm run compile && npm run stage-sidecar",
     "package": "vsce package --no-dependencies --allow-missing-repository --out lm-pipe.vsix && node scripts/verify-vsix.js",
     "install-local": "npm run package && node scripts/install-local.js",
-    "verify-vsix": "node scripts/verify-vsix.js"
+    "verify-vsix": "node scripts/verify-vsix.js",
+    "test:view-script": "npm run compile && node scripts/test-view-script.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
