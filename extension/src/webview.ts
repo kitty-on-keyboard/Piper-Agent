@@ -2158,8 +2158,6 @@ function paint() {
   $('effortState').textContent = effortSupported ? '' : 'not supported here';
   $('effortWarn').textContent = !effortSupported
     ? 'This checkpoint has no thinking levels — the setting is kept and ignored. Qwen3.8 has them; Qwen3.6 does not.'
-    : settings.reasoningEffort === 'xhigh'
-    ? 'Most thorough and slowest. Every turn carries the instruction, so it costs decode time on all of them.'
     : settings.reasoningEffort === 'low'
     ? 'Briefest reasoning. Good for mechanical work, worse for anything needing a plan.'
     : '';
