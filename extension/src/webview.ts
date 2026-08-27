@@ -798,22 +798,20 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
   display: flex; align-items: center; justify-content: center;
 }
 #send:disabled { opacity: .3; cursor: default; }
-/* Stop REPLACES send while a run is turning, the way every other assistant does it.
-   Two buttons side by side would mean the primary action changes meaning without moving,
-   and the one you want mid-run is always the same one. */
+/* Stop is a safety control: it stays in the composer in every phase, including idle.
+   Send hides only while a generate is in flight so the arrow cannot replace it.
+   body.in-flight is set from busy() and is not the orb's body.busy flag. */
 #stop {
   flex: none; width: 28px; height: 28px; padding: 0; border-radius: 50%;
   background: var(--surface-hi); color: var(--fg); border: 1px solid var(--line);
-  display: none; align-items: center; justify-content: center;
+  display: flex !important; align-items: center; justify-content: center;
 }
-#stop::before {
-  content: ""; width: 9px; height: 9px; border-radius: 2px; background: var(--fg);
-}
+#stop::before { display: none; }
 #stop:hover { background: color-mix(in srgb, var(--fail) 18%, transparent);
-              border-color: color-mix(in srgb, var(--fail) 45%, transparent); }
-#stop:hover::before { background: var(--fail); }
-body.busy #stop { display: flex; }
-body.busy #send { display: none; }
+              border-color: color-mix(in srgb, var(--fail) 45%, transparent);
+              color: var(--fail); }
+#stop:disabled { opacity: .55; cursor: default; }
+body.in-flight #send { display: none; }
 #hint { font-size: 10px; color: var(--faint); padding: 5px 4px 0; text-align: center; }
 `;
 }
@@ -906,7 +904,7 @@ function markup(): string {
   <div id="attachments"></div>
   <div id="composer">
     <textarea id="say" rows="1" placeholder="Message the agent…"></textarea>
-    <button id="stop" title="Stop this run"></button>
+    <button id="stop" title="Stop this run">■</button>
     <button id="send" title="Send">↑</button>
   </div>
   <div id="hint"></div>
@@ -1562,8 +1560,22 @@ function renderMd(ctx, events) {
 // --- state ----------------------------------------------------------------
 // The status line and the orb are set from the SAME call, so the word and the colour can
 // never disagree about what the run is doing. Everything the orb knows arrives here.
+// sidebar.ts posts 'idle' in the same tick as 'run_end'. Left alone, that overwrites the
+// terminal colour in the frame it started, and a run would end on the same grey it began
+// on -- so the ending is held on screen before the orb is allowed to go back to rest.
+let terminalUntil = 0;
+let idleTimer = 0;
+
 function busy(on, label, state) {
+  // A follow-up that starts during the ending hold must cancel the pending Idle paint.
+  // Otherwise goIdle's timer fires ~2.4s later and paints Idle over a live run.
+  if (on) {
+    clearTimeout(idleTimer);
+    idleTimer = 0;
+    if (label !== 'Stopping…') $('stop').disabled = false;
+  }
   inFlight = on;
+  document.body.classList.toggle('in-flight', on);
   document.body.classList.toggle('busy', on);
   $('statusText').textContent = label;
   // The same word, in the transcript, next to the orb. Set from the SAME call as the hue
@@ -1577,12 +1589,6 @@ function busy(on, label, state) {
     : 'Your message continues the conversation';
 }
 
-// sidebar.ts posts 'idle' in the same tick as 'run_end'. Left alone, that overwrites the
-// terminal colour in the frame it started, and a run would end on the same grey it began
-// on -- so the ending is held on screen before the orb is allowed to go back to rest.
-let terminalUntil = 0;
-let idleTimer = 0;
-
 function finish(label, state) {
   terminalUntil = Date.now() + 2400;
   busy(false, label, state);
@@ -1590,8 +1596,14 @@ function finish(label, state) {
 
 function goIdle() {
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => busy(false, 'Idle', 'IDLE'),
-                         Math.max(0, terminalUntil - Date.now()));
+  idleTimer = setTimeout(() => {
+    // The ending hold outlives the run that scheduled it. If a follow-up is already
+    // in flight, painting Idle would hide Stop mid-generation.
+    if (inFlight) {
+      return;
+    }
+    busy(false, 'Idle', 'IDLE');
+  }, Math.max(0, terminalUntil - Date.now()));
 }
 
 // ADDS classes; it used to assign them.
@@ -1811,6 +1823,9 @@ const submit = () => {
   // send means "look at this" -- so the guard is "nothing at all", not "no text".
   const ready = [...attached.values()].filter((a) => a.path).map((a) => a.path);
   if (!text && ready.length === 0) return;
+  // Stop has to appear the instant the human commits, not when the host echoes said.
+  // The gap between those two used to leave only Send on screen while generation began.
+  busy(true, 'Thinking', 'THINKING');
   api.postMessage({ kind: 'message', text: text || 'Look at this.', images: ready });
   attached.clear();
   renderAttachments();
@@ -2312,6 +2327,13 @@ const Q_BULLET = /^\\s*[-*•]\\s+/;
 const Q_INDENT = /^\\s+\\S/;
 const Q_MARKER = /(?:Option\\s+[A-Za-z0-9]+[:\\)]|[-*•]\\s+|\\d+[\\.\\)]\\s+)/i;
 const Q_LEAD_MARKER = /^(?:Option\\s+[A-Za-z0-9]+\\s*[:\\)]\\s*|[-*•]\\s+|\\d+\\s*[\\.\\)]\\s+|[A-Za-z]\\s*[\\.\\)]\\s+)/i;
+// Tool-call XML is not a choice. Measured, r-18cfb8403c4b4d90-9bd00186: the model closed
+// the options parameter with </parameter> glued to the last line (no leading newline),
+// so ToolCallGuard kept scanning until a later newline-plus-closer and the value swallowed
+// seven </function> lines. Each unindented line became a button, and a six-way question
+// rendered as thirteen rows, G-M labelled </function>.
+const Q_TOOL_XML = /^<\\/?(?:function|parameter|tool_call)(?:\\b[^>]*)?>$/i;
+const Q_TRAILING_TOOL_XML = /(?:<\\/(?:parameter|function|tool_call)>)+$/i;
 
 // One block of text -> one option. The first line names it; anything under it is detail,
 // which the card shows but never makes separately clickable.
@@ -2325,10 +2347,10 @@ function stripEmphasis(s) {
 }
 
 function questionBlockToOption(block) {
-  const lines = block.split(/\\n/).map((s) => s.trim()).filter(Boolean);
-  const label = stripEmphasis((lines.shift() || '').replace(Q_LEAD_MARKER, '').trim());
+  const lines = block.split(/\\n/).map((s) => s.trim()).filter((l) => l && !Q_TOOL_XML.test(l));
+  const label = stripEmphasis((lines.shift() || '').replace(Q_LEAD_MARKER, '').replace(Q_TRAILING_TOOL_XML, '').trim());
   const detail = lines
-    .map((l) => stripEmphasis(l.replace(Q_BULLET, '').trim()))
+    .map((l) => stripEmphasis(l.replace(Q_BULLET, '').replace(Q_TRAILING_TOOL_XML, '').trim()))
     .filter(Boolean)
     .join(' · ');
   return { label: label, detail: detail };
@@ -2505,16 +2527,54 @@ function questionCard(argsObj, questionText) {
   // The question text wins when it holds two or more enumerated options: a model that
   // writes them out in full there and abbreviates them in 'options' has said which of
   // the two it meant.
+  let result;
   if (options.length < 2) {
     const embedded = questionFromText(questionText);
     if (embedded.options.length > 1) {
-      return { question: embedded.question, options: embedded.options };
+      result = { question: embedded.question, options: embedded.options };
     }
   }
-  return { question: questionText, options: options };
+  if (!result) {
+    result = { question: questionText, options: options };
+  }
+  return result;
 }
 
 // --- inbound --------------------------------------------------------------
+// The card is the question. The model often writes the same choice list as answer
+// prose first (measured: fractal feature A-E streamed, then ask_user drew A-D).
+// Retract that trailing list from the last assistant bubble so it is not asked twice.
+function retractQuestionProse(questionText) {
+  const bubbles = [...feed.querySelectorAll('.msg.assistant')];
+  const el = bubbles[bubbles.length - 1];
+  if (!el) return;
+  const q = (questionText || '').trim();
+  const raw = (el.innerText || '').trim();
+  if (q && raw === q) { el.remove(); return; }
+  const optRe = /^(?:\\*{0,2})?(?:[A-Ea-e]|[0-9]{1,2})[.)]\\s/;
+  const blocks = [...el.querySelectorAll('p, li, h4, h3, h2')];
+  let first = -1;
+  let n = 0;
+  blocks.forEach((b, i) => {
+    if (optRe.test((b.textContent || '').trim())) {
+      if (first < 0) first = i;
+      n++;
+    }
+  });
+  if (n < 2 || first < 0) return;
+  let cut = first;
+  for (let i = first - 1; i >= 0; i--) {
+    const t = (blocks[i].textContent || '').trim();
+    if (!t) continue;
+    if (/\\?\\s*$/.test(t) || /here are some options/i.test(t) || /what direction/i.test(t)) {
+      cut = i;
+    }
+    break;
+  }
+  for (let i = cut; i < blocks.length; i++) blocks[i].remove();
+  if (!(el.innerText || '').trim()) el.remove();
+}
+
 window.addEventListener('message', (e) => {
   const { kind, payload } = e.data;
 
@@ -2573,6 +2633,7 @@ window.addEventListener('message', (e) => {
     // control -- the control describes the NEXT run, and the two diverge exactly when it
     // matters most, which is when someone has just changed it.
     $('modeNow').textContent = payload.mode || '';
+    $('stop').disabled = false;
     busy(true, 'Thinking', 'THINKING');
   }
 
@@ -2673,6 +2734,7 @@ window.addEventListener('message', (e) => {
             if (chosenTexts.length === 0) return;
             const textToSubmit = chosenTexts.length === 1 ? chosenTexts[0] : chosenTexts.join('\\n\\n');
 
+            busy(true, 'Thinking', 'THINKING');
             api.postMessage({ kind: 'message', text: textToSubmit });
             qCard.classList.add('submitted');
             qCard.style.opacity = '0.7';
@@ -2741,6 +2803,7 @@ window.addEventListener('message', (e) => {
 
           qCard.append(qHeader, optsContainer, footer);
           add(qCard, '');
+          retractQuestionProse(questionText);
           busy(true, 'Waiting for choice', 'WAITING');
           if (window.__orb) window.__orb.impulse('tool');
           return;
@@ -3124,9 +3187,6 @@ window.addEventListener('message', (e) => {
     // neither: nothing failed and nothing finished, the run is waiting on a person, and
     // WAITING is the hue the orb already has for exactly that.
     finish(label, yielded ? 'WAITING' : payload.completed ? 'DONE' : 'FAILED');
-    // The button is hidden by the busy class again, but a disabled control that comes
-    // back disabled is how the next run ends up unstoppable.
-    $('stop').disabled = false;
     // The history panel is stale the moment a run ends, and it is the moment someone is
     // most likely to look at it.
     if ($('history').classList.contains('open')) api.postMessage({ kind: 'history' });

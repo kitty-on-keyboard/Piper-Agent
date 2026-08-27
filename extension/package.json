@@ -2,7 +2,7 @@
   "name": "lm-pipe",
   "displayName": "Piper Agent",
   "description": "A local coding agent for Apple Silicon: Qwen3 in-process via MLX.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "lm-pipe",
   "license": "Apache-2.0",
   "repository": {
@@ -34,7 +34,8 @@
       },
       {
         "command": "lmPipe.cancel",
-        "title": "LM_Pipe: Cancel the current run"
+        "title": "Stop run",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "lmPipe.selectModel",
@@ -67,6 +68,13 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "lmPipe.cancel",
+        "key": "shift+escape",
+        "mac": "shift+escape"
+      }
+    ],
     "configuration": {
       "title": "LM_Pipe",
       "properties": {

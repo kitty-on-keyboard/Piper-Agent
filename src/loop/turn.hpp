@@ -100,6 +100,16 @@ struct TurnResult {
 [[nodiscard]] std::string param_value(const std::vector<tools::ToolParamValue>& params,
                                       std::string_view name);
 
+// Drop tool-call framing that leaked into a Text parameter value.
+//
+// ToolCallGuard closes a Text value only on the exact byte sequence `\n</parameter>\n`.
+// A model that writes `...server</parameter>` (no leading newline) keeps that closer as
+// content, then emits `</function>` trying to end the call, then a later
+// `\n</parameter>\n` actually closes -- so the extracted value ends with the closer
+// glued to the last line plus a run of `</function>` lines. Measured on
+// r-18cfb8403c4b4d90-9bd00186: those lines became question-card buttons.
+[[nodiscard]] std::string strip_leaked_tool_xml(std::string value);
+
 // Mode policy is applied in ONE place (S9.3); the loop does not apply it itself, so a
 // config that skips the policy cannot run with writes enabled anyway.
 enum class Mode : std::uint8_t { Plan, Debug, Agent };

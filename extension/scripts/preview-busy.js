@@ -1,5 +1,5 @@
 // A driven preview of a run IN FLIGHT, for looking at the states the finished-run preview
-// cannot show: the stop button (only visible while busy), the context meter under load,
+// cannot show: the stop button (always in the composer), the context meter under load,
 // the compaction chip, and the reasoning disclosure opened.
 //
 // preview-webview.js drives a run to completion, which is the right default and is exactly

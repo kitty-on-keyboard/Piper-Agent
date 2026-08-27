@@ -6,7 +6,11 @@ private `lmp/*` protocol to it over stdio.
 
 ## Install
 
-From the repo root, build the sidecar first — the package refuses to build without it.
+**From a release (easiest):** download `lm-pipe.vsix` from
+[GitHub Releases](https://github.com/kitty-on-keyboard/Piper-Agent/releases), then
+Extensions → `...` → Install from VSIX. Apple Silicon only. Reload the window.
+
+**From source.** Build the sidecar first — the package refuses to build without it.
 Use the `dev` preset so MLX is compiled from source (tag `v0.32.0`) and linked statically:
 
 ```bash
@@ -62,9 +66,9 @@ through.
 
 ### Cancelling
 
-**LM_Pipe: Cancel the current run** is deliverable mid-generation — the sidecar's reader
-thread sets the cancel token as soon as the message is framed, without waiting for the
-model to finish the token it is on.
+The composer **Stop** button (Shift+Escape, or command **Stop run**) is deliverable
+mid-generation — the sidecar's reader thread sets the cancel token as soon as the
+message is framed, without waiting for the model to finish the token it is on.
 
 ## Known limits
 

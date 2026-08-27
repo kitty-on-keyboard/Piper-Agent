@@ -3595,6 +3595,37 @@ TEST(ask_user_with_options_halts_awaiting_user) {
     CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
 }
 
+TEST(ask_user_does_not_replay_the_question_on_the_answer_channel) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string valid_ask =
+        "<function=ask_user>\n<parameter=question>\nnotes.txt\n</parameter>\n<parameter=options>\nOption A\nOption B\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, valid_ask, "thinking"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    std::string answer;
+    loop::Observer obs;
+    obs.on_token = [&](const std::string& channel, const std::string& text) {
+        if (channel == "answer") answer += text;
+    };
+    agent.set_observer(std::move(obs));
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
+    CHECK(answer.find("notes.txt") == std::string::npos);
+}
+
 TEST(transitional_text_turn_after_tool_call_nudges_and_continues_in_plan_mode) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());

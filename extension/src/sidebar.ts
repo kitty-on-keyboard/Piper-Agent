@@ -464,6 +464,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.beginRun(plan, false);
     const reply = await this.client.start_run(plan, settings);
     if (reply.error) this.fail(reply.error);
+    else if (reply.run_id) this.currentRunId = reply.run_id;
   }
 
   /** An explicit start: the mission comes from the palette, not the composer. */
@@ -477,6 +478,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.beginRun(mission);
     const reply = await this.client.start_run(mission, settings);
     if (reply.error) this.fail(reply.error);
+    else if (reply.run_id) this.currentRunId = reply.run_id;
   }
 
   /** Loads the weights on purpose, from the model chip.
@@ -884,6 +886,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.runInFlight = true;
       const reply = await this.client.message(this.currentRunId, text, imagePaths);
       if (reply.error) this.fail(reply.error);
+      else if (reply.run_id) this.currentRunId = reply.run_id;
       return;
     }
 
@@ -901,6 +904,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.beginRun(text, false);
     const reply = await this.client.start_run(text, settings, imagePaths);
     if (reply.error) this.fail(reply.error);
+    else if (reply.run_id) this.currentRunId = reply.run_id;
   }
 
   private html(): string {

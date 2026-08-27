@@ -387,4 +387,58 @@ std::string param_value(const std::vector<tools::ToolParamValue>& params,
     return {};
 }
 
+namespace {
+
+[[nodiscard]] std::string_view trim_ws(std::string_view s) noexcept {
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r')) {
+        s.remove_prefix(1);
+    }
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+[[nodiscard]] bool is_leaked_tool_xml_line(std::string_view line) noexcept {
+    const std::string_view t = trim_ws(line);
+    if (t == "</function>" || t == "</parameter>" || t == "</tool_call>" ||
+        t == "<tool_call>") {
+        return true;
+    }
+    return t.size() >= 10 && t.substr(0, 10) == "<function=";
+}
+
+} // namespace
+
+std::string strip_leaked_tool_xml(std::string value) {
+    while (!value.empty()) {
+        const std::size_t nl = value.find_last_of('\n');
+        const std::string_view last =
+            nl == std::string::npos ? std::string_view(value)
+                                    : std::string_view(value).substr(nl + 1);
+        if (trim_ws(last).empty() || is_leaked_tool_xml_line(last)) {
+            value = nl == std::string::npos ? std::string{} : value.substr(0, nl);
+            continue;
+        }
+        break;
+    }
+    constexpr std::string_view kClosers[] = {"</parameter>", "</function>", "</tool_call>"};
+    bool again = true;
+    while (again) {
+        again = false;
+        for (const std::string_view c : kClosers) {
+            if (value.size() >= c.size() &&
+                value.compare(value.size() - c.size(), c.size(), c.data(), c.size()) == 0) {
+                value.resize(value.size() - c.size());
+                while (!value.empty() &&
+                       (value.back() == ' ' || value.back() == '\t')) {
+                    value.pop_back();
+                }
+                again = true;
+            }
+        }
+    }
+    return value;
+}
+
 } // namespace lmp::loop

@@ -151,13 +151,16 @@ export function orbScript(): string {
   window.__orb = {
     state: function (s) {
       var st = (s || '').toString().toLowerCase();
-      if (st === 'busy' || st === 'thinking') {
-        document.body.classList.add('busy');
-        document.body.classList.remove('executing');
+      // Writing, waiting and checks used to fall through to else and REMOVE body.busy,
+      // which hid Stop (it was keyed on that class) and left the Send arrow up while
+      // the run was still live. Only terminal rest states drop busy.
+      if (st === 'idle' || st === 'done' || st === 'failed') {
+        document.body.classList.remove('busy', 'executing');
       } else if (st === 'executing' || st === 'tool' || st === 'running') {
         document.body.classList.add('busy', 'executing');
       } else {
-        document.body.classList.remove('busy', 'executing');
+        document.body.classList.add('busy');
+        document.body.classList.remove('executing');
       }
     },
     impulse: function () {},
