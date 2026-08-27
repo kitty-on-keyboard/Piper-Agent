@@ -1,14 +1,17 @@
-# LM_Pipe v2
+# Piper Agent
 
-A local coding agent for Apple Silicon: a VS Code extension plus one native sidecar that
-loads a **single** Qwen3 model in-process via MLX and drives a tool-using ReAct loop
-against the user's workspace. **Product scope:** Mac-local Qwen/MLX, one model loaded,
-no subagents, no second inference server.
+A local coding agent for Apple Silicon: a VS Code / Cursor extension plus one native
+sidecar that loads a **single** Qwen3 model in-process via [MLX](https://github.com/ml-explore/mlx)
+and drives a tool-using loop against the workspace you open.
 
-**Status: all nine phases landed.** The model runs in-process on MLX and completes a
-grammar-accepted turn at 22.9 tok/s. See [docs/PHASES.md](docs/PHASES.md) for every
-measurement and the places the spec was overruled. Remaining gaps include T2 containers;
-model-free speculative decode exists but stays **opt-in** (`LMP_SPECULATIVE=1`).
+**Scope:** Mac-local Qwen/MLX, one model loaded, no subagents, no second inference server.
+
+License: [Apache-2.0](LICENSE). Credits: [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+**Model weights are not in this repo** — download a Qwen3 MLX checkpoint and set
+`lmPipe.modelDir` (or `LMP_QWEN_DIR`). Follow that checkpoint's own license.
+
+See [docs/PHASES.md](docs/PHASES.md) for measurements. Speculative decode exists but stays
+**opt-in** (`LMP_SPECULATIVE=1`).
 
 The build order in the spec is not advisory. Phases 0–2 come before any model code,
 because v1 built the loop first and spent the next month discovering what it could not

@@ -42,6 +42,10 @@ struct Tool {
     std::string description;
     nlohmann::json input_schema = nlohmann::json{{"type", "object"}};
     std::optional<nlohmann::json> output_schema;
+    // MCP ToolAnnotations (`readOnlyHint`, `destructiveHint`, …). Absent when the
+    // server did not send them. Hosts that make mode decisions from these must still
+    // ignore them on an untrusted server — the spec says so.
+    std::optional<nlohmann::json> annotations;
 
     [[nodiscard]] nlohmann::json to_json() const;
 };

@@ -138,7 +138,7 @@ for the reason the sweep could not see.
 - **Speculative decoding is still worth doing here, but only adaptively.** A fixed draft
   length — the default in most implementations — makes this model *slower*. Anyone porting
   a stock speculative decoder to a MoE of this shape should expect a regression.
-- **The three model-layer blockers in `PLAN_PARALLELISM.md` are unchanged** (last-position
+- **The three model-layer blockers for parallelism are unchanged** (last-position
   logits, no KV tail rollback, append-only ledger). What has changed is that the payoff is
   now measured rather than hoped for, and the drafting policy is settled.
 - **Do not spend on expert-aware drafting.** Section 3 is the reason.

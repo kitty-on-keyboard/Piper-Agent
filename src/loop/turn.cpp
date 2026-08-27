@@ -1,6 +1,8 @@
 #include "src/loop/turn.hpp"
 
 #include <algorithm>
+#include <regex>
+#include <string>
 
 // For lexically_normal: a repeat is the same call, not the same bytes. See
 // RepeatDetector::key.
@@ -24,6 +26,36 @@ std::string_view to_string(Outcome o) noexcept {
             return "BackendError";
     }
     return "BackendError";
+}
+
+int enumerated_choice_lines(std::string_view text) {
+    // Keep in lockstep with Q_ENUM_LINE in webview.ts. The `i` flag is icase here.
+    static const std::regex kEnumLine(
+        R"(^(?:option\s+[0-9a-z]+\s*[:.)]|[0-9]{1,2}\s*[.)]\s|[a-z]\s*[.)]\s))",
+        std::regex::icase);
+    int n = 0;
+    std::string line;
+    const auto count_if_marker = [&](std::string s) {
+        const auto a = s.find_first_not_of(" \t\r");
+        if (a == std::string::npos) {
+            return;
+        }
+        const auto b = s.find_last_not_of(" \t\r");
+        s = s.substr(a, b - a + 1);
+        if (std::regex_search(s, kEnumLine)) {
+            ++n;
+        }
+    };
+    for (const char c : text) {
+        if (c == '\n') {
+            count_if_marker(std::move(line));
+            line.clear();
+        } else {
+            line += c;
+        }
+    }
+    count_if_marker(std::move(line));
+    return n;
 }
 
 ModePolicy ModePolicy::for_mode(Mode m) noexcept {
@@ -142,7 +174,8 @@ std::string mode_brief(Mode m) {
             return "# Plan mode\n"
                    "\n"
                    "You are in Plan mode to inspect the codebase, ask design choices, and present a plan. "
-                   "Nothing you do here changes a file or runs a command -- execution tools are not loaded.\n"
+                   "Nothing you do here changes a file or runs a command -- write and execution tools are not loaded. "
+                   "Read tools are, including a connected MCP server's tools that declare themselves read-only.\n"
                    "\n"
                    "- Direct Tool Execution: Execute read tool calls (`read_file`, `read_many`, `list_dir`, `find_files`, `search`) directly. "
                    "Do NOT output standalone conversational updates or text commentary explaining what you intend to read.\n"
@@ -249,13 +282,13 @@ Outcome classify_turn(const model::GenResult& gen, const model::TurnGrammar& gra
     return grammar.has_tool_call() ? Outcome::ToolCallRefused : Outcome::TextOnly;
 }
 
-// A repeat is the same CALL, not the same bytes. `ResMon` and `ResMon/` name one
+// A repeat is the same CALL, not the same bytes. `proj` and `proj/` name one
 // directory, and keying on the raw value made them two different calls -- so a run could
 // alternate the trailing slash and repeat itself forever without the detector ever
 // counting past one.
 //
 // MEASURED: a real run in the editor spent its entire 80-turn budget alternating
-// `list_dir ResMon` and `list_dir ResMon/`, learning nothing. Normalising the path
+// `list_dir proj` and `list_dir proj/`, learning nothing. Normalising the path
 // arguments is what makes the two the same key -- and under the cache it is also what
 // makes the second spelling a free answer instead of a second execution.
 //

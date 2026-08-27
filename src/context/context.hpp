@@ -278,6 +278,10 @@ class ContextStore {
             t.observation += "\n[truncated at the observation budget]\n";
         }
         recent_.push_back(std::move(t));
+        // MONOTONIC OVER THE SESSION, unlike recent_.size(), which compaction shrinks.
+        // The sampler's per-turn seed is derived from it -- see Agent's constructor for
+        // why that number must not restart when a follow-up builds a new Agent.
+        ++turns_recorded_;
         // Durable BEFORE anything can drop it. See set_turn_sink().
         if (turn_sink_) {
             turn_sink_(recent_.back());
@@ -441,8 +445,19 @@ class ContextStore {
         return user_turns_;
     }
 
+    // Every turn ever recorded into this session, including the ones compaction has since
+    // folded into a span. Strictly increasing, never reset -- which is the whole property
+    // it is for: it is the only number that keeps counting across the Agent boundary a
+    // follow-up message creates, and the per-turn sampler seed rides on it.
+    [[nodiscard]] std::uint64_t turns_recorded() const noexcept { return turns_recorded_; }
+
     // --- T3 compacted -------------------------------------------------------
     [[nodiscard]] std::size_t compaction_count() const noexcept { return compactions_; }
+
+    // One compaction EVENT. compact_to_budget drops one turn at a time so it can remeasure
+    // tokens; those inner calls must not each bump this, or the surface chip reads the
+    // number of turns thrown away as the number of times the run had to trim.
+    void note_compaction() noexcept { ++compactions_; }
 
     // Called with the turns compact_oldest() is about to erase, BEFORE it erases them.
     //
@@ -474,7 +489,7 @@ class ContextStore {
     // schema and ZERO rows. The one component whose whole job is to remember what got
     // trimmed had never been handed anything to remember.
     //
-    // MEASURED 2026-08-03 on ~/Desktop/Agent_testing/ResMon: `select kind,count(*) from
+    // MEASURED 2026-08-03 on a real workspace: `select kind,count(*) from
     // item group by kind` returned nothing, and the event log had no compaction events to
     // explain it. Nothing was broken; the door was simply never reached.
     //
@@ -488,7 +503,10 @@ class ContextStore {
     // number of turns compacted. The summary keeps every observation's ANCHOR (tool
     // name + whether it errored + the first line of what it observed), because the
     // evidence a later question needs is usually the anchor, not the prose around it.
-    std::size_t compact_oldest(std::size_t keep_recent);
+    //
+    // `count_as_event` is the default so a direct call still means one trim. The agent's
+    // budget loop passes false and calls note_compaction() once for the whole pass.
+    std::size_t compact_oldest(std::size_t keep_recent, bool count_as_event = true);
 
     // --- rendering ----------------------------------------------------------
     // Assembles the message list. Deterministic, pure, no clock, no I/O -- so a prompt
@@ -517,6 +535,7 @@ class ContextStore {
     // user_turns_[0] is the opening mission and never changes; the rest are instructions
     // that arrived later. front() is therefore always valid.
     std::vector<std::string> user_turns_;
+    std::uint64_t turns_recorded_ = 0;
     std::string persona_;
     std::string mode_brief_;
     std::string reasoning_brief_;

@@ -4,6 +4,12 @@
   "description": "A local coding agent for Apple Silicon: Qwen3 in-process via MLX.",
   "version": "2.0.0",
   "publisher": "lm-pipe",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kitty-on-keyboard/Piper-Agent.git"
+  },
+  "homepage": "https://github.com/kitty-on-keyboard/Piper-Agent",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -72,7 +78,20 @@
         "lmPipe.draftModelDir": {
           "type": "string",
           "default": "",
-          "description": "Optional absolute path to a Qwen MTP draft head (model_type qwen3_5_mtp), e.g. Qwen3.6-27B-MTP-4bit. NOT a smaller chat model \u2014 it is a head split from the target and only works with the matching dense checkpoint. Empty disables speculative decoding; a path that is not a usable head fails the load rather than generating without it."
+          "description": "Remembered path to a Qwen MTP draft head (model_type qwen3_5_mtp) for the dense checkpoint. Not sent when loading A3B / MoE. Prefer the Speculative decoding checkbox in the sidebar over editing this by hand."
+        },
+        "lmPipe.speculativeDecoding": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use the MTP draft head for speculative decoding on the dense 27B. Ignored on A3B (MoE): the head is not sent, so switching back cannot fail the load. The sidebar checkbox is the control; this setting is what it writes."
+        },
+        "lmPipe.recentModelDirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Recently used Qwen3 MLX checkpoint directories. The sidebar switcher shows the current one and the previous one so A3B and dense can be swapped without a folder picker."
         },
         "lmPipe.mode": {
           "type": "string",
@@ -293,6 +312,7 @@
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
     "test:edit-version": "npm run compile && node scripts/test-edit-version.js",
+    "test:checkpoint": "npm run compile && node scripts/test-checkpoint.js",
     "stage-sidecar": "node scripts/stage-sidecar.js",
     "vscode:prepublish": "npm run compile && npm run stage-sidecar",
     "package": "vsce package --no-dependencies --allow-missing-repository --out lm-pipe.vsix && node scripts/verify-vsix.js",

@@ -4,7 +4,7 @@
 // Compacts captured command output so that what an agent needs to ACT survives a byte cap.
 //
 // This is the consolidated engine from the log-triage cookoff (round 1, 2026-07-30, 15
-// entrants at cat-collector-king/log-triage-engine). What was taken from whom, and what was
+// entrants). What was taken from whom, and what was
 // rejected, is recorded at the bottom of this file. The benchmark it is measured on lives at
 // bakeoff/log_triage/ and its answer key was written by the compiler, not by us.
 //

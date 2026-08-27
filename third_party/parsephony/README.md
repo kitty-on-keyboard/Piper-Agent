@@ -1,9 +1,9 @@
 # parsephone
 
 A JSON parser and **constrained-decoding engine** for local LLM agent loops,
-built for [LM-Pipe](https://github.com/kitty-on-keyboard/LM-Pipe) and Qwen 3.6.
+built for Piper Agent and Qwen 3.6.
 
-Synthesized from an 11-way agent cookoff (`cat-collector-king/parsephony`,
+Synthesized from an 11-way agent cookoff (`parsephony`,
 PRs #1–#11) — every entry's best idea kept, every entry's flaw fixed, then
 pushed well past what any of them attempted. See [DESIGN.md](DESIGN.md) for
 provenance and [RESULTS.md](RESULTS.md) for measurements.

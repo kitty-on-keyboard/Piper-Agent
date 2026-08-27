@@ -16,15 +16,13 @@ inline double ms(Clock::time_point a, Clock::time_point b) {
 
 inline const char* qwen_dir() {
     const char* v = std::getenv("LMP_QWEN_DIR");
-    return v != nullptr
-               ? v
-               : "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit";
+    return v != nullptr ? v : "";
 }
 
 // The MTP draft head, empty for plain decode. An env var rather than an argv slot for the
 // reason MLX_DISABLE_COMPILE is: speculation has to be A/B'd against itself on ONE binary
-// in ONE session, because this machine drifts ~9% between sittings and a rebuild between
-// the two halves of a comparison is exactly how HANDOFF_PERF's retracted claims were made.
+// in ONE session, because a rebuild between the two halves of a comparison is how
+// earlier timing claims were made and then retracted.
 inline const char* draft_dir() {
     const char* v = std::getenv("LMP_DRAFT_DIR");
     return v != nullptr ? v : "";

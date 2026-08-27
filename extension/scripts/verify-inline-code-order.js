@@ -11,8 +11,8 @@
 //
 // MEASURED, from a real run's transcript. The model wrote:
 //
-//   ...identified it as a Swift package (`ResMon.xcodeproj`, `Package.swift`). The
-//   directory `Sources/ResMon/` seems to be...
+//   ...identified it as a Swift package (`DemoApp.xcodeproj`, `Package.swift`). The
+//   directory `Sources/DemoApp/` seems to be...
 //
 // and the bubble rendered "a Swift package (, )... The directory  seems to be..." with
 // every code span swept to the end and run together, because adjacent <code> siblings with
@@ -148,7 +148,7 @@ const T = fn(...Object.values(scope));
 const EVENTS = [
   { kind: "text", text: "identified it as a Swift package (" },
   { kind: "inlineOpen" },
-  { kind: "text", text: "ResMon.xcodeproj" },
+  { kind: "text", text: "DemoApp.xcodeproj" },
   { kind: "inlineClose" },
   { kind: "text", text: ", " },
   { kind: "inlineOpen" },
@@ -156,15 +156,15 @@ const EVENTS = [
   { kind: "inlineClose" },
   { kind: "text", text: "). The directory " },
   { kind: "inlineOpen" },
-  { kind: "text", text: "Sources/ResMon/" },
+  { kind: "text", text: "Sources/DemoApp/" },
   { kind: "inlineClose" },
   { kind: "text", text: " seems to be the main source folder." },
 ];
 
 const EXPECT =
-  "identified it as a Swift package (" + TICK + "ResMon.xcodeproj" + TICK + ", " +
+  "identified it as a Swift package (" + TICK + "DemoApp.xcodeproj" + TICK + ", " +
   TICK + "Package.swift" + TICK + "). The directory " +
-  TICK + "Sources/ResMon/" + TICK + " seems to be the main source folder.";
+  TICK + "Sources/DemoApp/" + TICK + " seems to be the main source folder.";
 
 // The real sequence: the answer is queued while the context is current, the turn
 // notification detaches it, and only then does the typewriter drain.

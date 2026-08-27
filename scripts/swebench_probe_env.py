@@ -52,7 +52,7 @@ import tempfile
 import time
 
 WORK = os.environ.get(
-    "LMP_SWEBENCH_WORK", "/Users/dev/Desktop/seans_projects_local/swebench_work"
+    "LMP_SWEBENCH_WORK", os.path.expanduser("~/swebench_work")
 )
 DATASET = os.path.join(WORK, "data", "swebench_lite_test.parquet")
 SPEC_FILE = os.path.join(WORK, "data", "swebench_python_specs.py")

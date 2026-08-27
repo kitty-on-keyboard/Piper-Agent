@@ -41,6 +41,10 @@ __pycache__/
 
 # System
 .DS_Store
+.cursor/
+
+# Local-only safety copy made before history rewrite. Never commit.
+/.oss-backup/
 
 # Sidecar event log (S6). It goes to ~/Library/Logs/LM_Pipe/ now, so it no longer
 # lands in the repo -- kept because $LMP_EVENT_LOG can still point anywhere, and

@@ -1,8 +1,7 @@
 # SpecVerifier cook-off (Jules round 2, Brief C)
 
-The acceptance rule for speculative decoding: which drafted tokens to keep. Brief text in
-[docs/JULES_BRIEFS_ROUND2.md](../../docs/JULES_BRIEFS_ROUND2.md). Repo:
-`cat-collector-king/SpecVerifier`, one PR per entrant, **5 of 5 landed**.
+The acceptance rule for speculative decoding: which drafted tokens to keep. One PR per
+entrant, **5 of 5 landed**.
 
 ## Standing, 2026-08-01 — complete
 

@@ -64,6 +64,9 @@ nlohmann::json Tool::to_json() const {
     if (output_schema.has_value()) {
         j["outputSchema"] = *output_schema;
     }
+    if (annotations.has_value() && annotations->is_object() && !annotations->empty()) {
+        j["annotations"] = *annotations;
+    }
     return j;
 }
 

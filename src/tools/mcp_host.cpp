@@ -6,7 +6,9 @@
 #include <filesystem>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -246,10 +248,55 @@ void fill_param_constraints(const nlohmann::json& prop, parsephony::ParamSpec& p
     return out;
 }
 
+std::optional<bool> annotation_bool(const std::optional<nlohmann::json>& ann,
+                                    const char* key) {
+    if (!ann.has_value() || !ann->is_object() || !ann->contains(key)) {
+        return std::nullopt;
+    }
+    const nlohmann::json& v = ann->at(key);
+    if (v.is_boolean()) {
+        return v.get<bool>();
+    }
+    return std::nullopt;
+}
+
+// Trust answers containment (cards). Annotations on a trusted server answer
+// mutates vs read. The previous `mutates = !trusted` made every trusted tool look
+// like a read, and `remote` was then used as a second gate to take that back —
+// which hid orientation tools from Plan mode.
+void apply_mcp_decl_flags(ToolDecl& decl, bool trusted, const mcp::Tool& tool) {
+    decl.remote = true;
+    decl.executes_commands = false;
+    if (!trusted) {
+        decl.mutates_workspace = true;
+        decl.needs_execution = true;
+        decl.irreversible = true;
+        return;
+    }
+    const bool read_only =
+        annotation_bool(tool.annotations, "readOnlyHint").value_or(false);
+    decl.mutates_workspace = !read_only;
+    decl.needs_execution = !read_only;
+    decl.irreversible =
+        annotation_bool(tool.annotations, "destructiveHint").value_or(false);
+}
+
+constexpr std::size_t kMaxInstructionsBytes = 32U * 1024;
+
 } // namespace
 
 std::string namespaced_tool_name(const std::string& server, const std::string& tool) {
     return "mcp__" + server + "__" + tool;
+}
+
+std::string registered_mcp_tool_name(const Registry& registry, const std::string& server,
+                                     const std::string& tool) {
+    // Keep the name the server declared when it would not collide and would not
+    // corrupt the grammar. Namespace only to avoid a shadow or a delimiter.
+    if (name_is_usable(tool) && registry.find(tool) == nullptr) {
+        return tool;
+    }
+    return namespaced_tool_name(server, tool);
 }
 
 bool tool_spec_from_schema(const std::string& registered_name,
@@ -312,6 +359,7 @@ bool tool_spec_from_schema(const std::string& registered_name,
 struct McpHost::Connection {
     McpServerConfig config;
     std::shared_ptr<mcp::Client> client;
+    std::string instructions;
 };
 
 McpHost::McpHost() : McpHost(Options{}) {}
@@ -376,6 +424,10 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
             // nothing here drains a stderr pipe, and an undrained one eventually blocks
             // the server mid-call -- the stall this class exists to prevent.
             sub.stderr_mode = mcp::StderrMode::kDiscard;
+            // THE WORKSPACE, so a relative path means to this server what the prompt told
+            // the model it means. See Subprocess::Options::working_dir for the fifteen
+            // identical failures that motivated it.
+            sub.working_dir = registry.workspace().root;
             for (const std::string& kv : cfg.env) {
                 const std::size_t eq = kv.find('=');
                 if (eq != std::string::npos) {
@@ -383,7 +435,14 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
                 }
             }
             conn->client->connect_stdio(std::move(sub));
-            (void)conn->client->initialize();
+            const mcp::ServerInfo sinfo = conn->client->initialize();
+            if (cfg.trusted && !sinfo.instructions.empty()) {
+                conn->instructions = sinfo.instructions;
+                if (conn->instructions.size() > kMaxInstructionsBytes) {
+                    conn->instructions.resize(kMaxInstructionsBytes);
+                }
+                status.instructions = conn->instructions;
+            }
             tools = conn->client->list_tools();
         } catch (const std::exception& e) {
             status.error = e.what();
@@ -397,7 +456,8 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
         const auto call_timeout = options_.call_timeout;
 
         for (const mcp::Tool& tool : tools) {
-            const std::string registered = namespaced_tool_name(cfg.name, tool.name);
+            const std::string registered =
+                registered_mcp_tool_name(registry, cfg.name, tool.name);
             parsephony::ToolSpec spec;
             std::string why;
             if (!tool_spec_from_schema(registered, tool.input_schema, spec, why)) {
@@ -422,30 +482,24 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
             decl.description += "\n(provided by MCP server '" + cfg.name + "'";
             decl.description += trusted ? ")" : "; runs outside the sandbox)";
             decl.spec = spec;
-            // We cannot see what a remote tool touches, so the honest answer to both of
-            // these is "assume it might".
-            decl.mutates_workspace = !trusted;
-            decl.executes_commands = !trusted;
-            // THE containment decision. A remote tool runs in the server's process, which
-            // Seatbelt does not cover, so an untrusted server's tools each raise a card.
-            // The server's own readOnlyHint/destructiveHint annotations deliberately do
-            // not participate: per the MCP spec they are hints from an untrusted peer and
-            // must not drive a security decision.
-            decl.irreversible = !trusted;
-            // Regardless of trust. The three flags above answer "does this call need a
-            // human", and trust is a real answer to that; this one answers "can a mode
-            // that permits no writes permit this call", and the honest answer never
-            // depends on how the operator feels about the server. Plan mode was letting
-            // trusted MCP tools straight through the one gate it has.
-            decl.remote = true;
+            apply_mcp_decl_flags(decl, trusted, tool);
 
             const std::string remote_name = tool.name;
             // Capture the Registry so each call can observe the run-scoped CancelToken
             // without threading it through every Handler signature. The registry owns
             // this handler, so the reference outlives every call into it.
             Registry* const host_registry = &registry;
+            // WHICH PARAMETERS THE SERVER DECLARED AS STRINGS, so the call does not hand
+            // it a parsed object where its schema asked for text. See the parse below.
+            std::vector<std::string> string_params;
+            for (const parsephony::ParamSpec& ps : decl.spec.params) {
+                if (ps.type == parsephony::ParamType::Text) {
+                    string_params.push_back(ps.name);
+                }
+            }
             Registry::Handler handler =
-                [client, remote_name, call_timeout, host_registry](
+                [client, remote_name, call_timeout, host_registry,
+                 string_params = std::move(string_params)](
                     const std::vector<ToolParamValue>& params, int) -> ToolResult {
                 // A closed or crashed server is a typed failure, never a hang and never a
                 // call into a half-dead client.
@@ -456,9 +510,30 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
                 }
                 nlohmann::json args = nlohmann::json::object();
                 for (const ToolParamValue& p : params) {
-                    // The guard validated shape, not JSON: a param typed Object or Json
-                    // arrives as the text the model emitted. Parse when it parses, and
-                    // otherwise send the string rather than failing the call.
+                    // A STRING PARAMETER IS SENT AS A STRING, whatever its contents happen
+                    // to parse as. This parsed every value unconditionally, so a parameter
+                    // the server's own schema declares as `string` arrived as an object,
+                    // a number or a bool whenever its text looked like one -- and the
+                    // server rejected the call it had itself specified.
+                    //
+                    // Measured on r-18ced29746aa7728-2ea858f4: godoer's `godot_build_scene`
+                    // takes `spec` as a STRING holding a scene spec. The model sent one,
+                    // this parsed it into an object, and godoer answered "Input should be
+                    // a valid string [type=string_type, input_value={'path': ...},
+                    // input_type=dict]". The same hazard turns a version string "1.20"
+                    // into the number 1.2 and an id "007" into 7.
+                    //
+                    // The parse is still right for every other type: the guard validates
+                    // SHAPE, not JSON, so a param typed Object, Array, Number or Boolean
+                    // arrives as the text the model emitted and has to be parsed. When it
+                    // does not parse, the string goes rather than the call failing.
+                    const bool declared_string =
+                        std::find(string_params.begin(), string_params.end(), p.name) !=
+                        string_params.end();
+                    if (declared_string) {
+                        args[p.name] = p.value;
+                        continue;
+                    }
                     nlohmann::json parsed = nlohmann::json::parse(p.value, nullptr, false);
                     args[p.name] = parsed.is_discarded() ? nlohmann::json(p.value)
                                                          : std::move(parsed);
@@ -508,10 +583,25 @@ std::vector<McpServerStatus> McpHost::connect_and_register(
             ++status.registered;
         }
 
+
         connections_.push_back(std::move(conn));
         report.push_back(std::move(status));
     }
     return report;
+}
+
+std::string McpHost::prompt_instructions() const {
+    std::string out;
+    for (const auto& c : connections_) {
+        if (c->instructions.empty()) {
+            continue;
+        }
+        out += "\n\n# MCP server '";
+        out += c->config.name;
+        out += "'\n\n";
+        out += c->instructions;
+    }
+    return out;
 }
 
 } // namespace lmp::tools

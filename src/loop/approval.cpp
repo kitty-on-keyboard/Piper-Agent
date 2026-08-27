@@ -514,9 +514,6 @@ bool Agent::tool_allowed(const tools::ToolDecl& decl) const {
     if (decl.mutates_workspace && !policy_.allow_workspace_writes) {
         return false;
     }
-    if (decl.remote && !policy_.allow_workspace_writes) {
-        return false;
-    }
     if (decl.irreversible && !policy_.allow_destructive) {
         return false;
     }
@@ -623,17 +620,9 @@ std::optional<tools::ToolResult> Agent::gate_call(
         emit("tool_refused", {{"tool", name}, {"why", "mode policy"}});
         return tools::ToolResult::refused("this mode does not permit workspace writes");
     }
-    // A tool that runs in another process is not covered by anything above it. A trusted
-    // MCP server's tools are declared with mutates_workspace false -- trust is a statement
-    // about the SANDBOX, "this may run outside Seatbelt without a card for every call",
-    // and it was being read here as a statement about mode policy. So a trusted server
-    // carrying a write-equivalent tool was fully live in plan mode, through a gate whose
-    // entire job is that writes do not happen. We cannot see what a remote tool touches,
-    // and a mode that permits no writes cannot permit a call whose effects it cannot know.
-    if (decl != nullptr && decl->remote && !policy_.allow_workspace_writes) {
-        emit("tool_refused", {{"tool", name}, {"why", "mode policy: remote"}});
-        return tools::ToolResult::refused(
-            "this mode does not permit tools that run outside it");
+    if (decl != nullptr && decl->needs_execution && !policy_.allow_execution) {
+        emit("tool_refused", {{"tool", name}, {"why", "mode policy"}});
+        return tools::ToolResult::refused("this mode does not execute commands");
     }
     // DESTRUCTION IS ITS OWN POWER. `irreversible` already meant "this destroys data that
     // the workspace cannot give back" and was used only to decide whether to raise a card;
@@ -681,7 +670,7 @@ std::optional<tools::ToolResult> Agent::gate_call(
     // Gating that raised a card on every one of those turns with auto-approve ON, which
     // is how the switch came to look broken -- while ledger.csv, the case this gate was
     // actually built for, is a file the run never wrote and still asks about.
-    // Normalised the way the repeat detector normalises: `ResMon` and `ResMon/` name one
+    // Normalised the way the repeat detector normalises: `proj` and `proj/` name one
     // directory, and a set keyed on raw bytes would forget its own writes over a slash.
     const std::string write_path =
         platform::lexically_normal(param_value(params, "path"));
@@ -775,10 +764,9 @@ std::optional<tools::ToolResult> Agent::gate_call(
         // own advisory call site had the arguments right; this one starved the classifier
         // of the fact that makes "outside" mean anything.
         const std::string& root = registry_.workspace().root;
-        // An empty command string has nothing to classify. Remote tools declare
-        // executes_commands when untrusted so mode policy sees them, but their
-        // containment card is the write/irreversible gate above -- not a phantom
-        // Unparseable hint from the RiskHint default.
+        // An empty command string has nothing to classify. MCP tools do not declare
+        // executes_commands (they have no `command` param); their containment card is
+        // irreversible when untrusted.
         if (!cmd.empty()) {
             tools::RiskHint hint = tools::classify_command(cmd, root, root);
             // Redirecting into a file the run itself produced is not destruction. Applied

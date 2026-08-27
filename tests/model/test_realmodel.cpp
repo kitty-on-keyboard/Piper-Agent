@@ -20,14 +20,9 @@ using namespace lmp::model;
 
 namespace {
 
-std::string env_or(const char* key, const char* fallback) {
-    const char* v = std::getenv(key);
-    return v != nullptr ? std::string(v) : std::string(fallback);
-}
-
 std::string qwen_dir() {
-    return env_or("LMP_QWEN_DIR",
-                  "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit");
+    const char* v = std::getenv("LMP_QWEN_DIR");
+    return v != nullptr ? std::string(v) : std::string();
 }
 
 const QwenTokenizer& loaded_tokenizer() {

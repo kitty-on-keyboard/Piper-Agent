@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <csignal>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1109,8 +1110,42 @@ bool start_mission(const std::string& id, const std::string& message,
     session.ctx->set_observation_budget(tools::kObservationBudgetBytes);
     // Loaded once into the STABLE part of the prompt: neither the repo's conventions nor
     // the agent's own notes change mid-run, so they cost one prefill for the whole run.
-    session.ctx->set_project_instructions(
-        surface::load_project_instructions(session.registry->filesystem()));
+    std::string conventions = surface::load_project_instructions(session.registry->filesystem());
+    if (session.mcp != nullptr) {
+        const std::string mcp_brief = session.mcp->prompt_instructions();
+        if (!mcp_brief.empty()) {
+            platform::Event ev;
+            ev.kind = "mcp_instructions";
+            ev.fields = {{"chars", std::to_string(mcp_brief.size())}};
+            log.append(ev, clock);
+            conventions += mcp_brief;
+        }
+    }
+    // A tool the conventions name and the registry does not have is unrepresentable at
+    // decode time, so the model can neither call it nor report that it is missing -- see
+    // unknown_tool_names. Checked here because this is the first point where both halves
+    // exist: the conventions are loaded and the registry is fully populated, MCP servers
+    // included. Appended to the conventions rather than kept in the log, because the run
+    // that needed to know was the one that could not find out.
+    {
+        const std::vector<std::string> missing =
+            surface::unknown_tool_names(conventions, *session.registry);
+        if (!missing.empty()) {
+            std::string joined;
+            for (const std::string& n : missing) {
+                joined += joined.empty() ? "" : ",";
+                joined += n;
+            }
+            platform::Event ev;
+            ev.kind = "conventions_name_absent_tools";
+            ev.fields = {{"names", joined},
+                         {"count", std::to_string(missing.size())},
+                         {"registered", std::to_string(session.registry->guard_specs().size())}};
+            log.append(ev, clock);
+            conventions += surface::unknown_tools_note(missing);
+        }
+    }
+    session.ctx->set_project_instructions(std::move(conventions));
     session.ctx->set_project_memory(
         surface::load_project_memory(session.registry->filesystem()));
     session.ctx->set_workspace_root(canonical_workspace);

@@ -397,6 +397,10 @@ class Agent {
     // Whether `tool` is how the run changes the workspace -- asked of the registry rather
     // than matched against a name list, so a tool added later is covered by construction.
     [[nodiscard]] bool mutates_workspace(const std::string& tool) const;
+    // The human's reply to `question`, if they already answered this exact one. See the
+    // definition: a question asked and NOT yet answered returns empty, so a run resumed at
+    // the moment it was asking can still ask it.
+    [[nodiscard]] const std::string& previously_answered(const std::string& question) const;
     [[nodiscard]] tools::ToolResult dispatch_call(
         const std::string& name, const std::vector<tools::ToolParamValue>& params,
         bool& executed);
@@ -550,11 +554,17 @@ class Agent {
     // finishing; the counter exists to say so before the turn budget does.
     std::size_t consecutive_micro_edit_turns_ = 0;
     std::size_t executed_tool_calls_in_run_ = 0;
-    // Generations attempted this run, and the only input other than config_.seed to the
-    // per-turn sampler seed. Counts ATTEMPTS rather than completed turns -- a turn refused
+    // The turn index the sampler seed advances on, and the only input other than
+    // config_.seed to it. Counts ATTEMPTS rather than completed turns -- a turn refused
     // before it reached the backend leaves a gap in the sequence, which is harmless, and
     // the alternative (only counting successes) would hand two different turns the same
-    // seed after any refusal. See seed_for_turn in agent.cpp.
+    // seed after any refusal.
+    //
+    // SEEDED FROM THE CONVERSATION, NOT FROM ZERO. It used to start at 0 in every Agent,
+    // which is correct only if an Agent lasts as long as the conversation -- and it does
+    // not. Every `lmp/message` builds a fresh one over the SAME ContextStore, so a
+    // question-and-answer exchange is a sequence of one-turn runs that each generated at
+    // seed_for_turn(config_.seed, 0): the same seed, every time. See the constructor.
     std::uint64_t turns_generated_ = 0;
 };
 

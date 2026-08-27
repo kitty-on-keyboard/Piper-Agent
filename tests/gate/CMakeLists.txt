@@ -83,6 +83,10 @@ if(LMP_NODE)
   else()
     message(STATUS "view script check skipped: run `npm run compile` in extension/")
   endif()
+  lmp_add_script_test(test_checkpoint
+    COMMAND "${LMP_NODE}"
+            "${PROJECT_SOURCE_DIR}/extension/scripts/test-checkpoint.js"
+    LABELS gate)
 else()
   message(STATUS "transcript order check skipped: node not found")
 endif()

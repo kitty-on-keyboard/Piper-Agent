@@ -27,8 +27,8 @@ target_link_libraries(lmp_pcc PUBLIC sqlite3 z)
 
 # --- the MCP server ---------------------------------------------------------
 #
-# PCC over MCP, so the store is reachable from the editors Sean actually drives (Cursor,
-# Antigravity) and not only from our own loop. Same binary, same database: a fact the
+# PCC over MCP, so the store is reachable from the editors people actually drive (Cursor,
+# VS Code) and not only from our own loop. Same binary, same database: a fact the
 # agent wrote in a sidecar run is one Cursor can read a minute later.
 add_executable(pcc_mcp_server mcp_server.cpp)
 target_link_libraries(pcc_mcp_server PRIVATE lmp_pcc lmp_mcp lmp_warnings lmp_assertions)

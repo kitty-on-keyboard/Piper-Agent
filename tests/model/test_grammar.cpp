@@ -28,8 +28,7 @@ std::string tokenizer_path() {
 #else
     const char* v = std::getenv("LMP_QWEN_DIR");
     return std::string(v != nullptr ? v
-                                    : "/Users/dev/.lmstudio/models/lmstudio-community/"
-                                      "Qwen3.6-35B-A3B-MLX-4bit") +
+                                    : "") +
            "/tokenizer.json";
 #endif
 }

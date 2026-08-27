@@ -43,6 +43,7 @@ void register_tools(Server& server) {
     echo.input_schema = {{"type", "object"},
                          {"properties", {{"text", {{"type", "string"}, {"description", "Text to echo"}}}}},
                          {"required", nlohmann::json::array({"text"})}};
+    echo.annotations = nlohmann::json{{"readOnlyHint", true}, {"destructiveHint", false}};
     server.add_tool(std::move(echo), [](const nlohmann::json& args, RequestContext&) {
         return ToolResult::text(arg_string(args, "text"));
     });
@@ -95,6 +96,7 @@ void register_tools(Server& server) {
     shot.description =
         "Returns a tiny image, so a host can be checked for whether it can show the "
         "model a picture rather than a note saying one arrived.";
+    shot.annotations = nlohmann::json{{"readOnlyHint", true}, {"destructiveHint", false}};
     server.add_tool(std::move(shot), [](const nlohmann::json&, RequestContext&) {
         ToolResult r;
         r.add(content::text("here is the screenshot"));

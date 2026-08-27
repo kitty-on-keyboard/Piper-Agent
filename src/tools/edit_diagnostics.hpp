@@ -216,7 +216,7 @@ struct Candidate {
 // just edited and wanted to know WHAT it edited had exactly one route: read the whole file
 // back and diff it by hand against a copy thousands of tokens up the context.
 //
-// MEASURED, on the ResMon run that ended at turn 22 of 200 (events.jsonl, run_id 5): a
+// MEASURED, on a run that ended at turn 22 of 200: a
 // model edited DesignTokens.swift, got the one-sentence receipt, and then read that same
 // file SIX times, byte-identical every time, writing nothing further. Every re-read was
 // detected (`repeat_reread`, prior_count 1..5, unchanged=1) and answered with a note

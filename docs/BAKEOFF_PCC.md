@@ -1,7 +1,7 @@
 # Cook-off: the agent context database (`pcc-test-1`, `context-db`)
 
-Judged 2026-08-02. Twelve entrants in `cat-collector-king/pcc-test-1`, plus the fourteen
-in `cat-collector-king/context-db` from 2026-07-31, read for their architecture only.
+Judged 2026-08-02. Twelve entrants in a `pcc-test-1` cook-off, plus fourteen
+from a `context-db` round on 2026-07-31, read for their architecture only.
 
 **Verdict: nothing adoptable as code, three ideas worth taking, and one whole-category
 failure that is the most useful thing in the corpus.** The result is `src/pcc/`.
@@ -142,6 +142,5 @@ overstate consistently — `feat/cpp20-hybrid-memory`'s body describes a hybrid 
 Jules PR body at face value, open the file.
 
 ```bash
-GH_TOKEN=$(gh auth token --user cat-collector-king) \
-  gh pr list -R cat-collector-king/pcc-test-1 --state all
+gh pr list --state all
 ```

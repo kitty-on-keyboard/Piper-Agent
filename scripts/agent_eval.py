@@ -47,8 +47,8 @@ SPLIT POLICY
   A regression on corpus/holdout fails; an improvement asks to be re-pinned. Pins move
   deliberately. Private results are reported and never gated as pin floors.
 
-Loads the model, so it is subject to the one-MLX-process-at-a-time rule in
-docs/HANDOFF_AGENT.md: this runs the sidecar serially, one task at a time, in the
+Loads the model, so it is subject to the one-MLX-process-at-a-time rule.
+This runs the sidecar serially, one task at a time, in the
 foreground. The full suite is roughly half an hour of wall clock per seed.
 """
 
@@ -71,7 +71,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASKS = os.path.join(ROOT, "evals", "agent", "tasks")
 PINS = os.path.join(ROOT, "evals", "agent", "pins.json")
-DEFAULT_MODEL = "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
+DEFAULT_MODEL = os.environ.get("LMP_QWEN_DIR", "")
 SIDECAR = os.path.join(ROOT, "build", "src", "surface", "lmp_sidecar")
 
 # Qwen3's recommended thinking-mode operating point (S5.9). The CLI adds temperature
@@ -768,7 +768,7 @@ def summarize(rows, split):
         "turns": sum(r["turns"] for r in subset),
         # Per-task outcomes beside the aggregate (V2). The counts stay the gate -- at
         # temperature 0.6 an individual task is far too noisy to be a floor -- but a drop
-        # has to be ATTRIBUTABLE. PLAN_GAP_CLOSURE.md finding 2 could not establish
+        # has to be ATTRIBUTABLE. An earlier gap-closure pass could not establish
         # whether a 3-of-6 corpus was a regression, because pins.json recorded `solved: 3`
         # and never which 3.
         "tasks": {

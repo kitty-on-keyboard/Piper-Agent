@@ -16,8 +16,8 @@ with no test that can prove it against a real model:
     # and/or continue the conversation after the run ends, as many times as you like
     --then "now do the same for the other module"
 
-Loads the model, so it is subject to the one-MLX-process-at-a-time rule in
-docs/HANDOFF_AGENT.md: run it alone, in the foreground, to completion.
+Loads the model, so it is subject to the one-MLX-process-at-a-time rule:
+run it alone, in the foreground, to completion.
 """
 import argparse
 import json
@@ -27,7 +27,6 @@ import sys
 import threading
 import time
 
-DEFAULT_MODEL = "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
 DEFAULT_SIDECAR = "build/src/surface/lmp_sidecar"
 
 # Qwen3's recommended thinking-mode operating point (S5.9). These are also the pinned
@@ -39,7 +38,7 @@ QWEN_SAMPLING = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
 ap = argparse.ArgumentParser()
 ap.add_argument("--workspace", required=True)
 ap.add_argument("--mission", required=True)
-ap.add_argument("--model", default=os.environ.get("LMP_QWEN_DIR", DEFAULT_MODEL))
+ap.add_argument("--model", default=os.environ.get("LMP_QWEN_DIR"))
 ap.add_argument("--sidecar", default=DEFAULT_SIDECAR)
 ap.add_argument("--mode", default="agent", choices=["plan", "debug", "agent"])
 # These three track loop::Budget and the editor's defaults on purpose. When they did not,
@@ -73,6 +72,8 @@ ap.add_argument("--then", action="append", default=[], metavar="TEXT",
                 help="on run_end, continue the conversation with TEXT instead of "
                      "shutting down (repeatable, in order).")
 args = ap.parse_args()
+if not args.model:
+    ap.error("need --model PATH or LMP_QWEN_DIR")
 
 # {turn_number: [text, ...]}
 say_at = {}

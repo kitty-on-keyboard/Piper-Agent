@@ -146,7 +146,7 @@ overshoots on 31 of 75 points. That is the number to quote.
 
 ## Round 1 results (2026-07-30)
 
-15 submissions at `cat-collector-king/log-triage-engine`. **All fifteen shipped real code** —
+15 submissions. **All fifteen shipped real code** —
 no empty commits this round, unlike blast-radius's 3 of 14. **None of the fifteen PR
 descriptions contains a blind-spots section or a challenge to the spec.**
 

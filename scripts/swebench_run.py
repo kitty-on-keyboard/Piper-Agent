@@ -29,7 +29,7 @@ runs on the host against a bare checkout with no environment, so the agent canno
 the project's tests, cannot reproduce the bug, and cannot check its own work by running
 anything. That is a materially harder condition, and any comparison against the published
 number has to say so. It is a consequence of LM_Pipe being a native macOS binary with MLX
-in-process; closing it needs the T2 container work in docs/PLAN_GAP_CLOSURE.md.
+in-process; closing it needs the T2 container work.
 
 Loads the model, so it is subject to the one-MLX-process-at-a-time rule: one checkpoint
 is 15-19 GB resident on a 48 GB host, and running two has taken this machine down. The
@@ -55,7 +55,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import agent_eval as ae  # noqa: E402
 
 WORK = os.environ.get(
-    "LMP_SWEBENCH_WORK", "/Users/dev/Desktop/seans_projects_local/swebench_work"
+    "LMP_SWEBENCH_WORK", os.path.expanduser("~/swebench_work")
 )
 DATASET = os.path.join(WORK, "data", "swebench_lite_test.parquet")
 MIRRORS = os.path.join(WORK, "repos")
@@ -101,7 +101,7 @@ SYNTAX_VERIFY = (
 
 def load_instances():
     if not os.path.exists(DATASET):
-        sys.exit(f"no dataset at {DATASET}; see docs/HANDOFF_SWEBENCH.md")
+        sys.exit(f"no dataset at {DATASET}; see docs/SWEBENCH_BARE_METAL.md")
     try:
         import pandas as pd
     except ImportError:
@@ -535,7 +535,7 @@ def cmd_run(args):
     print(f"\n  {produced}/{len(rows)} instance(s) produced a non-empty patch "
           f"in {round(wall / 60, 1)} min")
     print(f"  predictions -> {os.path.join(args.out, 'predictions.json')}")
-    print("  NOT a score. Grade with SWE-bench's harness; see docs/HANDOFF_SWEBENCH.md")
+    print("  NOT a score. Grade with SWE-bench's harness; see docs/SWEBENCH_BARE_METAL.md")
     return 0
 
 

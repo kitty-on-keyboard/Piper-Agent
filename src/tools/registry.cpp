@@ -2125,9 +2125,10 @@ Registry::Registry(WorkspaceContext ctx)
             "are. Call it EARLY on any task with more than one step, before you start the "
             "work, listing every item you expect to do. Call it again as each one lands: "
             "restating replaces the whole list, so send all the items every time, '[x] ' "
-            "on the ones that are done and '[ ] ' on the rest. One item per line, separated "
-            "by REAL newlines -- one string with '\\n' sequences typed into it is one item, "
-            "not a list, and is rejected.";
+            "on the ones that are done and '[ ] ' on the rest. One item per line. Real "
+            "newlines or a JSON array of strings both work. Typing the two characters "
+            "'\\n' BETWEEN items is also a line break when the next item starts with "
+            "'[ ]', '1. ' or '- '; a '\\n' in the middle of a sentence stays text.";
         d.spec.name = d.name;
         d.spec.params = {param("items", ParamType::Text, true)};
         // Not offered to a mode that only reads, asks and hands over -- see
@@ -2175,7 +2176,10 @@ Registry::Registry(WorkspaceContext ctx)
             "what each answer would change. When the answer is a short closed set -- which "
             "approach, which library, which of two designs -- pass `options` as 2 to 4 "
             "newline-separated choices, one per line; they become buttons the human clicks "
-            "instead of typing. Leave `options` out for a genuinely open question. The run "
+            "instead of typing. EACH LINE MUST BE A CHOICE THEY COULD PICK, never a "
+            "summary of the list: a single line reading 'A / B / C / D' is one button "
+            "labelled with every answer at once, which is not a question. Leave `options` "
+            "out for a genuinely open question. The run "
             "ends here; their reply continues this same conversation with everything you "
             "have read still in context.";
         d.spec.name = d.name;

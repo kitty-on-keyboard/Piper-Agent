@@ -75,10 +75,12 @@ bool parse_args(int argc, char** argv, tools::McpServerConfig& cfg, std::string&
 
 void print_registered(const tools::Registry& registry) {
     for (const tools::ToolDecl& d : registry.decls()) {
-        if (d.name.rfind("mcp__", 0) != 0) {
+        if (!d.remote) {
             continue;
         }
-        std::printf("  %s%s\n", d.name.c_str(), d.irreversible ? "  [card]" : "");
+        std::printf("  %s%s%s%s\n", d.name.c_str(), d.irreversible ? "  [card]" : "",
+                    d.mutates_workspace ? "  [write]" : "  [read]",
+                    d.needs_execution ? "  [exec]" : "");
         for (const parsephony::ParamSpec& p : d.spec.params) {
             std::printf("      %s: %s%s\n", p.name.c_str(), type_name(p.type),
                         p.required ? " (required)" : "");
@@ -97,7 +99,13 @@ int call_through_registry(tools::Registry& registry, const std::string& server,
             params.push_back({k, v.is_string() ? v.get<std::string>() : v.dump()});
         }
     }
-    const std::string full = tools::namespaced_tool_name(server, tool);
+    // Call by the name the server declared. registered_mcp_tool_name is the
+    // registration-time chooser; after connect the short name is already taken, so
+    // using it here would invent a namespaced alias that was never registered.
+    std::string full = tool;
+    if (registry.find(full) == nullptr) {
+        full = tools::namespaced_tool_name(server, tool);
+    }
     const tools::ToolResult r = registry.execute(full, params, 0);
     std::printf("\ncall %s -> %s\n", full.c_str(), r.ok() ? "ok" : "FAILED");
     std::printf("%s\n", r.summary.c_str());
@@ -141,6 +149,7 @@ int main(int argc, char** argv) {
     std::printf("registered %zu tool(s)%s\n", st.registered,
                 cfg.trusted ? " (trusted: no approval card)"
                             : " (untrusted: every call raises a card)");
+    std::printf("instructions %zu chars\n", st.instructions.size());
     for (const std::string& why : st.rejected) {
         std::printf("  REJECTED %s\n", why.c_str());
     }

@@ -167,7 +167,7 @@ TEST(nullable_and_enum_constraints_are_preserved_when_reducible) {
 
 // --- the live half: a real server, a real subprocess -----------------------
 
-TEST(a_live_server_populates_the_registry_under_namespaced_names) {
+TEST(a_live_server_populates_the_registry_under_the_servers_tool_names) {
     Registry registry(workspace());
     const std::size_t native = registry.decls().size();
 
@@ -180,17 +180,25 @@ TEST(a_live_server_populates_the_registry_under_namespaced_names) {
     CHECK_EQ(report[0].registered, static_cast<std::size_t>(5));
     CHECK(registry.decls().size() == native + 5);
 
-    // Namespaced, so a remote tool cannot shadow a native one.
-    REQUIRE(find(registry, "mcp__demo__echo") != nullptr);
-    CHECK(find(registry, "mcp__demo__add") != nullptr);
-    CHECK(find(registry, "mcp__demo__always_fails") != nullptr);
-    CHECK(find(registry, "echo") == nullptr);
+    // The server's name, not a prefix: `godot_guide` is what AGENTS.md and the model
+    // write. Collision is the only reason to namespace.
+    REQUIRE(find(registry, "echo") != nullptr);
+    CHECK(find(registry, "add") != nullptr);
+    CHECK(find(registry, "always_fails") != nullptr);
+    CHECK(find(registry, "mcp__demo__echo") == nullptr);
 
     // The schema came across, so generation of a remote call is constrained.
-    const ToolDecl* echo = find(registry, "mcp__demo__echo");
+    const ToolDecl* echo = find(registry, "echo");
     REQUIRE(echo->spec.params.size() == 1);
     CHECK_EQ(echo->spec.params[0].name, std::string("text"));
     CHECK(echo->spec.params[0].required);
+}
+
+TEST(a_remote_tool_is_namespaced_only_when_its_name_would_shadow) {
+    Registry registry(workspace());
+    CHECK_EQ(registered_mcp_tool_name(registry, "demo", "echo"), std::string("echo"));
+    CHECK_EQ(registered_mcp_tool_name(registry, "demo", "read_file"),
+             std::string("mcp__demo__read_file"));
 }
 
 TEST(an_untrusted_servers_tools_are_irreversible_and_a_trusted_servers_are_not) {
@@ -200,21 +208,38 @@ TEST(an_untrusted_servers_tools_are_irreversible_and_a_trusted_servers_are_not) 
     Registry untrusted_reg(workspace());
     McpHost untrusted_host;
     (void)untrusted_host.connect_and_register({demo("demo", false)}, untrusted_reg);
-    const ToolDecl* u = find(untrusted_reg, "mcp__demo__echo");
+    const ToolDecl* u = find(untrusted_reg, "echo");
     REQUIRE(u != nullptr);
     CHECK(u->irreversible);
     CHECK(u->mutates_workspace);
-    CHECK(u->executes_commands);
+    CHECK(u->needs_execution);
+    CHECK(!u->executes_commands);
+    CHECK(u->remote);
     // The model is told where this came from and that we are not containing it.
     CHECK(u->description.find("outside the sandbox") != std::string::npos);
 
     Registry trusted_reg(workspace());
     McpHost trusted_host;
     (void)trusted_host.connect_and_register({demo("demo", true)}, trusted_reg);
-    const ToolDecl* t = find(trusted_reg, "mcp__demo__echo");
+    const ToolDecl* t = find(trusted_reg, "echo");
     REQUIRE(t != nullptr);
     CHECK(!t->irreversible);
+    CHECK(!t->mutates_workspace);
+    CHECK(!t->needs_execution);
+    CHECK(t->remote);
     CHECK(t->description.find("provided by MCP server") != std::string::npos);
+
+    // MCP's default for an omitted readOnlyHint is false: the tool may modify.
+    // Trust is not a proxy for "this is a read".
+    const ToolDecl* add = find(trusted_reg, "add");
+    REQUIRE(add != nullptr);
+    CHECK(add->mutates_workspace);
+    CHECK(add->needs_execution);
+    CHECK(!add->irreversible);
+
+    CHECK(!trusted_host.prompt_instructions().empty());
+    CHECK(trusted_host.prompt_instructions().find("Demonstration server") != std::string::npos);
+    CHECK(untrusted_host.prompt_instructions().empty());
 }
 
 TEST(a_namespaced_call_round_trips_through_the_registry) {
@@ -223,13 +248,13 @@ TEST(a_namespaced_call_round_trips_through_the_registry) {
     (void)host.connect_and_register({demo("demo", true)}, registry);
 
     const ToolResult echoed =
-        registry.execute("mcp__demo__echo", {{"text", "hello from lmp"}}, 0);
+        registry.execute("echo", {{"text", "hello from lmp"}}, 0);
     CHECK(echoed.ok());
     CHECK_EQ(echoed.summary, std::string("hello from lmp"));
 
     // Numbers are parsed rather than sent as strings: the guard validated the SHAPE, and
     // turning "2" into 2 is this layer's job.
-    const ToolResult sum = registry.execute("mcp__demo__add", {{"a", "2"}, {"b", "3"}}, 0);
+    const ToolResult sum = registry.execute("add", {{"a", "2"}, {"b", "3"}}, 0);
     CHECK(sum.ok());
     CHECK(sum.summary.find('5') != std::string::npos);
 }
@@ -242,7 +267,7 @@ TEST(a_remote_tool_that_fails_is_evidence_and_not_a_refusal) {
     McpHost host;
     (void)host.connect_and_register({demo("demo", true)}, registry);
 
-    const ToolResult r = registry.execute("mcp__demo__always_fails", {}, 0);
+    const ToolResult r = registry.execute("always_fails", {}, 0);
     CHECK(!r.ok());
     CHECK(r.status == Status::ToolError);
     CHECK(r.status != Status::Refused);
@@ -269,19 +294,19 @@ TEST(a_server_that_cannot_start_leaves_its_tools_absent_and_the_run_alive) {
     // able to take the run down with it.
     CHECK(report[1].connected);
     CHECK(registry.decls().size() == native + 5);
-    CHECK(registry.execute("mcp__demo__echo", {{"text", "still here"}}, 0).ok());
+    CHECK(registry.execute("echo", {{"text", "still here"}}, 0).ok());
 }
 
 TEST(a_server_that_dies_mid_run_fails_its_calls_without_stalling_the_turn) {
     Registry registry(workspace());
     McpHost host;
     (void)host.connect_and_register({demo("demo", true)}, registry);
-    CHECK(registry.execute("mcp__demo__echo", {{"text", "before"}}, 0).ok());
+    CHECK(registry.execute("echo", {{"text", "before"}}, 0).ok());
 
     // Drop the connection under the registered handler, the way a crashed server would.
     host.close();
 
-    const ToolResult after = registry.execute("mcp__demo__echo", {{"text", "after"}}, 0);
+    const ToolResult after = registry.execute("echo", {{"text", "after"}}, 0);
     CHECK(!after.ok());
     // Typed, and it RETURNED -- the point of this test is that it is not a hang.
     CHECK(after.status == Status::ToolError);
@@ -300,9 +325,24 @@ TEST(a_duplicate_server_name_cannot_displace_the_first_ones_tools) {
     CHECK(!report[1].error.empty());
     // The first server's trust level survived: the second did not silently re-register
     // the same names with different containment.
-    const ToolDecl* echo = find(registry, "mcp__demo__echo");
+    const ToolDecl* echo = find(registry, "echo");
     REQUIRE(echo != nullptr);
     CHECK(!echo->irreversible);
+}
+
+TEST(a_second_servers_echo_is_namespaced_rather_than_shadowing) {
+    Registry registry(workspace());
+    McpHost host;
+    const auto report =
+        host.connect_and_register({demo("alpha", true), demo("beta", true)}, registry);
+    REQUIRE(report.size() == 2);
+    CHECK(report[0].connected);
+    CHECK(report[1].connected);
+    REQUIRE(find(registry, "echo") != nullptr);
+    REQUIRE(find(registry, "mcp__beta__echo") != nullptr);
+    CHECK(find(registry, "mcp__alpha__echo") == nullptr);
+    CHECK(registry.execute("echo", {{"text", "a"}}, 0).ok());
+    CHECK(registry.execute("mcp__beta__echo", {{"text", "b"}}, 0).ok());
 }
 
 // The case that proves these checks can fail (S11.4): every claim above is about a name
@@ -333,7 +373,7 @@ TEST(an_image_from_a_server_is_spooled_and_offered_as_pixels) {
     McpHost host;
     (void)host.connect_and_register({demo("demo", true)}, registry);
 
-    const ToolResult r = registry.execute("mcp__demo__screenshot", {}, 0);
+    const ToolResult r = registry.execute("screenshot", {}, 0);
     CHECK(r.ok());
     // The text block still reaches the model...
     CHECK(r.summary.find("here is the screenshot") != std::string::npos);
@@ -356,7 +396,58 @@ TEST(a_non_image_block_is_still_named_rather_than_dropped) {
     Registry registry(workspace());
     McpHost host;
     (void)host.connect_and_register({demo("demo", true)}, registry);
-    const ToolResult r = registry.execute("mcp__demo__echo", {{"text", "plain"}}, 0);
+    const ToolResult r = registry.execute("echo", {{"text", "plain"}}, 0);
     CHECK(r.ok());
     CHECK(r.images.empty());
+}
+
+// A STRING PARAMETER IS SENT AS A STRING, whatever its contents happen to parse as.
+//
+// Every value went through nlohmann::json::parse unconditionally, so a parameter the
+// server's own schema declares as `string` arrived as an object, a number or a bool
+// whenever its text looked like one -- and the server then rejected the call it had itself
+// specified. Measured on r-18ced29746aa7728-2ea858f4: godoer's `godot_build_scene` takes
+// `spec` as a STRING holding a scene spec; the model sent one, this layer parsed it into
+// an object, and godoer answered "Input should be a valid string [type=string_type,
+// input_value={'path': ...}, input_type=dict]".
+//
+// `echo` returns its `text` argument, so a round trip that comes back byte-identical is
+// proof the string was not reinterpreted on the way out.
+TEST(a_string_parameter_holding_json_is_not_parsed_into_an_object) {
+    Registry registry(workspace());
+    McpHost host;
+    (void)host.connect_and_register({demo("demo", true)}, registry);
+
+    const std::string spec = R"({"path":"res://main.tscn","root":{"type":"Node3D"}})";
+    const ToolResult r = registry.execute("echo", {{"text", spec}}, 0);
+    CHECK(r.ok());
+    CHECK_EQ(r.summary, spec);
+}
+
+TEST(a_string_parameter_that_looks_numeric_keeps_its_text) {
+    Registry registry(workspace());
+    McpHost host;
+    (void)host.connect_and_register({demo("demo", true)}, registry);
+
+    // The same hazard, quieter: a version "1.20" becomes 1.2 and an id "007" becomes 7,
+    // and neither failure announces itself the way the object one did.
+    CHECK_EQ(registry.execute("echo", {{"text", "007"}}, 0).summary,
+             std::string("007"));
+    CHECK_EQ(registry.execute("echo", {{"text", "1.20"}}, 0).summary,
+             std::string("1.20"));
+    CHECK_EQ(registry.execute("echo", {{"text", "true"}}, 0).summary,
+             std::string("true"));
+}
+
+TEST(a_non_string_parameter_is_still_parsed) {
+    // The parse is right for every other declared type: the guard validates SHAPE, not
+    // JSON, so an Object, Array, Number or Boolean param arrives as the text the model
+    // emitted and has to be parsed. Narrowing this to strings must not take that with it.
+    Registry registry(workspace());
+    McpHost host;
+    (void)host.connect_and_register({demo("demo", true)}, registry);
+
+    const ToolResult sum = registry.execute("add", {{"a", "2"}, {"b", "3"}}, 0);
+    CHECK(sum.ok());
+    CHECK(sum.summary.find('5') != std::string::npos);
 }

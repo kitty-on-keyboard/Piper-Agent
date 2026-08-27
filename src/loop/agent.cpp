@@ -345,6 +345,38 @@ std::size_t ordinal_width(const std::string& line, std::size_t i) {
     return j - i;
 }
 
+// Does a new checklist item start at `i`? Used to tell an unsplit list (another item after
+// a `\n` escape) from a sentence that merely mentions the two-character sequence.
+//
+// Checkboxes, markdown bullets (`- ` / `* `) and ordinals (`1. ` / `1) `) are all how a
+// model starts the next row. A letter after the escape is prose -- `[ ] emit \n rather
+// than a newline` is one item, and decoding it would tear the sentence in half.
+bool looks_like_item_start(const std::string& s, std::size_t i) {
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    if (i >= s.size()) {
+        return false;
+    }
+    if ((s[i] == '-' || s[i] == '*') && i + 1 < s.size() &&
+        (s[i + 1] == ' ' || s[i + 1] == '\t')) {
+        return true;
+    }
+    while (i < s.size() && (s[i] == '-' || s[i] == '*')) {
+        ++i;
+    }
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+        ++i;
+    }
+    if (i >= s.size()) {
+        return false;
+    }
+    if (s[i] == '[') {
+        return true;
+    }
+    return ordinal_width(s, i) > 0;
+}
+
 // One item per line: an optional `- `/`* ` bullet, an optional `1. ` ordinal, an optional
 // `[ ]`/`[x]` marker, then the text -- with the ordinal and the marker accepted in either
 // order. Tolerant of prose-ish markdown, because refusing a checklist over a dash would be
@@ -411,24 +443,42 @@ std::vector<context::ChecklistItem> parse_checklist_lines(const std::string& sou
     return items;
 }
 
-// Does this single item carry a SECOND checkbox? Then the list arrived unsplit: a real
-// one-item plan does not mention another item's marker.
+// Does this single item carry a SECOND item's marker? Then the list arrived unsplit: a
+// real one-item plan does not mention another item's checkbox, and does not continue with
+// `2. ` or `- ` after a break.
 bool holds_a_whole_list(const std::string& text) {
-    return text.find("[ ]") != std::string::npos || text.find("[x]") != std::string::npos ||
-           text.find("[X]") != std::string::npos;
+    if (text.find("[ ]") != std::string::npos || text.find("[x]") != std::string::npos ||
+        text.find("[X]") != std::string::npos) {
+        return true;
+    }
+    for (std::size_t at = 0; at < text.size();) {
+        const std::size_t nl = text.find('\n', at);
+        const std::size_t esc = text.find("\\n", at);
+        if (nl == std::string::npos && esc == std::string::npos) {
+            break;
+        }
+        const bool escaped = esc != std::string::npos && (nl == std::string::npos || esc < nl);
+        const std::size_t after = escaped ? esc + 2 : nl + 1;
+        if (looks_like_item_start(text, after)) {
+            return true;
+        }
+        at = after;
+    }
+    return false;
 }
 
-// Is there an ESCAPED newline here with the next item's checkbox behind it? That is an
+// Is there an ESCAPED newline here with the next item starting behind it? That is an
 // unsplit list and nothing else.
 //
 // The bare `\n` test this replaces was not good enough: `[ ] make write_file emit \n rather
 // than a newline` is ONE item that talks about the escape, and decoding it tore the item in
 // half at the word "rather". What separates the two cases is what FOLLOWS the escape -- a
-// marker (through any bullet or indent) means another item starts there.
+// checkbox, a `1. ` ordinal or a `- ` bullet means another item starts there. Only looking
+// for `[` left numbered plans (`1. Foo\n2. Bar`) as one garbled row that the description
+// had promised to reject.
 bool escaped_newline_starts_an_item(const std::string& s) {
     for (std::size_t at = s.find("\\n"); at != std::string::npos; at = s.find("\\n", at + 2)) {
-        const std::size_t next = s.find_first_not_of(" \t-*", at + 2);
-        if (next != std::string::npos && s[next] == '[') {
+        if (looks_like_item_start(s, at + 2)) {
             return true;
         }
     }
@@ -449,11 +499,35 @@ constexpr const char kCacheNote[] =
 constexpr const char kRepeatNote[] =
     "\n[Note: This tool call produced identical output to a previous call. Do not repeat the same query. Explore subdirectories, inspect code files, or put the choice to the human with 'ask_user'.]";
 
+// THE SAME FACT, FOR A CALL THAT ACTS RATHER THAN READS. kRepeatNote's advice -- explore
+// subdirectories, inspect code files -- is about a read that returned bytes already held,
+// and reads as nonsense after a build or a remote tool that came back with the same error
+// for the fifteenth time. That is not hypothetical: on r-18ced29746aa7728-2ea858f4 the
+// model sent `mcp__godoer__godot_check` fifteen times and got
+// "'/game' is not a Godot project" every time.
+//
+// It names the shape of the escape, because the escape is different here. A read repeats
+// because the model forgot it had the bytes; a call like this repeats because the model is
+// waiting for a different answer from an unchanged question.
+constexpr const char kRepeatActionNote[] =
+    "\n[Note: This call returned EXACTLY what it returned last time. Running it again will "
+    "return it again -- nothing about it will change on its own. If it reported a problem, "
+    "the problem is what to work on: change the arguments, fix the file it named, or ask "
+    "'ask_user' if you cannot tell what it wants. Do not send this call again unchanged.]";
+
 std::string without_cache_note(std::string summary) {
-    const std::string_view rnote(kRepeatNote);
-    if (summary.size() >= rnote.size() &&
-        std::string_view(summary).substr(summary.size() - rnote.size()) == rnote) {
-        summary.resize(summary.size() - rnote.size());
+    // BOTH REPEAT NOTES, and the stripper has to know about every one of them. The summary
+    // is cached without its note so the next comparison is against the bytes the tool
+    // produced; a note this misses is a note that stacks up -- two on the third repeat,
+    // three on the fourth -- and, worse, makes the "unchanged" comparison fail forever
+    // after, which silently disables the detector it belongs to.
+    for (const std::string_view rnote : {std::string_view(kRepeatNote),
+                                         std::string_view(kRepeatActionNote)}) {
+        if (summary.size() >= rnote.size() &&
+            std::string_view(summary).substr(summary.size() - rnote.size()) == rnote) {
+            summary.resize(summary.size() - rnote.size());
+            break;
+        }
     }
     const std::string_view note(kCacheNote);
     if (summary.size() >= note.size() &&
@@ -613,6 +687,28 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     if (config_.sandbox_tier_override >= 0 && config_.mode != Mode::Plan) {
         policy_.sandbox_tier = config_.sandbox_tier_override;
     }
+    // WHERE THE SEED SEQUENCE RESUMES, and it must not be 0 on a follow-up.
+    //
+    // The per-turn seed (see seed_for_turn) fixed stuck runs by mixing the turn index into
+    // config_.seed, and it works for the length of one Agent. But an Agent is built per
+    // `lmp/start` AND per `lmp/message`, over a ContextStore that outlives it -- so every
+    // answer to an `ask_user` question starts a fresh Agent whose index is 0 again. With
+    // the editor's default seed of 0, every one of those one-turn runs generated at
+    // seed_for_turn(0, 0): one constant, drawn from forever.
+    //
+    // MEASURED on r-18cecdb5003e4468-b687d6cb: three consecutive follow-ups emitted the
+    // byte-identical `ask_user` call -- 88 tokens, think_tokens 6, tool_tokens 81 -- at
+    // prompt sizes 5856, 5966 and 6098. The operator answered each time, the answer landed
+    // in the context each time (messages 21 -> 24 -> 27), and the model asked the same
+    // question again because the draws were not independent. Identical generations at
+    // different prompt sizes is the fingerprint; it is the same defect the per-turn seed
+    // was written to fix, surviving in the one place that reset the counter.
+    //
+    // ctx_.turns_recorded() is monotonic over the whole session and survives compaction,
+    // so the sequence continues where the last Agent left off. A conversation replayed
+    // from the same inputs still reproduces exactly -- which is the property config_.seed
+    // exists for, and the only one being kept.
+    turns_generated_ = ctx_.turns_recorded();
     tools_guidance_ =
         registry_.tools_json([this](const tools::ToolDecl& d) { return tool_allowed(d); });
     std::string withheld_by_mode;
@@ -744,10 +840,9 @@ TurnResult::PlanOutcome Agent::apply_plan(const std::vector<tools::ToolParamValu
     // call until the run ended. An error is information; a plausible number is not.
     if (items.size() == 1 && holds_a_whole_list(items[0].text)) {
         return {false,
-                "plan got ONE item containing other checkbox markers, so the list arrived "
+                "plan got ONE item containing other list markers, so the list arrived "
                 "unsplit and was not applied. Put each item on its own line with a real "
-                "newline between them, or send a JSON array of strings -- not one string "
-                "with \\n sequences inside it."};
+                "newline between them, or send a JSON array of strings."};
     }
     const std::size_t open = static_cast<std::size_t>(std::count_if(
         items.begin(), items.end(), [](const context::ChecklistItem& c) { return !c.done; }));
@@ -958,7 +1053,7 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // looked ignored -- they were being written into a prompt whose continuation had
     // already been decided by the RNG.
     //
-    // MEASURED, plan mode, ResMon, temperature 0.6: prompts of 2901 and 3042 tokens
+    // MEASURED, plan mode, temperature 0.6: prompts of 2901 and 3042 tokens
     // produced byte-identical 147-token generations; prompts of 3342 and 3586 produced
     // byte-identical 238-token ones. Two independent draws agreeing for 238 tokens at
     // that temperature does not happen -- the draws were not independent.
@@ -1433,9 +1528,12 @@ bool Agent::turn_made_progress(const TurnResult& turn) noexcept {
 // record_call() folds this result into the detector, which is why every use sits on the
 // execution path rather than after it.
 //
-// A call with no prior is new by definition. A FAILED call is treated as new -- an error
-// is information, and two identical failures in a row are caught by the inert-turn count
-// rather than by pretending the second one said nothing.
+// A call with no prior is new by definition. A first failure is new -- an error is
+// information. Two identical failures in a row are not: they are the inert-turn count's
+// job, not a reason to reset it. The early `if (!result.ok()) return true` plus
+// `!prior->last_ok` made every follow-up after a failure look fresh, so the seven
+// identical "requires read_file before overwrite" errors on r-18cf0daf42104e38-b4d1f851
+// (turns 43-48, 53-54) each reset the streak.
 // Answer a byte-identical re-read with a reference instead of the bytes.
 //
 // PREVENTION, WHERE collapse_duplicate_read IS CURE, and the asymmetry is the point. The
@@ -1482,30 +1580,37 @@ bool Agent::elide_redundant_reread(const std::string& name,
 bool Agent::observation_is_new(const std::string& name,
                                const std::vector<tools::ToolParamValue>& params,
                                const tools::ToolResult& result) const {
-    if (!result.ok()) {
-        return true;
-    }
-    // A malformed `plan` is caught above -- an error is information. A SUCCESSFUL one
-    // learns nothing by construction, so it must not reset the inert-turn counter.
-    if (is_display_only(name)) {
+    // A SUCCESSFUL `plan` learns nothing by construction. A malformed one is an
+    // error, and an error is information -- the first time. Identical repeats of
+    // that error fall through to the comparison below.
+    if (result.ok() && is_display_only(name)) {
         return false;
     }
-    if (!observes_workspace(name)) {
-        // A shell or MCP call that ran to completion is not "new information" just
-        // because it is not a read. A repeated `swift build` that prints the same
-        // success line teaches the run nothing; treating it as fresh let a verify
-        // step reset the inert counter on every turn and hide a thrash loop.
-        // Measured: 39 tool calls, 11 writes, 9 plan restatements, ended stalled
-        // because each build looked like progress.
-        if (name == "shell" || name == "run_command") {
-            const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
-            return prior == nullptr || !prior->last_ok ||
-                   prior->last_summary != without_cache_note(result.summary);
-        }
+    // A shell or MCP call that ran to completion is not "new information" just
+    // because it is not a read. A repeated `swift build` that prints the same
+    // success line teaches the run nothing; treating it as fresh let a verify
+    // step reset the inert counter on every turn and hide a thrash loop.
+    // Measured: 39 tool calls, 11 writes, 9 plan restatements, ended stalled
+    // because each build looked like progress.
+    // EVERY tool that acts, not the two that were named. The comment above says "a
+    // shell or MCP call", and the code checked for `shell` and `run_command` -- so an
+    // MCP tool returning the identical bytes still counted as new information and
+    // reset the inert counter on every turn, which is precisely the hole the shell
+    // case was added to close.
+    //
+    // Measured on r-18ced29746aa7728-2ea858f4: fifteen `mcp__godoer__godot_check`
+    // calls, identical arguments, identical "'/game' is not a Godot project" back
+    // every time, and not one of them counted as a turn that learned nothing.
+    //
+    // Identical PARAMS are part of the key -- RepeatDetector stores per (tool, params)
+    // -- so a build re-run after an edit compares against the previous run of the same
+    // command and is new exactly when its output differs. A first failure is new
+    // (no prior). A second with the same ok-bit and the same summary is not.
+    const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
+    if (prior == nullptr) {
         return true;
     }
-    const RepeatDetector::SeenCall* prior = repeats_.previous(name, params);
-    return prior == nullptr || !prior->last_ok ||
+    return prior->last_ok != result.ok() ||
            prior->last_summary != without_cache_note(result.summary);
 }
 
@@ -1703,6 +1808,37 @@ std::size_t Agent::apply_one_collapse(const PendingCollapse& pc) {
     return collapsed;
 }
 
+// The human's reply to this exact question, if they have already given one.
+//
+// Walks back over the session's turns looking for an `ask_user` whose question matches
+// byte for byte, and returns the first human turn recorded AFTER it. Empty when the
+// question is new, or when it was asked and not yet answered -- the second case matters:
+// a run resumed at the moment it was asking must be able to ask again.
+const std::string& Agent::previously_answered(const std::string& question) const {
+    static const std::string kNone;
+    const std::vector<context::TurnRecord>& turns = ctx_.recent();
+    for (std::size_t i = turns.size(); i > 0; --i) {
+        const context::TurnRecord& t = turns[i - 1];
+        // MATCHED ON tool_call_text, NOT tool_args_summary. The summary is preview_of()'s
+        // one-line label and it truncates every argument at 120 bytes, so two different
+        // long questions share it and one long question never equals itself. The surface
+        // form is verbatim by contract (see call_surface_form) and carries the delimiters,
+        // so this is an exact match on the whole parameter rather than a prefix.
+        const std::string needle = "<parameter=question>\n" + question + "\n</parameter>\n";
+        if (t.tool_name != "ask_user" ||
+            t.tool_call_text.find(needle) == std::string::npos) {
+            continue;
+        }
+        for (std::size_t j = i; j < turns.size(); ++j) {
+            if (!turns[j].user_text.empty()) {
+                return turns[j].user_text;
+            }
+        }
+        return kNone;
+    }
+    return kNone;
+}
+
 tools::ToolResult Agent::dispatch_call(const std::string& name,
                                        const std::vector<tools::ToolParamValue>& params,
                                        bool& executed) {
@@ -1783,6 +1919,32 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
                 "'" + name + "' needs a non-empty " +
                     (name == "ask_user" ? "'question'" : "'plan'"));
         }
+        if (name == "ask_user") {
+            // NEVER PUT THE SAME QUESTION TO THE HUMAN TWICE. They answered it; asking
+            // again spends their attention to learn something already in the context, and
+            // from the pane it is indistinguishable from the product being broken.
+            //
+            // The seed reset in the constructor is why this happened -- three identical
+            // questions in a row on r-18cecdb5003e4468-b687d6cb -- and fixing the seed
+            // removes the cause. This is the door, not the cause: any future turn that
+            // lands on the same question for any reason must not reach the operator with
+            // it, and the check costs a walk over the recent turns.
+            //
+            // REFUSED, and the refusal CARRIES THE ANSWER. A bare "you already asked that"
+            // leaves the model exactly where it was; handing back what the human actually
+            // said is the whole point, and it is already in the context two turns above --
+            // the model just drew past it. ToolCallRefused is exempt from the inert
+            // counter, so this cannot end a run that is otherwise working.
+            const std::string& answered = previously_answered(body);
+            if (!answered.empty()) {
+                emit("ask_user_repeat", {{"question", body}});
+                return tools::ToolResult::refused(
+                    "you have ALREADY asked this exact question and the human answered it: "
+                    "\"" + answered +
+                    "\". Not asked again. Use that answer and carry on -- if you need "
+                    "something further, ask a DIFFERENT question.");
+            }
+        }
         executed = true;
         halted_ = true;
         if (name == "ask_user") {
@@ -1855,28 +2017,47 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
     // Annotate a revalidated repeat. The bytes are withheld in exactly one case -- when
     // the context is already holding them, verbatim and unsuperseded -- and then a
     // reference stands in their place; see elide_redundant_reread().
+    //
+    // ANNOTATED FOR EVERY TOOL; ELIDED FOR READS ONLY. These used to be one condition, so
+    // the whole block was gated on observes_workspace and a shell or MCP call could repeat
+    // itself forever without ever being told. Eliding a non-read would be wrong -- the call
+    // may have side effects and its result is not a snapshot of anything -- but SAYING that
+    // it changed nothing is right for both, and is the only signal a stuck run gets.
     bool elided = false;
-    if (prior_seen > 0 && result.ok() && observes_workspace(name)) {
+    const bool observes = observes_workspace(name);
+    // Identical failures get the note too. Gating on ok() meant a write_file that
+    // kept dying on "read it, then retry" was never told it was repeating -- and
+    // observation_is_new used to treat every failure as fresh, so the inert
+    // counter could not see it either. Measured: seven identical overwrite
+    // refusals on r-18cf0daf42104e38-b4d1f851, zero notes, zero nudges.
+    if (prior_seen > 0) {
         const bool unchanged = !observation_is_new(name, params, result);
-        emit("repeat_reread",
-             {{"tool", name},
-              {"prior_count", std::to_string(prior_seen)},
-              {"unchanged", unchanged ? "1" : "0"},
-              {"read_bytes", std::to_string(result.bytes_read)}});
+        // A read is logged whether or not it changed -- the count is the useful part.
+        // A call that ACTED is only worth a row when it changed nothing; otherwise every
+        // successful build in a long run writes one.
+        if (observes || unchanged) {
+            emit("repeat_reread",
+                 {{"tool", name},
+                  {"prior_count", std::to_string(prior_seen)},
+                  {"unchanged", unchanged ? "1" : "0"},
+                  {"read_bytes", std::to_string(result.bytes_read)}});
+        }
         if (unchanged) {
-            if (result.bytes_read > 0) {
-                emit("redundant_read_bytes",
-                     {{"tool", name},
-                      {"bytes", std::to_string(result.bytes_read)},
-                      {"path", param_value(params, "path")}});
+            if (observes) {
+                if (result.bytes_read > 0) {
+                    emit("redundant_read_bytes",
+                         {{"tool", name},
+                          {"bytes", std::to_string(result.bytes_read)},
+                          {"path", param_value(params, "path")}});
+                }
+                elided = elide_redundant_reread(name, params, result);
             }
-            elided = elide_redundant_reread(name, params, result);
             if (!elided) {
-                // THE CONSTANT, not a copy of its text. without_cache_note() strips this
-                // exact string back off before the summary is cached, so a literal here
-                // that drifts from kRepeatNote silently stops being stripped and the notes
+                // THE CONSTANTS, not copies of their text. without_cache_note() strips
+                // these exact strings back off before the summary is cached, so a literal
+                // here that drifts from them silently stops being stripped and the notes
                 // stack up: two on the third repeat, three on the fourth.
-                result.summary += kRepeatNote;
+                result.summary += observes ? kRepeatNote : kRepeatActionNote;
             }
         }
     }
@@ -1923,7 +2104,7 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
             // eight files look the same in every other event.
             //
             // `first_touch` is the one that catches the accident this was built for: a run
-            // whose workspace root was already `.../ResMon` wrote to `ResMon/Sources/...`,
+            // whose workspace root was already the project folder wrote to `proj/Sources/...`,
             // creating a second copy of the tree one level down and then reading the
             // ORIGINAL back and wondering why its edit was missing. Both paths are legal,
             // both writes succeeded, and nothing in the trace marked the moment a second
@@ -2044,17 +2225,23 @@ void Agent::compact_to_budget() {
     const std::size_t before = tokens;
     const std::size_t turns_before = ctx_.recent().size();
     while (ctx_.recent().size() > kMinRecentTurns && tokens > low_water) {
-        if (ctx_.compact_oldest(ctx_.recent().size() - 1) == 0) {
+        if (ctx_.compact_oldest(ctx_.recent().size() - 1, /*count_as_event=*/false) == 0) {
             break;
         }
         tokens = prompt_tokens();
     }
+    const std::size_t dropped = turns_before - ctx_.recent().size();
     // One event per compaction EVENT, carrying both ends of it. Emitting per dropped turn
-    // said how often the trim looped and never said whether it achieved anything.
+    // said how often the trim looped and never said whether it achieved anything. The
+    // public counter used to follow the loop too, which is why the chip jumped from 0 to
+    // "compacted 30×" the first time the bar filled.
+    if (dropped > 0) {
+        ctx_.note_compaction();
+    }
     emit("compaction", {{"tokens_before", std::to_string(before)},
                         {"tokens_after", std::to_string(tokens)},
                         {"budget_tokens", std::to_string(budget)},
-                        {"turns_dropped", std::to_string(turns_before - ctx_.recent().size())},
+                        {"turns_dropped", std::to_string(dropped)},
                         {"recent_turns", std::to_string(ctx_.recent().size())}});
 }
 
@@ -2302,6 +2489,33 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // turn that takes ten minutes is measured as progress once, not as ten minutes of
         // silence.
         last_progress = clock_.mono();
+
+        // A MULTIPLE-CHOICE QUESTION WRITTEN AS PROSE IS STILL A QUESTION.
+        //
+        // Measured on a plan-mode run: two TextOnly turns
+        // of four A)/B)/C) design axes, never an `ask_user` call. The view streamed the
+        // markdown, drew no card, and the loop nudged "standalone text does not reach the
+        // human" -- so the model thought it had asked and been ignored, while the human
+        // never got a halt to answer. `ask_user` was in the grammar (not withheld). The
+        // card path already parses this shape out of `question` (questionFromText); the
+        // hole was that a TextOnly turn never took that path, and the nudge kept the run
+        // generating instead of yielding.
+        const int enum_lines =
+            turn.outcome == Outcome::TextOnly && !turn.cut_for_looping
+                ? enumerated_choice_lines(turn.assistant_text)
+                : 0;
+        if (enum_lines >= 2) {
+            turn.tool_name = "ask_user";
+            turn.tool_params = {{"question", turn.assistant_text}};
+            turn.tool_result =
+                tools::ToolResult::okay("asked the operator; the run stops here");
+            turn.outcome = Outcome::ToolCallExecuted;
+            turn.batch_count = 1;
+            halted_ = true;
+            halt_reason_ = "awaiting_user";
+            emit("ask_user", {{"question", turn.assistant_text}, {"options", ""},
+                              {"promoted_from_text", "1"}});
+        }
 
         // ONE LINE PER TURN, always. The log had every ingredient of a turn and no record
         // of the turn itself, so reconstructing "what did iteration 41 actually do" meant

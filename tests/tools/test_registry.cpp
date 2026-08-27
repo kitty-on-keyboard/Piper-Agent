@@ -876,8 +876,8 @@ TEST(replacing_text_with_itself_is_reported_as_no_change) {
 
 // THE REGRESSION. A successful replace_in_file used to return "replaced one occurrence in
 // <path>" and nothing else -- no line, no diff -- so a model could not tell whether its
-// edit had landed where it meant it to without reading the whole file back. On the ResMon
-// run that ended at turn 22 of 200, one that had not, it read the same file SIX times.
+// edit had landed where it meant it to without reading the whole file back. On one
+// measured run that ended at turn 22 of 200, one that had not, it read the same file SIX times.
 //
 // The case below is that run in miniature: the model means to make `extension View` public
 // and sends an old_text that matches a DIFFERENT site. The write succeeds either way. The
@@ -1002,9 +1002,10 @@ TEST(tools_json_can_be_filtered_to_what_a_mode_permits) {
     CHECK(all.find("\"shell\"") != std::string::npos);
     CHECK(all.find("\"delete_file\"") != std::string::npos);
 
-    // Plan mode: no writes, no execution, no remote tools.
+    // Plan mode: no writes, no execution. Remote is not a third prohibition -- a
+    // trusted MCP tool that declares itself read-only is a read.
     const std::string plan = reg.tools_json([](const ToolDecl& d) {
-        return !d.mutates_workspace && !d.needs_execution && !d.remote && !d.irreversible;
+        return !d.mutates_workspace && !d.needs_execution && !d.irreversible;
     });
     CHECK(plan.find("\"write_file\"") == std::string::npos);
     CHECK(plan.find("\"replace_in_file\"") == std::string::npos);

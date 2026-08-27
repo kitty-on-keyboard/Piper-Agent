@@ -5,10 +5,10 @@
 // bundles rather than assuming. All of these are Code-OSS forks and accept
 // --install-extension.
 //
-// It installs into ALL editors it finds, not the first. Sean runs more than one, and an
-// installer that silently picks a winner is an extension that "did not install" in
-// whichever editor he happens to have open. Set LMP_EDITOR_CLI to override with one
-// explicit path.
+// It installs into ALL editors it finds, not the first. A machine often has more than
+// one Code-OSS fork open, and an installer that silently picks a winner is an extension
+// that "did not install" in whichever editor is actually being used. Set LMP_EDITOR_CLI
+// to override with one explicit path.
 
 const { execFileSync } = require("child_process");
 const fs = require("fs");

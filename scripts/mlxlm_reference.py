@@ -15,11 +15,12 @@ Usage: mlxlm_reference.py [--prompts 512,2048,8192] [--chunks 2048] [--max-new N
 """
 
 import argparse
+import os
 import statistics
 import sys
 import time
 
-MODEL = "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
+MODEL = os.environ.get("LMP_QWEN_DIR", "")
 
 # The same filler lmp_diag's bench builds, so the two measure the same token count of the
 # same kind of text. Real prose, not a repeated token: the tokenizer must not collapse it.

@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.24)
 # below the version it was compiled for, so that surfaces at a user's first GPU call
 # rather than here.
 #
-# 26.2 IS A PRODUCT DECISION, made deliberately for performance (Sean, 2026-08-08), not a
+# 26.2 IS A PRODUCT DECISION, made deliberately for performance (2026-08-08), not a
 # build tuning knob somebody flipped. It is the threshold at which MLX compiles its M5
 # neural-accelerator kernels -- quantized_nax, steel_gemm_*_nax, steel_attention_nax --
 # which target the matrix units on M5-class GPUs. Below it MLX defines MLX_METAL_NO_NAX

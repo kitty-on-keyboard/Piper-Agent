@@ -92,6 +92,25 @@ Subprocess::Subprocess(Options options) {
     }
     // kInherit: no action. The child keeps our stderr, and there is no pipe to fill.
 
+    // The child's working directory, when the caller named one. A path that does not
+    // exist makes posix_spawn itself fail, which is the right outcome: the alternative is
+    // a server that starts in the wrong place and answers every call with a path error.
+    if (!options.working_dir.empty()) {
+#if defined(LMP_SPAWN_ADDCHDIR_UNAVAILABLE)
+        // REFUSE rather than start it in the wrong place. A server whose relative paths
+        // resolve somewhere else answers every call with a path error, and that reads as
+        // a broken tool rather than a missing platform feature.
+        throw std::system_error(std::make_error_code(std::errc::not_supported),
+                                "this platform cannot set a spawned child's working "
+                                "directory; working_dir is not honoured here");
+#else
+        if (const int rc = LMP_SPAWN_ADDCHDIR(&actions, options.working_dir.c_str());
+            rc != 0) {
+            throw std::system_error(rc, std::generic_category(), "spawn addchdir");
+        }
+#endif
+    }
+
     // Close the parent-side ends in the child. Leaving them open means the child holds
     // a write end of its own stdout pipe, so the parent never sees EOF when the child
     // dies -- the reader thread then blocks forever on a process that no longer exists.

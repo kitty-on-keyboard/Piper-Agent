@@ -94,7 +94,7 @@ carries a one-line `why`.
 
 ## Round 1 results (2026-07-30)
 
-14 submissions at `cat-collector-king/blast-radius`. **Three of them (PRs 2, 5 and 8) are
+14 submissions. **Three of them (PRs 2, 5 and 8) are
 empty commits** — a commit message describing an implementation, zero bytes of code. 11 real
 entrants, vendored to `entrants/e01..e14.hpp` by PR number.
 

@@ -5,10 +5,13 @@
 // framing, stderr backpressure, EOF handling, and reaping the child.
 
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include "src/mcp/client.hpp"
 
@@ -47,6 +50,21 @@ TEST(stdio_session_against_a_real_subprocess) {
 
     const std::vector<Tool> tools = client.list_tools();
     CHECK_EQ(tools.size(), std::size_t(5)); // + screenshot, the image round-trip
+    bool saw_echo_ro = false;
+    bool saw_add_unannotated = false;
+    for (const Tool& t : tools) {
+        if (t.name == "echo") {
+            REQUIRE(t.annotations.has_value());
+            CHECK(t.annotations->at("readOnlyHint").get<bool>());
+            saw_echo_ro = true;
+        }
+        if (t.name == "add") {
+            CHECK(!t.annotations.has_value());
+            saw_add_unannotated = true;
+        }
+    }
+    CHECK(saw_echo_ro);
+    CHECK(saw_add_unannotated);
 
     const ToolResult r = client.call_tool("echo", nlohmann::json{{"text", "over a pipe"}});
     CHECK(!r.is_error);
@@ -208,4 +226,88 @@ TEST(the_stdio_checks_can_actually_fail) {
         CHECK_EQ(info.name, std::string("wrong-name"));
         client.close();
     });
+}
+
+// --- where the child starts ------------------------------------------------------
+//
+// AN MCP SERVER IS A DIFFERENT PROCESS, and a relative path means whatever ITS working
+// directory says it means. The sidecar's own is whatever the editor launched it with --
+// on macOS, a GUI-launched process gets `/` -- so a server asked for the relative path the
+// prompt tells the model to use resolved it against the root of the filesystem.
+//
+// Measured on r-18ced29746aa7728-2ea858f4: fifteen consecutive godoer calls came back
+// "'/game' is not a Godot project (no project.godot found)". Verified against godoer
+// directly the same day: the identical command run from `/` fails and run from the
+// workspace root returns real diagnostics.
+
+TEST(a_child_starts_in_the_working_directory_it_was_given) {
+    const char* base = std::getenv("TMPDIR");
+    std::string tmpl = std::string(base != nullptr ? base : "/tmp") + "/lmp_cwd_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    const char* made = ::mkdtemp(buf.data());
+    REQUIRE(made != nullptr);
+    const std::string dir(made);
+
+    Subprocess::Options o;
+    o.program = "/bin/pwd";
+    o.working_dir = dir;
+    o.stderr_mode = StderrMode::kDiscard;
+    Subprocess proc(std::move(o));
+
+    std::string out;
+    char chunk[512];
+    for (;;) {
+        const ssize_t n = ::read(proc.stdout_fd(), chunk, sizeof(chunk));
+        if (n <= 0) {
+            break;
+        }
+        out.append(chunk, static_cast<std::size_t>(n));
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    // mkdtemp hands back a path under TMPDIR, which on macOS is itself a symlink
+    // (/var -> /private/var), and pwd resolves it. Comparing the tail is what makes this
+    // assert "it started where we said" without asserting the platform's symlink policy.
+    CHECK(out.size() >= dir.size() - 5);
+    CHECK(out.find(dir.substr(dir.rfind('/'))) != std::string::npos);
+}
+
+TEST(an_unset_working_directory_still_inherits_ours) {
+    // The default must not change: every existing caller passes nothing and expects the
+    // parent's directory, and a test that only proves the new path works would not notice
+    // the old one breaking.
+    Subprocess::Options o;
+    o.program = "/bin/pwd";
+    o.stderr_mode = StderrMode::kDiscard;
+    Subprocess proc(std::move(o));
+
+    std::string out;
+    char chunk[512];
+    for (;;) {
+        const ssize_t n = ::read(proc.stdout_fd(), chunk, sizeof(chunk));
+        if (n <= 0) {
+            break;
+        }
+        out.append(chunk, static_cast<std::size_t>(n));
+    }
+    CHECK(!out.empty());
+}
+
+TEST(a_working_directory_that_does_not_exist_fails_the_spawn) {
+    // REFUSED, not ignored. A server that silently starts in the wrong place answers every
+    // call with a path error, which reads as a broken tool rather than a bad config -- the
+    // exact failure this option exists to prevent.
+    Subprocess::Options o;
+    o.program = "/bin/pwd";
+    o.working_dir = "/nonexistent/definitely-not-a-directory";
+    o.stderr_mode = StderrMode::kDiscard;
+    bool threw = false;
+    try {
+        Subprocess proc(std::move(o));
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
 }

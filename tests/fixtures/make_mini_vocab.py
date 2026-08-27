@@ -29,7 +29,7 @@ WHAT MAKES IT USABLE RATHER THAN JUST BIG:
 
 THE FOREIGN SHAPES. `--shape` also emits the two vocabularies family verification must
 REFUSE. Until 2026-08-08 that test loaded a real 31 MB Gemma tokenizer off this machine;
-the checkpoint is gone (Sean never ran it, and this is a Qwen-only product) and keeping a
+the checkpoint is gone (this is a Qwen-only product) and keeping a
 model on disk as a test fixture was the wrong dependency anyway -- it made the guard a
 `realmodel` test, so it never ran in CI.
 

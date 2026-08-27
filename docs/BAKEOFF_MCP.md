@@ -1,6 +1,6 @@
 # MCP cook-off: `mcp-client-cpp` and `mcp-server-cpp`
 
-Judged 2026-08-02. 7 client entrants, 7 server entrants, all on `cat-collector-king`.
+Judged 2026-08-02. 7 client entrants, 7 server entrants, from a same-day MCP cook-off.
 Both repos were created the same day and were not present in the 2026-08-02 sweep
 recorded in the memory note, which is why that note says no MCP client cook-off exists.
 It does now.

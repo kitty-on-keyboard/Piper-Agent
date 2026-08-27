@@ -1,7 +1,7 @@
 # moetrace
 
 Expert-routing trace analysis. Amalgamated from the 6-entrant
-`cat-collector-king/expert-router-trace` cook-off (2026-08-01).
+`expert-router-trace` cook-off (2026-08-01).
 
 All six entrants passed every known-answer anchor and agreed to four decimal places, so
 correctness was settled; they differed on speed (313-1239 ms per 1M lines), malformed-line

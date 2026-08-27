@@ -37,6 +37,21 @@ public:
         std::string program;                                     // resolved via PATH
         std::vector<std::string> args;                           // excluding argv[0]
         std::vector<std::pair<std::string, std::string>> env;    // added to the parent's
+        // WHERE THE CHILD STARTS. Empty inherits ours, which is what this did before it
+        // was an option -- and ours is whatever the editor launched the sidecar with. On
+        // macOS a GUI-launched process gets `/`, so an MCP server asked for the relative
+        // path the model was told to use resolved it against the root of the filesystem.
+        //
+        // Measured on r-18ced29746aa7728-2ea858f4: fifteen consecutive godoer calls came
+        // back "'/game' is not a Godot project (no project.godot found)". The prompt tells
+        // the model to write paths relative to the workspace, because every native tool
+        // resolves them there; an MCP server is a different process and resolved them
+        // somewhere else entirely.
+        //
+        // Applied with posix_spawn_file_actions_addchdir_np, so the chdir happens in the
+        // CHILD. Doing it in the parent would be a process-wide mutation racing every
+        // other thread in a multi-threaded sidecar.
+        std::string working_dir;
         StderrMode stderr_mode = StderrMode::kInherit;
     };
 

@@ -76,12 +76,14 @@ struct ToolDecl {
     //
     // A tool knows what it does at declaration time. It does not need to be guessed at.
     bool irreversible = false;
-    // This tool's work happens in a process this binary does not control, so none of the
-    // three flags above is a claim we can stand behind -- they describe what the peer
-    // SAYS it does. Declared separately because trust already meant something else here:
-    // a trusted MCP server's tools set mutates_workspace, executes_commands and
-    // irreversible all false, which is the right answer to "does this need a card" and
-    // the wrong answer to "may a read-only mode call it". Mode policy reads this.
+    // This tool's work happens in a process this binary does not control.
+    //
+    // Parallel-safety and observation-cache invalidation read this: a remote call may
+    // rewrite the workspace in a process we do not see. It is NOT a plan-mode kill
+    // switch. Mode policy uses mutates_workspace / needs_execution / irreversible;
+    // treating every remote tool as a write (because trust had been used as a proxy
+    // for "this does not mutate") hid Godoer's orientation tools from the planner
+    // and produced a Blender-CLI plan on r-18cf2a6c7f16da98-14a63603.
     bool remote = false;
     // This tool does no work without an execution grant: at T0 it can only refuse.
     //

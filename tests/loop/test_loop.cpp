@@ -166,14 +166,14 @@ TEST(repeat_detection_keys_on_tool_and_arguments) {
 
 // A repeat is the same CALL, not the same bytes. Keying on the raw argument let a run
 // alternate a trailing slash and repeat itself forever without the detector counting past
-// one -- measured in the editor as 80 turns of `list_dir ResMon` / `list_dir ResMon/`.
+// one -- measured in the editor as 80 turns of `list_dir proj` / `list_dir proj/`.
 // Under the cache, the normalisation is also what makes the second spelling a free
 // answer instead of a second execution.
 TEST(a_cosmetic_path_difference_is_not_a_different_call) {
     RepeatDetector d;
-    const std::vector<tools::ToolParamValue> plain = {{"path", "ResMon"}};
-    const std::vector<tools::ToolParamValue> slashed = {{"path", "ResMon/"}};
-    const std::vector<tools::ToolParamValue> dotted = {{"path", "./ResMon"}};
+    const std::vector<tools::ToolParamValue> plain = {{"path", "proj"}};
+    const std::vector<tools::ToolParamValue> slashed = {{"path", "proj/"}};
+    const std::vector<tools::ToolParamValue> dotted = {{"path", "./proj"}};
 
     record_ok(d, "list_dir", plain, "the listing");
     CHECK_EQ(d.seen_count("list_dir", slashed), std::size_t{1});

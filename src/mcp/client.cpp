@@ -31,6 +31,9 @@ Tool tool_from_json(const nlohmann::json& j) {
     if (j.contains("outputSchema")) {
         t.output_schema = j["outputSchema"];
     }
+    if (j.contains("annotations") && j["annotations"].is_object()) {
+        t.annotations = j["annotations"];
+    }
     return t;
 }
 

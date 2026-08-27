@@ -67,7 +67,7 @@ SPEC_TABLE = {
 }
 
 WORK = os.environ.get(
-    "LMP_SWEBENCH_WORK", "/Users/dev/Desktop/seans_projects_local/swebench_work"
+    "LMP_SWEBENCH_WORK", os.path.expanduser("~/swebench_work")
 )
 DATASET_V5 = os.path.join(WORK, "data", "swebench_lite_test_v5.parquet")
 ENV_PROBE = os.path.join(WORK, "runs", "env_probe.json")

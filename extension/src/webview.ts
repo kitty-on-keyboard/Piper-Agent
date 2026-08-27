@@ -197,6 +197,10 @@ body.busy #statusText, body.busy #liveLabel {
 #modelBar button:disabled { opacity: .45; cursor: default; }
 #modelBar .dot.loading { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
 #modelBar .dot.unloaded { background: var(--faint); }
+#modelSwitch { margin-top: 6px; }
+#modelSwitch[hidden] { display: none !important; }
+#modelSwitch button { font-size: 10px; padding: 4px 5px; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 @keyframes pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { #modelBar .dot.loading { animation: none; } }
 
@@ -604,6 +608,8 @@ button.ghost {
 input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
 .toggle { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
 .toggle span { font-size: 12px; }
+.toggle.off { opacity: .5; }
+.toggle.off .sw { cursor: default; }
 .toggle .sw {
   width: 34px; height: 19px; border-radius: 999px; background: var(--faint);
   position: relative; cursor: pointer; transition: background .2s var(--ease); flex: none;
@@ -840,6 +846,7 @@ function markup(): string {
     <button id="modelAction">Load</button>
     <button id="modelPick" title="Choose a different model directory">Change</button>
   </div>
+  <div id="modelSwitch" class="seg" hidden></div>
   <div id="history"></div>
   <div id="drawer">
     <div class="set">
@@ -862,6 +869,8 @@ function markup(): string {
     </div>
     <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec"></div></div>
     <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite"></div></div>
+    <div class="toggle" id="specRow"><span>Speculative decoding</span><div class="sw" id="swSpec"></div></div>
+    <div class="warnbox" id="specWarn"></div>
     <div class="set">
       <label>Check command <b id="checkState"></b></label>
       <input type="text" id="checkBox" placeholder="e.g. swift build — empty for no check">
@@ -1319,6 +1328,11 @@ let inFlight = false;
 let bubble = null;          // the assistant bubble currently being typed into
 let caret = null;
 let mdCtx = null;           // the markdown parser + DOM cursor for that bubble
+// Last turn's tool, so run_end can tell an \`ask_user\` halt from a Plan-mode pause.
+// Both arrive as termination_reason \`awaiting_user\`; dressing the pause as a question
+// is how "Your turn — answer in the box below" appeared after a list_dir.
+let lastTurnTool = '';
+let lastQuestionCardDrawn = false;
 
 // --- typewriter -----------------------------------------------------------
 //
@@ -1393,7 +1407,7 @@ function flushQueue() {
 // container holding a caret that was not its last child split permanently in two, prose
 // before and elements after.
 //
-// MEASURED: "identified it as a Swift package (\`ResMon.xcodeproj\`, \`Package.swift\`)"
+// MEASURED: "identified it as a Swift package (\`DemoApp.xcodeproj\`, \`Package.swift\`)"
 // rendered as "identified it as a Swift package (, )" with every code span swept to the
 // end of the bubble and run together, since adjacent <code> siblings with no text between
 // them read as a single span. applyMd re-anchors the caret after each structural op, which
@@ -2010,6 +2024,11 @@ function sw(id, key) {
 }
 sw('swExec', 'autoApproveExec');
 sw('swWrite', 'autoApproveWrites');
+$('swSpec').onclick = () => {
+  if (settings.checkpointKind !== 'dense') return;
+  put('speculativeDecoding', !settings.speculativeDecoding);
+  paint();
+};
 
 // --- the thinking toggle --------------------------------------------------
 // Applied to the disclosures ALREADY IN THE FEED as well as the ones still to come, which
@@ -2117,6 +2136,59 @@ function paintCheck() {
     : 'No check: the run ends when the agent says it is done, and nothing verifies that. Set a build or test command.';
 }
 
+function shortModelName(dir) {
+  const base = (dir || '').split('/').filter(Boolean).pop() || dir || '';
+  return base.replace(/-MLX-4bit$/i, '').replace(/-MLX.*$/i, '') || base;
+}
+
+function paintModelSwitch() {
+  const host = $('modelSwitch');
+  const current = settings.modelDir || '';
+  const recents = Array.isArray(settings.recentModelDirs) ? settings.recentModelDirs : [];
+  const other = recents.find((d) => d && d !== current);
+  host.textContent = '';
+  if (!current || !other) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  for (const dir of [current, other]) {
+    const b = document.createElement('button');
+    b.textContent = shortModelName(dir);
+    b.title = dir;
+    b.classList.toggle('on', dir === current);
+    b.onclick = () => {
+      if (dir === current || modelState === 'loading') return;
+      api.postMessage({ kind: 'switch_model', dir });
+    };
+    host.append(b);
+  }
+}
+
+function paintSpec() {
+  const dense = settings.checkpointKind === 'dense';
+  $('specRow').classList.toggle('off', !dense);
+  $('swSpec').classList.toggle('on', settings.speculativeDecoding === true);
+  const warn = $('specWarn');
+  if (settings.checkpointKind !== 'dense') {
+    warn.className = 'warnbox';
+    warn.textContent = settings.checkpointKind === 'moe'
+      ? 'MTP speculation only runs on the dense 27B. The setting is kept; switching back to dense restores it. A3B is never sent the draft head.'
+      : 'Available on the dense 27B. A3B is never sent the MTP draft head, so switching to it cannot fail the load.';
+    return;
+  }
+  if (settings.speculativeDecoding && !settings.hasUsableDraft) {
+    warn.className = 'warnbox';
+    warn.textContent =
+      'On, but no MTP draft head is configured. Use Change and pick the dense checkpoint again — a sibling *-MTP-4bit folder is detected automatically.';
+    return;
+  }
+  warn.className = settings.speculativeDecoding ? 'warnbox calm' : 'warnbox';
+  warn.textContent = settings.speculativeDecoding
+    ? 'Draft tokens from the MTP head. Reloads the dense model when you toggle this.'
+    : 'Off: the dense model loads without the MTP head.';
+}
+
 function buildSliders() {
   const host = $('sliders');
   host.innerHTML = '';
@@ -2146,6 +2218,8 @@ function paint() {
     (b) => b.classList.toggle('on', Number(b.dataset.v) === settings.sandboxTier));
   $('swExec').classList.toggle('on', settings.autoApproveExec === true);
   $('swWrite').classList.toggle('on', settings.autoApproveWrites === true);
+  paintSpec();
+  paintModelSwitch();
   // Thinking level. Greyed rather than hidden when the checkpoint has no notion of it:
   // the setting is real and shared across checkpoints, so the honest thing is to show
   // the value it holds and say why it is doing nothing here -- a control that vanishes
@@ -2158,8 +2232,6 @@ function paint() {
   $('effortState').textContent = effortSupported ? '' : 'not supported here';
   $('effortWarn').textContent = !effortSupported
     ? 'This checkpoint has no thinking levels — the setting is kept and ignored. Qwen3.8 has them; Qwen3.6 does not.'
-    : settings.reasoningEffort === 'xhigh'
-    ? 'Most thorough and slowest. Every turn carries the instruction, so it costs decode time on all of them.'
     : settings.reasoningEffort === 'low'
     ? 'Briefest reasoning. Good for mechanical work, worse for anything needing a plan.'
     : '';
@@ -2243,11 +2315,20 @@ const Q_LEAD_MARKER = /^(?:Option\\s+[A-Za-z0-9]+\\s*[:\\)]\\s*|[-*•]\\s+|\\d+
 
 // One block of text -> one option. The first line names it; anything under it is detail,
 // which the card shows but never makes separately clickable.
+// Markdown emphasis is not part of the choice. A model writing an enumerated list in
+// prose bolds the name of each option -- "1. **Katana** (Traditional Japanese...)" -- and
+// the label goes into the button as textContent AND back to the model as the answer, so
+// the asterisks would be visible in both. Stripped here rather than at the call sites,
+// because both paths produce labels and only one of them used to be reachable.
+function stripEmphasis(s) {
+  return s.replace(/\\*\\*/g, '').replace(/__/g, '').trim();
+}
+
 function questionBlockToOption(block) {
   const lines = block.split(/\\n/).map((s) => s.trim()).filter(Boolean);
-  const label = (lines.shift() || '').replace(Q_LEAD_MARKER, '').trim();
+  const label = stripEmphasis((lines.shift() || '').replace(Q_LEAD_MARKER, '').trim());
   const detail = lines
-    .map((l) => l.replace(Q_BULLET, '').trim())
+    .map((l) => stripEmphasis(l.replace(Q_BULLET, '').trim()))
     .filter(Boolean)
     .join(' · ');
   return { label: label, detail: detail };
@@ -2264,12 +2345,12 @@ function questionBlockToOption(block) {
 // EVERY LINE WAS AN OPTION until 2026-08-24. The tool description asks for "one per line"
 // and the model very reasonably writes richer than that -- measured, from real runs:
 //
-//     Fixed cinematic angles (PS1 original)
-//       - Dramatic, controlled views per encounter
-//       - Limited player freedom, strong storytelling
+//     Keep the current layout
+//       - Familiar to existing users
+//       - Fewer moving parts
 //
-//     Free third-person camera (modern action games)
-//       - Full player control over camera
+//     Switch to a split view
+//       - Side-by-side comparison
 //
 // Splitting that on /\\n+/ collapses the blank line that separates the two real choices and
 // offers EIGHT clickable rows, six of them fragments of the argument for one of the other
@@ -2343,10 +2424,10 @@ function questionOptions(argsObj) {
 // tools for the same job: on 2026-08-24 it asked a four-way design question through
 // 'ask_user' and wrote the choices into the question itself --
 //
-//     What kind of combat style are you envisioning for this Onimusha-inspired game?
+//     Which approach should we take for the shared helper?
 //
-//     Option 1: Traditional combo-based (light/heavy attacks, chain combos, guard/parry)
-//     Option 2: Action-focused (fast movement, aerial combos, dodge mechanics)
+//     Option 1: Extract it now (one PR, larger diff)
+//     Option 2: Patch the call site (smallest change)
 //     ...
 //
 // -- which is a perfectly good four-option question that rendered as a plain tool row and
@@ -2401,6 +2482,38 @@ function questionFromText(text) {
   return { question: head || text, options: options };
 }
 
+// THE WHOLE DECISION: given the call's arguments, what does the card offer?
+//
+// Named and placed here, above the inbound marker, because scripts/verify-question-options.js
+// slices this region out of the file and runs it. The gate used to live inline in the
+// render block where no harness could reach it -- and that is exactly where the bug was.
+//
+// Returns fewer than two options when there is no real choice to offer. The caller must
+// not draw a card for that: see the render site.
+function questionCard(argsObj, questionText) {
+  let options = questionOptions(argsObj);
+  // ONE OPTION IS NOT A CHOICE. This used to be 'options.length === 0', so a single
+  // parsed option locked the card to it and the question text was never consulted.
+  //
+  // Measured, verbatim from the run that exposed it. The model put the real choices in
+  // the question, numbered, one per line -- and passed 'options' as a one-line SUMMARY
+  // of them, "Katana / Tachi / Dual Swords / Long Sword". questionOptions reads that as
+  // one option, correctly: no newline and no marker, so nothing in it says "four
+  // choices". One beat zero, the fallback was skipped, and a four-way design question
+  // reached the human as a single button labelled with every answer at once.
+  //
+  // The question text wins when it holds two or more enumerated options: a model that
+  // writes them out in full there and abbreviates them in 'options' has said which of
+  // the two it meant.
+  if (options.length < 2) {
+    const embedded = questionFromText(questionText);
+    if (embedded.options.length > 1) {
+      return { question: embedded.question, options: embedded.options };
+    }
+  }
+  return { question: questionText, options: options };
+}
+
 // --- inbound --------------------------------------------------------------
 window.addEventListener('message', (e) => {
   const { kind, payload } = e.data;
@@ -2443,6 +2556,8 @@ window.addEventListener('message', (e) => {
   }
 
   if (kind === 'run_start') {
+    lastTurnTool = '';
+    lastQuestionCardDrawn = false;
     $('mission').textContent = payload.mission;
     // Only a DELIBERATE start over clears the feed. When the mission came from the
     // composer the user's message is already on screen, and wiping it to announce the
@@ -2508,24 +2623,24 @@ window.addEventListener('message', (e) => {
 
   if (kind === 'turn') {
     closeBubble();
+    lastTurnTool = payload.tool_name || '';
+    lastQuestionCardDrawn = false;
     const isQuestionTool = payload.tool_name === 'ask_question' || payload.tool_name === 'ask_user';
     if (isQuestionTool) {
       try {
         const argsObj = parseToolArgs(payload.tool_args);
         let questionText = argsObj.question || 'Clarification required:';
-        let optionList = questionOptions(argsObj);
-        // No 'options' argument, but the model may have written the choices into the
-        // question itself -- which is what 'ask_user' forces, since its description never
-        // mentions the optional parameter it accepts.
-        if (optionList.length === 0) {
-          const embedded = questionFromText(questionText);
-          if (embedded.options.length > 1) {
-            questionText = embedded.question;
-            optionList = embedded.options;
-          }
-        }
+        const card = questionCard(argsObj, questionText);
+        questionText = card.question;
+        const optionList = card.options;
 
-        if (optionList.length > 0) {
+        // NO CARD FOR A SINGLE OPTION. A one-button card looks like a choice, is not one,
+        // and sends an answer the human never chose. The honest render for a question we
+        // could not find a choice set in is the plain tool row and the composer box --
+        // the same conclusion questionOptions' own comment reached about fabricating a
+        // choice out of the loop's status string.
+        if (optionList.length >= 2) {
+          lastQuestionCardDrawn = true;
           const qCard = document.createElement('div');
           qCard.className = 'question-card';
 
@@ -2633,6 +2748,16 @@ window.addEventListener('message', (e) => {
       } catch (err) {
         // fallback to standard tool row on error
       }
+    }
+
+    // A TURN WITH NO TOOL IS NOT A TOOL ROW. TextOnly still went through on_turn with an
+    // empty name and the default ToolResult status (ToolError), so the view drew a red
+    // "TextOnly" details element under the answer. Measured on r-18cf3831ea73c5a8-2d4f679d
+    // turn 6 -- the "**Fixed.**" paragraph -- immediately before finish: that row is the
+    // "malformed output at the very end right before the last turn".
+    if (!payload.tool_name) {
+      busy(true, 'Thinking', 'THINKING');
+      return;
     }
 
     const d = document.createElement('details');
@@ -2953,15 +3078,31 @@ window.addEventListener('message', (e) => {
     // contract and writes no code -- so both of these would otherwise print "Stopped",
     // which is the same word this UI uses for a run that ran out of budget mid-edit. The
     // two endings are the mode working, and they say so.
-    const yielded = payload.termination_reason === 'awaiting_user' ||
-                    payload.termination_reason === 'plan_ready';
+    const asked = payload.termination_reason === 'awaiting_user' &&
+                  (lastTurnTool === 'ask_user' || lastTurnTool === 'ask_question');
+    const paused = payload.termination_reason === 'awaiting_user' && !asked;
+    const yielded = asked || paused || payload.termination_reason === 'plan_ready';
     const d = document.createElement('div');
     d.className = 'ended';
     let t = 'Ended: ' + payload.termination_reason + ' · ' + payload.iterations + ' turn(s)';
-    if (yielded) {
-      t = payload.termination_reason === 'plan_ready'
-        ? 'the plan is above — approve it, or keep talking to change it'
-        : 'answer in the box below and the conversation continues';
+    let label = payload.completed ? 'Complete' : 'Stopped';
+    if (payload.termination_reason === 'plan_ready') {
+      t = 'the plan is above — approve it, or keep talking to change it';
+      label = 'Your turn';
+    } else if (asked) {
+      // A question halt. The card is the reply surface when we drew one; the composer
+      // is the fallback when we could not find a choice set. Both are "your turn".
+      t = lastQuestionCardDrawn
+        ? 'pick an option above and the conversation continues'
+        : 'type your answer in the box below and the conversation continues';
+      label = 'Your turn';
+    } else if (paused) {
+      // Plan mode yields after inert turns with the SAME reason as ask_user
+      // (\'awaiting_user\'). That is not a question. Measured: r-18cf17272d7adbb0-223bccea
+      // ended this way after list_dir of an asset pack, and the old copy made it look
+      // like a question box that never appeared.
+      t = 'the run paused without a question · send a message to continue';
+      label = 'Paused';
     }
     // The checklist is the model's own progress display and holds no authority over the
     // ending -- but "done, with items still open on its own list" is worth a human's
@@ -2969,11 +3110,6 @@ window.addEventListener('message', (e) => {
     if (payload.completed && payload.unfinished_items > 0) {
       t += ' · ' + payload.unfinished_items + ' item(s) still open on its own checklist';
     }
-    const label = yielded
-      ? 'Your turn'
-      : payload.completed
-        ? 'Complete'
-        : 'Stopped';
     d.innerHTML = '<b>' + label + '</b> — ';
     d.append(document.createTextNode(t));
     // Through add(), like every other block. Appending directly is what let the footer

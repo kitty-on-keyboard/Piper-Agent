@@ -1583,6 +1583,59 @@ TEST(compaction_starts_before_the_budget_is_spent) {
     }
 }
 
+// One pass that has to drop many turns still counts as one compaction. compact_to_budget
+// peels one record at a time so it can remeasure tokens; the public counter used to
+// follow that loop.
+TEST(one_compaction_pass_counts_as_one_event) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const auto play = [&](model::ScriptedBackend& b) {
+        b.enqueue_response(text_turn(tok, "thinking", "one"));
+    };
+
+    std::size_t prompt = 0;
+    {
+        model::ScriptedBackend backend;
+        play(backend);
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = fat_context(20);
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.budget.max_iterations = 1;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+        prompt = first_prompt_tokens(backend);
+        REQUIRE(prompt > 0);
+        CHECK_EQ(ctx.compaction_count(), std::size_t{0});
+    }
+
+    {
+        model::ScriptedBackend backend;
+        play(backend);
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = fat_context(20);
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = static_cast<std::int32_t>(prompt * 100 / 85);
+        config.budget.max_iterations = 1;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+
+        CHECK_EQ(ctx.compaction_count(), std::size_t{1});
+        CHECK(ctx.recent().size() < std::size_t{20});
+        CHECK(ctx.recent().size() >= std::size_t{4});
+        CHECK(std::size_t{20} - ctx.recent().size() > std::size_t{1});
+    }
+}
+
 // The switch in the editor said "auto-approve command execution", the operator turned it
 // ON, and every command still raised a card. It was tightening-only: it could turn an
 // auto-approval into an escalation and never the reverse, so the route came entirely from
@@ -2790,6 +2843,67 @@ TEST(plan_splits_escaped_newlines_sent_without_quotes) {
     CHECK(ctx.checklist()[1].done);
 }
 
+// Numbered items joined with the two-character sequence `\n`, no checkboxes. The re-split
+// used to look only for `[` after the escape, so `1. Foo\n2. Bar` became one garbled row
+// that the tool description had promised to reject -- and did not.
+TEST(plan_splits_numbered_items_joined_by_escaped_newlines) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        R"(1. Explore the workspace\n2. Fix the parser\n3. Run the tests)"
+        "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 3);
+    CHECK(ctx.checklist()[0].text == "1. Explore the workspace");
+    CHECK(ctx.checklist()[1].text == "2. Fix the parser");
+    CHECK(ctx.checklist()[2].text == "3. Run the tests");
+}
+
+// Same hole, markdown bullets instead of ordinals.
+TEST(plan_splits_bullets_joined_by_escaped_newlines) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string body =
+        "<function=plan>\n<parameter=items>\n"
+        R"(- read it\n- write it)"
+        "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(ctx.checklist().size() == 2);
+    CHECK(ctx.checklist()[0].text == "read it");
+    CHECK(ctx.checklist()[1].text == "write it");
+}
+
 // A ONE-ITEM PLAN IS STILL A PLAN, and a backslash-n inside its text is text. The re-split
 // above must not fire here: one item in, one item out, escape intact.
 TEST(plan_keeps_a_single_item_that_merely_contains_a_backslash_n) {
@@ -3089,6 +3203,61 @@ TEST(plan_mode_yields_on_a_text_only_turn_instead_of_stalling) {
     CHECK_EQ(report.iterations, 3);
 }
 
+TEST(enumerated_choice_lines_sees_a_b_markers_and_ignores_prose) {
+    CHECK_EQ(loop::enumerated_choice_lines("Here is what I would do."), 0);
+    CHECK_EQ(loop::enumerated_choice_lines("Which color?\n\nA) red\nB) blue"), 2);
+    CHECK_EQ(loop::enumerated_choice_lines(
+                 "Pick:\n1. **Katana** (quick)\n2. **Tachi** (long)\n3. Dual Swords"),
+             3);
+    // Verbatim shape from r-18cf39935cc24ac8-2ef88a6b turn 6. Four questions, thirteen
+    // lettered choices -- the survey that streamed as markdown and never drew a card.
+    const std::string strange =
+        "I see you've got a bare-bones Godot project.\n\n"
+        "**Question 1: What's the core experience?**\n\n"
+        "A) **Exploration toy** - A sandbox.\n\n"
+        "B) **Abstract game** - Players navigate.\n\n"
+        "C) **Generative art tool** - Users create.\n\n"
+        "D) **Rhythmic/kinetic experience** - Math visualizations.\n\n"
+        "**Question 2: What's the primary interaction model?**\n\n"
+        "A) **Mouse-driven exploration** - Click/drag.\n\n"
+        "B) **Keyboard-driven manipulation** - Keys change equations.\n\n"
+        "C) **Hybrid** - Mouse for navigation.\n";
+    CHECK_EQ(loop::enumerated_choice_lines(strange), 7);
+}
+
+TEST(an_enumerated_text_turn_in_plan_mode_asks_instead_of_nudging) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(
+        text_turn(tok, "choosing", "Which color?\n\nA) red\nB) blue"));
+    // Must not be consumed: the first turn is the question and the run yields there.
+    backend.enqueue_response(text_turn(tok, "extra", "This must never be reached."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("pick a color");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("awaiting_user"));
+    CHECK_EQ(report.iterations, 1);
+    bool asked = false;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.tool_name == "ask_user") {
+            asked = true;
+        }
+    }
+    CHECK(asked);
+}
+
 // The other half of the same contract: a text turn the model FOLLOWS with a tool call is
 // not an ending at all, and must not consume the run's patience. The counter resets on any
 // executed call, so narrate/act/narrate/act continues indefinitely -- which is what a run
@@ -3184,6 +3353,53 @@ TEST(plan_mode_neither_offers_nor_permits_a_write) {
     CHECK(turn.outcome != loop::Outcome::ToolCallExecuted);
 
     (void)::system(("rm -rf " + root).c_str());
+}
+
+// Trust is not "this tool is a read". Plan mode uses mutates_workspace / needs_execution,
+// not a blanket `remote` kill. Measured: r-18cf2a6c7f16da98-14a63603 withheld every
+// Godoer tool from the planner, which then wrote a Blender Python script instead.
+TEST(plan_mode_offers_a_read_only_remote_tool_and_withholds_a_mutating_one) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "x", "y"));
+
+    tools::Registry registry(workspace("/tmp"));
+    tools::ToolDecl orient;
+    orient.name = "orient";
+    orient.description = "look up a recipe";
+    orient.spec.name = "orient";
+    orient.remote = true;
+    orient.mutates_workspace = false;
+    orient.needs_execution = false;
+    REQUIRE(registry.declare_remote(std::move(orient),
+                                    [](const std::vector<tools::ToolParamValue>&, int) {
+                                        return tools::ToolResult::okay("ok");
+                                    }));
+    tools::ToolDecl mutate;
+    mutate.name = "mutate_world";
+    mutate.description = "write a scene";
+    mutate.spec.name = "mutate_world";
+    mutate.remote = true;
+    mutate.mutates_workspace = true;
+    mutate.needs_execution = true;
+    REQUIRE(registry.declare_remote(std::move(mutate),
+                                    [](const std::vector<tools::ToolParamValue>&, int) {
+                                        return tools::ToolResult::okay("ok");
+                                    }));
+
+    context::ContextStore ctx("plan it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    CHECK(agent.tools_guidance().find("\"orient\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"mutate_world\"") == std::string::npos);
+    CHECK(agent.tools_guidance().find("\"write_file\"") == std::string::npos);
 }
 
 // Debug mode is the inverse: it writes, and it still will not delete.
@@ -3827,4 +4043,382 @@ TEST(real_progress_between_plan_calls_clears_the_spin_counter) {
     // NOT stalled: every plan call here was earned by a write.
     CHECK(report.termination_reason != std::string("stalled"));
     CHECK(report.iterations >= 10);
+}
+
+// --- the sampler seed across the Agent boundary ----------------------------------
+//
+// THE SEED SEQUENCE BELONGS TO THE CONVERSATION, NOT TO THE AGENT. Mixing the turn index
+// into config_.seed fixed stuck runs -- but only for the length of one Agent, and an Agent
+// does not last as long as a conversation. `lmp/message` builds a fresh one over the SAME
+// ContextStore, so every answer to an `ask_user` question began a one-turn run whose index
+// was 0 again, and with the editor's default seed of 0 that is one constant drawn from
+// forever.
+//
+// MEASURED on r-18cecdb5003e4468-b687d6cb: three consecutive follow-ups emitted the
+// byte-identical `ask_user` call -- 88 tokens, think 6, tool 81 -- at prompt sizes 5856,
+// 5966 and 6098, each after the operator had answered. The human was asked the same
+// question three times.
+
+TEST(a_follow_up_agent_does_not_restart_the_seed_sequence) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("mission");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.seed = 0; // the editor's default, and the value the real failure ran at
+
+    // The first run: one Agent, one turn.
+    model::ScriptedBackend first;
+    first.enqueue_response(text_turn(tok, "thinking", "first"));
+    {
+        loop::Agent agent(tok, first, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+    }
+    REQUIRE(first.received().size() == std::size_t{1});
+    const std::uint64_t first_seed = first.received()[0].sampling.seed;
+
+    // The human replies. This is what `lmp/message` does before building a new Agent over
+    // the same store -- which is the boundary the counter used to reset across.
+    ctx.add_user_message("an answer");
+
+    model::ScriptedBackend second;
+    second.enqueue_response(text_turn(tok, "thinking", "second"));
+    {
+        loop::Agent agent(tok, second, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+    }
+    REQUIRE(second.received().size() == std::size_t{1});
+    const std::uint64_t second_seed = second.received()[0].sampling.seed;
+
+    // THE ASSERTION. Same config, same seed field, same store -- and the draws must not be
+    // the same draws, or the model redraws its last turn however the prompt has changed.
+    CHECK(first_seed != second_seed);
+}
+
+TEST(the_seed_still_advances_within_one_agent) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "a", "one"));
+    backend.enqueue_response(text_turn(tok, "b", "two"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("mission");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.step(cancel);
+    (void)agent.step(cancel);
+    REQUIRE(backend.received().size() == std::size_t{2});
+    // The property the per-turn seed was introduced for, unchanged by seeding the index
+    // from the conversation.
+    CHECK(backend.received()[0].sampling.seed != backend.received()[1].sampling.seed);
+}
+
+TEST(the_same_conversation_still_reproduces_from_the_same_seed) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+    // Reproducibility is what config_.seed exists for and the only property being kept:
+    // two sessions given the same inputs must draw the same sequence. Asserted so that a
+    // future change to the index cannot quietly trade it away.
+    const auto seed_of_second_turn = [&tok]() {
+        model::ScriptedBackend backend;
+        backend.enqueue_response(text_turn(tok, "a", "one"));
+        backend.enqueue_response(text_turn(tok, "b", "two"));
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx("mission");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.seed = 4242;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+        (void)agent.step(cancel);
+        return backend.received()[1].sampling.seed;
+    };
+    CHECK_EQ(seed_of_second_turn(), seed_of_second_turn());
+}
+
+// --- the same question must never reach the human twice --------------------------
+
+TEST(an_already_answered_question_is_refused_and_the_refusal_carries_the_answer) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string ask =
+        "<function=ask_user>\n<parameter=question>\nWhich character?\n</parameter>\n"
+        "<parameter=options>\nDark Knight\nSamurai\n</parameter>\n</function>\n";
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.mode = loop::Mode::Plan;
+    const model::CancelToken cancel;
+
+    // Asked once, and the run halts for the human.
+    model::ScriptedBackend first;
+    first.enqueue_response(call_turn(tok, ask, "thinking"));
+    {
+        loop::Agent agent(tok, first, registry, ctx, log, clock, config);
+        CHECK_EQ(agent.run(cancel).termination_reason, std::string("awaiting_user"));
+    }
+
+    // The human answers, and the follow-up draws the identical call again.
+    ctx.add_user_message("Dark Knight");
+    model::ScriptedBackend second;
+    second.enqueue_response(call_turn(tok, ask, "thinking"));
+    second.enqueue_response(text_turn(tok, "ok", "Using Dark Knight."));
+    {
+        loop::Agent agent(tok, second, registry, ctx, log, clock, config);
+        const loop::TurnResult turn = agent.step(cancel);
+        // NOT put to the human a second time.
+        CHECK(turn.outcome == loop::Outcome::ToolCallRefused);
+        // And the refusal hands back what they actually said, so the model can carry on
+        // rather than being told only that it erred.
+        CHECK(turn.tool_result.summary.find("Dark Knight") != std::string::npos);
+    }
+}
+
+TEST(a_question_asked_but_not_yet_answered_may_still_be_asked) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+    // A run resumed at the moment it was asking has an `ask_user` in its history with no
+    // human turn after it. That is an UNANSWERED question, and refusing it would leave the
+    // conversation with no way to put it a second time.
+    const std::string ask =
+        "<function=ask_user>\n<parameter=question>\nWhich character?\n</parameter>\n"
+        "<parameter=options>\nDark Knight\nSamurai\n</parameter>\n</function>\n";
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.mode = loop::Mode::Plan;
+    const model::CancelToken cancel;
+
+    model::ScriptedBackend first;
+    first.enqueue_response(call_turn(tok, ask, "thinking"));
+    {
+        loop::Agent agent(tok, first, registry, ctx, log, clock, config);
+        CHECK_EQ(agent.run(cancel).termination_reason, std::string("awaiting_user"));
+    }
+    model::ScriptedBackend second;
+    second.enqueue_response(call_turn(tok, ask, "thinking"));
+    {
+        loop::Agent agent(tok, second, registry, ctx, log, clock, config);
+        CHECK_EQ(agent.run(cancel).termination_reason, std::string("awaiting_user"));
+    }
+}
+
+TEST(a_different_question_after_an_answer_is_asked_normally) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+    // The guard is on the QUESTION, not on asking. A run that asks one thing, is answered,
+    // and needs a second decision must still be able to reach the human.
+    const std::string first_ask =
+        "<function=ask_user>\n<parameter=question>\nWhich character?\n</parameter>\n"
+        "<parameter=options>\nDark Knight\nSamurai\n</parameter>\n</function>\n";
+    const std::string second_ask =
+        "<function=ask_user>\n<parameter=question>\nWhich camera?\n</parameter>\n"
+        "<parameter=options>\nFixed\nFree\n</parameter>\n</function>\n";
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("plan the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.mode = loop::Mode::Plan;
+    const model::CancelToken cancel;
+
+    model::ScriptedBackend first;
+    first.enqueue_response(call_turn(tok, first_ask, "thinking"));
+    {
+        loop::Agent agent(tok, first, registry, ctx, log, clock, config);
+        CHECK_EQ(agent.run(cancel).termination_reason, std::string("awaiting_user"));
+    }
+    ctx.add_user_message("Dark Knight");
+    model::ScriptedBackend second;
+    second.enqueue_response(call_turn(tok, second_ask, "thinking"));
+    {
+        loop::Agent agent(tok, second, registry, ctx, log, clock, config);
+        CHECK_EQ(agent.run(cancel).termination_reason, std::string("awaiting_user"));
+    }
+}
+
+// --- a call that ACTS can loop too -----------------------------------------------
+//
+// `observation_is_new` returned true for every non-workspace tool except `shell` and
+// `run_command`, which were named literally -- so an MCP tool returning byte-identical
+// output counted as new information and reset the inert counter on every turn. The repeat
+// NOTE was gated on observes_workspace() as well, so nothing told the model either.
+//
+// Measured on r-18ced29746aa7728-2ea858f4: fifteen `mcp__godoer__godot_check` calls,
+// identical arguments, "'/game' is not a Godot project (no project.godot found)" back
+// every time. Twenty nudges fired in that run and not one of them was about the loop that
+// was actually running; the run then wrote thirteen files by hand and called `finish`.
+
+TEST(an_acting_tool_repeating_itself_is_told_so_and_does_not_count_as_progress) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // `shell` stands in for any tool that acts rather than reads: it takes the same
+    // non-workspace path through observation_is_new that an MCP tool does, and it needs no
+    // server. `true` prints nothing and succeeds, so every call is byte-identical.
+    //
+    // Driven through run() rather than step(): record_call lives in the loop, so a repeat
+    // is only ever SEEN by a run. A step()-only test asserts against a detector that was
+    // never fed.
+    const std::string body =
+        "<function=shell>\n<parameter=command>\ntrue\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 6; ++i) {
+        backend.enqueue_response(call_turn(tok, body, "again"));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_exec = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    std::size_t noted = 0;
+    std::size_t read_flavoured = 0;
+    for (const context::TurnRecord& r : ctx.recent()) {
+        if (r.observation.find("EXACTLY what it returned") != std::string::npos) {
+            ++noted;
+        }
+        if (r.observation.find("Explore subdirectories") != std::string::npos) {
+            ++read_flavoured;
+        }
+    }
+    // THE NOTE, on every repeat after the first.
+    CHECK(noted > 0);
+    // And specifically the ACTING one. kRepeatNote's advice -- explore subdirectories,
+    // inspect code files -- is nonsense after a build or a remote call that failed the
+    // same way twice, which is what the model was reading fifteen times.
+    CHECK_EQ(read_flavoured, std::size_t{0});
+    // A run that only repeats an acting call has not progressed, so it must END rather
+    // than spend its whole budget. Before this, each repeat reset the inert counter.
+    CHECK(report.termination_reason == std::string("stalled"));
+}
+
+TEST(a_repeat_note_is_never_appended_twice) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+    // The summary is cached WITHOUT its note so the next comparison is against the bytes
+    // the tool produced. A note the stripper does not know about stacks up -- two on the
+    // third repeat, three on the fourth -- and, worse, makes every later "unchanged"
+    // comparison fail, silently disabling the detector it belongs to. Adding a second note
+    // is exactly the change that could have done that.
+    const std::string body =
+        "<function=shell>\n<parameter=command>\ntrue\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 6; ++i) {
+        backend.enqueue_response(call_turn(tok, body, "again"));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_exec = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    const auto note_count = [](const std::string& s) {
+        std::size_t n = 0;
+        for (std::size_t i = s.find("EXACTLY what it returned"); i != std::string::npos;
+             i = s.find("EXACTLY what it returned", i + 1)) {
+            ++n;
+        }
+        return n;
+    };
+    for (const context::TurnRecord& r : ctx.recent()) {
+        CHECK(note_count(r.observation) <= std::size_t{1});
+    }
+}
+
+// --- identical ToolError is not progress ---------------------------------------
+//
+// `observation_is_new` returned true for every `!ok()` result, and the comparison
+// used `!prior->last_ok`, so a follow-up after a failure was always "new". The
+// comment said identical failures would be caught by the inert-turn count. They
+// were not.
+//
+// Measured on r-18cf0daf42104e38-b4d1f851: seven `write_file` calls to
+// `specs/mixamo_hero.json` failed with the same content-version gate ("existing
+// file requires read_file … before overwrite"), each one reset the streak, and
+// the run spent those turns retrying instead of reading the file. The acting-tool
+// repeat note was also gated on `result.ok()`, so the model was never told the
+// error was repeating.
+
+TEST(identical_tool_errors_are_not_progress_and_end_the_run_as_stalled) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // `false` is the error twin of the `true` case above: same non-workspace path
+    // through observation_is_new, ToolError every time, byte-identical summary.
+    // write_file's content-version gate is the measured shape, but overwriting a
+    // pre-existing file is irreversible and needs an approver this fixture does
+    // not attach -- the call would be Refused and never reach the detector.
+    const std::string body =
+        "<function=shell>\n<parameter=command>\nfalse\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 6; ++i) {
+        backend.enqueue_response(call_turn(tok, body, "again"));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_exec = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    std::size_t noted = 0;
+    for (const context::TurnRecord& r : ctx.recent()) {
+        if (r.observation.find("EXACTLY what it returned") != std::string::npos) {
+            ++noted;
+        }
+    }
+    // THE NOTE, on every identical failure after the first.
+    CHECK(noted > 0);
+    // First failure is information; the rest are the same failure. Three nudges
+    // then stall, same budget as a repeated successful `shell true`.
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK(report.iterations < 6);
 }

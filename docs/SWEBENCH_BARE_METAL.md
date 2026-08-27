@@ -1,7 +1,6 @@
 # SWE-bench on bare metal: the protocol, and what it costs
 
-Written 2026-08-19, continuing [HANDOFF_SWEBENCH.md](HANDOFF_SWEBENCH.md) and
-[BAKEOFF_HARNESS.md](BAKEOFF_HARNESS.md). This records a **protocol and its feasibility**,
+Written 2026-08-19, continuing [BAKEOFF_HARNESS.md](BAKEOFF_HARNESS.md). This records a **protocol and its feasibility**,
 not a score. No arm has been run. Every number below is about the machine, not the agent.
 
 ## Why not SWE-bench as published
@@ -316,7 +315,7 @@ pins measure. It was extracted and then validated by a full 6/6 corpus run throu
 
 ## Cleaning up
 
-Everything lives in **`~/Desktop/seans_projects_local/swebench_work/`** — mirrors, venvs,
+Everything lives in **`$LMP_SWEBENCH_WORK`** (default `~/swebench_work`) — mirrors, venvs,
 the parquet, and the measurements. Nothing is inside the repo except source.
 
 ```bash

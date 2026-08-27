@@ -41,7 +41,7 @@ std::string first_line(const std::string& s, std::size_t cap) {
 
 } // namespace
 
-std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
+std::size_t ContextStore::compact_oldest(std::size_t keep_recent, bool count_as_event) {
     if (recent_.size() <= keep_recent) {
         return 0;
     }
@@ -105,7 +105,9 @@ std::size_t ContextStore::compact_oldest(std::size_t keep_recent) {
     }
 
     recent_.erase(recent_.begin(), recent_.begin() + static_cast<std::ptrdiff_t>(drop));
-    ++compactions_;
+    if (count_as_event) {
+        ++compactions_;
+    }
     return drop;
 }
 

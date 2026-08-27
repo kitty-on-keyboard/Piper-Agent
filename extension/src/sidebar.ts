@@ -30,6 +30,13 @@ import {
 } from "./protocol.generated";
 import { editPreconditionError } from "./edit_version";
 import { handleCodeIntel } from "./code_intel";
+import {
+  classifyCheckpoint,
+  effectiveDraftDir,
+  findSiblingMtp,
+  isUsableMtp,
+  pushRecent,
+} from "./checkpoint";
 
 /** One finished run, as the history panel shows it.
  *
@@ -477,21 +484,69 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  Deliberately NOT called on activation. 19 GB of unified memory on a 48 GB machine
    *  is not something an editor should take because a panel became visible; the operator
    *  says when. Sending a prompt counts as saying when -- see ready(). */
-  async loadModel(modelDir?: string): Promise<void> {
-    const dir = modelDir ?? this.host.settings().model_dir;
-    if (!dir) return this.fail(NO_MODEL);
+  async loadModel(modelDir?: string): Promise<boolean> {
+    const cfg = vscode.workspace.getConfiguration("lmPipe");
+    const dir = modelDir ?? cfg.get<string>("modelDir", "");
+    if (!dir) {
+      this.fail(NO_MODEL);
+      return false;
+    }
     const err = this.host.ensureSidecar();
-    if (err) return this.fail(err);
+    if (err) {
+      this.fail(err);
+      return false;
+    }
+    const storedDraft = cfg.get<string>("draftModelDir", "");
+    const draft = effectiveDraftDir(dir, {
+      speculative: cfg.get<boolean>("speculativeDecoding", true),
+      draftModelDir: storedDraft,
+    });
+    // Persist a sibling we discovered so switching back to dense does not have to
+    // find it again, and so the drawer can say whether a head is actually configured.
+    if (draft && draft !== storedDraft) {
+      await this.updateSetting("draftModelDir", draft);
+    }
     // No await on the view: model_status carries `loading` before this settles, which is
     // the only progress there is to show for a load that owns the sidecar for a minute.
-    const reply = await this.client.loadModel(dir, this.host.settings().draft_model_dir);
-    if (reply.loaded !== true) this.fail(reply.error || `could not load ${dir}`);
+    const reply = await this.client.loadModel(dir, draft);
+    if (reply.loaded !== true) {
+      this.fail(reply.error || `could not load ${dir}`);
+      return false;
+    }
+    await this.rememberRecent(dir);
+    return true;
   }
 
   async unloadModel(): Promise<void> {
     if (!this.client.running) return;
     const reply = await this.client.unloadModel();
     if (reply.error) this.fail(reply.error);
+  }
+
+  /** Folder picker result: classify, remember, pair an MTP head on dense, then load. */
+  async selectModelDir(dir: string): Promise<void> {
+    const kind = classifyCheckpoint(dir);
+    if (kind === "mtp") {
+      await this.updateSetting("draftModelDir", dir);
+      void vscode.window.showInformationMessage(
+        "That folder is an MTP draft head, not a chat model. It will be used for " +
+          "speculative decoding when the dense checkpoint is loaded."
+      );
+      return;
+    }
+    await this.updateSetting("modelDir", dir);
+    if (kind === "dense") {
+      await this.updateSetting("speculativeDecoding", true);
+      await this.ensureDraftForDense(dir);
+    }
+    await this.loadModel(dir);
+  }
+
+  /** One-click swap to a remembered checkpoint. Does not force spec on — that is the
+   *  checkbox — but never sends an MTP head at A3B. */
+  async switchModelDir(dir: string): Promise<void> {
+    await this.updateSetting("modelDir", dir);
+    await this.loadModel(dir);
   }
 
   /** Everything that has to be true before a prompt can be answered: a sidecar process,
@@ -508,17 +563,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       return false;
     }
     if (this.model.state === "ready") return true;
-    const dir = this.host.settings().model_dir;
-    if (!dir) {
-      this.fail(NO_MODEL);
-      return false;
+    return this.loadModel();
+  }
+
+  private async rememberRecent(dir: string): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("lmPipe");
+    const prev = cfg.get<string[]>("recentModelDirs", []);
+    await this.updateSetting("recentModelDirs", pushRecent(prev, dir));
+  }
+
+  private async ensureDraftForDense(dir: string): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration("lmPipe");
+    const stored = cfg.get<string>("draftModelDir", "");
+    if (isUsableMtp(stored)) return;
+    const sibling = findSiblingMtp(dir);
+    if (sibling) {
+      await this.updateSetting("draftModelDir", sibling);
+      return;
     }
-    const reply = await this.client.loadModel(dir, this.host.settings().draft_model_dir);
-    if (reply.loaded !== true) {
-      this.fail(reply.error || `could not load ${dir}`);
-      return false;
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: "Use this MTP head",
+      title: "MTP draft head for speculative decoding (model_type qwen3_5_mtp)",
+    });
+    const draft = picked?.[0]?.fsPath;
+    if (!draft) return;
+    if (!isUsableMtp(draft)) {
+      void vscode.window.showWarningMessage(
+        "That folder is not a usable MTP draft head (needs config.json with " +
+          "model_type qwen3_5_mtp and block_size >= 2). Loading without speculation."
+      );
+      return;
     }
-    return true;
+    await this.updateSetting("draftModelDir", draft);
+  }
+
+  private async reloadSpecIfNeeded(): Promise<void> {
+    if (this.model.state !== "ready" && this.model.state !== "failed") return;
+    const dir = vscode.workspace.getConfiguration("lmPipe").get<string>("modelDir", "");
+    if (classifyCheckpoint(dir) !== "dense") return;
+    await this.loadModel(dir);
   }
 
   /** Says what went wrong, in the feed, and puts the view back to rest.
@@ -596,6 +682,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     "prompts.agent",
     "prompts.plan",
     "prompts.debug",
+    "speculativeDecoding",
   ];
 
   /** Pushes current configuration into the drawer. The drawer holds no state of its
@@ -604,6 +691,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const cfg = vscode.workspace.getConfiguration("lmPipe");
     const out: Record<string, unknown> = {};
     for (const key of SidebarProvider.LIVE_KEYS) out[key] = cfg.get(key);
+    const modelDir = cfg.get<string>("modelDir", "");
+    const draftModelDir = cfg.get<string>("draftModelDir", "");
+    out.modelDir = modelDir;
+    out.draftModelDir = draftModelDir;
+    out.recentModelDirs = cfg.get<string[]>("recentModelDirs", []);
+    out.checkpointKind = classifyCheckpoint(modelDir);
+    out.hasUsableDraft = isUsableMtp(draftModelDir);
     this.post("settings", out);
   }
 
@@ -672,6 +766,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (msg.kind === "load_model") void this.loadModel();
         if (msg.kind === "unload_model") void this.unloadModel();
         if (msg.kind === "pick_model") void vscode.commands.executeCommand("lmPipe.selectModel");
+        if (msg.kind === "switch_model" && typeof msg.dir === "string") {
+          void this.switchModelDir(msg.dir);
+        }
         if (msg.kind === "ready") {
           // The view's script is up and listening -- NOW replay works. Anything posted
           // before this arrived while the webview was still parsing HTML and was
@@ -686,7 +783,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // "write whatever key it names into the user's settings" is not a thing to
           // offer on trust.
           if (!SidebarProvider.LIVE_KEYS.includes(msg.key)) return;
-          void this.updateSetting(msg.key, msg.value);
+          void this.updateSetting(msg.key, msg.value).then(() => {
+            if (msg.key === "speculativeDecoding") void this.reloadSpecIfNeeded();
+          });
         }
         // The plan handoff. Carries no payload on purpose -- see `planReady`.
         if (msg.kind === "start_implementing") void this.startImplementing();

@@ -2,6 +2,8 @@
 
 #include "src/platform/fs.hpp"
 
+#include <algorithm>
+
 #include <nlohmann/json.hpp>
 
 namespace lmp::surface {
@@ -26,6 +28,28 @@ std::vector<std::string> json_string_array(const nlohmann::json& obj, const char
     for (const nlohmann::json& v : obj.at(key)) {
         if (v.is_string()) {
             out.push_back(v.get<std::string>());
+        }
+    }
+    return out;
+}
+
+// `.mcp.json` writes env as an OBJECT ({"KEY":"VAL"}); the settings schema writes it as an
+// array of KEY=VALUE strings. Both land here as the array form McpServerConfig carries.
+std::vector<std::string> json_env(const nlohmann::json& obj) {
+    std::vector<std::string> out;
+    if (!obj.contains("env")) {
+        return out;
+    }
+    const nlohmann::json& env = obj.at("env");
+    if (env.is_array()) {
+        return json_string_array(obj, "env");
+    }
+    if (!env.is_object()) {
+        return out;
+    }
+    for (const auto& [k, v] : env.items()) {
+        if (v.is_string()) {
+            out.push_back(k + "=" + v.get<std::string>());
         }
     }
     return out;
@@ -120,6 +144,72 @@ std::vector<tools::McpServerConfig> parse_mcp_servers(const std::string& message
     return out;
 }
 
+std::vector<tools::McpServerConfig> parse_mcp_json_file(const std::string& workspace_root,
+                                                         std::string& signature,
+                                                         std::size_t& trusted_ignored) {
+    std::vector<tools::McpServerConfig> out;
+    signature.clear();
+    trusted_ignored = 0;
+    if (workspace_root.empty()) {
+        return out;
+    }
+    // 256 KB: a server list is a few hundred bytes and the cap is only here so a
+    // pathological file cannot be read into memory whole.
+    const platform::FileContents f =
+        platform::read_file_whole(workspace_root + "/.mcp.json", 256U * 1024);
+    if (!f.ok() || f.bytes.empty()) {
+        return out;
+    }
+    const nlohmann::json root = nlohmann::json::parse(f.bytes, nullptr, false);
+    if (root.is_discarded() || !root.is_object() || !root.contains("mcpServers") ||
+        !root.at("mcpServers").is_object()) {
+        return out;
+    }
+    // The key IS the name here -- that is the file format, not a convenience. An entry
+    // whose command is missing or empty is dropped rather than spawned as "": the host
+    // would report a failure to start, which reads as a broken server rather than a
+    // malformed config line.
+    for (const auto& [name, s] : root.at("mcpServers").items()) {
+        if (name.empty() || !s.is_object()) {
+            continue;
+        }
+        tools::McpServerConfig cfg;
+        cfg.name = name;
+        cfg.command = s.value("command", std::string{});
+        if (cfg.command.empty()) {
+            continue;
+        }
+        cfg.args = json_string_array(s, "args");
+        cfg.env = json_env(s);
+        // NOT s.value("trusted", ...). See the header: this file came with a checkout.
+        cfg.trusted = false;
+        if (s.contains("trusted") && s.at("trusted").is_boolean() &&
+            s.at("trusted").get<bool>()) {
+            ++trusted_ignored;
+        }
+        cfg.source = ".mcp.json";
+        out.push_back(std::move(cfg));
+    }
+    signature = root.at("mcpServers").dump();
+    return out;
+}
+
+std::vector<tools::McpServerConfig> merge_mcp_servers(
+    std::vector<tools::McpServerConfig> from_settings,
+    std::vector<tools::McpServerConfig> from_file) {
+    std::vector<tools::McpServerConfig> out = std::move(from_settings);
+    for (tools::McpServerConfig& cfg : from_file) {
+        const bool shadowed =
+            std::any_of(out.begin(), out.end(), [&cfg](const tools::McpServerConfig& s) {
+                return s.name == cfg.name;
+            });
+        if (!shadowed) {
+            out.push_back(std::move(cfg));
+        }
+    }
+    return out;
+}
+
 void connect_mcp_servers(tools::McpHost& host,
                          const std::vector<tools::McpServerConfig>& servers,
                          tools::Registry& registry, platform::EventLogWriter& log,
@@ -151,10 +241,18 @@ void connect_mcp_servers(tools::McpHost& host,
         if (i < servers.size()) {
             ev.fields.push_back({"trusted", servers[i].trusted ? "1" : "0"});
             ev.fields.push_back({"exec_hash", i < hashes.size() ? hashes[i] : ""});
+            // WHICH CONFIG PUT IT THERE. Two sources can now name a server and they carry
+            // different authority -- settings can vouch for one, `.mcp.json` never can --
+            // so a postmortem that can see `trusted` must also be able to see why.
+            ev.fields.push_back(
+                {"source", servers[i].source.empty() ? "settings" : servers[i].source});
         }
         if (!st.error.empty()) {
             // Absent, not fatal: the run continues without that server's tools.
             ev.fields.push_back({"error", st.error});
+        }
+        if (!st.instructions.empty()) {
+            ev.fields.push_back({"instructions_chars", std::to_string(st.instructions.size())});
         }
         for (const std::string& why : st.rejected) {
             ev.fields.push_back({"rejected", why});

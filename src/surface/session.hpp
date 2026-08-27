@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "src/context/context.hpp"
 #include "src/loop/agent.hpp"
@@ -130,5 +131,33 @@ void ensure_registry(Session& session, const std::string& workspace,
 // stable-prompt slot, same once-per-session cost, opposite provenance.
 [[nodiscard]] std::string load_project_memory(
     const platform::WorkspaceFs& workspace);
+
+// Tool names the conventions tell the model to call that NOTHING IN THIS RUN ANSWERS TO.
+//
+// A missing tool is invisible from the inside. Tool names are constrained at decode time
+// by parsephony::ToolCallGuard, so the model cannot emit a call to an unregistered one --
+// the mask steers the name into a registered one instead, and there is no error, no event
+// and no counterfactual to log. Measured on r-18cecc130e7bc558-31fdd81a: AGENTS.md said
+// "Call `godot_guide` before authoring your first scene", godoer's MCP server was not
+// connected, and the model's own reasoning ("let me call that tool now") came out as
+// `git_status`. It spent six of fourteen turns rediscovering this through the shell, could
+// not do the next checklist item without the tool, restated its plan three times and the
+// run ended `stalled`.
+//
+// So the check runs where the answer IS knowable -- at run start, against the registry --
+// and its result goes into the prompt rather than only into the log. Knowing at turn 1 is
+// worth more than a postmortem: a run that knows can say so and ask.
+//
+// DELIBERATELY NARROW, because a false positive spends prompt on a fact about a word that
+// was never a tool. A candidate must be inside backticks, be lower_snake_case with at
+// least one underscore, and sit within a few words of "call"/"run"/"use"/"tool". A name
+// counts as registered if a tool has it exactly OR carries it after an `mcp__server__`
+// prefix -- otherwise every connected MCP tool would be reported missing, which is the
+// same defect pointed the other way.
+[[nodiscard]] std::vector<std::string> unknown_tool_names(const std::string& conventions,
+                                                          const tools::Registry& registry);
+
+// The sentence appended to the conventions for those names. Empty when there are none.
+[[nodiscard]] std::string unknown_tools_note(const std::vector<std::string>& names);
 
 } // namespace lmp::surface

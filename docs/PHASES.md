@@ -200,7 +200,7 @@ space via `TMPDIR` pointed inside the jail.
 
 ## Not done, stated plainly
 
-*Revised 2026-08-02 after the gap-closure pass; see [PLAN_GAP_CLOSURE.md](PLAN_GAP_CLOSURE.md).*
+*Revised 2026-08-02 after the gap-closure pass.*
 
 - **`lmp/edit` through the extension — half done.** The tools-layer seam is built and
   tested: `Registry::set_edit_sink` makes `commit_write` the one door every mutating tool
@@ -221,7 +221,7 @@ space via `TMPDIR` pointed inside the jail.
 ## Closed since (2026-08-02)
 
 - **Speculative decoding.** Wired, off by default; measured +4.5–11% on turns where it
-  fires. See [HANDOFF_SPECULATIVE.md](HANDOFF_SPECULATIVE.md).
+  fires. Opt-in via `LMP_SPECULATIVE=1`.
 - **Approval round-trip.** `sidecar.cpp` attaches a real approver. The
   `ApprovalRequestNotification` dead-code exemption was stale and has been deleted — the
   gate stayed green without it, which is the proof the notification is referenced.
@@ -247,7 +247,7 @@ space via `TMPDIR` pointed inside the jail.
   sampled tokens: the same prompt with `LMP_PREFILL_CHUNK=512` and `=2048` produces
   different first tokens, with no cache reuse involved. So "reuse must be byte-identical
   to a plain run" is not an achievable assertion and never was; the achievable one holds
-  segmentation fixed. `HANDOFF_SPECULATIVE.md` records the same property from the
+  segmentation fixed. The same property was measured from the
   speculative side ("~4% TV from sequential decode").
 - **The miniature vocabulary.** `tests/fixtures/make_mini_vocab.py` generates a
   140,009-entry Qwen-shaped `tokenizer.json` that passes the **real** family verification,

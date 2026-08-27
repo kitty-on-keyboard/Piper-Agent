@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 
-ROOT = "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import agent_eval as ae  # noqa: E402
 

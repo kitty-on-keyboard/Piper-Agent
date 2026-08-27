@@ -1,9 +1,9 @@
 # MarkdownStream cook-off (Jules round 2, Brief E)
 
 An incremental markdown/code-fence state machine: bytes in, render events out, no HTML and no
-DOM. Brief text in [docs/JULES_BRIEFS_ROUND2.md](../../docs/JULES_BRIEFS_ROUND2.md).
+DOM.
 
-Repo: `cat-collector-king/MarkdownStream`, one PR per entrant.
+One PR per entrant.
 
 ## Standing, 2026-08-01 — COMPLETE, 5 of 5, plus an amalgamation that is the only clean row
 

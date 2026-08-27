@@ -35,7 +35,7 @@ const char* qwen_dir() {
     const char* v = std::getenv("LMP_QWEN_DIR");
     return v != nullptr
                ? v
-               : "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit";
+               : "";
 }
 
 // One 19 GB load for the whole file. Two live models on a 48 GB host is the failure mode

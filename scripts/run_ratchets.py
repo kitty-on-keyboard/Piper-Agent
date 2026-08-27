@@ -392,7 +392,7 @@ def copy_tree_for_probe(root, dest, extra=()):
     back a perfect 6/6 killed -- a number that was measuring this function. Caught by
     running the harness on an UNMUTATED copy and watching it "kill" that too (S16: no
     metric quoted without checking what it counts)."""
-    skip_dirs = {".git", "node_modules", "out", "__pycache__"} | set(extra)
+    skip_dirs = {".git", "node_modules", "out", "__pycache__", ".cursor", ".oss-backup"} | set(extra)
 
     def ignore(directory, names):
         drop = set()

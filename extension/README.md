@@ -1,4 +1,4 @@
-# LM_Pipe
+# Piper Agent
 
 A local coding agent for Apple Silicon: Qwen3 in-process via MLX, driven from the editor
 sidebar. One sidecar process owns the model and the loop; the extension speaks the
@@ -6,10 +6,11 @@ private `lmp/*` protocol to it over stdio.
 
 ## Install
 
-From the repo root, build the sidecar first — the package refuses to build without it:
+From the repo root, build the sidecar first — the package refuses to build without it.
+Use the `dev` preset so MLX is compiled from source (tag `v0.32.0`) and linked statically:
 
 ```bash
-cmake --build build --target lmp_sidecar
+cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
 ```
 
 Then, from `extension/`:
@@ -18,10 +19,10 @@ Then, from `extension/`:
 npm install && npm run install-local
 ```
 
-That compiles the TypeScript, stages the binary into `extension/bin/`, produces
-`lm-pipe.vsix`, and installs it into Cursor (or VS Code / VSCodium, whichever it finds).
-**Reload the editor window afterwards** — a newly installed extension does not activate
-in an already-open window.
+That compiles the TypeScript, stages the sidecar binary and `mlx.metallib` into
+`extension/bin/`, produces `lm-pipe.vsix`, and installs it into Cursor (or VS Code /
+VSCodium, whichever it finds). **Reload the editor window afterwards** — a newly
+installed extension does not activate in an already-open window.
 
 To install by hand instead: `npm run package`, then Extensions view → `...` →
 "Install from VSIX".
@@ -29,14 +30,12 @@ To install by hand instead: `npm run package`, then Extensions view → `...` �
 ## Prerequisites
 
 - **Apple Silicon.** Not a portability gap to be fixed; a settled scope decision.
-- **The MLX runtime.** `lmp_sidecar` resolves `libmlx.dylib` through an absolute rpath
-  into the venv it was built against
-  (`/Users/dev/.venvs/lmp-mlx/lib/python3.12/site-packages/mlx/lib`). The package does
-  **not** bundle it: `libmlx.dylib` plus `mlx.metallib` are ~180 MB, and bundling them is
-  a deliberate decision nobody has needed to make yet. If that venv moves or is deleted,
-  the sidecar dies at startup and the extension surfaces the dyld error verbatim.
-- **A model.** Set `lmPipe.modelDir` to a Qwen3 MLX checkpoint directory. There is no
-  default model and no fallback — an unset `modelDir` refuses loudly (S7.5).
+- **MLX, built from source.** The sidecar links `libmlx.a` from FetchContent (see
+  `src/model/CMakeLists.txt`) and stages `mlx.metallib` next to the binary. There is no
+  Python venv and no rpath into a pip package.
+- **A model.** Set `lmPipe.modelDir` to a Qwen3 MLX checkpoint directory. Weights are
+  not in this repository. There is no default model and no fallback — an unset
+  `modelDir` refuses loudly (S7.5). You must accept the checkpoint's own license.
 
 ## Use
 

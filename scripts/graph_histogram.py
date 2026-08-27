@@ -27,12 +27,13 @@ step is a real decode step rather than a first-token forward.
 """
 
 import argparse
+import os
 import collections
 import json
 import re
 import sys
 
-MODEL = "/Users/dev/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
+MODEL = os.environ.get("LMP_QWEN_DIR", "")
 
 LABEL = re.compile(r'\[label\s*="([^"]+)"')
 

@@ -1,11 +1,11 @@
 # PrefixLedger cook-off (Jules round 2, Brief D)
 
 The bookkeeping half of KV rollback: append, prefix comparison, truncation, fingerprint.
-Brief text in [docs/JULES_BRIEFS_ROUND2.md](../../docs/JULES_BRIEFS_ROUND2.md). Adoption
+Adoption
 target is `KvCacheLedger` (`src/model/kv_cache.hpp`), which today offers `append` and
 `clear` and nothing between — speculative decoding needs the thing between.
 
-Repo: `cat-collector-king/prefix-ledger`, one PR per entrant.
+One PR per entrant.
 
 ## Standing, 2026-08-01 — COMPLETE, 5 of 5, plus an amalgamation that beats all of them
 

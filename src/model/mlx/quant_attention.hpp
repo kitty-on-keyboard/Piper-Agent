@@ -63,8 +63,8 @@ inline QTensor expand_kv(const QTensor& t, int axis) {
     // THE DTYPE TRAP, and the reason this line is not `mx::multiply(queries,
     // mx::array(scale))`. A bare mx::array(float) is a strongly typed float32 array and
     // promotes whatever it touches; the identical mistake in forward_gated_delta put the
-    // residual stream in float32 from layer 1 onward and cost 3x decode (HANDOFF_PERF,
-    // "The cause of the decode gap: one strongly-typed scalar"). Python's weakly typed
+    // residual stream in float32 from layer 1 onward and cost 3x decode
+    // ("The cause of the decode gap: one strongly-typed scalar"). Python's weakly typed
     // float does not do this, which is why the reference can write `queries *= scale`.
     mx::array q = mx::multiply(queries, mx::astype(mx::array(scale), queries.dtype()));
 

@@ -1,7 +1,7 @@
 # draft_proposer
 
 `SuffixProposer`: model-free draft proposal for speculative decoding. Amalgamated from the
-5-entrant `cat-collector-king/model-free-draft-proposer` cook-off (2026-08-01).
+5-entrant model-free-draft-proposer cook-off (2026-08-01).
 
 Storage is the winning entrant's (compact array-backed trie, 32-bit node indices). The
 DECISION is rebuilt: minimum support so a context seen once is not treated as evidence, a

@@ -11,6 +11,7 @@ import * as path from "path";
 import { SidecarClient } from "./client";
 import { ExtensionHost, SidebarProvider } from "./sidebar";
 import { McpServerSettings, RunSettings } from "./protocol.generated";
+import { effectiveDraftDir } from "./checkpoint";
 
 let client: SidecarClient | undefined;
 let output: vscode.OutputChannel;
@@ -23,11 +24,15 @@ function settingsFromConfig(): RunSettings {
   const cfg = vscode.workspace.getConfiguration("lmPipe");
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
   const mode = cfg.get<"plan" | "debug" | "agent">("mode", "agent");
+  const modelDir = cfg.get<string>("modelDir", "");
   return {
-    model_dir: cfg.get<string>("modelDir", ""),
-    // Optional MTP draft head. Empty is the default and the reference path; a bad one
-    // fails the load rather than quietly generating without it.
-    draft_model_dir: cfg.get<string>("draftModelDir", ""),
+    model_dir: modelDir,
+    // Never send an MTP head at A3B. The remembered path stays in draftModelDir so
+    // switching back to dense restores speculation without a folder picker.
+    draft_model_dir: effectiveDraftDir(modelDir, {
+      speculative: cfg.get<boolean>("speculativeDecoding", true),
+      draftModelDir: cfg.get<string>("draftModelDir", ""),
+    }),
     workspace_root: root,
     mode,
     sampling: {
@@ -258,12 +263,7 @@ export function activate(context: vscode.ExtensionContext): void {
       });
       const dir = picked?.[0]?.fsPath;
       if (!dir) return;
-      await vscode.workspace
-        .getConfiguration("lmPipe")
-        .update("modelDir", dir, vscode.ConfigurationTarget.Global);
-      // Chosen is not loaded. Asking again here would be a second click for a decision
-      // the operator has already made, so the pick carries straight through to the load.
-      await sidebar.loadModel(dir);
+      await sidebar.selectModelDir(dir);
     })
   );
 

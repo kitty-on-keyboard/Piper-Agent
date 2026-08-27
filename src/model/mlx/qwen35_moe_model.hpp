@@ -145,7 +145,7 @@ public:
     // forward_logits.
     //
     // A second entry point rather than a flag on the first, deliberately. The decode path is
-    // tuned and its graph is load-bearing: HANDOFF_PERF.md records that folding the float32
+    // tuned and its graph is load-bearing: folding the float32
     // cast into this graph measured WORSE (84.8 -> 83.9 tok/s) despite removing a GPU
     // round-trip, because it extended the step's critical path. So forward_logits still
     // builds the graph it built before this function existed. What the two share is the

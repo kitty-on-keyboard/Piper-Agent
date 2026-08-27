@@ -7,7 +7,7 @@
 // The second is the one that matters. A stale-cache bug does not crash and does not
 // produce garbage -- it decodes fluent, plausible, WRONG text. Byte-identity between a
 // run with reuse and a run without it is the only assertion that catches it, which is why
-// docs/PLAN_GAP_CLOSURE.md names it as the falsifier for the whole item.
+// docs/PHASES.md names it as the falsifier for the whole item.
 //
 // Labelled realmodel: excluded from the gate, never run in parallel (S11.6).
 
@@ -32,8 +32,7 @@ std::string qwen_dir() {
     const char* v = std::getenv("LMP_QWEN_DIR");
     return v != nullptr
                ? std::string(v)
-               : std::string("/Users/dev/.lmstudio/models/lmstudio-community/"
-                             "Qwen3.6-35B-A3B-MLX-4bit");
+               : std::string("");
 }
 
 // Collects every sampled id, so two runs can be compared token for token.
@@ -151,7 +150,7 @@ TEST(the_second_turn_reuses_the_checkpointed_prefix) {
 // forces a chunk edge, so the two runs were prefilling in different SEGMENTS, and this
 // bf16 checkpoint is segmentation-sensitive: measured here, prefilling in 512-token
 // chunks and in 2048-token chunks produce different first tokens with no reuse in the
-// picture at all. HANDOFF_SPECULATIVE.md records the same property from the other side
+// picture at all. The same property shows up from the speculative-decode side
 // ("~4% TV from sequential decode ... a property to state rather than discover").
 //
 // So byte-identity across DIFFERENT segmentation is not achievable and never was. The

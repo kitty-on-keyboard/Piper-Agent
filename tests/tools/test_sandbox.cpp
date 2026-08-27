@@ -345,8 +345,8 @@ TEST(t1_sees_past_launcher_prefixes_to_the_program) {
     // code for 85 turns chasing a failure the harness was causing.
     CHECK(t1_compat_rewrite("xcrun swift build") == "xcrun swift build --disable-sandbox");
     CHECK(t1_compat_rewrite("xcrun swift test") == "xcrun swift test --disable-sandbox");
-    CHECK(t1_compat_rewrite("cd /w/ResMon && xcrun swift build") ==
-          "cd /w/ResMon && xcrun swift build --disable-sandbox");
+    CHECK(t1_compat_rewrite("cd /w/proj && xcrun swift build") ==
+          "cd /w/proj && xcrun swift build --disable-sandbox");
     CHECK(t1_compat_rewrite("/usr/bin/xcrun swift build") ==
           "/usr/bin/xcrun swift build --disable-sandbox");
     // A launcher flag that takes a SEPARATE value token: stopping at `macosx` would find no
