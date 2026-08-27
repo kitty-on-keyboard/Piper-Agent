@@ -11,7 +11,13 @@ License: [Apache-2.0](LICENSE). Credits: [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.
 
 ## Install
 
-Apple Silicon only. First build of MLX from source is slow.
+Apple Silicon only.
+
+**From a release (easiest):** download `lm-pipe.vsix` from
+[Releases](https://github.com/kitty-on-keyboard/Piper-Agent/releases). In the editor:
+Extensions → `...` → Install from VSIX. **Reload the window**, then set `lmPipe.modelDir`.
+
+**From source.** First build of MLX from source is slow.
 
 ```bash
 cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
@@ -25,7 +31,7 @@ packages `lm-pipe.vsix`, and installs it into every VS Code-family editor it fin
 **Reload the editor window** — a newly installed extension does not activate in an
 already-open window.
 
-To install by hand: `cd extension && npm run package`, then Extensions → `...` →
+To package a VSIX locally: `cd extension && npm run package`, then Extensions → `...` →
 Install from VSIX.
 
 ## Use
@@ -40,7 +46,8 @@ Install from VSIX.
    **LM_Pipe: Start a run**.
 5. Approvals: ordinary builds and tests can auto-run if `lmPipe.autoApproveExec` is on.
    Destructive or opaque commands always raise a card. The run blocks until you answer.
-6. **LM_Pipe: Cancel the current run** stops mid-generation.
+6. The composer **Stop** button (or Shift+Escape / command **Stop run**) stops
+   mid-generation.
 
 Modes: **plan** (reads only), **debug** (edits, never deletes), **agent** (full tools).
 

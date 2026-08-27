@@ -297,6 +297,28 @@ check(
   ]
 );
 
+// Measured, r-18cfb8403c4b4d90-9bd00186 seq 69: six real choices, then `</parameter>` glued
+// to the last line and seven `</function>` lines the guard swallowed as value text. Those
+// lines used to become clickable rows G–M. They are framing, not choices.
+const FRACTAL_OPTS =
+  "Audio resonance system — use the resonance_hz values already defined in every landmark to generate spatialized sound as you approach discoveries, turning exploration into an auditory experience\n" +
+  "Fractal lifeforms — procedural creatures that inhabit specific coordinate zones, flee when you get close, and drop collectible \"data fragments\" when tracked down\n" +
+  "Multiplayer co-op exploration — two probes sharing one fractal space, communicating landmark discoveries in real-time, with shared mission objectives\n" +
+  "Challenge mode — time-limited zoom races, parameter constraint puzzles (e.g. \"reach this coordinate using only Julia set + orbit trap\"), and a tournament leaderboard\n" +
+  "Procedural narrative — story fragments unlocked by discovering specific landmark combinations, building a lore about what these mathematical spaces actually are\n" +
+  "Export/share ecosystem — generate shareable image URLs with embedded state codes, embeddable fractal viewers, and a community gallery server</parameter>\n" +
+  "</function>\n</function>\n</function>\n</function>\n</function>\n</function>\n</function>";
+check(
+  "leaked tool-call closers are not options",
+  labels(questionCard({ options: FRACTAL_OPTS }, "Which direction for a new feature?").options).length,
+  6
+);
+check(
+  "and the last real choice keeps its text, without the glued closer",
+  labels(questionCard({ options: FRACTAL_OPTS }, "Which direction for a new feature?").options)[5],
+  "Export/share ecosystem — generate shareable image URLs with embedded state codes, embeddable fractal viewers, and a community gallery server"
+);
+
 // NO CHOICE TO OFFER. The caller draws a card only at >= 2, so both of these render as the
 // plain tool row and the composer box -- which is the honest answer to "we could not find
 // a choice set", and strictly better than one button the human never chose.

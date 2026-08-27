@@ -1271,7 +1271,12 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     turn.batch_count = calls.size();
     for (std::size_t i = 0; i < calls.size(); ++i) {
         for (const auto& p : calls[i].params) {
-            params[i].push_back({p.name, p.value});
+            std::string value = p.value;
+            if (calls[i].name == "ask_user" &&
+                (p.name == "options" || p.name == "question")) {
+                value = strip_leaked_tool_xml(std::move(value));
+            }
+            params[i].push_back({p.name, std::move(value)});
         }
     }
 
@@ -1951,9 +1956,9 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
             const std::string options = param_value(params, "options");
             halt_reason_ = "awaiting_user";
             emit(name, {{"question", body}, {"options", options}});
-            if (observer_.on_token) {
-                observer_.on_token("answer", body);
-            }
+            // The card is the question. Replaying `body` on the answer channel streamed
+            // it as prose first, then drew the card under it -- the operator read the
+            // same choice twice. Measured on the fractal-feature ask_user (seq 132).
             return tools::ToolResult::okay("asked the operator; the run stops here");
         }
         halt_reason_ = "plan_ready";

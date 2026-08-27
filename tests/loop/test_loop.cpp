@@ -41,6 +41,20 @@ void record_ok(RepeatDetector& d, const std::string& tool,
 
 // --- one turn, one outcome (S9.1) -------------------------------------------
 
+TEST(leaked_tool_xml_is_stripped_from_text_values) {
+    // Measured, r-18cfb8403c4b4d90-9bd00186: last option + glued closer + seven
+    // `</function>` lines. The closer is not a choice; neither are the extra tags.
+    const std::string raw =
+        "Export/share ecosystem — gallery server</parameter>\n"
+        "</function>\n</function>\n</function>\n</function>\n"
+        "</function>\n</function>\n</function>";
+    CHECK_EQ(strip_leaked_tool_xml(raw),
+             std::string("Export/share ecosystem — gallery server"));
+    CHECK_EQ(strip_leaked_tool_xml("Option A\nOption B"),
+             std::string("Option A\nOption B"));
+    CHECK_EQ(strip_leaked_tool_xml(""), std::string(""));
+}
+
 TEST(execution_is_asked_first_and_cannot_be_overwritten) {
     model::GenResult gen;
     gen.status = model::GenStatus::LengthCapped; // would otherwise say LengthCapped

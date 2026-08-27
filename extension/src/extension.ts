@@ -245,8 +245,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("lmPipe.cancel", async () => {
-      const runId = sidebar.currentRunId;
-      if (runId) await client?.cancel(runId);
+      // Always send. The sidecar's reader sets the cancel token from the framed
+      // method name; it does not need a run id. Requiring one meant Stop was a
+      // silent no-op between the composer commit and the first notification.
+      const runId = sidebar.currentRunId ?? "";
+      await client?.cancel(runId);
     }),
     vscode.commands.registerCommand("lmPipe.loadModel", () => sidebar.loadModel()),
     vscode.commands.registerCommand("lmPipe.unloadModel", () => sidebar.unloadModel()),
