@@ -45,6 +45,14 @@ jobs:
         # three days later", and it had never once run on CI.
         run: npm ci --prefix extension
 
+      - name: Extension compile
+        # test_view_script_parses registers only when extension/out/webview.js exists
+        # (tests/gate/CMakeLists.txt). npm ci alone leaves that file absent, so CMake
+        # skips the check and the pinned 51-test gate becomes 50 -- which is exactly the
+        # silent-narrowing the manifest exists to catch. Compile before Configure so the
+        # EXISTS probe sees the artifact.
+        run: npm run compile --prefix extension
+
       - name: Configure
         # -DLMP_WITH_MLX=OFF is not a downgrade of what CI checks: it is what CI has
         # ALWAYS done. The old venv probe could not find an interpreter with mlx on a
@@ -78,6 +86,9 @@ jobs:
       # Same reason as the gate job: without node_modules the pinned manifest and the
       # selected set disagree, and test_gate_manifest fails by design.
       - run: npm ci --prefix extension
+      # Same reason as the gate job: without out/webview.js, test_view_script_parses is
+      # skipped at Configure and the pinned count no longer matches.
+      - run: npm run compile --prefix extension
 
       # The asan preset never had MLX either (same probe, same absent interpreter), and
       # LMP_WITH_MLX defaults OFF, so this stays as it was.
