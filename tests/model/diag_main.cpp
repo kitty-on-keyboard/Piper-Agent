@@ -10,6 +10,10 @@
 //   lmp_diag bench [runs] [prompt_tokens] [max_new]
 //                           the whole stack, N runs, median + spread, next to the
 //                           LM Studio numbers derived by scripts/lmstudio_baseline.py
+//   lmp_diag reuse [runs] [prefix_tokens] [suffix_tokens] [max_new]
+//                           live KV reuse (reuse_on): two generate() calls per run on
+//                           one loaded backend, no reset between them; measures the
+//                           turn-2 restore that `bench` deliberately erases
 //   lmp_diag graph [prompt] the decode step's graph as dot, unevaluated -- the only
 //                           subcommand here that is not a timing. Diff its primitive
 //                           histogram against mlx-lm's with scripts/graph_histogram.py
@@ -1209,6 +1213,150 @@ int cmd_bench(int runs, int prompt_tokens, int max_new) {
     return 0;
 }
 
+// --- reuse -----------------------------------------------------------------
+//
+// Measures live KV reuse (reuse_on). `bench` resets the cache every run so cold
+// prefill stays honest; this subcommand is the other half -- two generate() calls on
+// ONE loaded backend with no reset between them, matching the protocol in
+// tests/model/test_kv_reuse_realmodel.cpp. Turn 1 checkpoints the stable prefix; turn
+// 2 restores it instead of re-prefilling. Between runs the cache IS reset so run N+1
+// is a fresh pair, not a growing conversation.
+//
+// Defaults sized for a useful prefix (~2k) and a short live tail, not for CI: this
+// loads the real checkpoint and is a diag driver only.
+
+std::string filler_to_tokens(const QwenTokenizer& tok, int target_tokens) {
+    std::string filler;
+    int n = 0;
+    while (n < target_tokens) {
+        filler += "The build system compiles each translation unit separately, then the "
+                  "linker resolves symbols across them and emits one binary. Line " +
+                  std::to_string(n) + ".\n";
+        n = static_cast<int>(tok.encode_content(filler).size());
+    }
+    return filler;
+}
+
+int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new) {
+    QwenTokenizer tok;
+    LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+
+    lmp::platform::SystemClock clock;
+    MlxBackend backend(clock);
+    auto t_load0 = Clock::now();
+    st = backend.load({qwen_dir(), draft_dir()});
+    if (!st.ok) {
+        std::printf("model load fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::printf("model load: %.1f s%s\n", ms(t_load0, Clock::now()) / 1000.0,
+                draft_dir()[0] != '\0' ? "  [MTP draft head loaded]" : "  [plain decode]");
+    std::printf("reuse_on: runs=%d prefix_tokens~%d suffix_tokens~%d max_new=%d\n", runs,
+                prefix_tokens, suffix_tokens, max_new);
+
+    // Same filler style as `bench` so token counts are comparable to the cold sweep.
+    const std::string prefix = filler_to_tokens(tok, prefix_tokens);
+    const std::string suffix = filler_to_tokens(tok, suffix_tokens);
+
+    ChatTemplate tmpl(tok);
+
+    class CapSink final : public TokenSink {
+      public:
+        explicit CapSink(int cap) : cap_(cap) {}
+        bool on_token(TokenId) override {
+            ++n_;
+            return n_ < cap_;
+        }
+
+      private:
+        int cap_;
+        int n_ = 0;
+    };
+
+    Ledger t1_ttft;
+    Ledger t1_prefill;
+    Ledger t2_ttft;
+    Ledger t2_prefill;
+    Ledger t2_reused;
+
+    for (int run = 0; run < runs; ++run) {
+        // Turn 1 (cold): System + User(prefix + ask). Last message is the live tail;
+        // checkpoint_at is the shared-prefix boundary (start of that last message).
+        const std::vector<Message> turn1 = {
+            {Role::System, "You are a terse assistant."},
+            {Role::User, prefix + "\nSummarise the above in one line."},
+        };
+        std::vector<std::size_t> off1;
+        InferenceTask task1;
+        task1.prompt = tmpl.render_with_offsets(turn1, "", off1);
+        task1.checkpoint_at = off1[turn1.size() - 1];
+        task1.max_new_tokens = max_new;
+        task1.sampling.seed = 7;
+        CapSink sink1(max_new);
+        CancelToken cancel;
+        const GenResult r1 = backend.generate(task1, sink1, cancel);
+        std::printf("  run %d turn1: prompt=%zu reused=%zu ttft=%.0fms "
+                    "prefill=%.1f decode=%.1f tokens=%d status=%d\n",
+                    run, task1.prompt.size(), r1.prefill_reused_tokens, r1.ttft_ms,
+                    r1.prefill_tok_per_s, r1.decode_tok_per_s, r1.tokens_generated,
+                    static_cast<int>(r1.status));
+        if (r1.prefill_reused_tokens != 0) {
+            std::printf("  FAIL: turn1 expected prefill_reused_tokens==0 (cold), got %zu\n",
+                        r1.prefill_reused_tokens);
+        }
+
+        // Turn 2 (reuse on): same messages + Assistant stub + short User suffix.
+        // Same checkpoint_at semantics -- last message is the live tail. Do NOT
+        // reset_cache between turn 1 and turn 2.
+        const std::vector<Message> turn2 = {
+            turn1[0],
+            turn1[1],
+            {Role::Assistant, "Summary: the build compiles units then links one binary."},
+            {Role::User, suffix},
+        };
+        std::vector<std::size_t> off2;
+        InferenceTask task2;
+        task2.prompt = tmpl.render_with_offsets(turn2, "", off2);
+        task2.checkpoint_at = off2[turn2.size() - 1];
+        task2.max_new_tokens = max_new;
+        task2.sampling.seed = 7;
+        CapSink sink2(max_new);
+        const GenResult r2 = backend.generate(task2, sink2, cancel);
+        const std::size_t suffix_prefill =
+            task2.prompt.size() > r2.prefill_reused_tokens
+                ? task2.prompt.size() - r2.prefill_reused_tokens
+                : 0;
+        std::printf("  run %d turn2: prompt=%zu reused=%zu ttft=%.0fms "
+                    "prefill=%.1f decode=%.1f suffix_prefill_tokens=%zu\n",
+                    run, task2.prompt.size(), r2.prefill_reused_tokens, r2.ttft_ms,
+                    r2.prefill_tok_per_s, r2.decode_tok_per_s, suffix_prefill);
+        if (r2.prefill_reused_tokens == 0) {
+            std::printf("  FAIL: turn2 reused==0 -- the KV reuse mechanism did not fire\n");
+        }
+
+        t1_ttft.add(r1.ttft_ms);
+        t1_prefill.add(r1.prefill_tok_per_s);
+        t2_ttft.add(r2.ttft_ms);
+        t2_prefill.add(r2.prefill_tok_per_s);
+        t2_reused.add(static_cast<double>(r2.prefill_reused_tokens));
+
+        // Fresh pair for the next run -- not a growing conversation.
+        backend.reset_cache();
+    }
+
+    std::printf("\nLM_Pipe reuse_on, %d runs:\n", runs);
+    t1_ttft.print("t1 ttft", "ms", 0.0);
+    t1_prefill.print("t1 prefill", "tok/s", 0.0);
+    t2_ttft.print("t2 ttft", "ms", 0.0);
+    t2_prefill.print("t2 prefill", "tok/s", 0.0);
+    t2_reused.print("t2 reused", "tok", 0.0);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1271,6 +1419,13 @@ int main(int argc, char** argv) {
         const int max_new = argc > 4 ? std::atoi(argv[4]) : 256;
         return cmd_bench(runs, prompt_tokens, max_new);
     }
-    std::printf("usage: lmp_diag [scan|mask|bench] ...\n");
+    if (cmd == "reuse") {
+        const int runs = argc > 2 ? std::atoi(argv[2]) : 3;
+        const int prefix_tokens = argc > 3 ? std::atoi(argv[3]) : 2048;
+        const int suffix_tokens = argc > 4 ? std::atoi(argv[4]) : 128;
+        const int max_new = argc > 5 ? std::atoi(argv[5]) : 32;
+        return cmd_reuse(runs, prefix_tokens, suffix_tokens, max_new);
+    }
+    std::printf("usage: lmp_diag [scan|mask|bench|reuse] ...\n");
     return 2;
 }
