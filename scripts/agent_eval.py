@@ -659,6 +659,32 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
         proc.kill()
         proc.wait()
 
+    rc = proc.returncode
+    sig = -rc if rc is not None and rc < 0 else None
+    sig_name = None
+    if sig:
+        try:
+            sig_name = signal.Signals(sig).name
+        except ValueError:
+            sig_name = f"SIG{sig}"
+    state["sidecar_returncode"] = rc
+    state["sidecar_signal"] = sig
+    state["sidecar_signal_name"] = sig_name
+    wait_line = f"sidecar waitpid: pid={proc.pid} returncode={rc}"
+    if sig is not None:
+        wait_line += f" signal={sig} ({sig_name})"
+    print(wait_line, flush=True)
+    if _stderr_path:
+        try:
+            _stderr.write(wait_line + "\n")
+            _stderr.flush()
+        except OSError:
+            pass
+        try:
+            _stderr.close()
+        except OSError:
+            pass
+
     state["seconds"] = round(time.monotonic() - started, 1)
     return state
 

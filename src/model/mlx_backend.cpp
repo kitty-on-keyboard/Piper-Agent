@@ -136,10 +136,11 @@ std::size_t g_cache_limit = 0;
 //
 // THIS IS NOT THE CACHE CAP THAT WAS REVERTED. That one bounded what the allocator
 // RETAINS -- 4.75 GB against 18 GB observed -- and forced reclaim on every allocation in
-// steady state, which is where the slowdown came from. This changes nothing in steady
-// state: the cache limit follows the memory limit and lands at ~40 GB, far above the
-// ~18 GB high-water mark ever measured, so nothing is reclaimed that would not have been.
-// Only the edge changes, and only from "killed" to "reported".
+// steady state, which is where the slowdown came from. This changes the MEMORY limit
+// only, and keeps the cache limit at the device working set so decode is not taxed.
+// The memory valve is 4 GiB below the recommended working set: jetsam historically
+// lands near 38 GB while the recommended size is ~40 GB, so a valve at the
+// recommended size still loses the race to SIGKILL.
 void set_memory_ceiling() {
     if (!mx::metal::is_available()) {
         return;
@@ -150,9 +151,22 @@ void set_memory_ceiling() {
         return;
     }
     if (const auto* working_set = std::get_if<std::size_t>(&it->second)) {
-        mx::set_memory_limit(*working_set);
+        // The device-recommended working set is ~40 GB on this 48 GB machine. Jetsam
+        // historically kills near 38 GB, so a valve at the recommended size still
+        // loses the race to the OS. Keep the CACHE limit at the recommended size
+        // (a tight cache cap is the 5-6 s TTFT regression). Put the MEMORY limit
+        // 4 GiB below so an over-large allocation throws into generate()'s catch
+        // instead of SIGKILL.
+        constexpr std::size_t kJetsamHeadroom = 4ull * 1024ull * 1024ull * 1024ull;
+        const std::size_t valve = *working_set > kJetsamHeadroom
+                                      ? *working_set - kJetsamHeadroom
+                                      : *working_set;
+        mx::set_memory_limit(valve);
         mx::set_cache_limit(*working_set);
         g_cache_limit = *working_set;
+        std::fprintf(stderr, "mlx ceiling: memory=%zu cache=%zu recommended=%zu\n",
+                     valve, *working_set, *working_set);
+        std::fflush(stderr);
     }
 }
 
@@ -838,6 +852,28 @@ void reset_live_kv(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     r.cache_reclaimed_bytes = held > left ? held - left : 0;
 }
 
+const char* reuse_mode_name(ReuseMode mode) {
+    switch (mode) {
+        case ReuseMode::Extend:
+            return "extend";
+        case ReuseMode::Restore:
+            return "restore";
+        case ReuseMode::Reset:
+            return "reset";
+    }
+    return "unknown";
+}
+
+// Last line on a SIGKILL still has to be on disk. stderr is the only channel that
+// survives an OS kill of the sidecar; the event log is written after generate() returns.
+void log_mlx_mem(const char* at, std::size_t tokens = 0) {
+    const MemoryReport m = mlx_memory_report();
+    std::fprintf(stderr,
+                 "mem at=%s tokens=%zu active=%zu cache=%zu peak=%zu sum=%zu\n", at,
+                 tokens, m.active, m.cache, m.peak, m.active + m.cache);
+    std::fflush(stderr);
+}
+
 // Chunked prefill of task.prompt[start, end). `boundary` (if inside the range) is a
 // chunk edge where the turn checkpoint is snapshotted. Returns false on cancel.
 bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
@@ -858,6 +894,7 @@ bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         if (boundary > at && boundary < chunk_end) {
             chunk_end = boundary;
         }
+        log_mlx_mem("prefill_chunk_begin", at);
         mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
                                   {1, static_cast<int>(chunk_end - at)}, mx::int32);
         model.set_embed_splices(splices_for_chunk(image_rows, at, chunk_end));
@@ -875,6 +912,20 @@ bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         if (want_last_logits && chunk_end == end) {
             logits_to_host(logits, logits_host);
         }
+        // Drop this chunk's activations. eval_caches() has already synced the KV rows
+        // into live arrays; without a reclaim, MLX parks the dead buffers in its
+        // allocator cache and they stack ~2.5 GB per 2048-token chunk. At ~20k tokens
+        // that is ~38 GB (active+cache) on a 48 GB machine -- the historical
+        // generate_begin jetsam band -- while peak active stays ~22 GB.
+        //
+        // First-turn reuse is Extend from an empty ledger, so the Reset-path
+        // clear_cache never runs on the cold prefill that actually dies.
+        //
+        // THIS IS NOT THE REVERTED ALWAYS-ON CACHE CAP. That one bounded retention
+        // for every allocation, including decode, and cost 5-6 s TTFT. This fires
+        // once per prefill chunk and never in the decode loop.
+        mx::clear_cache();
+        log_mlx_mem("prefill_chunk_end", chunk_end);
         at = chunk_end;
     }
     return true;
@@ -897,6 +948,7 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     // in the report, the model stays loaded, and the next request still has somewhere to
     // go. Catching by reference and reporting what() also puts MLX's own words -- which
     // name the size it could not get -- in front of whoever reads the trace.
+    log_mlx_mem("generate_enter", task.prompt.size());
     try {
         return generate_impl(task, sink, cancel);
     } catch (const std::exception& e) {
@@ -948,6 +1000,11 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     // context and the most-stable-first prompt layout bought nothing.
     const TurnReuse plan = plan_turn_reuse(ledger_, task.prompt, impl_->ckpt.len,
                                            impl_->ckpt.valid, prompt_tags);
+    std::fprintf(stderr,
+                 "generate: reuse=%s prefill_from=%zu prompt=%zu chunk=%zu ledger=%zu\n",
+                 reuse_mode_name(plan.mode), plan.prefill_from, task.prompt.size(),
+                 prefill_chunk(), ledger_.size());
+    std::fflush(stderr);
     switch (plan.mode) {
         case ReuseMode::Extend:
             break;
@@ -985,6 +1042,7 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             // ~40.2 GB, and the kills land near 38.
             reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
                           impl_->ckpt.valid, r);
+            log_mlx_mem("after_reset", 0);
             break;
     }
     const std::size_t start = plan.prefill_from;
@@ -1000,11 +1058,13 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     const std::size_t boundary =
         task.checkpoint_at > start && task.checkpoint_at <= prompt_n ? task.checkpoint_at
                                                                      : 0;
+    log_mlx_mem("prefill_start", start);
     if (!prefill_tokens(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
                         impl_->ckpt.valid, task, cancel, image_rows, prompt_tags, start,
                         prompt_n, boundary, /*want_last_logits=*/true, logits_host, r)) {
         return r;
     }
+    log_mlx_mem("prefill_done", prompt_n);
     const auto t_prefill = clock_.mono();
     const double prefill_ms = ms_between(t0, t_prefill);
     const auto prefilled = static_cast<double>(prompt_n - start);

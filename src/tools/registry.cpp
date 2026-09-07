@@ -12,9 +12,7 @@
 #include <cstdlib>
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
-#include <fstream>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -34,23 +32,6 @@ namespace {
 namespace fsx = lmp::platform;
 using parsephony::ParamSpec;
 using parsephony::ParamType;
-
-void dbg_log(const char* loc, const char* msg, const char* hid, const std::string& data) {
-    // #region agent log
-    std::ofstream f(
-        "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
-        std::ios::app);
-    if (!f) {
-        return;
-    }
-    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-    f << "{\"sessionId\":\"3dfcb2\",\"runId\":\"post-fix\",\"hypothesisId\":\"" << hid
-      << "\",\"location\":\"" << loc << "\",\"message\":\"" << msg << "\",\"data\":{" << data
-      << "},\"timestamp\":" << ts << "}\n";
-    // #endregion
-}
 
 // A failed write, classified by WHY -- because `retryable` tells the model (and any
 // consumer of the result) whether re-sending the identical bytes can ever come back
@@ -877,16 +858,8 @@ Registry::Registry(WorkspaceContext ctx)
                                          "This read was not blocked -- the file is not "
                                          "on disk."
                                        : where;
-                        // #region agent log
-                        dbg_log("registry.cpp:view_image", "view_image_missing", "A",
-                                "\"path\":\"" + path + "\",\"error_class\":\"NotFound\"");
-                        // #endregion
                         return ToolResult::error(ErrorClass::NotFound, false, err_msg);
                     }
-                    // #region agent log
-                    dbg_log("registry.cpp:view_image", "view_image_open_fail", "A",
-                            "\"path\":\"" + path + "\"");
-                    // #endregion
                     return ToolResult::error(ErrorClass::Malformed, false, opened.error);
                 }
             }
