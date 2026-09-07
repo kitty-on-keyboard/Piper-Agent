@@ -59,7 +59,8 @@ TEST(stdio_session_against_a_real_subprocess) {
             saw_echo_ro = true;
         }
         if (t.name == "add") {
-            CHECK(!t.annotations.has_value());
+            REQUIRE(t.annotations.has_value());
+            CHECK(!t.annotations->value("readOnlyHint", true));
             saw_add_unannotated = true;
         }
     }
