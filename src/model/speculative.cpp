@@ -9,6 +9,42 @@
 
 namespace lmp::model {
 
+TokenId SpecForward::mtp_step_greedy(TokenId tok, std::span<const float> hidden,
+                                     std::vector<float>& out_hidden) {
+    mtp_step(tok, hidden, out_hidden);
+    if (out_hidden.empty()) {
+        return 0;
+    }
+    std::vector<float> row;
+    mtp_logits(out_hidden, row);
+    if (row.empty()) {
+        out_hidden.clear();
+        return 0;
+    }
+    std::size_t best = 0;
+    for (std::size_t i = 1; i < row.size(); ++i) {
+        if (row[i] > row[best]) {
+            best = i;
+        }
+    }
+    return static_cast<TokenId>(best);
+}
+
+TokenId SpecForward::mtp_argmax(std::span<const float> hidden) {
+    std::vector<float> row;
+    mtp_logits(hidden, row);
+    if (row.empty()) {
+        return 0;
+    }
+    std::size_t best = 0;
+    for (std::size_t i = 1; i < row.size(); ++i) {
+        if (row[i] > row[best]) {
+            best = i;
+        }
+    }
+    return static_cast<TokenId>(best);
+}
+
 namespace {
 
 // The drafter is deterministic -- it proposes a concrete continuation from matched

@@ -5,24 +5,6 @@
 
 namespace lmp::model {
 
-namespace {
-
-// The head drafts greedily. Speculative decoding stays distribution-preserving through the
-// VERIFIER, not through the drafter -- and the acceptance rule the verifier implements is
-// exact only for a deterministic drafter (q = 1), which is the same assumption the suffix
-// proposer already relies on. Sampling here would break that, not improve the draft.
-[[nodiscard]] TokenId argmax_of(std::span<const float> row) noexcept {
-    std::size_t best = 0;
-    for (std::size_t i = 1; i < row.size(); ++i) {
-        if (row[i] > row[best]) {
-            best = i;
-        }
-    }
-    return static_cast<TokenId>(best);
-}
-
-} // namespace
-
 void MtpProposer::reset() {
     round_appended_ = 0;
     has_seed_ = false;
@@ -70,19 +52,12 @@ std::vector<TokenId> MtpProposer::propose(std::span<const TokenId> context,
 
     while (drafted_.size() < want) {
         std::vector<float> h_next;
-        fwd.mtp_step(tok, h_prev, h_next);
+        tok = fwd.mtp_step_greedy(tok, h_prev, h_next);
         if (h_next.empty()) {
             break;
         }
         ++round_appended_;
         h_prev = std::move(h_next);
-
-        std::vector<float> row;
-        fwd.mtp_logits(h_prev, row);
-        if (row.empty()) {
-            break;
-        }
-        tok = argmax_of(row);
         drafted_.push_back(tok);
     }
     return drafted_;
@@ -169,13 +144,7 @@ void MtpProposer::settle(std::size_t accepted, std::span<const TokenId> committe
 
     // Seed the next round from the head's own last state, which is one prediction the
     // next propose() gets without paying for a forward.
-    std::vector<float> row;
-    fwd.mtp_logits(h_last, row);
-    if (row.empty()) {
-        has_seed_ = false;
-        return;
-    }
-    seed_token_ = argmax_of(row);
+    seed_token_ = fwd.mtp_argmax(h_last);
     seed_hidden_ = std::move(h_last);
     has_seed_ = true;
 }

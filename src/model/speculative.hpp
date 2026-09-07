@@ -150,6 +150,17 @@ class SpecForward {
         row.clear();
     }
 
+    // Greedy (token, hidden) -> (next_token, next_hidden). Default is mtp_step then
+    // mtp_logits then argmax, which is what the gate's fakes exercise. The MLX forward
+    // fuses the two GPU evals and keeps the vocab row off-host: the drafter is
+    // deterministic, so only the argmax is consumed.
+    virtual TokenId mtp_step_greedy(TokenId tok, std::span<const float> hidden,
+                                    std::vector<float>& out_hidden);
+
+    // Argmax of the target LM head on an MTP hidden row. Default materialises the row;
+    // the MLX forward does not.
+    virtual TokenId mtp_argmax(std::span<const float> hidden);
+
     // Drop the last n positions from the MTP head's cache, and clear it entirely.
     virtual void mtp_trim(std::size_t /*n*/) {}
     virtual void mtp_reset() {}
