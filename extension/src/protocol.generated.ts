@@ -50,6 +50,8 @@ export interface RunSettings {
   reasoning_effort: string;
   verify_contract: string;
   mcp_servers: McpServerSettings[];
+  commit_think: boolean;
+  shadow_compact: boolean;
 }
 
 export interface CapabilityChips {
@@ -145,6 +147,7 @@ export interface MessageParams {
   run_id: string;
   text: string;
   image_paths: string[];
+  settings: RunSettings;
 }
 export interface MessageResult {
   accepted: boolean;

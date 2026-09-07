@@ -96,6 +96,11 @@ class MlxBackend final : public InferenceBackend {
     [[nodiscard]] GenResult generate(const InferenceTask& task, TokenSink& sink,
                                      const CancelToken& cancel) override;
 
+    // After compaction rewrote the prompt: Reset + prefill the stable prefix, no decode.
+    // See docs/KV_SHADOW_SWAP.md.
+    [[nodiscard]] GenResult warm_stable_prefix(const InferenceTask& task,
+                                               const CancelToken& cancel) override;
+
     // The verified-reuse ledger, exposed for tests and for the loop's fresh-window
     // restart (S8.3).
     [[nodiscard]] const KvCacheLedger& ledger() const noexcept { return ledger_; }
@@ -107,6 +112,8 @@ class MlxBackend final : public InferenceBackend {
     // sidecar dies, ~20 GB of weights go with it, and the run ends with no report at all.
     [[nodiscard]] GenResult generate_impl(const InferenceTask& task, TokenSink& sink,
                                           const CancelToken& cancel);
+    [[nodiscard]] GenResult warm_stable_prefix_impl(const InferenceTask& task,
+                                                    const CancelToken& cancel);
 
     struct Impl; // holds the mx graph objects; keeps mlx headers out of this header
     std::unique_ptr<Impl> impl_;

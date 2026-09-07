@@ -230,7 +230,9 @@ TEST(an_untrusted_servers_tools_are_irreversible_and_a_trusted_servers_are_not) 
     CHECK(t->description.find("provided by MCP server") != std::string::npos);
 
     // MCP's default for an omitted readOnlyHint is false: the tool may modify.
-    // Trust is not a proxy for "this is a read".
+    // Trust is not a proxy for "this is a read". destructiveHint=true on `add`
+    // (the blender-mcp execute_blender_code shape) must still leave irreversible
+    // false — that flag is containment, not "the tool has side effects".
     const ToolDecl* add = find(trusted_reg, "add");
     REQUIRE(add != nullptr);
     CHECK(add->mutates_workspace);

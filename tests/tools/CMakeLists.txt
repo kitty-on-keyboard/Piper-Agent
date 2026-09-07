@@ -1,5 +1,6 @@
 lmp_add_test(test_sandbox  SOURCES test_sandbox.cpp  LABELS gate LINK lmp_tools TIMEOUT 120)
 lmp_add_test(test_registry SOURCES test_registry.cpp LABELS gate LINK lmp_tools TIMEOUT 120)
+lmp_add_test(test_think_blocks SOURCES test_think_blocks.cpp LABELS gate LINK lmp_tools TIMEOUT 60)
 lmp_add_test(test_syntax_check SOURCES test_syntax_check.cpp LABELS gate LINK lmp_tools TIMEOUT 120)
 
 # The recall tools over a real store. Links lmp_pcc explicitly: lmp_tools keeps it PRIVATE

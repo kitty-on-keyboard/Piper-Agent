@@ -154,6 +154,8 @@ struct RunSettings {
     std::string reasoning_effort;
     std::string verify_contract;
     std::vector<McpServerSettings> mcp_servers;
+    bool commit_think = false;
+    bool shadow_compact = false;
 };
 inline void append_value(std::string& out, const RunSettings& v) {
     out += "{";
@@ -219,6 +221,12 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"mcp_servers\":";
     append_value(out, v.mcp_servers);
+    out += ",";
+    out += "\"commit_think\":";
+    append_value(out, v.commit_think);
+    out += ",";
+    out += "\"shadow_compact\":";
+    append_value(out, v.shadow_compact);
     out += "}";
 }
 
@@ -429,6 +437,7 @@ struct MessageParams {
     std::string run_id;
     std::string text;
     std::vector<std::string> image_paths;
+    RunSettings settings;
 };
 struct MessageResult {
     bool accepted = false;

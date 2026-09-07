@@ -771,6 +771,62 @@ std::vector<mlxl::Qwen35MoeModel::EmbedSplice> splices_for_chunk(
     return out;
 }
 
+void reset_live_kv(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
+                   mlxl::Qwen35MoeModel::CacheCheckpoint& ckpt_cp, std::size_t& ckpt_len,
+                   bool& ckpt_valid, GenResult& r) {
+    model.reset_cache();
+    ledger.clear();
+    ckpt_cp = {};
+    ckpt_len = 0;
+    ckpt_valid = false;
+    const std::size_t held = mx::get_cache_memory();
+    mx::clear_cache();
+    const std::size_t left = mx::get_cache_memory();
+    r.cache_reclaimed_bytes = held > left ? held - left : 0;
+}
+
+// Chunked prefill of task.prompt[start, end). `boundary` (if inside the range) is a
+// chunk edge where the turn checkpoint is snapshotted. Returns false on cancel.
+bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
+                    mlxl::Qwen35MoeModel::CacheCheckpoint& ckpt_cp, std::size_t& ckpt_len,
+                    bool& ckpt_valid, const InferenceTask& task, const CancelToken& cancel,
+                    const std::vector<ImageRows>& image_rows,
+                    const std::vector<ContentTag>& prompt_tags, std::size_t start,
+                    std::size_t end, std::size_t boundary, bool want_last_logits,
+                    std::vector<float>& logits_host, GenResult& r) {
+    const std::size_t kPrefillChunk = prefill_chunk();
+    std::size_t at = start;
+    while (at < end) {
+        if (cancel.cancelled()) {
+            r.status = GenStatus::Cancelled;
+            return false;
+        }
+        std::size_t chunk_end = std::min(at + kPrefillChunk, end);
+        if (boundary > at && boundary < chunk_end) {
+            chunk_end = boundary;
+        }
+        mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
+                                  {1, static_cast<int>(chunk_end - at)}, mx::int32);
+        model.set_embed_splices(splices_for_chunk(image_rows, at, chunk_end));
+        mx::array logits = model.forward_logits(ids);
+        model.eval_caches();
+        model.clear_embed_splices();
+        for (std::size_t i = at; i < chunk_end; ++i) {
+            ledger.append(task.prompt[i], i < prompt_tags.size() ? prompt_tags[i] : 0);
+        }
+        if (chunk_end == boundary) {
+            ckpt_cp = model.checkpoint();
+            ckpt_len = ledger.size();
+            ckpt_valid = true;
+        }
+        if (want_last_logits && chunk_end == end) {
+            logits_to_host(logits, logits_host);
+        }
+        at = chunk_end;
+    }
+    return true;
+}
+
 } // namespace
 
 GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
@@ -850,9 +906,6 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             break;
         case ReuseMode::Reset:
             // Stale context is never decoded past. One honest full re-prefill.
-            impl_->model.reset_cache();
-            ledger_.clear();
-            impl_->ckpt = {};
             // AND GIVE THE BUFFERS BACK, because this is the one moment in a run when
             // reclaim is free. reset_cache() drops the KV arrays, and MLX's allocator
             // parks their Metal buffers in its own cache rather than returning them --
@@ -877,12 +930,8 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             // crash report, which is the signature of an OS kill and not of MLX's valve.
             // The valve could not have caught them: it sits at the device working set,
             // ~40.2 GB, and the kills land near 38.
-            {
-                const std::size_t held = mx::get_cache_memory();
-                mx::clear_cache();
-                const std::size_t left = mx::get_cache_memory();
-                r.cache_reclaimed_bytes = held > left ? held - left : 0;
-            }
+            reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                          impl_->ckpt.valid, r);
             break;
     }
     const std::size_t start = plan.prefill_from;
@@ -891,7 +940,6 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     const auto t0 = clock_.mono();
 
     // --- chunked prefill ----------------------------------------------------
-    const std::size_t kPrefillChunk = prefill_chunk();
     std::vector<float> logits_host;
     const std::size_t prompt_n = task.prompt.size();
     // The stable boundary is made a CHUNK EDGE so the snapshot lands exactly on it. One
@@ -899,43 +947,10 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     const std::size_t boundary =
         task.checkpoint_at > start && task.checkpoint_at <= prompt_n ? task.checkpoint_at
                                                                      : 0;
-    // Everything before the last token is pure prefill; the last token's forward pass
-    // produces the first sampling distribution.
-    // A while loop, not `at += kPrefillChunk`: the boundary shortens a chunk, so the step
-    // is whatever was actually consumed.
-    std::size_t at = start;
-    while (at < prompt_n) {
-        if (cancel.cancelled()) {
-            r.status = GenStatus::Cancelled;
-            return r;
-        }
-        std::size_t end = std::min(at + kPrefillChunk, prompt_n);
-        if (boundary > at && boundary < end) {
-            end = boundary;
-        }
-        mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
-                                  {1, static_cast<int>(end - at)}, mx::int32);
-        // Whatever part of each image lands inside THIS chunk. An image is hundreds of
-        // tokens and does not respect the chunk edge, so a chunk may carry a slice from
-        // the middle of one.
-        impl_->model.set_embed_splices(splices_for_chunk(image_rows, at, end));
-        mx::array logits = impl_->model.forward_logits(ids);
-        impl_->model.eval_caches();
-        impl_->model.clear_embed_splices();
-        for (std::size_t i = at; i < end; ++i) {
-            ledger_.append(task.prompt[i], i < prompt_tags.size() ? prompt_tags[i] : 0);
-        }
-        if (end == boundary) {
-            // Exactly one checkpoint is held, and it is overwritten each turn -- which is
-            // what bounds the memory the 30 gated-delta snapshots cost.
-            impl_->ckpt.cp = impl_->model.checkpoint();
-            impl_->ckpt.len = ledger_.size();
-            impl_->ckpt.valid = true;
-        }
-        if (end == prompt_n) {
-            logits_to_host(logits, logits_host);
-        }
-        at = end;
+    if (!prefill_tokens(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                        impl_->ckpt.valid, task, cancel, image_rows, prompt_tags, start,
+                        prompt_n, boundary, /*want_last_logits=*/true, logits_host, r)) {
+        return r;
     }
     const auto t_prefill = clock_.mono();
     const double prefill_ms = ms_between(t0, t_prefill);
@@ -1012,6 +1027,71 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     return r;
 }
 
+GenResult MlxBackend::warm_stable_prefix(const InferenceTask& task,
+                                         const CancelToken& cancel) {
+    try {
+        return warm_stable_prefix_impl(task, cancel);
+    } catch (const std::exception& e) {
+        GenResult r;
+        r.status = GenStatus::BackendError;
+        r.error = std::string("MLX threw during shadow compact: ") + e.what();
+        return r;
+    } catch (...) {
+        GenResult r;
+        r.status = GenStatus::BackendError;
+        r.error = "MLX threw a non-standard exception during shadow compact";
+        return r;
+    }
+}
+
+GenResult MlxBackend::warm_stable_prefix_impl(const InferenceTask& task,
+                                              const CancelToken& cancel) {
+    GenResult r;
+    if (!loaded_) {
+        r.error = "MlxBackend: no model loaded";
+        return r;
+    }
+    if (task.prompt.empty()) {
+        r.error = "MlxBackend: empty prompt";
+        return r;
+    }
+    const std::size_t end = task.checkpoint_at;
+    if (end == 0 || end > task.prompt.size()) {
+        r.error = "no_stable_prefix";
+        return r;
+    }
+
+    std::vector<ContentTag> prompt_tags;
+    std::vector<ImageRows> image_rows;
+    if (!task.images.empty()) {
+        std::string err;
+        if (!prepare_images(task, impl_->model, prompt_tags, image_rows, err)) {
+            r.error = "MlxBackend: " + err;
+            return r;
+        }
+    }
+
+    // ALWAYS Reset. The live cache is the pre-compact prompt; reusing it against the
+    // rewritten prefix is the silent-wrong failure S5.10 exists to prevent.
+    reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len, impl_->ckpt.valid,
+                  r);
+    r.prefill_reused_tokens = 0;
+
+    const auto t0 = clock_.mono();
+    std::vector<float> unused_logits;
+    if (!prefill_tokens(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                        impl_->ckpt.valid, task, cancel, image_rows, prompt_tags, 0, end,
+                        end, /*want_last_logits=*/false, unused_logits, r)) {
+        return r;
+    }
+    r.status = GenStatus::Complete;
+    r.ttft_ms = ms_between(t0, clock_.mono());
+    const double prefill_ms = r.ttft_ms;
+    r.prefill_tok_per_s =
+        prefill_ms > 0 ? static_cast<double>(end) / (prefill_ms / 1000.0) : 0.0;
+    return r;
+}
+
 #else // !LMP_HAVE_MLX
 
 struct MlxBackend::Impl {};
@@ -1052,6 +1132,22 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     r.status = GenStatus::BackendError;
     r.error = "MlxBackend: MLX not compiled in";
     return r;
+}
+
+GenResult MlxBackend::warm_stable_prefix(const InferenceTask& task,
+                                         const CancelToken& cancel) {
+    (void)task;
+    (void)cancel;
+    (void)clock_;
+    GenResult r;
+    r.status = GenStatus::BackendError;
+    r.error = "MlxBackend: MLX not compiled in";
+    return r;
+}
+
+GenResult MlxBackend::warm_stable_prefix_impl(const InferenceTask& task,
+                                              const CancelToken& cancel) {
+    return warm_stable_prefix(task, cancel);
 }
 
 #endif // LMP_HAVE_MLX

@@ -15,8 +15,10 @@ constexpr const char* kPersona =
     "- You favour correctness over speed. A slower answer that is right beats a fast one\n"
     "  that is probably right.\n"
     "- You reach for the most specific tool for the job: replace_in_file over write_file\n"
-    "  for a partial change, git_diff over shell, read_slice over read_file on a large\n"
-    "  file. A general tool used where a specific one exists is a mistake.\n"
+    "  for a partial change, write_file or append_file for a new file (append_file when\n"
+    "  one generation cannot finish the whole file), git_diff over shell, read_slice over\n"
+    "  read_file on a large file. A general tool used where a specific one exists is a\n"
+    "  mistake.\n"
     "- When a build or check fails, identify the exact error message and file line before\n"
     "  modifying source code.\n"
     "- You test whenever it is possible and safe to do so, and you run the test rather\n"
@@ -185,37 +187,23 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // Without a journal the recall tools are never declared, and naming a tool the model
     // cannot call is worse than saying nothing.
     const bool earlier_sessions = recall_sessions_ > 1 && recall_items_ > 0;
-    // THIS run's own trimmed turns. Everything above is about what an EARLIER session
-    // left, which is the only case the store was measured to be useful for -- and it left
-    // a real gap: a long run compacts, its early turns leave the window, and their full
-    // text is sitting in the store where nothing tells the model to look for it.
+    // THIS run's own trimmed turns used to be advertised HERE too. That rewrote token 0
+    // of the system prompt on the first compact, so even the mission KV died -- measured
+    // as zero-reuse re-prefill, 43.5 s, about half the wall clock of a long run. The
+    // span itself is already a new user message (the trim has to insert it), so the
+    // rehydrate hint lives on the first span instead. System plus mission can stay
+    // byte-identical across a compact.
     //
-    // Adding it HERE is free. A trim rewrites the front of the prompt, so compaction
-    // already pays a zero-reuse re-prefill every time it fires (measured: 43.5 s, and
-    // roughly half the wall clock of a long run). Changing the system prompt at any other
-    // moment would cost that same re-prefill for nothing; changing it at the moment the
-    // bill is already being paid costs nothing at all.
-    const bool trimmed_this_run = recall_items_ > 0 && !spans_.empty();
-    if (earlier_sessions || trimmed_this_run) {
+    // Cross-session recall stays in system: it is known at run start, so it does not
+    // move mid-run.
+    if (earlier_sessions) {
         system += "\n\n# What this workspace already remembers\n";
-        if (earlier_sessions) {
-            system += "\nEarlier sessions here left " + std::to_string(recall_items_) +
-                      " stored items across " + std::to_string(recall_sessions_) +
-                      " sessions -- their turns, the files they read and what they worked "
-                      "out. `context_recall` searches all of it. Reach for it before "
-                      "re-deriving something this project may have already settled, and "
-                      "before re-reading a file an earlier session read.";
-        }
-        if (trimmed_this_run) {
-            system += "\nYour own earlier turns in this run have been summarised to save "
-                      "room, and the summaries above are shorter than what they replaced. "
-                      "The full text is still stored: `context_rehydrate` brings back a "
-                      "span of them and `context_recall` searches them. Use it rather "
-                      "than re-reading a file you already read this run.";
-        }
-        // The closing instruction is not padding. An empty recall already answers
-        // "nothing stored matches that", and runs asked anyway, often enough to trip
-        // break_repeat and then escalated_hold.
+        system += "\nEarlier sessions here left " + std::to_string(recall_items_) +
+                  " stored items across " + std::to_string(recall_sessions_) +
+                  " sessions -- their turns, the files they read and what they worked "
+                  "out. `context_recall` searches all of it. Reach for it before "
+                  "re-deriving something this project may have already settled, and "
+                  "before re-reading a file an earlier session read.";
         system += "\nIf it comes back empty, that is a real answer: the fact is not "
                   "stored, so go to the files instead rather than asking again.";
     }
@@ -239,9 +227,21 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     // injects it once so the ask is not duplicated when follow-ups arrive.
     out.push_back({Role::User, user_turns_.front()});
 
-    // Compacted spans, oldest first, as observed history.
-    for (const std::string& span : spans_) {
-        out.push_back({Role::User, span});
+    // Compacted spans, oldest first, as observed history. The rehydrate hint rides
+    // the first span so a trim does not rewrite the system prompt. Silent when no
+    // journal opened (recall_items_ == 0): naming a tool the model cannot call is
+    // worse than saying nothing.
+    for (std::size_t i = 0; i < spans_.size(); ++i) {
+        std::string body = spans_[i];
+        if (i == 0 && recall_items_ > 0) {
+            body += "The full text of these turns is still stored. "
+                    "`context_rehydrate` brings back a span (copy the event range "
+                    "printed above) and `context_recall` searches them. Use that "
+                    "rather than re-reading a file you already read this run. If "
+                    "it comes back empty, that is a real answer: go to the files "
+                    "instead of asking again.\n";
+        }
+        out.push_back({Role::User, std::move(body)});
     }
 
     // Recent turns, verbatim. The assistant's answer body (or a capped working note from

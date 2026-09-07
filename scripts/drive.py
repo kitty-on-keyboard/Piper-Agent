@@ -18,6 +18,10 @@ with no test that can prove it against a real model:
 
 Loads the model, so it is subject to the one-MLX-process-at-a-time rule:
 run it alone, in the foreground, to completion.
+
+Bakeoff fairness (omit the new tools / classic re-prefill after compact):
+
+    LMP_COMMIT_THINK=0 LMP_SHADOW_COMPACT=0 python3 scripts/drive.py ...
 """
 import argparse
 import json
@@ -50,10 +54,13 @@ ap.add_argument("--mode", default="agent", choices=["plan", "debug", "agent"])
 ap.add_argument("--deadline", type=float, default=5400.0)
 ap.add_argument("--max-iterations", type=int, default=200)
 ap.add_argument("--wall-clock", type=int, default=4800)
-ap.add_argument("--max-new-tokens", type=int, default=4096,
-                help="generation cap for one turn. A capped turn makes no "
-                     "tool call and leaves nothing behind, so a long first "
-                     "plan can stall a run on it.")
+ap.add_argument("--max-new-tokens", type=int, default=32768,
+                help="generation cap for one turn. High enough that a new "
+                     "source file can finish in one write_file. A capped "
+                     "turn makes no tool call and leaves nothing behind.")
+ap.add_argument("--context-budget", type=int, default=96000,
+                help="tokens the sidecar is managed against (lmp/start "
+                     "context_budget_tokens). Shrink to trip compaction in a short run.")
 ap.add_argument("--sandbox-tier", type=int, default=1)
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--verify-contract", default="",
@@ -71,6 +78,12 @@ ap.add_argument("--say", action="append", default=[], metavar="TURN:TEXT",
 ap.add_argument("--then", action="append", default=[], metavar="TEXT",
                 help="on run_end, continue the conversation with TEXT instead of "
                      "shutting down (repeatable, in order).")
+ap.add_argument("--commit-think", action=argparse.BooleanOptionalAction, default=None,
+                help="send RunSettings.commit_think. Omit to keep the sidecar "
+                     "default (on). Env LMP_COMMIT_THINK=0|1 still wins.")
+ap.add_argument("--shadow-compact", action=argparse.BooleanOptionalAction, default=None,
+                help="send RunSettings.shadow_compact. Omit to keep the sidecar "
+                     "default (on). Env LMP_SHADOW_COMPACT=0|1 still wins.")
 args = ap.parse_args()
 if not args.model:
     ap.error("need --model PATH or LMP_QWEN_DIR")
@@ -149,22 +162,27 @@ for raw in proc.stdout:
 
     if method == "lmp/ready":
         print(f"{T()} ready, protocol {params.get('protocol_version')}", flush=True)
+        settings = {
+            "model_dir": args.model, "workspace_root": os.path.abspath(args.workspace),
+            "mode": args.mode, "sampling": dict(QWEN_SAMPLING, seed=args.seed),
+            "max_iterations": args.max_iterations,
+            "wall_clock_seconds": args.wall_clock,
+            "sandbox_tier": args.sandbox_tier,
+            "require_approval": not args.auto,
+            "auto_approve_exec": bool(args.auto),
+            "auto_approve_writes": bool(args.auto),
+            "system_prompt": "",
+            "context_budget_tokens": args.context_budget,
+            "max_new_tokens": args.max_new_tokens,
+            "verify_contract": args.verify_contract,
+        }
+        if args.commit_think is not None:
+            settings["commit_think"] = args.commit_think
+        if args.shadow_compact is not None:
+            settings["shadow_compact"] = args.shadow_compact
         send({"jsonrpc": "2.0", "id": "1", "method": "lmp/start", "params": {
             "mission": args.mission,
-            "settings": {
-                "model_dir": args.model, "workspace_root": os.path.abspath(args.workspace),
-                "mode": args.mode, "sampling": dict(QWEN_SAMPLING, seed=args.seed),
-                "max_iterations": args.max_iterations,
-                "wall_clock_seconds": args.wall_clock,
-                "sandbox_tier": args.sandbox_tier,
-                "require_approval": not args.auto,
-                "auto_approve_exec": bool(args.auto),
-                "auto_approve_writes": bool(args.auto),
-                "system_prompt": "",
-                "context_budget_tokens": 96000,
-                "max_new_tokens": args.max_new_tokens,
-                "verify_contract": args.verify_contract,
-            },
+            "settings": settings,
         }})
     elif method == "lmp/token":
         (thinking if params.get("channel") == "thinking" else answer).append(

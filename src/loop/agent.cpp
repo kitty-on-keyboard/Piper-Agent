@@ -7,7 +7,9 @@
 #include <cctype> // ordinal_width's digit test
 #include <chrono>
 #include <cstdlib> // getenv/atoi, for the LMP_TRACE_TEXT gate
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string_view>
 #include <unordered_map>
 
@@ -17,6 +19,7 @@
 #include "src/platform/fs.hpp"
 #include "src/tools/apply_patch.hpp"
 #include "src/tools/log_triage.hpp"
+#include "src/tools/think_blocks.hpp"
 
 namespace lmp::loop {
 namespace {
@@ -36,6 +39,23 @@ bool trace_text_enabled() {
         return s != nullptr && std::atoi(s) != 0;
     }();
     return on;
+}
+
+void dbg_log(const char* loc, const char* msg, const char* hid, const std::string& data) {
+    // #region agent log
+    std::ofstream f(
+        "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
+        std::ios::app);
+    if (!f) {
+        return;
+    }
+    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    f << "{\"sessionId\":\"3dfcb2\",\"runId\":\"post-fix\",\"hypothesisId\":\"" << hid
+      << "\",\"location\":\"" << loc << "\",\"message\":\"" << msg << "\",\"data\":{" << data
+      << "},\"timestamp\":" << ts << "}\n";
+    // #endregion
 }
 
 // Long enough to see a whole argument -- a truncated write_file is exactly the case
@@ -546,13 +566,12 @@ bool observes_workspace(const std::string& tool) {
            tool == "git_log";
 }
 
-// A PROGRESS DISPLAY IS NOT PROGRESS. `plan` writes no bytes and observes nothing -- it
-// restates the model's own checklist for the operator's panel -- so a turn that only
-// called it has neither written nor learned, whatever the panel now says.
-//
-// It counted as progress because observation_is_new() returns true for anything that does
-// not read the workspace, which reset the inert-turn counter on every call. Measured: 56
-// of one run's 98 tool calls were `plan`, and the ending could not see any of them.
+// A RESTATED checklist is not progress. Creating one, or ticking an item, changes
+// `plan`'s arguments -- that is the operator's panel moving, and observation_is_new
+// treats a first-seen `items` string as learned. Sending the identical string again is
+// the spin the inert counter has to see (54% of plan calls in the stalled-run sample).
+// is_display_only still marks every plan turn for the consecutive-plan-only lock, which
+// is a different detector: bookkeeping without doing the work.
 bool is_display_only(const std::string& tool) {
     return tool == "plan";
 }
@@ -709,22 +728,22 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     // from the same inputs still reproduces exactly -- which is the property config_.seed
     // exists for, and the only one being kept.
     turns_generated_ = ctx_.turns_recorded();
-    tools_guidance_ =
-        registry_.tools_json([this](const tools::ToolDecl& d) { return tool_allowed(d); });
+    refresh_mode_tools();
     std::string withheld_by_mode;
     for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
         const tools::ToolDecl* d = registry_.find(s.name);
         if (d != nullptr && !tool_allowed(*d)) {
             withheld_by_mode += withheld_by_mode.empty() ? "" : ",";
             withheld_by_mode += s.name;
-            continue;
         }
-        mode_specs_.push_back(s);
     }
     // In the Agent rather than in the sidecar, so every client gets it -- the eval harness
     // and scripts/drive.py send a mode too, and a brief only the editor's runs received
     // would make the two disagree about what plan mode even is.
-    ctx_.set_mode_brief(mode_brief(config_.mode));
+    ctx_.set_mode_brief(mode_brief(config_.mode, registry_.workspace().commit_think));
+    if (registry_.workspace().commit_think) {
+        registry_.set_think_blocks_source([this] { return think_blocks_; });
+    }
 
     // WHAT THIS MODE TOOK AWAY, once, at the top of the run.
     if (!withheld_by_mode.empty()) {
@@ -779,6 +798,25 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
                     {"sandbox_tier", std::to_string(policy_.sandbox_tier)},
                     {"auto_approve_exec", config_.auto_approve_exec ? "1" : "0"},
                     {"auto_approve_writes", config_.auto_approve_writes ? "1" : "0"}});
+}
+
+Agent::~Agent() {
+    if (registry_.workspace().commit_think) {
+        registry_.set_think_blocks_source({});
+    }
+}
+
+void Agent::refresh_mode_tools() {
+    mode_specs_.clear();
+    for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
+        const tools::ToolDecl* d = registry_.find(s.name);
+        if (d != nullptr && !tool_allowed(*d)) {
+            continue;
+        }
+        mode_specs_.push_back(s);
+    }
+    tools_guidance_ =
+        registry_.tools_json([this](const tools::ToolDecl& d) { return tool_allowed(d); });
 }
 
 // `plan` is declared by the registry but executed HERE: the checklist lives in the
@@ -969,6 +1007,8 @@ void Agent::emit(const std::string& kind, std::vector<platform::EventField> fiel
 
 TurnResult Agent::step(const model::CancelToken& cancel) {
     TurnResult turn;
+    think_blocks_.clear();
+    warmed_stable_prefix_ = false;
 
     // PHASE MARKERS EXIST BECAUSE A CRASH LEAVES NO OTHER TRACE.
     //
@@ -1102,16 +1142,15 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
                         {"peak", std::to_string(mem.peak)},
                         {"prompt_tokens", std::to_string(task.prompt.size())}});
     }
+    maybe_warm_stable_prefix(task, cancel);
     emit("phase", {{"at", "generate_begin"}});
 
     // --- constrained generation --------------------------------------------
     //
-    // The grammar offers the mode's whole tool set, every turn. What used to live here --
-    // a plan-only gate, per-turn suppressions, a refusal blocklist, a write floor
-    // restoring what the other three took away -- was four narrowings composing blind,
-    // and the run that motivated the floor lost its editor to a mechanism whose author
-    // did not think it could. The mode's set is a run constant, which is also what keeps
-    // the KV prefix stable (S6.4).
+    // The grammar offers the mode's tool set, rebuilt when `plan` locks or unlocks.
+    // Per-turn suppressions of the rest of the set are still forbidden (S6.4); dropping
+    // one display-only tool after a restatement spin is the exception that stops the
+    // model sampling `plan` until it does some work.
     model::TurnGrammar grammar(tok_, mode_specs());
 
     // Reasoning is surfaced on its own channel, never inlined into the answer (S5.7).
@@ -1121,15 +1160,10 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     if (observer_.on_token) {
         streamer = std::make_unique<TokenStreamer>(tok_, observer_.on_token);
     }
-    // Leave reserved_tool_tokens of the turn budget for tool XML after think ends.
-    std::size_t think_cap = 0;
-    if (config_.max_think_tokens > 0 && config_.max_new_tokens > 0) {
-        const auto reserved = std::max(0, config_.reserved_tool_tokens);
-        const auto room =
-            std::max(0, config_.max_new_tokens - reserved);
-        think_cap = static_cast<std::size_t>(
-            std::max(0, std::min(config_.max_think_tokens, room)));
-    }
+    // Leave reserved_tool_budget of the turn for tool XML after think ends.
+    const std::size_t think_cap =
+        think_token_cap(config_.max_think_tokens, config_.max_new_tokens,
+                        config_.reserved_tool_tokens);
     // The budget constrains the MASK, not the automaton: at the cap the only legal id is
     // `</think>`, so the model emits a real one and its own context carries the boundary.
     // See ThinkCapMask for what happened when the phase was flipped from under it instead.
@@ -1157,6 +1191,9 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         generated - std::min(generated, turn.think_tokens + turn.text_tokens);
     if (turn.generation.status == model::GenStatus::LengthCapped) {
         turn.cap_phase = phase_name(grammar.phase());
+        if (!sink.tool_ids.empty()) {
+            turn.truncated_tool_xml = tok_.decode(sink.tool_ids);
+        }
     } else if (think_cap > 0 && turn.think_tokens >= think_cap) {
         // Not a length cap of the turn -- generation continued after think closed -- but
         // still worth naming so a trace can see why reasoning stopped early.
@@ -1205,6 +1242,11 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           // backend had already written down the answer and nobody was recording it.
           {"error", turn.generation.error}});
 
+    if (warmed_stable_prefix_ && turn.generation.prefill_reused_tokens == 0 &&
+        turn.generation.cache_reclaimed_bytes > 0) {
+        emit("shadow_compact_fallback", {{"why", "generate_reset"}});
+    }
+
     // THE SHAPE OF WHAT WAS SAID, always, even when the text itself is not traced. Three
     // integers per turn, and they separate the two failures that `tokens=4096 status=1`
     // cannot: a long legitimate write, and a model stuck emitting one sentence until the
@@ -1250,6 +1292,32 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         emit("turn_text", {{"reasoning", capped(turn.reasoning)},
                            {"text", capped(turn.assistant_text)},
                            {"calls", std::to_string(grammar.tool_calls().size())}});
+    }
+
+    if (registry_.workspace().commit_think) {
+        const tools::FenceHarvest harvest = tools::extract_fenced_blocks(turn.reasoning);
+        think_blocks_ = harvest.blocks;
+        if (!harvest.blocks.empty() || harvest.dropped_overflow > 0 ||
+            harvest.dropped_too_large > 0) {
+            std::vector<platform::EventField> fields;
+            fields.push_back({"count", std::to_string(harvest.blocks.size())});
+            if (harvest.dropped_overflow > 0) {
+                fields.push_back(
+                    {"dropped_overflow", std::to_string(harvest.dropped_overflow)});
+            }
+            if (harvest.dropped_too_large > 0) {
+                fields.push_back(
+                    {"dropped_too_large", std::to_string(harvest.dropped_too_large)});
+            }
+            for (const tools::ThinkBlock& b : harvest.blocks) {
+                const std::string n = std::to_string(b.block_id);
+                fields.push_back({"id_" + n, n});
+                fields.push_back({"lang_" + n, b.language});
+                fields.push_back({"char_len_" + n, std::to_string(b.content.size())});
+                fields.push_back({"sha256_" + n, b.sha256});
+            }
+            emit("think_blocks", std::move(fields));
+        }
     }
 
     if (!grammar.has_tool_call()) {
@@ -1585,11 +1653,29 @@ bool Agent::elide_redundant_reread(const std::string& name,
 bool Agent::observation_is_new(const std::string& name,
                                const std::vector<tools::ToolParamValue>& params,
                                const tools::ToolResult& result) const {
-    // A SUCCESSFUL `plan` learns nothing by construction. A malformed one is an
-    // error, and an error is information -- the first time. Identical repeats of
-    // that error fall through to the comparison below.
+    // A SUCCESSFUL identical `plan` learns nothing: the panel already has that list.
+    // A successful plan that the run has not sent before -- creating the list, or
+    // ticking an item -- is the panel moving, and that IS information. The previous
+    // short-circuit returned false for every ok plan, including the first call that
+    // created the checklist. Measured r-18d29b4a83a4a1b0: plan set 11 items, the loop
+    // classified that turn as no_progress and nudged "calling plan writes nothing",
+    // and the model never called plan again. The operator watched 11 open boxes
+    // through 27 blender turns; the run then stalled on a repeated MCP call.
+    //
+    // Cannot fall through to the summary comparison: an identical restatement now
+    // replies "IDENTICAL" instead of "checklist set: N/M done", so the bytes differ
+    // even when the list did not. "New" for plan is "these params have not been sent".
     if (result.ok() && is_display_only(name)) {
-        return false;
+        const bool fresh = repeats_.previous(name, params) == nullptr;
+        // #region agent log
+        {
+            std::ostringstream d;
+            d << "\"tool\":\"" << name << "\",\"fresh\":" << (fresh ? "true" : "false")
+              << ",\"items_len\":" << param_value(params, "items").size();
+            dbg_log("agent.cpp:observation_is_new", "plan_fresh", "A", d.str());
+        }
+        // #endregion
+        return fresh;
     }
     // A shell or MCP call that ran to completion is not "new information" just
     // because it is not a read. A repeated `swift build` that prints the same
@@ -1851,6 +1937,31 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
 
     // `plan` never reaches the registry: the loop owns the checklist.
     if (name == "plan") {
+        // TWO PLAN-ONLY TURNS IN A ROW IS THE SPIN. A 72-turn Piper_craft run
+        // (r-18d13cfb6ffadd18) had just written a file with two items still open,
+        // then restated `plan` three times and the harness KILLED it. Ending the
+        // run is the same as a stall: the agent stops doing work. Refuse further
+        // `plan` calls until a turn writes or learns something, and keep going.
+        if (ctx_.plan_locked() && !policy_.conversational) {
+            std::string next_open;
+            for (const context::ChecklistItem& c : ctx_.checklist()) {
+                if (!c.done) {
+                    next_open = c.text;
+                    break;
+                }
+            }
+            emit("plan_locked",
+                 {{"consecutive", std::to_string(ctx_.consecutive_plan_only_turns())},
+                  {"next_open", next_open}});
+            return tools::ToolResult::refused(
+                "`plan` is locked: you restated the checklist twice without doing any of "
+                "it. The panel already has the list. Do the next open item NOW" +
+                (next_open.empty()
+                     ? std::string(" (every item is ticked: call `finish` or `ask_user`).")
+                     : ": " + next_open + ".") +
+                " Make the edit, run the build, or call `ask_user` if you are blocked. "
+                "`plan` will work again after a turn that writes or learns something.");
+        }
         const TurnResult::PlanOutcome r = apply_plan(params);
         executed = r.ok;
         return r.ok ? tools::ToolResult::okay(r.detail)
@@ -2217,10 +2328,11 @@ void Agent::compact_to_budget() {
     // bytes reclaimed from duplicate and stale copies are bytes the trim does not have to
     // buy by dropping a real turn. See collapse_duplicate_read for what this used to cost.
     if (apply_pending_collapses() > 0) {
+        kv_invalidated_by_compact_ = true;
         tokens = prompt_tokens();
         if (tokens <= high_water) {
             // The collapse alone got us under. No turn needs to be dropped at all, and the
-            // run keeps history it would otherwise have lost.
+            // run keeps history it would otherwise have lost. Live KV is still invalid.
             emit("compaction_avoided_by_collapse",
                  {{"tokens_after", std::to_string(tokens)},
                   {"high_water", std::to_string(high_water)}});
@@ -2242,12 +2354,46 @@ void Agent::compact_to_budget() {
     // "compacted 30×" the first time the bar filled.
     if (dropped > 0) {
         ctx_.note_compaction();
+        kv_invalidated_by_compact_ = true;
     }
     emit("compaction", {{"tokens_before", std::to_string(before)},
                         {"tokens_after", std::to_string(tokens)},
                         {"budget_tokens", std::to_string(budget)},
                         {"turns_dropped", std::to_string(dropped)},
                         {"recent_turns", std::to_string(ctx_.recent().size())}});
+}
+
+void Agent::maybe_warm_stable_prefix(const model::InferenceTask& task,
+                                     const model::CancelToken& cancel) {
+    if (!config_.shadow_compact || !kv_invalidated_by_compact_) {
+        return;
+    }
+    kv_invalidated_by_compact_ = false;
+    warmed_stable_prefix_ = false;
+    auto fallback = [this](const char* why) {
+        emit("shadow_compact_fallback", {{"why", why}});
+    };
+    if (cancel.cancelled()) {
+        fallback("cancel");
+        return;
+    }
+    if (task.checkpoint_at == 0 || task.checkpoint_at > task.prompt.size()) {
+        fallback("no_stable_prefix");
+        return;
+    }
+    const model::GenResult wr = backend_.warm_stable_prefix(task, cancel);
+    if (wr.status == model::GenStatus::Cancelled) {
+        fallback("cancel");
+        return;
+    }
+    if (wr.status != model::GenStatus::Complete) {
+        emit("shadow_compact_fallback",
+             {{"why", wr.error.empty() ? "backend_error" : wr.error}});
+        return;
+    }
+    warmed_stable_prefix_ = true;
+    emit("shadow_compact", {{"tokens_warmed", std::to_string(task.checkpoint_at)},
+                            {"ms", std::to_string(wr.ttft_ms)}});
 }
 
 // Takes whatever the user has said since the last turn boundary into the context.
@@ -2414,6 +2560,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
     RunReport report;
     inert_turns_ = 0;
     inert_streak_had_tool_call_ = false;
+    inert_streak_had_cut_ = false;
     executed_tool_calls_in_run_ = 0;
     const auto started = clock_.mono();
     // Moves on every completed turn. The stall dial is measured against THIS, not against
@@ -2620,13 +2767,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // byte-identically, and the run ended `stalled` with one of fourteen items done.
         if (turn.outcome == Outcome::LengthCapped) {
             if (turn.cap_phase == "tool") {
-                rec.observation =
-                    "(your tool call was CUT OFF after " + std::to_string(turn.tool_tokens) +
-                    " tokens -- too long to finish in one turn, so nothing ran and nothing "
-                    "changed on disk. Sending it again unchanged will hit the same limit. "
-                    "Make a SMALLER call: a targeted `replace_in_file` for the one section "
-                    "you are changing rather than a whole-file write, or split the change "
-                    "into several edits and apply them one at a time.)";
+                rec.observation = length_capped_tool_observation(turn.tool_tokens,
+                                                                 turn.truncated_tool_xml);
             } else {
                 rec.observation = "(generation hit the token cap during " +
                                   (turn.cap_phase.empty() ? std::string("this turn")
@@ -2652,6 +2794,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         if (progressed) {
             inert_turns_ = 0;
             inert_streak_had_tool_call_ = false;
+            inert_streak_had_cut_ = false;
         }
 
         // A turn that called only `plan` is not progress, and a run that keeps doing it
@@ -2675,9 +2818,16 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             turn.outcome == Outcome::ToolCallExecuted && turn.extra_calls.empty() &&
             is_display_only(turn.tool_name);
         if (plan_only_turn) {
-            ++consecutive_plan_only_turns_;
+            ctx_.note_plan_only_turn();
+            if (ctx_.plan_locked() && !policy_.conversational) {
+                refresh_mode_tools();
+            }
         } else if (progressed) {
-            consecutive_plan_only_turns_ = 0;
+            const bool was_locked = ctx_.plan_locked();
+            ctx_.clear_plan_spin();
+            if (was_locked && !policy_.conversational) {
+                refresh_mode_tools();
+            }
         }
 
         // A turn whose only write was a small edit is not the same as a turn that moved
@@ -2745,32 +2895,22 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             break;
         }
 
-        // A RUN THAT KEEPS RESTATING ITS CHECKLIST IS NOT WORKING. The inert counter
-        // cannot see it because any real edit between two `plan` calls resets the
-        // streak; this counter does not reset on an edit, only on a turn that did
-        // something else entirely. Two in a row is a warning; three ends the run.
-        if (consecutive_plan_only_turns_ >= 2 && !policy_.conversational) {
+        // A RUN THAT KEEPS RESTATING ITS CHECKLIST IS NOT WORKING. Two in a row is a
+        // warning; the next `plan` is refused at dispatch so the model has to act.
+        // Killing the run here (the old `plan_spin` stall) stopped a working 72-turn
+        // Piper_craft run with two items still open.
+        if (ctx_.plan_locked() && !policy_.conversational) {
             context::TurnRecord note;
             note.observation =
                 "[Note: You have restated the plan " +
-                std::to_string(consecutive_plan_only_turns_) +
+                std::to_string(ctx_.consecutive_plan_only_turns()) +
                 " turns in a row without doing any of it. The panel already shows the "
-                "list; calling `plan` again changes nothing. Pick the next open item "
-                "and do it NOW -- make the edit, run the build, or call `ask_user` "
-                "if you are blocked. The run will end if the next turn is also only a "
-                "plan update.]";
+                "list; calling `plan` again will be refused until you do the work. "
+                "Pick the next open item and do it NOW -- make the edit, run the "
+                "build, or call `ask_user` if you are blocked.]";
             ctx_.add_turn(std::move(note));
             emit("plan_spin_warning",
-                 {{"consecutive", std::to_string(consecutive_plan_only_turns_)}});
-        }
-        if (consecutive_plan_only_turns_ >= 3 && !policy_.conversational) {
-            report.termination_reason = "stalled";
-            emit("stalled",
-                 {{"why", "plan_spin"},
-                  {"consecutive_plan_only",
-                   std::to_string(consecutive_plan_only_turns_)},
-                  {"wrote_bytes_in_run", std::to_string(ctx_.workspace_writes())}});
-            break;
+                 {{"consecutive", std::to_string(ctx_.consecutive_plan_only_turns())}});
         }
 
         // A RUN THAT ONLY POLISHES IS NOT FINISHING. Many tiny edits in a row without
@@ -2818,16 +2958,22 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // several turns running, which is the same kind of fact as the turn and wall-clock
         // budgets -- and unlike those, it is a fact about this run rather than a ceiling.
         //
-        // A turn the breaker CUT is exempt: the model did not conclude, the harness
-        // interrupted it. The fact of the cut is already in the context; the run
-        // continues, and the budgets bound a model that can produce nothing else.
+        // A turn the breaker CUT is still inert: the model produced no tool and no
+        // answer. Exempting it meant bowling seed 21/42 burned max_iterations on
+        // `cut_for_looping` think cycles (27 of 50 turns) while the counter stayed at
+        // zero. The cut is not a final answer -- `inert_streak_had_cut_` forces
+        // `stalled` rather than `ended` -- but it does count, or the budgets are the
+        // only backstop.
         //
         // REFUSED and LENGTH-CAPPED turns leave the count alone rather than incrementing
-        // it. A tool the human declined is not the model failing to progress, and a
-        // generation cut at the token cap never got to choose.
+        // it. Counting a locked-`plan` refusal as inert is how two restatements plus two
+        // refusals stalled a working run at four turns; `plan` is now dropped from the
+        // grammar, so the model has to pick something else. A tool the human declined is
+        // not the model failing to progress, and a generation cut at the token cap never
+        // got to choose.
         const bool countable = turn.outcome == Outcome::TextOnly ||
                                turn.outcome == Outcome::ToolCallExecuted;
-        if (!progressed && countable && !turn.cut_for_looping) {
+        if (!progressed && countable) {
             // Last look at the inbox before anything else. A human watching a run drift
             // toward an ending is exactly the human who types "keep going" -- and ending
             // the run a moment after they said it, having already read it off the pipe,
@@ -2848,7 +2994,10 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             ++inert_turns_;
             const bool spun = turn.outcome == Outcome::ToolCallExecuted;
             inert_streak_had_tool_call_ = inert_streak_had_tool_call_ || spun;
-            const char* const why = spun ? "no_progress" : "text_only_turn";
+            inert_streak_had_cut_ = inert_streak_had_cut_ || turn.cut_for_looping;
+            const char* const why = spun ? "no_progress"
+                                         : (turn.cut_for_looping ? "loop_cut"
+                                                                 : "text_only_turn");
 
             if (inert_turns_ <= allowed) {
                 // THE NOTE SAYS WHICH FAILURE THIS IS. "Call a tool now" is the wrong
@@ -2871,24 +3020,56 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 // tool NOW" without saying WHY it never got there is the same failure the
                 // spun note above was written to fix: advice for a state the model is not
                 // in.
+                const bool loop_cut = !spun && turn.cut_for_looping;
                 const bool think_truncated = !spun && turn.cap_phase == "think_budget";
+                // THE FILE NOTE IS FOR FILES. r-18d29b4a83a4a1b0 stalled on four identical
+                // `execute_blender_code` calls; each nudge told it the file was
+                // byte-identical and not to re-read -- advice for a state it was not in,
+                // while the operator's checklist still showed 11/11 open.
+                std::string spun_note;
+                if (display_only_turn) {
+                    spun_note =
+                        "[Note: That turn called only `plan`. Restating the checklist writes "
+                        "nothing and reads nothing, so the run is exactly where it was before "
+                        "it -- and the panel already shows the list you just sent. Do the next "
+                        "open item NOW: make the edit, or run the build to see where you stand. "
+                        "Turns that neither write nor learn anything end the run.]";
+                } else if (observes_workspace(turn.tool_name)) {
+                    spun_note =
+                        "[Note: That call changed nothing and returned nothing you did not "
+                        "already have -- either the file was byte-identical to a copy already "
+                        "in this conversation, or the edit matched but wrote no bytes. Calling "
+                        "it again will produce the same result. Scroll up and use what is "
+                        "already here: make the NEXT edit, run the build to see where you "
+                        "stand, call `finish` if the work is actually done, or call "
+                        "'ask_user' if you need a decision from the human. "
+                        "Do not re-read a file this run has already read unless something has "
+                        "written to it since.]";
+                } else {
+                    const std::size_t open = ctx_.open_checklist_items();
+                    const std::size_t total = ctx_.checklist().size();
+                    spun_note =
+                        "[Note: That call (`" + turn.tool_name +
+                        "`) came back EXACTLY as it did last time -- same arguments, same "
+                        "result. Sending it again will not change anything. Change the "
+                        "arguments, or if work on the checklist actually landed, call `plan` "
+                        "with those items ticked -- a list in your thinking is invisible to "
+                        "the operator.";
+                    if (total > 0) {
+                        spun_note += " Their panel still shows " + std::to_string(open) + "/" +
+                                     std::to_string(total) + " items open.";
+                    }
+                    spun_note += "]";
+                }
                 context::TurnRecord note;
                 note.observation =
-                    display_only_turn
-                    ? "[Note: That turn called only `plan`. Restating the checklist writes "
-                      "nothing and reads nothing, so the run is exactly where it was before "
-                      "it -- and the panel already shows the list you just sent. Do the next "
-                      "open item NOW: make the edit, or run the build to see where you stand. "
-                      "Turns that neither write nor learn anything end the run.]"
-                    : spun ? "[Note: That call changed nothing and returned nothing you did not "
-                           "already have -- either the file was byte-identical to a copy already "
-                           "in this conversation, or the edit matched but wrote no bytes. Calling "
-                           "it again will produce the same result. Scroll up and use what is "
-                           "already here: make the NEXT edit, run the build to see where you "
-                           "stand, call `finish` if the work is actually done, or call "
-                           "'ask_user' if you need a decision from the human. "
-                           "Do not re-read a file this run has already read unless something has "
-                           "written to it since.]"
+                    display_only_turn || spun
+                    ? spun_note
+                    : loop_cut
+                        ? "[Note: That turn was cut because the same stretch of reasoning "
+                          "repeated. Nothing ran. Do not resume that loop: call a tool this "
+                          "turn -- read, edit, or run the build -- or call 'ask_user' if you "
+                          "are blocked. Repeating the same thought ends the run.]"
                     : think_truncated
                         ? "[Note: Your reasoning hit its budget and was closed for you, so the "
                           "turn ran out having thought rather than acted -- and what you wrote "
@@ -2913,6 +3094,16 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "changed and how you know it works. Saying you are finished in text does "
                           "not end the run; `finish` does.]";
                 ctx_.add_turn(std::move(note));
+                // #region agent log
+                {
+                    std::ostringstream d;
+                    d << "\"why\":\"" << why << "\",\"consecutive\":" << inert_turns_
+                      << ",\"tool\":\"" << turn.tool_name << "\",\"display_only\":"
+                      << (display_only_turn ? "true" : "false") << ",\"open_items\":"
+                      << ctx_.open_checklist_items();
+                    dbg_log("agent.cpp:inert_nudge", "nudged", "E", d.str());
+                }
+                // #endregion
                 emit("nudged", {{"why", why},
                                 {"consecutive", std::to_string(inert_turns_)}});
                 continue;
@@ -2929,7 +3120,9 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             // A run that kept calling tools to no effect is STALLED, and stalled is never
             // completion: it is not a reason the completed=true block below recognises, so
             // it falls through to false without needing to say so twice.
-            report.termination_reason = inert_streak_had_tool_call_ ? "stalled" : "ended";
+            report.termination_reason =
+                (inert_streak_had_tool_call_ || inert_streak_had_cut_) ? "stalled"
+                                                                      : "ended";
             emit(report.termination_reason,
                  {{"why", why},
                   {"consecutive", std::to_string(inert_turns_)},

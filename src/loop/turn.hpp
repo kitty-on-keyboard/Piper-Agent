@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/context/context.hpp"
@@ -93,6 +94,9 @@ struct TurnResult {
     std::size_t batch_count = 0;
     // Non-empty only when generation hit its cap; names the grammar phase at the cap.
     std::string cap_phase;
+    // Decoded tool-channel tokens when generation capped mid-call. Scanned for
+    // write_file/append_file and a path; never treated as a parsed call.
+    std::string truncated_tool_xml;
 };
 
 // Value of a named param, or empty. The grammar guarantees required params are present,
@@ -145,7 +149,7 @@ struct ModePolicy {
 // a view. Both modes write code and both fail the same ways when they are not told how, so
 // the text has ONE home: a lesson measured in either run reaches both. Plan mode does not
 // take it; nothing there can build or edit.
-[[nodiscard]] std::string mode_brief(Mode m);
+[[nodiscard]] std::string mode_brief(Mode m, bool commit_think = false);
 
 // How many lines in `text` look like an enumerated choice (Option N, "1. ", "A) ").
 //
@@ -271,5 +275,11 @@ inline constexpr int kBudgetWarningTurns = 8;
 [[nodiscard]] Outcome classify_turn(const model::GenResult& gen,
                                     const model::TurnGrammar& grammar, bool executed,
                                     bool refused);
+
+// Observation for a tool-phase LengthCap: the call never closed, nothing ran.
+// `truncated_xml` is a scan of generated tool tokens (may name write_file/append_file
+// and a path); it is not a parsed call.
+[[nodiscard]] std::string length_capped_tool_observation(std::size_t tool_tokens,
+                                                         std::string_view truncated_xml);
 
 } // namespace lmp::loop

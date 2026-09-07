@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <regex>
 #include <string>
+#include <string_view>
 
 // For lexically_normal: a repeat is the same call, not the same bytes. See
 // RepeatDetector::key.
@@ -136,7 +137,9 @@ constexpr std::string_view kWorkingDiscipline =
     "- Prefer targeted edits (`replace_in_file`) over rewriting a whole file. "
     "A whole-file write of something you last read several turns ago silently "
     "discards anything that changed underneath you, and is how a file ends up "
-    "back at a state you already fixed.\n"
+    "back at a state you already fixed. A NEW file is `write_file`, or "
+    "`write_file` a first slice then `append_file` the rest when one generation "
+    "cannot finish it -- not `replace_in_file`.\n"
     "- If an edit comes back saying the file already contained those bytes, "
     "NOTHING CHANGED. Re-sending it will change nothing again. Read the file "
     "and work from what is actually on disk, not from what you believe you "
@@ -168,10 +171,11 @@ constexpr std::string_view kWorkingDiscipline =
 // Returns by value because two of the three modes are now a mode-specific opening plus
 // kWorkingDiscipline. The brief is built once per run, into the STABLE system prefix, so
 // the allocation is not on any path that repeats.
-std::string mode_brief(Mode m) {
+std::string mode_brief(Mode m, bool commit_think) {
+    std::string out;
     switch (m) {
         case Mode::Plan:
-            return "# Plan mode\n"
+            out = "# Plan mode\n"
                    "\n"
                    "You are in Plan mode to inspect the codebase, ask design choices, and present a plan. "
                    "Nothing you do here changes a file or runs a command -- write and execution tools are not loaded. "
@@ -186,13 +190,14 @@ std::string mode_brief(Mode m) {
                    "NOT after reading the whole codebase. Their answer changes what is worth reading next. "
                    "Asking the question as plain text does not present the card and does not reach them.\n"
                    "- Final Plan Submission (`exit_plan_mode`): When your investigation is finished, call `exit_plan_mode` with your completed plan markdown.\n";
+            break;
         // DEBUG MODE FIXES THINGS. It is an implementation run that leads with evidence,
         // not a separate, weaker kind of run that hands its findings to someone else --
         // which is what the old brief left it sounding like, and what it then did: the
         // measured run produced a tidy numbered list of five defects and stopped, twice,
         // with the work undone and a green build it had never used to check anything.
         case Mode::Debug:
-            return std::string(
+            out = std::string(
                        "# Debug mode\n"
                        "\n"
                        "You are finding out WHY something is wrong and then FIXING it. You "
@@ -233,6 +238,7 @@ std::string mode_brief(Mode m) {
                        "formatting.\n"
                        "\n") +
                    std::string(kWorkingDiscipline);
+            break;
         // AGENT MODE HAD NO BRIEF AT ALL until 2026-08-08, which is why the mode that
         // actually writes code was the only one never told to check its own work. Plan
         // mode is told how to ask; Debug mode is told to run the reproduction again and
@@ -241,7 +247,7 @@ std::string mode_brief(Mode m) {
         // a dashboard rewrite wrote nine files, ran `swift build` ONCE, and then spent 44
         // turns editing against that one stale error list without ever building again.
         case Mode::Agent:
-            return std::string(
+            out = std::string(
                        "# Agent mode\n"
                        "\n"
                        "You are changing this codebase, and a change you have not seen work "
@@ -251,8 +257,21 @@ std::string mode_brief(Mode m) {
                        "came back.\n"
                        "\n") +
                    std::string(kWorkingDiscipline);
+            break;
     }
-    return "";
+    if (commit_think && (m == Mode::Agent || m == Mode::Debug)) {
+        const char* line =
+            "- If a full file was drafted inside <think> as a markdown fence, call "
+            "`commit_think_block` with block_id 0 (1 or 2 for later fences) rather than "
+            "pasting the same bytes into `write_file`.\n";
+        const auto pos = out.find("## Getting unstuck\n");
+        if (pos != std::string::npos) {
+            out.insert(pos, line);
+        } else {
+            out += line;
+        }
+    }
+    return out;
 }
 
 Outcome classify_turn(const model::GenResult& gen, const model::TurnGrammar& grammar,
@@ -280,6 +299,51 @@ Outcome classify_turn(const model::GenResult& gen, const model::TurnGrammar& gra
     }
     // Accepted by the grammar with no tool call: a text answer.
     return grammar.has_tool_call() ? Outcome::ToolCallRefused : Outcome::TextOnly;
+}
+
+std::string length_capped_tool_observation(std::size_t tool_tokens,
+                                           std::string_view truncated_xml) {
+    std::string tool;
+    if (truncated_xml.find("<function=write_file>") != std::string_view::npos) {
+        tool = "write_file";
+    } else if (truncated_xml.find("<function=append_file>") != std::string_view::npos) {
+        tool = "append_file";
+    }
+    std::string path;
+    if (!tool.empty()) {
+        const auto p = truncated_xml.find("<parameter=path>");
+        if (p != std::string_view::npos) {
+            auto start = truncated_xml.find('\n', p);
+            if (start != std::string_view::npos) {
+                ++start;
+                auto end = truncated_xml.find('\n', start);
+                if (end == std::string_view::npos) {
+                    end = truncated_xml.size();
+                }
+                path.assign(truncated_xml.data() + start, end - start);
+                while (!path.empty() && (path.back() == ' ' || path.back() == '\r')) {
+                    path.pop_back();
+                }
+                if (path.empty() || path.size() > 256 || path.find('<') != std::string::npos) {
+                    path.clear();
+                }
+            }
+        }
+    }
+
+    std::string s = "(your tool call was CUT OFF after " + std::to_string(tool_tokens) +
+                    " tokens -- too long to finish in one turn, so nothing ran and nothing "
+                    "changed on disk. Sending it again unchanged will hit the same limit.";
+    if (!tool.empty() && !path.empty()) {
+        s += " The cut call was `" + tool + "` of `" + path + "`.";
+    } else if (!tool.empty()) {
+        s += " The cut call was `" + tool + "`.";
+    }
+    s += " If you were CREATING a file, `write_file` a first slice that will finish, then "
+         "`append_file` the rest -- do not resend a chunk that already landed, that "
+         "duplicates. If you were EDITING, a targeted `replace_in_file` for the one "
+         "section rather than a whole-file write.)";
+    return s;
 }
 
 // A repeat is the same CALL, not the same bytes. `proj` and `proj/` name one

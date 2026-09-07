@@ -62,6 +62,7 @@ import math
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,7 @@ TASKS = os.path.join(ROOT, "evals", "agent", "tasks")
 PINS = os.path.join(ROOT, "evals", "agent", "pins.json")
 DEFAULT_MODEL = os.environ.get("LMP_QWEN_DIR", "")
 SIDECAR = os.path.join(ROOT, "build", "src", "surface", "lmp_sidecar")
+# Bakeoff isolation: product defaults are ON. LMP_COMMIT_THINK=0 LMP_SHADOW_COMPACT=0.
 
 # Qwen3's recommended thinking-mode operating point (S5.9). The CLI adds temperature
 # and seed so the historical default stays 0.6/7 while smoke and multi-seed runs are
@@ -387,6 +389,11 @@ def build_start_request(meta, model_dir, workspace, sampling, contract):
     draft_dir = os.environ.get("LMP_DRAFT_DIR", "")
     if draft_dir:
         settings["draft_model_dir"] = draft_dir
+    # Product-optimal agent features (defaults ON in sidecar). Send explicitly so
+    # bakeoff summaries and wire captures record what ran. Env LMP_COMMIT_THINK /
+    # LMP_SHADOW_COMPACT =0|1 still overlays inside the sidecar after parse.
+    settings["commit_think"] = os.environ.get("LMP_COMMIT_THINK", "1") != "0"
+    settings["shadow_compact"] = os.environ.get("LMP_SHADOW_COMPACT", "1") != "0"
     return {"jsonrpc": "2.0", "id": "1", "method": "lmp/start", "params": {
         "mission": meta["mission"], "settings": settings,
     }}
@@ -418,10 +425,13 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
     # a repository but cannot run a line of it.
     if extra_env:
         env.update(extra_env)
+    # Bakeoff diagnosis: keep sidecar stderr when LMP_SIDECAR_STDERR is a path.
+    _stderr_path = env.get("LMP_SIDECAR_STDERR", "")
+    _stderr = open(_stderr_path, "a") if _stderr_path else subprocess.DEVNULL
     proc = subprocess.Popen(
         [SIDECAR], cwd=workspace, env=env,
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, bufsize=1,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=_stderr,
+        text=True, bufsize=1, start_new_session=True,
     )
     state = {
         "turn_notifications": 0, "iterations": 0,
@@ -467,7 +477,18 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
             proc.stdin.flush()
 
     started = time.monotonic()
-    deadline = meta.get("wall_clock_seconds", 900) + 180  # harness slack over the run's own
+    wall = float(meta.get("wall_clock_seconds", 900))
+
+    def hard_kill():
+        """SIGKILL the sidecar group. Do not write stdin: a full pipe deadlocks the watchdog."""
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
     def request_cancel(trigger):
         """Sends lmp/cancel at most once, from whichever thread got there first."""
@@ -511,15 +532,12 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
                        if cancel_when_file else None)
         while not finished.wait(0.1):
             elapsed = time.monotonic() - started
-            if elapsed > deadline:
-                # Past the harness's own patience. Ask once, then stop asking: if the
-                # process is still alive well after that, it is not going to answer, and
-                # a hung run must become a recorded failure rather than a hung harness.
-                request_cancel("harness_deadline")
-                if elapsed > deadline + 120:
-                    proc.kill()
-                    return
-                continue
+            if elapsed > wall:
+                # Hard cap. The old path wrote lmp/cancel then waited +120s to kill.
+                # If stdin is full (sidecar generating), that write blocks forever and
+                # kill never runs. Seed 13 bowling try 1 ran 2548s against a 900s cap.
+                hard_kill()
+                return
             if cancel_file is not None and os.path.exists(cancel_file):
                 request_cancel("file")
                 return

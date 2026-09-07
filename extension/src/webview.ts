@@ -888,6 +888,12 @@ function markup(): string {
       <label>System prompt <b id="promptMode"></b></label>
       <textarea id="promptBox" placeholder="Empty uses the built-in Piper persona"></textarea>
     </div>
+    <div class="set">
+      <label>Advanced</label>
+      <div class="toggle"><span>Commit from thinking</span><div class="sw" id="swCommitThink"></div></div>
+      <div class="toggle"><span>Shadow KV after compact</span><div class="sw" id="swShadowCompact"></div></div>
+      <div class="warnbox" id="advWarn"></div>
+    </div>
     <div class="set"><label>View build <b id="viewBuild"></b></label></div>
   </div>
 </div>
@@ -1908,9 +1914,12 @@ function paintHistory(runs) {
     meta.textContent = (r.finished === false ? 'died · ' : '') +
                        r.iterations + ' turns · ' + when(r.at);
     row.append(dot, m, meta);
-    // Only a row with something behind it is clickable. A hover state on a row that
-    // cannot open is a promise the panel cannot keep.
-    if (r.resumable && r.runId) {
+    // A minted run id is enough to reopen. Observations used to gate the click, which
+    // made a conversation look dead when the log had no tool_result/write counted.
+    if (r.runId) {
+      row.className = 'run resumable';
+      m.title = r.mission + '\\n' + r.reason +
+                '\\n\\nClick to reopen this conversation.';
       row.onclick = () => {
         api.postMessage({ kind: 'resume', runId: r.runId });
         $('history').classList.remove('open');
@@ -2039,6 +2048,8 @@ function sw(id, key) {
 }
 sw('swExec', 'autoApproveExec');
 sw('swWrite', 'autoApproveWrites');
+sw('swCommitThink', 'commitThink');
+sw('swShadowCompact', 'shadowCompact');
 $('swSpec').onclick = () => {
   if (settings.checkpointKind !== 'dense') return;
   put('speculativeDecoding', !settings.speculativeDecoding);
@@ -2233,6 +2244,9 @@ function paint() {
     (b) => b.classList.toggle('on', Number(b.dataset.v) === settings.sandboxTier));
   $('swExec').classList.toggle('on', settings.autoApproveExec === true);
   $('swWrite').classList.toggle('on', settings.autoApproveWrites === true);
+  $('swCommitThink').classList.toggle('on', settings.commitThink === true);
+  $('swShadowCompact').classList.toggle('on', settings.shadowCompact === true);
+  $('advWarn').textContent = 'Applies on the next run.';
   paintSpec();
   paintModelSwitch();
   // Thinking level. Greyed rather than hidden when the checkpoint has no notion of it:
