@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -65,6 +66,9 @@ public:
         sanitize_weights();
         if (ffn_ == FfnKind::Moe && fuse_gate_up_enabled()) {
             fuse_expert_gate_up();
+        }
+        if (ffn_ == FfnKind::Dense && fuse_gate_up_enabled()) {
+            fuse_dense_shared_x();
         }
         reset_cache();
         cfg_.vocab_size = cfg_.vocab_size > 0 ? cfg_.vocab_size : 248320;
@@ -185,8 +189,25 @@ public:
         CacheCheckpoint cp;
         cp.seq_len = cache_seq_len();
         cp.ssm.reserve(ssm_caches_.size());
+        // ONE eval of every live SSM buffer, not one eval per layer. snapshot() would
+        // mx::eval conv_state and delta_state separately for each linear layer -- dozens
+        // of Metal round-trips for handles the previous forward already computed.
+        // SpecPhases put that on the dense MTP hot path at ~5 ms/block.
+        std::vector<mx::array> live;
+        live.reserve(ssm_caches_.size() * 2);
         for (const auto& c : ssm_caches_) {
-            cp.ssm.push_back(c.snapshot());
+            if (c.conv_state) {
+                live.push_back(*c.conv_state);
+            }
+            if (c.delta_state) {
+                live.push_back(*c.delta_state);
+            }
+        }
+        if (!live.empty()) {
+            mx::eval(live);
+        }
+        for (const auto& c : ssm_caches_) {
+            cp.ssm.push_back({c.conv_state, c.delta_state, c.offset});
         }
         return cp;
     }
@@ -298,6 +319,12 @@ public:
     // Prefix-addressed so the MTP head's identically-shaped MLP reuses it rather than
     // carrying a second copy of the same three matmuls.
     mx::array dense_mlp_at(const std::string& p, const mx::array& x) const {
+        const std::string fused = p + "gate_up_proj";
+        if (weights_.is_quantized(fused)) {
+            const mx::array gu = weights_.linear(x, fused);
+            const std::vector<mx::array> half = mx::split(gu, 2, -1);
+            return weights_.linear(lmp::model::mlxl::swiglu(half[0], half[1]), p + "down_proj");
+        }
         return weights_.linear(lmp::model::mlxl::swiglu(weights_.linear(x, p + "gate_proj"),
                                                         weights_.linear(x, p + "up_proj")),
                                p + "down_proj");
@@ -389,6 +416,11 @@ public:
         mtp_cache_ = KVCache{};
         mtp_qcache_ = QuantizedKVCache{};
         mtp_loaded_ = true;
+        if (fuse_gate_up_enabled()) {
+            fuse_quant_out_rows({"mtp.layers.0.mlp.gate_proj", "mtp.layers.0.mlp.up_proj"},
+                                "mtp.layers.0.mlp.gate_up_proj");
+            mx::clear_cache();
+        }
         return true;
     }
 
@@ -566,6 +598,76 @@ private:
         // It is reclaimable and so it is not a leak, but on a 48 GB host that also runs
         // two editors it is 11 GB of apparent headroom that is not headroom -- the exact
         // accounting error that made 38 GB look survivable (see model_limits.cpp).
+        mx::clear_cache();
+    }
+
+    // Dense 2D affine-4: concat packed rows along the output axis. Same contract as
+    // fuse_expert_gate_up (eval before erase) but axis 0, because these weights are
+    // [out, in/8] rather than [experts, out, in].
+    bool fuse_quant_out_rows(const std::vector<std::string>& bases, const std::string& out_key) {
+        if (bases.size() < 2) {
+            return false;
+        }
+        std::vector<QuantWeight> qs;
+        qs.reserve(bases.size());
+        for (const std::string& b : bases) {
+            if (!weights_.is_quantized(b)) {
+                return false;
+            }
+            qs.push_back(weights_.quant(b));
+        }
+        const QuantWeight& q0 = qs[0];
+        if (q0.weight.ndim() != 2) {
+            return false;
+        }
+        std::vector<mx::array> ws;
+        std::vector<mx::array> scs;
+        std::vector<mx::array> bis;
+        for (const QuantWeight& q : qs) {
+            if (q.group_size != q0.group_size || q.bits != q0.bits || q.mode != q0.mode ||
+                q.biases.has_value() != q0.biases.has_value() || q.weight.ndim() != 2 ||
+                q.weight.shape()[1] != q0.weight.shape()[1]) {
+                return false;
+            }
+            ws.push_back(q.weight);
+            scs.push_back(q.scales);
+            if (q.biases) {
+                bis.push_back(*q.biases);
+            }
+        }
+        mx::array w = mx::concatenate(ws, 0);
+        mx::array sc = mx::concatenate(scs, 0);
+        std::vector<mx::array> force{w, sc};
+        std::optional<mx::array> bi;
+        if (!bis.empty()) {
+            bi = mx::concatenate(bis, 0);
+            force.push_back(*bi);
+        }
+        mx::eval(force);
+        weights_.set(out_key + ".weight", w);
+        weights_.set(out_key + ".scales", sc);
+        if (bi) {
+            weights_.set(out_key + ".biases", *bi);
+        }
+        for (const std::string& b : bases) {
+            weights_.erase(b + ".weight");
+            weights_.erase(b + ".scales");
+            weights_.erase(b + ".biases");
+        }
+        return true;
+    }
+
+    void fuse_dense_shared_x() {
+        int n_glu = 0;
+        for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+            const std::string lp = prefix_ + "layers." + std::to_string(layer) + ".";
+            if (fuse_quant_out_rows({lp + "mlp.gate_proj", lp + "mlp.up_proj"},
+                                    lp + "mlp.gate_up_proj")) {
+                ++n_glu;
+            }
+        }
+        std::fprintf(stderr, "dense concat: gate_up=%d qkv=0 / %d layers\n", n_glu,
+                     cfg_.num_hidden_layers);
         mx::clear_cache();
     }
 

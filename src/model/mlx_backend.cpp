@@ -1,11 +1,16 @@
 #include "src/model/mlx_backend.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
+#include <span>
 #include <variant>
+#include <vector>
 
 #include "src/model/sampler.hpp"
 
@@ -451,14 +456,10 @@ class MlxSpecForward final : public SpecForward {
             return;
         }
         Phase _p(phases_.mtp_step_ms);
-        const std::array<TokenId, 1> ids_buf{tok};
-        mx::array ids = mx::array(ids_buf.data(), {1, 1}, mx::int32);
-        mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
-                                mx::float32);
-        mx::array next = mx::astype(model_.mtp_forward(ids, h), mx::float32);
-        mx::eval(next);
-        const float* data = next.data<float>();
-        out_hidden.assign(data, data + next.size());
+        mx::array next = mtp_forward_gpu(tok, hidden);
+        mx::array next_f = mx::astype(next, mx::float32);
+        mx::eval(next_f);
+        retain_mtp_hidden(std::move(next), next_f, out_hidden);
     }
 
     void mtp_logits(std::span<const float> hidden, std::vector<float>& row) override {
@@ -468,23 +469,73 @@ class MlxSpecForward final : public SpecForward {
         }
         Phase _p(phases_.mtp_logits_ms);
         ++phases_.mtp_logits_calls;
-        mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
-                                mx::float32);
-        // The TARGET's head. The MTP checkpoint ships none, which is also why a drafted
-        // token is not free -- this projection is the most expensive tensor either model
-        // touches, ~0.7 GB at 4-bit against the head body's ~0.15 GB.
-        mx::array logits = mx::astype(model_.logits_from_hidden_public(h), mx::float32);
+        mx::array logits = mx::astype(model_.logits_from_hidden_public(hidden_gpu(hidden)),
+                                      mx::float32);
         mx::eval(logits);
         const float* data = logits.data<float>();
         row.assign(data, data + logits.size());
     }
 
+    TokenId mtp_step_greedy(TokenId tok, std::span<const float> hidden,
+                            std::vector<float>& out_hidden) override {
+        out_hidden.clear();
+        if (!model_.has_mtp() || hidden.empty()) {
+            return 0;
+        }
+        // One eval of (layer + LM head + argmax). The vocab row never comes to the host:
+        // the drafter is greedy and the verifier is what preserves the target distribution.
+        Phase _p(phases_.mtp_logits_ms);
+        ++phases_.mtp_logits_calls;
+        mx::array next = mtp_forward_gpu(tok, hidden);
+        mx::array idx = mx::argmax(model_.logits_from_hidden_public(next));
+        mx::array next_f = mx::astype(next, mx::float32);
+        mx::eval({idx, next_f});
+        retain_mtp_hidden(std::move(next), next_f, out_hidden);
+        return static_cast<TokenId>(idx.data<std::uint32_t>()[0]);
+    }
+
+    TokenId mtp_argmax(std::span<const float> hidden) override {
+        if (!model_.has_mtp() || hidden.empty()) {
+            return 0;
+        }
+        Phase _p(phases_.mtp_logits_ms);
+        ++phases_.mtp_logits_calls;
+        mx::array idx = mx::argmax(model_.logits_from_hidden_public(hidden_gpu(hidden)));
+        mx::eval(idx);
+        return static_cast<TokenId>(idx.data<std::uint32_t>()[0]);
+    }
+
     void mtp_trim(std::size_t n) override { model_.mtp_trim(static_cast<int>(n)); }
-    void mtp_reset() override { model_.mtp_reset(); }
+    void mtp_reset() override {
+        mtp_h_gpu_.reset();
+        mtp_h_host_.clear();
+        model_.mtp_reset();
+    }
 
   private:
     mx::array impl_forward_all(const mx::array& ids) { return model_.forward_logits_all(ids); }
     mx::array impl_forward_last(const mx::array& ids) { return model_.forward_logits(ids); }
+
+    mx::array hidden_gpu(std::span<const float> hidden) {
+        if (mtp_h_gpu_ && mtp_h_host_.size() == hidden.size() &&
+            std::equal(mtp_h_host_.begin(), mtp_h_host_.end(), hidden.begin())) {
+            return *mtp_h_gpu_;
+        }
+        return mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())}, mx::float32);
+    }
+
+    mx::array mtp_forward_gpu(TokenId tok, std::span<const float> hidden) {
+        const std::array<TokenId, 1> ids_buf{tok};
+        mx::array ids = mx::array(ids_buf.data(), {1, 1}, mx::int32);
+        return model_.mtp_forward(ids, hidden_gpu(hidden));
+    }
+
+    void retain_mtp_hidden(mx::array gpu, const mx::array& host_f32, std::vector<float>& out) {
+        const float* data = host_f32.data<float>();
+        out.assign(data, data + host_f32.size());
+        mtp_h_gpu_ = std::move(gpu);
+        mtp_h_host_ = out;
+    }
 
     // Accumulates into one phase counter for the lifetime of the scope. Wall time, not
     // GPU time: every one of these phases ends in an mx::eval, so the barrier is inside
@@ -505,6 +556,8 @@ class MlxSpecForward final : public SpecForward {
     mlxl::Qwen35MoeModel::CacheCheckpoint mark_{};
     std::size_t ledger_mark_ = 0;
     SpecPhases phases_{};
+    std::optional<mx::array> mtp_h_gpu_;
+    std::vector<float> mtp_h_host_;
 };
 
 // The speculative decode loop. Separate from generate() so the plain path keeps the exact
