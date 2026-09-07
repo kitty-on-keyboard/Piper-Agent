@@ -2,7 +2,7 @@
   "name": "lm-pipe",
   "displayName": "Piper Agent",
   "description": "A local coding agent for Apple Silicon: Qwen3 in-process via MLX.",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "publisher": "lm-pipe",
   "license": "Apache-2.0",
   "repository": {
@@ -92,6 +92,16 @@
           "type": "boolean",
           "default": true,
           "description": "Use the MTP draft head for speculative decoding on the dense 27B. Ignored on A3B (MoE): the head is not sent, so switching back cannot fail the load. The sidebar checkbox is the control; this setting is what it writes."
+        },
+        "lmPipe.commitThink": {
+          "type": "boolean",
+          "default": true,
+          "description": "Harvest closed fences from thinking and expose commit_think_block so the model can commit exact bytes by block id. Advanced sidebar toggle; LMP_COMMIT_THINK=0 overrides for benches."
+        },
+        "lmPipe.shadowCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "After context compaction or collapse, warm KV off-path and swap instead of full re-prefill. Advanced sidebar toggle; LMP_SHADOW_COMPACT=0 overrides for benches."
         },
         "lmPipe.recentModelDirs": {
           "type": "array",
@@ -211,8 +221,8 @@
         },
         "lmPipe.maxNewTokens": {
           "type": "number",
-          "default": 4096,
-          "markdownDescription": "Generation cap for one turn. A turn that hits the cap makes no tool call and leaves nothing behind, so a mission needing a long first plan can stall on it; raise this rather than the turn budget."
+          "default": 32768,
+          "markdownDescription": "Generation cap for one turn. High enough that a new source file can finish in one write_file. The sidecar still clamps this to the checkpoint leftover and to memory. A turn that hits the cap makes no tool call and leaves nothing on disk. VS Code remembers a previous value (4096 or 8192) if you set one — that pin, not this default, is what still cuts a create. Raise it rather than the turn budget."
         },
         "lmPipe.reasoningEffort": {
           "type": "string",

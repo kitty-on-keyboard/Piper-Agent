@@ -451,6 +451,18 @@ class ContextStore {
     // follow-up message creates, and the per-turn sampler seed rides on it.
     [[nodiscard]] std::uint64_t turns_recorded() const noexcept { return turns_recorded_; }
 
+    // Consecutive display-only (`plan`) turns with no progress. Lives HERE because every
+    // `lmp/message` builds a fresh Agent over this store; a lock that died with the Agent
+    // let a follow-up restate `plan` until the inert counter stalled the run.
+    void note_plan_only_turn() noexcept { ++consecutive_plan_only_turns_; }
+    void clear_plan_spin() noexcept { consecutive_plan_only_turns_ = 0; }
+    [[nodiscard]] std::size_t consecutive_plan_only_turns() const noexcept {
+        return consecutive_plan_only_turns_;
+    }
+    [[nodiscard]] bool plan_locked() const noexcept {
+        return consecutive_plan_only_turns_ >= 2;
+    }
+
     // --- T3 compacted -------------------------------------------------------
     [[nodiscard]] std::size_t compaction_count() const noexcept { return compactions_; }
 
@@ -536,6 +548,7 @@ class ContextStore {
     // that arrived later. front() is therefore always valid.
     std::vector<std::string> user_turns_;
     std::uint64_t turns_recorded_ = 0;
+    std::size_t consecutive_plan_only_turns_ = 0;
     std::string persona_;
     std::string mode_brief_;
     std::string reasoning_brief_;

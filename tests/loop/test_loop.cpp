@@ -839,6 +839,10 @@ TEST(a_workspace_with_earlier_sessions_is_told_recall_is_worth_using) {
 // THE GAP THE SESSIONS>1 RULE LEFT. A long run compacts, its early turns leave the
 // window, and their full text sits in the store with nothing telling the model it is
 // there. That is a FIRST session, so the earlier-sessions rule above is silent about it.
+//
+// The hint MUST NOT live in the system prompt. Putting it there rewrote token 0 and
+// forced a zero-reuse re-prefill (43.5 s). It rides the first compacted span instead,
+// so system plus mission stay byte-identical across the trim.
 TEST(a_run_that_has_compacted_is_told_its_own_turns_are_recoverable) {
     context::ContextStore ctx("do the thing");
     ctx.set_workspace_root("/w");
@@ -852,20 +856,27 @@ TEST(a_run_that_has_compacted_is_told_its_own_turns_are_recoverable) {
         t.last_event_seq = i;
         ctx.add_turn(t);
     }
+    const std::string sys_before = ctx.render("")[0].content;
     REQUIRE(ctx.compact_oldest(2) > 0);
 
     const std::vector<model::Message> msgs2 = ctx.render("");
     REQUIRE(!msgs2.empty());
-    const std::string& sys = msgs2[0].content;
-    CHECK(sys.find("What this workspace already remembers") != std::string::npos);
-    CHECK(sys.find("context_rehydrate") != std::string::npos);
-    CHECK(sys.find("that is a real answer") != std::string::npos);
-    // Still not claiming an earlier session left anything, because none did.
-    CHECK(sys.find("Earlier sessions here left") == std::string::npos);
+    CHECK_EQ(msgs2[0].content, sys_before);
+    CHECK(msgs2[0].content.find("context_rehydrate") == std::string::npos);
+    CHECK(msgs2[0].content.find("Earlier sessions here left") == std::string::npos);
+    bool on_span = false;
+    for (const auto& m : msgs2) {
+        if (m.role == model::Role::User &&
+            m.content.find("context_rehydrate") != std::string::npos) {
+            on_span = true;
+            CHECK(m.content.find("that is a real answer") != std::string::npos);
+        }
+    }
+    CHECK(on_span);
 }
 
-// The nudge is free ONLY because a trim already rewrote the front of the prompt and paid
-// the re-prefill. Before any trim there is nothing recoverable and nothing to say.
+// Before any trim there is nothing recoverable and nothing to say. The hint lives on
+// the span, so an un-compacted run has nowhere to put it.
 TEST(a_run_that_has_not_compacted_is_still_told_nothing) {
     context::ContextStore ctx("do the thing");
     ctx.set_workspace_root("/w");
@@ -896,7 +907,11 @@ TEST(a_compacted_run_with_no_journal_is_told_nothing) {
         ctx.add_turn(t);
     }
     REQUIRE(ctx.compact_oldest(2) > 0);
-    CHECK(ctx.render("")[0].content.find("already remembers") == std::string::npos);
+    const auto msgs = ctx.render("");
+    CHECK(msgs[0].content.find("already remembers") == std::string::npos);
+    for (const auto& m : msgs) {
+        CHECK(m.content.find("context_rehydrate") == std::string::npos);
+    }
 }
 
 // THE ONE THE MEASUREMENT ARGUES FOR. 46% of real context_recall calls came back empty,
@@ -925,4 +940,50 @@ TEST(a_first_run_is_never_told_to_search_an_empty_store) {
     empty.set_recall_scope(0, 4);
     const std::vector<model::Message> empty_msgs = empty.render(tools);
     CHECK(empty_msgs[0].content.find("already remembers") == std::string::npos);
+}
+
+TEST(think_token_cap_keeps_room_for_a_write) {
+    AgentConfig cfg;
+    // Defaults: 32k generation, 8k think, floor 1024. A quarter of 32k is 8k reserved,
+    // so think_cap is 8k and a full rumination still leaves 24k for the call.
+    CHECK_EQ(think_token_cap(cfg.max_think_tokens, cfg.max_new_tokens,
+                             cfg.reserved_tool_tokens),
+             std::size_t{8192});
+    CHECK_EQ(reserved_tool_budget(cfg.max_new_tokens, cfg.reserved_tool_tokens), 8192);
+
+    // A user-set 8k cap: reserved 2k, think is not zeroed.
+    CHECK_EQ(think_token_cap(8192, 8192, 1024), std::size_t{6144});
+
+    // A leftover 4096 pin: reserved 1024, think still has 3072 -- not zero.
+    CHECK_EQ(think_token_cap(8192, 4096, 1024), std::size_t{3072});
+    CHECK(think_token_cap(8192, 4096, 1024) > 0);
+}
+
+TEST(a_cut_write_observation_names_append_file_and_the_path) {
+    const std::string xml =
+        "<function=write_file>\n<parameter=path>\ngame.js\n</parameter>\n"
+        "<parameter=content>\npartial";
+    const std::string obs = length_capped_tool_observation(8053, xml);
+    CHECK(obs.find("CUT OFF") != std::string::npos);
+    CHECK(obs.find("append_file") != std::string::npos);
+    CHECK(obs.find("game.js") != std::string::npos);
+    CHECK(obs.find("write_file") != std::string::npos);
+    CHECK(obs.find("before any tool call was made") == std::string::npos);
+}
+
+TEST(agent_brief_tells_creates_to_write_or_append) {
+    const std::string agent = mode_brief(Mode::Agent);
+    CHECK(agent.find("append_file") != std::string::npos);
+    CHECK(agent.find("NEW file") != std::string::npos);
+}
+
+TEST(commit_think_nudge_is_flag_on_only) {
+    CHECK(mode_brief(Mode::Agent).find("commit_think_block") == std::string::npos);
+    CHECK(mode_brief(Mode::Debug).find("commit_think_block") == std::string::npos);
+    CHECK(mode_brief(Mode::Plan).find("commit_think_block") == std::string::npos);
+    const std::string on = mode_brief(Mode::Agent, true);
+    CHECK(on.find("commit_think_block") != std::string::npos);
+    CHECK(on.find("write_file") != std::string::npos);
+    CHECK(mode_brief(Mode::Debug, true).find("commit_think_block") != std::string::npos);
+    CHECK(mode_brief(Mode::Plan, true).find("commit_think_block") == std::string::npos);
 }

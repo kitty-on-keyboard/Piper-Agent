@@ -92,6 +92,9 @@ lmp_add_test(test_vision_tower SOURCES test_vision_tower.cpp LABELS realmodel
              LINK lmp_model simdjson TIMEOUT 900)
 lmp_stage_metallib(test_vision_tower)
 lmp_stage_metallib(test_kv_reuse_realmodel)
+lmp_add_test(test_kv_compact_realmodel SOURCES test_kv_compact_realmodel.cpp LABELS realmodel
+             LINK lmp_loop TIMEOUT 1800)
+lmp_stage_metallib(test_kv_compact_realmodel)
 lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK lmp_model simdjson TIMEOUT 900)
 # The gate/up fusion is a claim about arithmetic -- stacking two quantized weight matrices
 # on the OUTPUT axis cannot move an affine group boundary -- so it is asserted as exact
@@ -108,7 +111,7 @@ set_source_files_properties(test_spec_cache.cpp PROPERTIES COMPILE_OPTIONS
 # A diagnostic driver, not a test: prints the model's actual turn so a failure can be
 # attributed by observation rather than by guessing (S19.3). Built on demand.
 add_executable(lmp_diag EXCLUDE_FROM_ALL diag_main.cpp diag_moe.cpp)
-target_link_libraries(lmp_diag PRIVATE lmp_warnings lmp_assertions lmp_model simdjson)
+target_link_libraries(lmp_diag PRIVATE lmp_warnings lmp_assertions lmp_model lmp_context simdjson)
 lmp_stage_metallib(lmp_diag)
 # Same relaxation mlx_backend.cpp carries: these TUs include the vendored MLX numerics
 # directly so the scan can be benchmarked against its own reference implementation.

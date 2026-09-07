@@ -15,6 +15,9 @@
 // model's final answer, an exact repeat revalidates current state, and the operator's check
 // command runs after every writing turn with its output placed in front of the model.
 //
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -159,16 +162,20 @@ struct AgentConfig {
     // extension inert.
     model::SamplingParams sampling;
     std::int32_t context_budget_tokens = 96000;
-    std::int32_t max_new_tokens = 4096;
+    // High enough that a new source file can finish in one write_file. The sidecar still
+    // clamps this to the checkpoint leftover and to KV RAM (affordable/2); a turn whose
+    // prompt + this would overflow the sequence is refused. A user setting of 4096 or
+    // 8192 is a stale pin, not a second safety limit.
+    std::int32_t max_new_tokens = 32768;
     // Checkpoint ceiling (text_config.max_position_embeddings). 0 means unknown -- tests
     // and ScriptedBackend runs leave it unset and skip the hard refuse. When set,
     // context_budget_tokens is clamped to it and a turn whose prompt + reserved
     // generation would overflow is refused rather than sent to the backend.
     std::int32_t model_max_sequence_tokens = 0;
     // Thinking is capped separately so a model that ruminates cannot LengthCap mid-write
-    // and leave tool XML with no remaining budget. reserved_tool_tokens is the floor kept
-    // for tool-call structure after think ends (forced or natural).
-    std::int32_t max_think_tokens = 2048;
+    // and leave tool XML with no remaining budget. reserved_tool_tokens is the floor;
+    // think_token_cap() also keeps a quarter of the turn for the call itself.
+    std::int32_t max_think_tokens = 8192;
     std::int32_t reserved_tool_tokens = 1024;
     std::uint64_t seed = 0;
 
@@ -212,7 +219,42 @@ struct AgentConfig {
     // Empty means no check: the run ends when the model answers, and `completed` reports
     // only that it did.
     std::string operator_verify_contract;
+
+    // Harvest closed think fences and declare `commit_think_block`. Default on.
+    // Threaded into WorkspaceContext at registry build. Env LMP_COMMIT_THINK=0|1
+    // wins when set. Tests set this field; they do not race on setenv.
+    bool commit_think = true;
+
+    // After compact/collapse rewrites the prompt, prefill the next turn's stable prefix
+    // into the live KV so generate Extend/Restores instead of a full Reset. Default on.
+    // `LMP_SHADOW_COMPACT=0|1` overrides when set. Tests set this field; they do not
+    // race on setenv.
+    bool shadow_compact = true;
 };
+
+// How many of `max_new_tokens` stay reserved for the tool call after think ends.
+// The field on AgentConfig is a floor (tool XML scaffolding). A quarter of a large
+// generation cap is kept as well, so an 8k think budget cannot eat a 32k turn.
+[[nodiscard]] inline std::int32_t reserved_tool_budget(std::int32_t max_new_tokens,
+                                                       std::int32_t reserved_floor) noexcept {
+    const std::int32_t floor = std::max(reserved_floor, std::int32_t{1024});
+    if (max_new_tokens <= 0) {
+        return floor;
+    }
+    return std::max(floor, max_new_tokens / 4);
+}
+
+// Tokens the think mask will allow. Zero means no think budget (the mask delegates).
+[[nodiscard]] inline std::size_t think_token_cap(std::int32_t max_think_tokens,
+                                                 std::int32_t max_new_tokens,
+                                                 std::int32_t reserved_floor) noexcept {
+    if (max_think_tokens <= 0 || max_new_tokens <= 0) {
+        return 0;
+    }
+    const auto reserved = reserved_tool_budget(max_new_tokens, reserved_floor);
+    const auto room = std::max(0, max_new_tokens - reserved);
+    return static_cast<std::size_t>(std::max(0, std::min(max_think_tokens, room)));
+}
 
 // The UI feed. The Agent emits structured facts; the sidecar serializes them with the
 // GENERATED protocol serializers. Injected rather than reached for, so the scripted
@@ -268,6 +310,7 @@ class Agent {
     Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
           tools::Registry& registry, context::ContextStore& ctx,
           platform::EventLogWriter& log, const platform::Clock& clock, AgentConfig config);
+    ~Agent();
 
     void set_approver(Approver a) { approver_ = std::move(a); }
     void set_observer(Observer o) { observer_ = std::move(o); }
@@ -371,9 +414,12 @@ class Agent {
     // Filtering is not defence in depth for its own sake; it is the difference between a
     // mode and a series of accidents.
     [[nodiscard]] bool tool_allowed(const tools::ToolDecl& decl) const;
-    // The registry's spec set minus what this mode withholds -- computed once in the
-    // constructor because the mode is fixed at lmp/start and so this is a run constant,
-    // which is also what keeps the KV prefix stable (S6.4).
+    // Rebuilds the advertised tool set and the turn grammar. Called from the constructor
+    // and again when `plan` locks or unlocks -- leaving `plan` samplable after a lock is
+    // how a run kept emitting it until the inert counter stalled (r-18d13efe).
+    void refresh_mode_tools();
+    // The registry's spec set minus what this mode withholds. Not a run constant: `plan`
+    // drops out after two restatements and returns on progress.
     [[nodiscard]] const std::vector<parsephony::ToolSpec>& mode_specs() const noexcept {
         return mode_specs_;
     }
@@ -385,6 +431,10 @@ class Agent {
     // and the context meter cannot measure a different prompt from the one that is sent.
     [[nodiscard]] std::size_t prompt_tokens() const;
     void compact_to_budget();
+    // Prefill `[0, checkpoint_at)` after compact invalidated the live prefix.
+    // No-op unless `config_.shadow_compact` and `kv_invalidated_by_compact_`.
+    void maybe_warm_stable_prefix(const model::InferenceTask& task,
+                                  const model::CancelToken& cancel);
     // Drains the steer source into the context. Returns how many instructions landed.
     [[nodiscard]] std::size_t take_steering();
     [[nodiscard]] TurnResult::PlanOutcome apply_plan(
@@ -496,6 +546,15 @@ class Agent {
     // Paths this run has written. A whole-file rewrite of one of them is the run editing
     // its OWN output, not destroying the operator's data -- see the approval gate.
     std::set<std::string> run_wrote_;
+    // Closed fences harvested from this turn's think text. Cleared at the start of
+    // every step(); Registry reads them through ThinkBlocksFn, never a captured pointer.
+    std::vector<tools::ThinkBlock> think_blocks_;
+    // Set by compact_to_budget when collapses or dropped turns rewrote history.
+    // Consumed by maybe_warm_stable_prefix at the start of the next step().
+    bool kv_invalidated_by_compact_ = false;
+    // True when this step successfully warmed the stable prefix; generate should then
+    // reuse ≫ 0, and a 0 is shadow_compact_fallback (id mismatch).
+    bool warmed_stable_prefix_ = false;
     // The budget note is a single fact, delivered once.
     bool budget_note_sent_ = false;
     bool halted_ = false;
@@ -543,12 +602,13 @@ class Agent {
     // one that kept calling tools to no effect is STALLED. Same count, different fact,
     // and the operator should not have to guess which they got.
     bool inert_streak_had_tool_call_ = false;
-    // Consecutive turns that called only `plan` and nothing else. A run that restates
-    // its checklist turn after turn is not making progress, and the inert counter alone
-    // cannot see it because any real edit between two `plan` calls resets the streak.
-    // Measured: 9 plan calls in a 39-turn run, each one resetting the clock on the
-    // thrash it was meant to interrupt.
-    std::size_t consecutive_plan_only_turns_ = 0;
+    // A cut think/text loop is not a final answer. Counting it as `ended` would mark
+    // the run completed; bowling seed 21/42 burned max_turns because cuts were exempt
+    // from the inert counter entirely. This bit forces `stalled` instead.
+    bool inert_streak_had_cut_ = false;
+    // Consecutive plan-only turns live on ContextStore (they must survive a follow-up
+    // Agent). After two, `plan` is dropped from the grammar until a turn writes or learns.
+
     // Consecutive turns whose only write was a small edit. A run that makes many tiny
     // edits without ever closing a checklist item or running a build is polishing, not
     // finishing; the counter exists to say so before the turn budget does.

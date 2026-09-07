@@ -17,6 +17,7 @@
 // dispatch and the run loop; the lifecycle of the 19 GB lives here.
 //
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +33,21 @@
 #include "src/tools/registry.hpp"
 
 namespace lmp::surface {
+
+// Precedence for commit_think / shadow_compact:
+//   1. env exactly `0` or `1` wins (headless / bakeoff)
+//   2. else the start-message / RunSettings field if present
+//   3. else the C++ struct default (true)
+// Unset env + omitted field → on. Tests set the struct field; they do not race on setenv.
+inline void overlay_lmp_env_bool(const char* var, bool* field) noexcept {
+    if (field == nullptr || var == nullptr) {
+        return;
+    }
+    const char* e = std::getenv(var);
+    if (e != nullptr && (e[0] == '0' || e[0] == '1') && e[1] == '\0') {
+        *field = e[0] == '1';
+    }
+}
 
 struct Session {
     std::string model_dir;

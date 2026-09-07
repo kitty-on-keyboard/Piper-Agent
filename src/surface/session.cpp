@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <string_view>
 
 #include <chrono>
@@ -131,9 +132,12 @@ void ensure_registry(Session& session, const std::string& workspace,
     // reload onto a text-only one would offer a tool whose every result is unusable --
     // so the capability joins workspace and MCP config in what makes a registry stale.
     const bool can_see = session.backend != nullptr && session.backend->can_see();
+    bool commit_think = session.config.commit_think;
+    overlay_lmp_env_bool("LMP_COMMIT_THINK", &commit_think);
     if (session.registry != nullptr && session.workspace == workspace &&
         session.mcp_signature == mcp_signature &&
-        session.registry->workspace().model_can_see == can_see) {
+        session.registry->workspace().model_can_see == can_see &&
+        session.registry->workspace().commit_think == commit_think) {
         return;
     }
 
@@ -146,6 +150,8 @@ void ensure_registry(Session& session, const std::string& workspace,
     wctx.spool_dir = workspace + "/.lmp_spool";
     wctx.shell_wall_clock_seconds = 300;
     wctx.model_can_see = can_see;
+    wctx.commit_think = commit_think;
+
     // Registry first, then host: the old registry's handlers are what keep the old
     // clients alive, so releasing it first lets those connections go at the same time
     // rather than one reconfiguration later.

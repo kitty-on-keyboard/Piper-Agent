@@ -10,6 +10,10 @@
 //   lmp_diag bench [runs] [prompt_tokens] [max_new]
 //                           the whole stack, N runs, median + spread, next to the
 //                           LM Studio numbers derived by scripts/lmstudio_baseline.py
+//   lmp_diag compact [max_new]
+//                           post-compaction KV tax (no shadow-swap): turn-to-turn reuse,
+//                           then compact_oldest, then collapse-only. Feeds
+//                           piper-bench/results/kv_compaction_baseline.md
 //   lmp_diag graph [prompt] the decode step's graph as dot, unevaluated -- the only
 //                           subcommand here that is not a timing. Diff its primitive
 //                           histogram against mlx-lm's with scripts/graph_histogram.py
@@ -37,6 +41,7 @@
 #include <functional>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/model/backend.hpp"
@@ -46,6 +51,7 @@
 #include "src/model/qwen_tokenizer.hpp"
 #include "src/model/sampler.hpp"
 #include "src/platform/clock.hpp"
+#include "src/context/context.hpp"
 #include "tests/model/diag_common.hpp"
 
 #if LMP_HAVE_MLX
@@ -1209,6 +1215,129 @@ int cmd_bench(int runs, int prompt_tokens, int max_new) {
     return 0;
 }
 
+// --- compact ---------------------------------------------------------------
+//
+// M0 for shadow-swap: turn-to-turn reuse with a stable prefix, then the same
+// conversation after compact_oldest / collapse rewrites the prompt. No Agent, no
+// LMP_SHADOW_COMPACT -- this is the tax the flag exists to hide.
+// See docs/KV_SHADOW_SWAP.md and piper-bench/results/kv_compaction_baseline.md.
+
+lmp::context::ContextStore diag_fat_context(int turns) {
+    lmp::context::ContextStore ctx("keep the context honest");
+    for (int i = 0; i < turns; ++i) {
+        lmp::context::TurnRecord rec;
+        rec.tool_name = "read_file";
+        rec.tool_args_summary = "src/module_" + std::to_string(i) + ".txt";
+        rec.observed_path = "src/module_" + std::to_string(i) + ".txt";
+        rec.assistant_text =
+            "Reading module " + std::to_string(i) + " to see what it does.";
+        rec.observation =
+            "line one of the file body for module " + std::to_string(i) +
+            "; line two of the same file; line three, which carries enough "
+            "text that a dozen of these are worth compacting away. " +
+            std::string(80, 'x' + static_cast<char>(i % 10));
+        ctx.add_turn(std::move(rec));
+    }
+    return ctx;
+}
+
+int cmd_compact(int max_new) {
+    QwenTokenizer tok;
+    LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    lmp::platform::SystemClock clock;
+    MlxBackend backend(clock);
+    auto t_load0 = Clock::now();
+    st = backend.load({qwen_dir(), draft_dir()});
+    if (!st.ok) {
+        std::printf("model load fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::printf("model load: %.1f s\n", ms(t_load0, Clock::now()) / 1000.0);
+
+    ChatTemplate tmpl(tok);
+    class CapSink final : public TokenSink {
+      public:
+        explicit CapSink(int cap) : cap_(cap) {}
+        bool on_token(TokenId) override {
+            ++n_;
+            return n_ < cap_;
+        }
+
+      private:
+        int cap_;
+        int n_ = 0;
+    };
+
+    const auto gen = [&](lmp::context::ContextStore& ctx) {
+        std::vector<Message> messages = ctx.render("");
+        std::vector<std::size_t> offsets;
+        InferenceTask task;
+        task.prompt = tmpl.render_with_offsets(messages, "", offsets);
+        const std::size_t stable = ctx.stable_message_count("");
+        task.checkpoint_at = stable < offsets.size() ? offsets[stable] : 0;
+        task.max_new_tokens = max_new;
+        task.sampling.temperature = 0.0F;
+        task.sampling.seed = 1;
+        CapSink sink(max_new);
+        CancelToken cancel;
+        const GenResult r = backend.generate(task, sink, cancel);
+        return std::pair<GenResult, std::size_t>{r, task.prompt.size()};
+    };
+
+    std::printf("\n== no compact (turn-to-turn reuse) ==\n");
+    {
+        lmp::context::ContextStore ctx = diag_fat_context(12);
+        auto [r1, n1] = gen(ctx);
+        ctx.add_user_message("continue with the next module");
+        auto [r2, n2] = gen(ctx);
+        std::printf("  turn1 prompt=%zu reused=%zu ttft=%.0fms\n", n1, r1.prefill_reused_tokens,
+                    r1.ttft_ms);
+        std::printf("  turn2 prompt=%zu reused=%zu ttft=%.0fms\n", n2, r2.prefill_reused_tokens,
+                    r2.ttft_ms);
+    }
+
+    std::printf("\n== after compact_oldest ==\n");
+    backend.reset_cache();
+    {
+        lmp::context::ContextStore ctx = diag_fat_context(12);
+        auto [r1, n1] = gen(ctx);
+        while (ctx.recent().size() > 4) {
+            if (ctx.compact_oldest(ctx.recent().size() - 1, /*count_as_event=*/false) == 0) {
+                break;
+            }
+        }
+        ctx.add_user_message("after compact");
+        auto [r2, n2] = gen(ctx);
+        std::printf("  pre-compact prompt=%zu reused=%zu ttft=%.0fms\n", n1,
+                    r1.prefill_reused_tokens, r1.ttft_ms);
+        std::printf("  post-compact prompt=%zu reused=%zu ttft=%.0fms recent=%zu spans=%zu\n",
+                    n2, r2.prefill_reused_tokens, r2.ttft_ms, ctx.recent().size(),
+                    ctx.compacted_spans().size());
+    }
+
+    std::printf("\n== collapse-only (stale copies superseded, no drop) ==\n");
+    backend.reset_cache();
+    {
+        lmp::context::ContextStore ctx = diag_fat_context(12);
+        auto [r1, n1] = gen(ctx);
+        const std::string path = "src/module_0.txt";
+        const std::string live = ctx.recent().back().observation;
+        const std::size_t n = ctx.supersede_stale_copies_of_path(
+            path, live, "see the latest read of " + path);
+        ctx.add_user_message("after collapse");
+        auto [r2, n2] = gen(ctx);
+        std::printf("  pre-collapse prompt=%zu reused=%zu ttft=%.0fms superseded=%zu\n", n1,
+                    r1.prefill_reused_tokens, r1.ttft_ms, n);
+        std::printf("  post-collapse prompt=%zu reused=%zu ttft=%.0fms\n", n2,
+                    r2.prefill_reused_tokens, r2.ttft_ms);
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1271,6 +1400,9 @@ int main(int argc, char** argv) {
         const int max_new = argc > 4 ? std::atoi(argv[4]) : 256;
         return cmd_bench(runs, prompt_tokens, max_new);
     }
-    std::printf("usage: lmp_diag [scan|mask|bench] ...\n");
+    if (cmd == "compact") {
+        return cmd_compact(argc > 2 ? std::atoi(argv[2]) : 8);
+    }
+    std::printf("usage: lmp_diag [scan|mask|bench|compact] ...\n");
     return 2;
 }

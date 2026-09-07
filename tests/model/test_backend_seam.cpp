@@ -257,3 +257,21 @@ TEST(repetition_penalty_does_not_compound_across_duplicates) {
     const SampleResult r = s.sample(logits, nullptr, recent);
     CHECK_EQ(r.id, TokenId{1});
 }
+
+TEST(scripted_warm_stable_prefix_is_a_noop) {
+    ScriptedBackend b;
+    b.enqueue_response({1, 2, 3});
+    Collect sink;
+    sink.stop_on = 3;
+    CancelToken cancel;
+    InferenceTask task;
+    task.prompt = {10, 11, 12};
+    task.checkpoint_at = 2;
+    const GenResult w = b.warm_stable_prefix(task, cancel);
+    CHECK(w.status == GenStatus::Complete);
+    CHECK_EQ(b.received().size(), std::size_t{0});
+    CHECK_EQ(b.responses_remaining(), std::size_t{1});
+    const GenResult r = b.generate(task, sink, cancel);
+    CHECK(r.status == GenStatus::Complete);
+    REQUIRE(b.received().size() == 1);
+}

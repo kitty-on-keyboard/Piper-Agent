@@ -10,6 +10,7 @@
 // tokens are the subject. That is a genuine need for the real vocab; this is not.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -18,6 +19,7 @@
 
 #include "src/context/context.hpp"
 #include "src/loop/agent.hpp"
+#include "src/loop/token_stream.hpp"
 #include "src/model/backend.hpp"
 #include "src/model/qwen_tokenizer.hpp"
 #include "src/platform/clock.hpp"
@@ -103,6 +105,33 @@ std::vector<model::TokenId> call_turn(const model::QwenTokenizer& tok,
     }
     script.push_back(tok.specials().tool_call_close);
     script.push_back(tok.specials().im_end);
+    return script;
+}
+
+// A think-phase cycle long enough for LoopBreaker to cut. No </think>, no tool.
+// Bowling seed 21/42: 27 of 50 turns were this shape and did not count as inert.
+std::vector<model::TokenId> looping_think_turn(const model::QwenTokenizer& tok) {
+    using loop::LoopBreaker;
+    const auto piece = tok.encode_content("cycle token unit xx ");
+    std::vector<model::TokenId> unit;
+    if (piece.empty()) {
+        unit.assign(LoopBreaker::kWindow, model::TokenId{1});
+    } else {
+        while (unit.size() < LoopBreaker::kWindow) {
+            unit.insert(unit.end(), piece.begin(), piece.end());
+        }
+    }
+    unit.resize(LoopBreaker::kWindow);
+    for (model::TokenId& id : unit) {
+        if (tok.is_special(id) || id == model::kInvalidToken) {
+            const auto x = tok.encode_content("x");
+            id = x.empty() ? model::TokenId{1} : x.front();
+        }
+    }
+    std::vector<model::TokenId> script;
+    for (std::size_t r = 0; r < LoopBreaker::kMaxRepeats + 1; ++r) {
+        script.insert(script.end(), unit.begin(), unit.end());
+    }
     return script;
 }
 
@@ -687,6 +716,8 @@ TEST(restating_the_checklist_is_not_progress) {
     // STALLED, not a budget exhaustion: the harness saw calls that achieved nothing.
     CHECK_EQ(report.termination_reason, std::string("stalled"));
     CHECK(report.iterations < 6);
+    // The first call still created the list -- restating is what is inert, not opening.
+    CHECK_EQ(ctx.open_checklist_items(), std::size_t{2});
 }
 
 // EVERY TURN GETS ITS OWN SAMPLER SEED, and the run stays reproducible anyway.
@@ -3341,6 +3372,7 @@ TEST(plan_mode_neither_offers_nor_permits_a_write) {
     // NOT ADVERTISED. This is the half that was missing, and it is the half the model
     // actually reads -- the gate below only ever spoke after a turn had been spent.
     CHECK(agent.tools_guidance().find("\"write_file\"") == std::string::npos);
+    CHECK(agent.tools_guidance().find("\"commit_think_block\"") == std::string::npos);
     CHECK(agent.tools_guidance().find("\"shell\"") == std::string::npos);
     CHECK(agent.tools_guidance().find("\"delete_file\"") == std::string::npos);
     // And what plan mode is FOR is still there.
@@ -3420,6 +3452,7 @@ TEST(debug_mode_offers_writes_but_never_delete_file) {
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
 
     CHECK(agent.tools_guidance().find("\"write_file\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"commit_think_block\"") != std::string::npos);
     CHECK(agent.tools_guidance().find("\"replace_in_file\"") != std::string::npos);
     CHECK(agent.tools_guidance().find("\"shell\"") != std::string::npos);
     CHECK(agent.tools_guidance().find("\"delete_file\"") == std::string::npos);
@@ -3705,10 +3738,10 @@ TEST(identical_shell_does_not_reset_the_inert_streak) {
 }
 
 // A run that restates its checklist between every real edit is not working -- it is
-// performing progress. The inert counter alone cannot see it because each edit resets
-// the streak; the plan-spin counter does not reset on an edit, only on a turn that did
-// something else entirely. Three plan-only turns in a row ends the run.
-TEST(plan_restatements_between_edits_end_the_run_as_stalled) {
+// performing progress. Killing it was worse: r-18d13cfb6ffadd18 wrote 43 files, had
+// two items open, then died on three `plan`s. After two plan-only turns, `plan` is
+// dropped from the grammar so the next write can land instead of another restatement.
+TEST(plan_restatements_lock_plan_and_the_run_continues) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
 
@@ -3718,24 +3751,19 @@ TEST(plan_restatements_between_edits_end_the_run_as_stalled) {
 
     const std::string plan_body =
         "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
-    const std::string edit_body =
-        "<function=replace_in_file>\n<parameter=path>\nf.swift\n</parameter>\n"
-        "<parameter=old_text>\nlet x = 1\n</parameter>\n"
-        "<parameter=new_text>\nlet x = 2\n</parameter>\n</function>\n";
-    const std::string read_body =
-        "<function=read_file>\n<parameter=path>\nf.swift\n</parameter>\n</function>\n";
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\ndone.txt\n</parameter>\n"
+        "<parameter=content>\nlanded\n</parameter>\n</function>\n";
 
     model::ScriptedBackend backend;
-    // The thrash pattern: plan, edit, plan, read, plan, plan, plan -- the run should
-    // end on the third consecutive plan-only turn, not after the budget.
-    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
-    backend.enqueue_response(call_turn(tok, edit_body, "editing"));
-    backend.enqueue_response(call_turn(tok, plan_body, "restating"));
-    backend.enqueue_response(call_turn(tok, read_body, "checking"));
     backend.enqueue_response(call_turn(tok, plan_body, "restating"));
     backend.enqueue_response(call_turn(tok, plan_body, "restating"));
     backend.enqueue_response(call_turn(tok, plan_body, "restating"));
-    backend.enqueue_response(text_turn(tok, "t", "should not be reached"));
+    backend.enqueue_response(call_turn(tok, write_body, "doing the work"));
+    backend.enqueue_response(call_turn(
+        tok,
+        "<function=finish>\n<parameter=summary>\nlanded the file\n</parameter>\n</function>\n",
+        "done"));
 
     tools::Registry registry(workspace(root));
     context::ContextStore ctx("finish the dashboard");
@@ -3751,8 +3779,18 @@ TEST(plan_restatements_between_edits_end_the_run_as_stalled) {
     const model::CancelToken cancel;
     const loop::RunReport report = agent.run(cancel);
 
-    CHECK_EQ(report.termination_reason, std::string("stalled"));
-    CHECK(report.iterations < 8);
+    bool warned = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.observation.find("calling `plan` again will be refused") !=
+            std::string::npos) {
+            warned = true;
+        }
+    }
+    CHECK(warned);
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    CHECK(report.iterations >= 4);
+    CHECK(lmp::platform::read_file_whole(root + "/done.txt", 64).bytes.find("landed") !=
+          std::string::npos);
 }
 
 // A run that makes many tiny edits in a row without ever running a build or closing a
@@ -3980,6 +4018,10 @@ TEST(resending_an_identical_checklist_is_reported_as_changing_nothing) {
     CHECK(first.tool_result.ok());
     // The first one SET something, and must not be scolded for it.
     CHECK(first.tool_result.summary.find("IDENTICAL") == std::string::npos);
+    // And it must not be inert. r-18d29b4a83a4a1b0: creating the checklist was
+    // classified no_progress, the model was told plan writes nothing, and it never
+    // called plan again -- the operator watched 11 open boxes through the whole run.
+    CHECK(first.produced_new_information);
 
     const loop::TurnResult second = agent.step(cancel);
     // Still a success -- an error here would make the turn ToolCallRefused, which is
@@ -3987,9 +4029,43 @@ TEST(resending_an_identical_checklist_is_reported_as_changing_nothing) {
     // the spin CHEAPER. It says what happened instead.
     CHECK(second.tool_result.ok());
     CHECK(second.tool_result.summary.find("IDENTICAL") != std::string::npos);
+    // RepeatDetector is updated in run(), not step(), so produced_new_information
+    // is not the pin here. apply_plan's IDENTICAL reply is.
     // And it names the next thing to do, because "you did nothing" without "do this" is
     // the advice that produced the loop in the first place.
     CHECK(second.tool_result.summary.find("one") != std::string::npos);
+}
+
+TEST(ticking_a_checklist_item_is_progress) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string open =
+        "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
+    const std::string ticked =
+        "<function=plan>\n<parameter=items>\n[x] one\n[ ] two\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, open, "listing the work"));
+    backend.enqueue_response(call_turn(tok, ticked, "one landed"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult first = agent.step(cancel);
+    CHECK(first.produced_new_information);
+    CHECK_EQ(ctx.open_checklist_items(), std::size_t{2});
+
+    const loop::TurnResult second = agent.step(cancel);
+    CHECK(second.tool_result.ok());
+    CHECK(second.tool_result.summary.find("IDENTICAL") == std::string::npos);
+    CHECK(second.produced_new_information);
+    CHECK_EQ(ctx.open_checklist_items(), std::size_t{1});
 }
 
 TEST(a_plan_spin_interleaved_with_inert_reads_still_ends_the_run) {
@@ -4006,7 +4082,8 @@ TEST(a_plan_spin_interleaved_with_inert_reads_still_ends_the_run) {
 
     // THE SHAPE FROM THE LOG: plan, stale re-read, plan, stale re-read. Neither detector
     // saw it -- `plan` is never consecutive with itself, and the re-read counted as
-    // "something else entirely" and reset the plan counter.
+    // "something else entirely" and reset the plan counter. After the lock, leftover
+    // identical reads are still inert and the run still ends -- it must not run forever.
     model::ScriptedBackend backend;
     for (int i = 0; i < 8; ++i) {
         backend.enqueue_response(call_turn(tok, items, "restating"));
@@ -4130,6 +4207,85 @@ TEST(a_follow_up_agent_does_not_restart_the_seed_sequence) {
     // THE ASSERTION. Same config, same seed field, same store -- and the draws must not be
     // the same draws, or the model redraws its last turn however the prompt has changed.
     CHECK(first_seed != second_seed);
+}
+
+TEST(a_follow_up_agent_inherits_a_plan_lock) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string plan_body =
+        "<function=plan>\n<parameter=items>\n[ ] one\n[ ] two\n</parameter>\n</function>\n";
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("finish the dashboard");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.budget.max_iterations = 2;
+
+    model::ScriptedBackend first;
+    first.enqueue_response(call_turn(tok, plan_body, "restating"));
+    first.enqueue_response(call_turn(tok, plan_body, "restating"));
+    {
+        loop::Agent agent(tok, first, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+    }
+    CHECK(ctx.plan_locked());
+
+    // The same store, a fresh Agent -- this is `lmp/message` after ask_user. The lock
+    // used to live on the Agent and reset here, so the follow-up restated `plan` until
+    // it stalled.
+    model::ScriptedBackend second;
+    second.enqueue_response(text_turn(tok, "x", "y"));
+    loop::Agent follow(tok, second, registry, ctx, log, clock, config);
+    CHECK(follow.tools_guidance().find("\"plan\"") == std::string::npos);
+}
+
+TEST(a_follow_up_agent_rebound_to_plan_refuses_writes) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_follow_up_plan_write";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("build it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig working;
+    working.auto_syntax_check = false;
+    working.auto_approve_writes = true;
+    working.mode = loop::Mode::Agent;
+
+    model::ScriptedBackend first;
+    first.enqueue_response(text_turn(tok, "done", "finished for now"));
+    {
+        loop::Agent agent(tok, first, registry, ctx, log, clock, working);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+    }
+
+    // The human flipped the UI to Plan and sent a follow-up. `lmp/message` builds a
+    // new Agent over the same store with the CURRENT mode.
+    ctx.add_user_message("just plan the next bit");
+    loop::AgentConfig planning = working;
+    planning.mode = loop::Mode::Plan;
+    const std::string body =
+        "<function=write_file>\n<parameter=path>\nnotes.md\n</parameter>\n"
+        "<parameter=content>\nhello\n</parameter>\n</function>\n";
+    model::ScriptedBackend second;
+    second.enqueue_response(call_turn(tok, body));
+    loop::Agent follow(tok, second, registry, ctx, log, clock, planning);
+    CHECK(follow.tools_guidance().find("\"write_file\"") == std::string::npos);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = follow.step(cancel);
+    CHECK(!lmp::platform::read_file_whole(root + "/notes.md", 4096).ok());
+    CHECK(turn.outcome != loop::Outcome::ToolCallExecuted);
+
+    (void)::system(("rm -rf " + root).c_str());
 }
 
 TEST(the_seed_still_advances_within_one_agent) {
@@ -4452,4 +4608,377 @@ TEST(identical_tool_errors_are_not_progress_and_end_the_run_as_stalled) {
     // then stall, same budget as a repeated successful `shell true`.
     CHECK_EQ(report.termination_reason, std::string("stalled"));
     CHECK(report.iterations < 6);
+}
+
+TEST(a_loop_cut_think_turn_is_flagged_as_cut) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(looping_think_turn(tok));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    CHECK(turn.cut_for_looping);
+    CHECK(turn.outcome == loop::Outcome::TextOnly);
+    CHECK(turn.tool_name.empty());
+}
+
+TEST(repeated_loop_cuts_end_the_run_as_stalled_before_the_turn_budget) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    // Bowling seed 42 try 2: 50 turns, 2 tools, the rest cut think loops, reason
+    // max_turns. Eight scripted cuts would have burned the budget; four consecutive
+    // inert turns (3 nudges + end) must stall first. Extra scripts prove we stopped.
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(looping_think_turn(tok));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK(report.iterations < 8);
+    CHECK(!report.completed);
+    std::size_t noted = 0;
+    for (const context::TurnRecord& r : ctx.recent()) {
+        if (r.observation.find("same stretch of reasoning") != std::string::npos) {
+            ++noted;
+        }
+    }
+    CHECK(noted > 0);
+}
+
+TEST(a_tool_then_repeated_loop_cuts_still_stalls) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    write_text(root + "/game.py", "def score():\n    return 0\n");
+
+    const std::string body =
+        "<function=read_file>\n<parameter=path>\ngame.py\n</parameter>\n</function>\n";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "look"));
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(looping_think_turn(tok));
+    }
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("fix bowling");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    // One real read, then 3 nudges + stall on cuts. Must not reach max_turns.
+    CHECK(report.iterations >= 2);
+    CHECK(report.iterations < 8);
+    CHECK(!report.completed);
+}
+
+// A capped CREATE must name append_file and the path. The old observation only offered
+// replace_in_file, which cannot create a file, and a plant-clicker run spent four turns
+// retrying a whole-file write of game.js.
+TEST(a_capped_write_file_is_told_to_append_the_rest) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::string body = "<function=write_file>\n<parameter=path>\ngame.js\n</parameter>\n"
+                       "<parameter=content>\n";
+    for (int i = 0; i < 200; ++i) {
+        body += "a lot of source that will not fit ";
+    }
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "writing"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("write the file");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.max_new_tokens = 64;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    bool told_to_append = false;
+    bool named_the_path = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.observation.find("CUT OFF") == std::string::npos) {
+            continue;
+        }
+        if (rec.observation.find("append_file") != std::string::npos) {
+            told_to_append = true;
+        }
+        if (rec.observation.find("game.js") != std::string::npos) {
+            named_the_path = true;
+        }
+    }
+    CHECK(told_to_append);
+    CHECK(named_the_path);
+}
+
+// After a write_file lands, the next turn's KV checkpoint is AT OR AFTER that call, so
+// Restore keeps the write in cache. The turn after CSS in the plant-clicker run paid
+// one promotion prefill; later turns reused ~99%. This pins that the write sits inside
+// the snapshot, not after it.
+TEST(a_landed_write_file_sits_inside_the_next_turns_kv_checkpoint) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string probe = "KV_CHECKPOINT_PROBE_UNIQUE";
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\nprobe.txt\n</parameter>\n"
+        "<parameter=content>\n" +
+        probe + "\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, write_body, "writing"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write a file");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(backend.received().size() >= 2);
+    const model::InferenceTask& next = backend.received()[1];
+    REQUIRE(next.checkpoint_at <= next.prompt.size());
+    const std::vector<model::TokenId> prefix(next.prompt.begin(),
+                                             next.prompt.begin() +
+                                                 static_cast<std::ptrdiff_t>(next.checkpoint_at));
+    const std::string decoded = tok.decode(prefix);
+    CHECK(decoded.find(probe) != std::string::npos);
+}
+
+TEST(commit_think_block_is_offered_after_think_when_flag_on) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "x", "y"));
+
+    tools::WorkspaceContext ws = workspace("/tmp");
+    ws.commit_think = true;
+    tools::Registry registry(ws);
+    context::ContextStore ctx("write it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    CHECK(agent.tools_guidance().find("\"commit_think_block\"") != std::string::npos);
+    CHECK(agent.tools_guidance().find("\"write_file\"") != std::string::npos);
+}
+
+TEST(commit_think_block_is_withheld_in_plan_even_when_flag_on) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "x", "y"));
+
+    tools::WorkspaceContext ws = workspace("/tmp");
+    ws.commit_think = true;
+    tools::Registry registry(ws);
+    context::ContextStore ctx("plan it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Plan;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    CHECK(agent.tools_guidance().find("\"commit_think_block\"") == std::string::npos);
+}
+
+TEST(commit_think_block_commits_harvested_fence_same_turn) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_commit_think_step";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    const std::string reasoning = "draft\n```txt\nharvested-bytes\n```\n";
+    const std::string body =
+        "<function=commit_think_block>\n<parameter=path>\nout.txt\n</parameter>\n"
+        "<parameter=block_id>\n0\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, reasoning));
+
+    tools::WorkspaceContext ws = workspace(root);
+    ws.commit_think = true;
+    tools::Registry registry(ws);
+    context::ContextStore ctx("commit it");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    CHECK(turn.tool_result.ok());
+    CHECK_EQ(turn.tool_name, std::string("commit_think_block"));
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/out.txt", 1024).bytes,
+             std::string("harvested-bytes\n"));
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+TEST(commit_think_block_empty_harvest_leaves_target_absent) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = "/tmp/lmp_commit_think_empty";
+    (void)::system(("rm -rf " + root + " && mkdir -p " + root).c_str());
+
+    const std::string body =
+        "<function=commit_think_block>\n<parameter=path>\nshould_not_exist.txt\n"
+        "</parameter>\n<parameter=block_id>\n0\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "prose only, no markdown fence"));
+
+    tools::WorkspaceContext ws = workspace(root);
+    ws.commit_think = true;
+    tools::Registry registry(ws);
+    context::ContextStore ctx("do not write");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    CHECK(!turn.tool_result.ok());
+    CHECK_EQ(turn.tool_name, std::string("commit_think_block"));
+    CHECK(turn.tool_result.error_class == tools::ErrorClass::NotFound);
+    CHECK(turn.tool_result.summary.find(
+              "no closed markdown fences harvested this turn") != std::string::npos);
+    CHECK(!lmp::platform::read_file_whole(root + "/should_not_exist.txt", 1024).ok());
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+namespace {
+
+std::string run_two_turns_with_compact(bool shadow, std::size_t& prompt_tokens) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    const auto play = [&](model::ScriptedBackend& b) {
+        b.enqueue_response(text_turn(tok, "thinking", "one"));
+        b.enqueue_response(text_turn(tok, "thinking", "two"));
+    };
+    if (prompt_tokens == 0) {
+        model::ScriptedBackend backend;
+        play(backend);
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = fat_context(12);
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.budget.max_iterations = 2;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+        prompt_tokens = first_prompt_tokens(backend);
+    }
+
+    const std::string root = temp_dir();
+    const std::string log_path = root + "/events.jsonl";
+    model::ScriptedBackend backend;
+    play(backend);
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx = fat_context(12);
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    if (!log.open(opts).ok) {
+        return {};
+    }
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.context_budget_tokens = static_cast<std::int32_t>(prompt_tokens * 100 / 85);
+    config.budget.max_iterations = 2;
+    config.shadow_compact = shadow;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    log.flush();
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    if (!f.ok()) {
+        return {};
+    }
+    CHECK(ctx.compaction_count() > 0);
+    return f.bytes;
+}
+
+} // namespace
+
+TEST(shadow_compact_stays_silent_when_flag_off) {
+    REQUIRE(mini_vocab().loaded());
+    std::size_t prompt = 0;
+    const std::string trace = run_two_turns_with_compact(false, prompt);
+    REQUIRE(!trace.empty());
+    REQUIRE(prompt > 0);
+    CHECK(trace.find("\"kind\":\"compaction\"") != std::string::npos);
+    CHECK(trace.find("\"kind\":\"shadow_compact\"") == std::string::npos);
+    CHECK(trace.find("shadow_compact_fallback") == std::string::npos);
+}
+
+TEST(shadow_compact_emits_on_the_turn_after_compact) {
+    REQUIRE(mini_vocab().loaded());
+    std::size_t prompt = 0;
+    const std::string trace = run_two_turns_with_compact(true, prompt);
+    REQUIRE(!trace.empty());
+    REQUIRE(prompt > 0);
+    CHECK(trace.find("\"kind\":\"compaction\"") != std::string::npos);
+    CHECK(trace.find("\"kind\":\"shadow_compact\"") != std::string::npos);
+    CHECK(trace.find("shadow_compact_fallback") == std::string::npos);
 }

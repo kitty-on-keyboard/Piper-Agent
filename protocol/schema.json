@@ -181,7 +181,7 @@
         "type": "int"
       },
       {
-        "_comment": "The generation cap for ONE turn. AgentConfig has always had this field and the protocol never carried it, so it was pinned at 4096 for every run the editor or the driver could start -- the same wired-on-one-side-consumed-by-nobody shape as sandbox_tier and require_approval before them. MEASURED: a cold start on a five-task mission spent FIVE of its nine turns hitting the cap, produced no tool call on any of them, and ended length_capped_no_progress with an empty workspace. A capped turn leaves nothing behind (reasoning is not carried forward), so it is the one failure that can burn a whole budget while looking like the model is working. Raise it for missions that need a long first plan; it costs decode time per turn, not context. Must be a positive int32; refused when it alone exceeds the checkpoint maximum sequence length.",
+        "_comment": "The generation cap for ONE turn. Default 32768 so a new source file can finish in one write_file; the sidecar still clamps to the checkpoint leftover (max_position_embeddings - context_budget_tokens) and to KV RAM (affordable/2), and refuses a turn whose prompt + this would overflow the sequence. A capped turn leaves nothing behind (the call never closed), so it is the one failure that can burn a whole budget while looking like the model is working. A user setting of 4096 or 8192 is a stale pin from before this default, not a second safety limit. Must be a positive int32; refused when it alone exceeds the checkpoint maximum sequence length.",
         "name": "max_new_tokens",
         "type": "int"
       },
@@ -200,6 +200,16 @@
         "name": "mcp_servers",
         "type": "McpServerSettings",
         "repeated": true
+      },
+      {
+        "name": "commit_think",
+        "type": "bool",
+        "_comment": "When true, harvest closed markdown fences after </think> and declare commit_think_block. Default true for IDE; set LMP_COMMIT_THINK=0 for bakeoffs that must not see the tool. Precedence: env exactly 0|1 wins, else this field if present, else the C++ struct default (true)."
+      },
+      {
+        "name": "shadow_compact",
+        "type": "bool",
+        "_comment": "When true, warm a post-compaction/collapse KV off the live path and swap when identity checks pass. Default true; LMP_SHADOW_COMPACT=0 forces classic full re-prefill for A/B. Precedence: env exactly 0|1 wins, else this field if present, else the C++ struct default (true)."
       }
     ],
     "CapabilityChips": [
@@ -498,6 +508,11 @@
           "name": "image_paths",
           "type": "string",
           "repeated": true
+        },
+        {
+          "_comment": "Current editor settings for an idle follow-up. Mode in particular must travel: switching the UI to Plan after a finished Agent run used to keep the previous AgentConfig, so the follow-up could still write. Absent keeps the session's existing config (drive.py omits this; in-flight steering never reaches continue_session).",
+          "name": "settings",
+          "type": "RunSettings"
         }
       ],
       "result": [

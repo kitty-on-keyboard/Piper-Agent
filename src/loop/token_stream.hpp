@@ -29,6 +29,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "src/model/backend.hpp"
 #include "src/model/grammar.hpp"
@@ -160,6 +161,10 @@ class GrammarSink final : public model::TokenSink {
     // blurring the two is how the LengthCapped case used to read as completion.
     bool looped = false;
     std::size_t loop_repeats = 0;
+    // Tokens that went to the tool-call automaton, not think or answer. A LengthCapped
+    // call never closed, so this is the only copy of the truncated XML -- scanned for
+    // write_file/append_file and a path, never treated as a parsed call.
+    std::vector<model::TokenId> tool_ids;
 
   private:
     model::TurnGrammar& g_;
