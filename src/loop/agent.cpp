@@ -7,7 +7,6 @@
 #include <cctype> // ordinal_width's digit test
 #include <chrono>
 #include <cstdlib> // getenv/atoi, for the LMP_TRACE_TEXT gate
-#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string_view>
@@ -39,23 +38,6 @@ bool trace_text_enabled() {
         return s != nullptr && std::atoi(s) != 0;
     }();
     return on;
-}
-
-void dbg_log(const char* loc, const char* msg, const char* hid, const std::string& data) {
-    // #region agent log
-    std::ofstream f(
-        "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
-        std::ios::app);
-    if (!f) {
-        return;
-    }
-    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-    f << "{\"sessionId\":\"3dfcb2\",\"runId\":\"post-fix\",\"hypothesisId\":\"" << hid
-      << "\",\"location\":\"" << loc << "\",\"message\":\"" << msg << "\",\"data\":{" << data
-      << "},\"timestamp\":" << ts << "}\n";
-    // #endregion
 }
 
 // Long enough to see a whole argument -- a truncated write_file is exactly the case
@@ -1667,14 +1649,6 @@ bool Agent::observation_is_new(const std::string& name,
     // even when the list did not. "New" for plan is "these params have not been sent".
     if (result.ok() && is_display_only(name)) {
         const bool fresh = repeats_.previous(name, params) == nullptr;
-        // #region agent log
-        {
-            std::ostringstream d;
-            d << "\"tool\":\"" << name << "\",\"fresh\":" << (fresh ? "true" : "false")
-              << ",\"items_len\":" << param_value(params, "items").size();
-            dbg_log("agent.cpp:observation_is_new", "plan_fresh", "A", d.str());
-        }
-        // #endregion
         return fresh;
     }
     // A shell or MCP call that ran to completion is not "new information" just
@@ -3094,16 +3068,6 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "changed and how you know it works. Saying you are finished in text does "
                           "not end the run; `finish` does.]";
                 ctx_.add_turn(std::move(note));
-                // #region agent log
-                {
-                    std::ostringstream d;
-                    d << "\"why\":\"" << why << "\",\"consecutive\":" << inert_turns_
-                      << ",\"tool\":\"" << turn.tool_name << "\",\"display_only\":"
-                      << (display_only_turn ? "true" : "false") << ",\"open_items\":"
-                      << ctx_.open_checklist_items();
-                    dbg_log("agent.cpp:inert_nudge", "nudged", "E", d.str());
-                }
-                // #endregion
                 emit("nudged", {{"why", why},
                                 {"consecutive", std::to_string(inert_turns_)}});
                 continue;

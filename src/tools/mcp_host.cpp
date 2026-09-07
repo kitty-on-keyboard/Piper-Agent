@@ -6,7 +6,6 @@
 #include <filesystem>
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -271,22 +270,6 @@ void apply_mcp_decl_flags(ToolDecl& decl, bool trusted, const mcp::Tool& tool) {
         decl.mutates_workspace = true;
         decl.needs_execution = true;
         decl.irreversible = true;
-        // #region agent log
-        {
-            std::ofstream dbg(
-                "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
-                std::ios::app);
-            if (dbg) {
-                const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch())
-                                    .count();
-                dbg << "{\"sessionId\":\"3dfcb2\",\"runId\":\"post-fix\",\"hypothesisId\":\"B\","
-                    << "\"location\":\"mcp_host.cpp:apply_mcp_decl_flags\",\"message\":\"mcp_flags\","
-                    << "\"data\":{\"name\":\"" << decl.name << "\",\"trusted\":false"
-                    << ",\"irreversible\":true},\"timestamp\":" << ts << "}\n";
-            }
-        }
-        // #endregion
         return;
     }
     const bool read_only =
@@ -300,28 +283,6 @@ void apply_mcp_decl_flags(ToolDecl& decl, bool trusted, const mcp::Tool& tool) {
     // (destructiveHint=true) raise a "destroys data" card with auto_approve_writes
     // on, against the trust event: "tools run outside Seatbelt without per-call cards".
     decl.irreversible = false;
-    // #region agent log
-    {
-        const bool destructive =
-            annotation_bool(tool.annotations, "destructiveHint").value_or(false);
-        std::ofstream dbg(
-            "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
-            std::ios::app);
-        if (dbg) {
-            const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
-            dbg << "{\"sessionId\":\"3dfcb2\",\"runId\":\"post-fix\",\"hypothesisId\":\"B\","
-                << "\"location\":\"mcp_host.cpp:apply_mcp_decl_flags\",\"message\":\"mcp_flags\","
-                << "\"data\":{\"name\":\"" << decl.name << "\",\"trusted\":true"
-                << ",\"read_only\":" << (read_only ? "true" : "false")
-                << ",\"destructive\":" << (destructive ? "true" : "false")
-                << ",\"irreversible\":false,\"mutates\":"
-                << (decl.mutates_workspace ? "true" : "false")
-                << "},\"timestamp\":" << ts << "}\n";
-        }
-    }
-    // #endregion
 }
 
 constexpr std::size_t kMaxInstructionsBytes = 32U * 1024;
