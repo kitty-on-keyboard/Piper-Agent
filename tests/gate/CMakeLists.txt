@@ -75,10 +75,18 @@ if(LMP_NODE)
   # packages, and installs a pane where every button is dead -- the script stops before a
   # single listener is attached. Shipped exactly once, 2026-08-15, over an escaped slash.
   # Reads the COMPILED out/webview.js, so it needs `npm run compile` to have run.
-  lmp_add_script_test(test_view_script_parses
-    COMMAND "${LMP_NODE}"
-            "${PROJECT_SOURCE_DIR}/extension/scripts/verify-view-script.js"
-    LABELS gate)
+  find_program(LMP_NPM npm)
+  if(LMP_NPM AND EXISTS "${PROJECT_SOURCE_DIR}/extension/node_modules")
+    lmp_add_script_test(test_view_script_parses
+      COMMAND "${CMAKE_COMMAND}" -E chdir "${PROJECT_SOURCE_DIR}/extension"
+              "${LMP_NPM}" run test:view-script
+      LABELS gate)
+  else()
+    lmp_add_script_test(test_view_script_parses
+      COMMAND "${LMP_NODE}"
+              "${PROJECT_SOURCE_DIR}/extension/scripts/verify-view-script.js"
+      LABELS gate)
+  endif()
   lmp_add_script_test(test_checkpoint
     COMMAND "${LMP_NODE}"
             "${PROJECT_SOURCE_DIR}/extension/scripts/test-checkpoint.js"
