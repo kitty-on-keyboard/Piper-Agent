@@ -79,6 +79,23 @@ compiled_rms_norm_gated_tail() {
     return f;
 }
 
+// Flash-Next GDN: same float32 multiply/cast as the silu tail, sigmoid not silu.
+// llama.cpp calls this the one numerical difference from Qwen3.5's GDN. A shared
+// compiled region cannot branch on the activation, so this is a second trace.
+inline const std::function<std::vector<mx::array>(const std::vector<mx::array>&)>&
+compiled_rms_norm_gated_sigmoid_tail() {
+    static const auto f = mx::compile(+[](const std::vector<mx::array>& in) {
+        const mx::array& normed = in[0];
+        const mx::array& gate = in[1];
+        const mx::array gate_f = mx::astype(gate, mx::float32);
+        const mx::array sig_f = mx::sigmoid(gate_f);
+        return std::vector<mx::array>{
+            mx::astype(mx::multiply(sig_f, mx::astype(normed, mx::float32)),
+                       normed.dtype())};
+    });
+    return f;
+}
+
 } // namespace detail
 
 inline mx::array silu(const mx::array& x) {
@@ -89,15 +106,25 @@ inline mx::array swiglu(const mx::array& gate, const mx::array& up) {
     return detail::compiled_swiglu()({gate, up})[0];
 }
 
-// Matches mlx-lm Qwen3NextRMSNormGated: silu(gate) * rms_norm(hidden) in float32.
+// Qwen3.5 GDN uses silu(gate); Flash-Next (`output_gate_type: sigmoid`) uses sigmoid.
+// Do not infer from the config string: the struct default is "sigmoid" even on 27B,
+// whose JSON omits the field and whose mlx-lm path is silu. Callers that want Flash
+// must pass Sigmoid explicitly (forward_gated_delta branches on is_flash()).
+enum class GatedNormAct : unsigned char { Silu, Sigmoid };
+
+// Matches mlx-lm Qwen3NextRMSNormGated: act(gate) * rms_norm(hidden) in float32.
 // rms_norm stays outside the compiled region, as it does in the reference -- it is
 // already one fused fast op, and the reference's compiled node likewise contains no
 // RMSNorm.
 inline mx::array precise_rms_norm_gated(const mx::array& hidden,
                                         const mx::array& gate,
                                         const mx::array& weight,
-                                        float eps) {
+                                        float eps,
+                                        GatedNormAct act = GatedNormAct::Silu) {
     const mx::array normed = mx::fast::rms_norm(hidden, weight, eps);
+    if (act == GatedNormAct::Sigmoid) {
+        return detail::compiled_rms_norm_gated_sigmoid_tail()({normed, gate})[0];
+    }
     return detail::compiled_rms_norm_gated_tail()({normed, gate})[0];
 }
 

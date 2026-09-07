@@ -3,16 +3,31 @@
 //
 //   lmp_diag scan [T ...]   gated-delta recurrence: fused kernel vs the reference
 //                           op-per-timestep loop -- max deviation AND wall time
+//   lmp_diag qsa [T ...]    QSA indexer keep-mask: MLX scores+mask vs the CPU spec
 //   lmp_diag mask           what one decode step costs OUTSIDE the forward pass
 //   lmp_diag step [n]       the REAL decode forward, split into CPU graph construction
 //                           and GPU eval; combine with LMP_ABLATE (see below)
 //   lmp_diag moestream [n]  the routed experts under a real step's access pattern
+//   lmp_diag smoke [max_new]
+//                           unconstrained short generate, twice: first run pays compile,
+//                           second is the warm decode. Prints the decoded text.
 //   lmp_diag bench [runs] [prompt_tokens] [max_new]
 //                           the whole stack, N runs, median + spread, next to the
 //                           LM Studio numbers derived by scripts/lmstudio_baseline.py
-//   lmp_diag graph [prompt] the decode step's graph as dot, unevaluated -- the only
+//   lmp_diag reuse [runs] [prefix_tokens] [suffix_tokens] [max_new]
+//                           live KV reuse (reuse_on): two generate() calls per run on
+//                           one loaded backend, no reset between them; measures the
+//                           turn-2 restore that `bench` deliberately erases
+//   lmp_diag compact [max_new]
+//                           post-compaction KV tax (no shadow-swap): turn-to-turn reuse,
+//                           then compact_oldest, then collapse-only. Feeds
+//                           piper-bench/results/kv_compaction_baseline.md
+//   lmp_diag graph [prompt] [step]
+//                           the decode step's graph as dot, unevaluated -- the only
 //                           subcommand here that is not a timing. Diff its primitive
 //                           histogram against mlx-lm's with scripts/graph_histogram.py
+//                           Optional `step` (default 1) dumps forward_logits_all for a
+//                           verify-shaped M-token forward after the same prefill.
 //
 // LMP_ABLATE=routed|mlp|delta|deltakernel deletes one block from the forward pass and
 // leaves the rest running. Output is garbage; only the rate means anything. Attribution
@@ -31,12 +46,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/model/backend.hpp"
@@ -46,6 +63,7 @@
 #include "src/model/qwen_tokenizer.hpp"
 #include "src/model/sampler.hpp"
 #include "src/platform/clock.hpp"
+#include "src/context/context.hpp"
 #include "tests/model/diag_common.hpp"
 
 #if LMP_HAVE_MLX
@@ -58,9 +76,11 @@
 #include "mlx/transforms.h"
 
 #include "src/model/mlx/gated_delta.hpp"
+#include "src/model/mlx/qsa.hpp"
 #include "src/model/mlx/qwen35_moe_model.hpp"
 #include "src/model/mlx/switch_glu.hpp"
 #include "src/model/mlx/weight_store.hpp"
+#include "src/model/qwen4_exp_ops.hpp"
 #endif
 
 using namespace lmp::model;
@@ -202,6 +222,86 @@ int cmd_scan(const std::vector<int>& lengths) {
 #endif
 }
 
+int cmd_qsa(const std::vector<int>& lengths) {
+#if !LMP_HAVE_MLX
+    std::printf("MLX not compiled in\n");
+    return 1;
+#else
+    namespace mx = mlx::core;
+    const int B = 1, H = 4, D = 8, hidden = 16, compress = 4, rotary = 4;
+    const int budget = 16;
+    const int q_dim = H * D;
+    const int k_dim = D;
+    std::printf("qsa indexer  B=%d H=%d D=%d budget=%d compress=%d\n", B, H, D, budget,
+                compress);
+    std::printf("%6s %14s %12s %10s\n", "T", "mask ms", "mismatches", "below_budget");
+
+    mlxl::WeightStore w;
+    mx::random::seed(7);
+    w.set("index_qk_proj.weight",
+          mx::random::normal({q_dim + k_dim, hidden}, mx::float32));
+    w.set("q_layernorm.weight", mx::ones({D}, mx::float32));
+    w.set("k_layernorm.weight", mx::ones({D}, mx::float32));
+
+    for (int T : lengths) {
+        mx::array x = mx::random::normal({B, T, hidden}, mx::float32);
+        mx::eval(x);
+        mlxl::IndexerCache cache;
+        auto t0 = Clock::now();
+        auto mask = mlxl::qsa_indexer_mask(x, w, "", cache, /*offset=*/0, H, 1, D, budget,
+                                           compress, rotary, 10000.0f, 1e-6f);
+        if (mask) {
+            mx::eval(*mask);
+        }
+        auto t1 = Clock::now();
+        const bool below = T <= budget;
+        int mismatches = 0;
+        if (below) {
+            if (mask.has_value()) {
+                mismatches = -1;
+            }
+        } else if (!mask) {
+            mismatches = -1;
+        } else {
+            mx::array m = mx::astype(mx::reshape(*mask, {-1}), mx::uint8);
+            mx::eval(m);
+            const auto* mp = m.data<uint8_t>();
+            mx::array qk = w.linear(x, "index_qk_proj");
+            mx::array q = mx::reshape(mx::slice(qk, {0, 0, 0}, {B, T, q_dim}), {B, T, H, D});
+            mx::array raw_k =
+                mx::reshape(mx::slice(qk, {0, 0, q_dim}, {B, T, q_dim + k_dim}), {B, T, D});
+            const int n_blocks = T / compress;
+            mx::array pooled = mx::reshape(mx::slice(raw_k, {0, 0, 0}, {B, n_blocks * compress, D}),
+                                           {B, n_blocks, compress, D});
+            pooled = mx::mean(pooled, 2);
+            pooled = mx::fast::rms_norm(pooled, w.get("k_layernorm.weight"), 1e-6f);
+            mx::array block_starts = mx::multiply(mx::arange(n_blocks), mx::array(compress));
+            pooled = mlxl::rope_at_positions(pooled, block_starts, rotary, 10000.0f);
+            q = mx::fast::rms_norm(q, w.get("q_layernorm.weight"), 1e-6f);
+            q = mlxl::rope_at_positions(q, mx::arange(T), rotary, 10000.0f);
+            mx::array dots = mx::matmul(mx::astype(q, mx::float32), mx::swapaxes(mx::astype(pooled, mx::float32), 1, 2));
+            mx::array scores = mx::divide(mx::sum(mx::maximum(dots, mx::array(0.0f)), 2),
+                                          mx::array(std::sqrt(static_cast<float>(D))));
+            mx::eval(scores);
+            const float* sp = scores.data<float>();
+            const int topk = budget / compress;
+            for (int s = 0; s < T; ++s) {
+                auto keep = lmp::model::qwen4::qsa_keep_mask(s, T, compress, topk, sp + s * n_blocks);
+                for (int t = 0; t < T; ++t) {
+                    const bool got = mp[s * T + t] != 0;
+                    if (got != (keep[static_cast<std::size_t>(t)] != 0)) {
+                        ++mismatches;
+                    }
+                }
+            }
+        }
+        std::printf("%6d %14.2f %12d %10s\n", T, ms(t0, t1), mismatches,
+                    below ? "yes" : "no");
+    }
+    return 0;
+#endif
+}
+
 // --- step ------------------------------------------------------------------
 //
 // The real decode forward: prefill a prompt, then time forward_logits() one token at a
@@ -274,7 +374,7 @@ int cmd_step(int steps) {
 //   scripts/graph_histogram.py --compare ours.json ref.json
 
 #if LMP_HAVE_MLX
-int cmd_graph(int prompt_tokens) {
+int cmd_graph(int prompt_tokens, int step_tokens) {
     mlxl::Qwen35MoeModel model;
     if (!model.load(qwen_dir())) {
         std::fprintf(stderr, "model load failed\n");
@@ -289,9 +389,16 @@ int cmd_graph(int prompt_tokens) {
     mx::eval(logits);
     model.eval_caches();
 
-    int32_t tok = 42;
-    mx::array one = mx::array(&tok, {1, 1}, mx::int32);
-    mx::array step = model.forward_logits(one);
+    if (step_tokens <= 1) {
+        int32_t tok = 42;
+        mx::array one = mx::array(&tok, {1, 1}, mx::int32);
+        mx::array step = model.forward_logits(one);
+        mx::export_to_dot(std::cout, {step});
+        return 0;
+    }
+    std::vector<int32_t> toks(static_cast<std::size_t>(step_tokens), 42);
+    mx::array many = mx::array(toks.data(), {1, step_tokens}, mx::int32);
+    mx::array step = model.forward_logits_all(many);
     mx::export_to_dot(std::cout, {step});
     return 0;
 }
@@ -1108,6 +1215,93 @@ int cmd_verify(int max_k, int ctx) {
     return 0;
 }
 
+int cmd_smoke(int max_new) {
+    QwenTokenizer tok;
+    LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    lmp::platform::SystemClock clock;
+    MlxBackend backend(clock);
+    auto t_load0 = Clock::now();
+    st = backend.load({qwen_dir(), draft_dir()});
+    if (!st.ok) {
+        std::printf("model load fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::printf("model load: %.1f s\n", ms(t_load0, Clock::now()) / 1000.0);
+    std::fflush(stdout);
+
+    ChatTemplate tmpl(tok);
+    const std::vector<TokenId> think_prompt =
+        tmpl.render({{Role::User, "The capital of France is"}}, "");
+    // Checkpoint jinja: enable_thinking false emits `<think>\n\n</think>\n\n`
+    // after the assistant header. Our render stops at `<think>\n`.
+    const std::vector<TokenId> nl = tok.encode_template("\n");
+    std::vector<TokenId> closed_prompt = think_prompt;
+    closed_prompt.insert(closed_prompt.end(), nl.begin(), nl.end());
+    closed_prompt.push_back(tok.specials().think_close);
+    closed_prompt.insert(closed_prompt.end(), nl.begin(), nl.end());
+    closed_prompt.insert(closed_prompt.end(), nl.begin(), nl.end());
+
+    const std::vector<TokenId>* prompts[2] = {&think_prompt, &closed_prompt};
+    const char* labels[2] = {"think-open", "think-closed"};
+
+    std::printf("prompt tokens: %zu  im_start=%d im_end=%d think=%d/%d vocab=%zu\n",
+                think_prompt.size(), tok.specials().im_start, tok.specials().im_end,
+                tok.specials().think_open, tok.specials().think_close, tok.vocab_size());
+    for (std::size_t i = 0; i < think_prompt.size(); ++i) {
+        std::printf("  [%zu]=%d\n", i, think_prompt[i]);
+    }
+    std::fflush(stdout);
+
+    class CollectSink final : public TokenSink {
+      public:
+        std::vector<TokenId> ids;
+        bool on_token(TokenId id) override {
+            ids.push_back(id);
+            return true;
+        }
+    };
+
+    for (int run = 0; run < 2; ++run) {
+        CollectSink sink;
+        InferenceTask task;
+        task.prompt = *prompts[run];
+        task.max_new_tokens = max_new;
+        task.sampling.temperature = 0.0F;
+        task.sampling.seed = 7;
+        task.mask = nullptr;
+        backend.reset_cache();
+        CancelToken cancel;
+        const GenResult r = backend.generate(task, sink, cancel);
+        const std::string text = tok.decode(sink.ids);
+        std::printf("smoke %d [%s]: tokens=%d status=%d ttft=%.0fms prefill=%.1f decode=%.1f tok/s\n",
+                    run, labels[run], r.tokens_generated, static_cast<int>(r.status), r.ttft_ms,
+                    r.prefill_tok_per_s, r.decode_tok_per_s);
+        if (!r.error.empty()) {
+            std::printf("  error: %s\n", r.error.c_str());
+        }
+        std::printf("  ids:");
+        for (TokenId id : sink.ids) {
+            std::printf(" %d", id);
+        }
+        std::printf("\n");
+        std::printf("  text: %s\n", text.c_str());
+        std::fflush(stdout);
+        if (r.status == GenStatus::BackendError) {
+            break;
+        }
+    }
+    const double gb = 1024.0 * 1024.0 * 1024.0;
+    std::printf("memory peak %.2f GB  active %.2f GB  cache %.2f GB\n",
+                static_cast<double>(mx::get_peak_memory()) / gb,
+                static_cast<double>(mx::get_active_memory()) / gb,
+                static_cast<double>(mx::get_cache_memory()) / gb);
+    return 0;
+}
+
 int cmd_bench(int runs, int prompt_tokens, int max_new) {
     QwenTokenizer tok;
     LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
@@ -1180,6 +1374,9 @@ int cmd_bench(int runs, int prompt_tokens, int max_new) {
                     run, task.prompt.size(), r.tokens_generated, static_cast<int>(r.status),
                     r.ttft_ms, r.prefill_tok_per_s, r.decode_tok_per_s, r.forward_ms,
                     r.logits_copy_ms, r.sample_ms);
+        if (!r.error.empty()) {
+            std::printf("    error: %s\n", r.error.c_str());
+        }
         prefill.add(r.prefill_tok_per_s);
         decode.add(r.decode_tok_per_s);
         ttft.add(r.ttft_ms);
@@ -1209,6 +1406,267 @@ int cmd_bench(int runs, int prompt_tokens, int max_new) {
     return 0;
 }
 
+// --- reuse -----------------------------------------------------------------
+//
+// Measures live KV reuse (reuse_on). `bench` resets the cache every run so cold
+// prefill stays honest; this subcommand is the other half -- two generate() calls on
+// ONE loaded backend with no reset between them, matching the protocol in
+// tests/model/test_kv_reuse_realmodel.cpp. Turn 1 checkpoints the stable prefix; turn
+// 2 restores it instead of re-prefilling. Between runs the cache IS reset so run N+1
+// is a fresh pair, not a growing conversation.
+//
+// Defaults sized for a useful prefix (~2k) and a short live tail, not for CI: this
+// loads the real checkpoint and is a diag driver only.
+
+std::string filler_to_tokens(const QwenTokenizer& tok, int target_tokens) {
+    std::string filler;
+    int n = 0;
+    while (n < target_tokens) {
+        filler += "The build system compiles each translation unit separately, then the "
+                  "linker resolves symbols across them and emits one binary. Line " +
+                  std::to_string(n) + ".\n";
+        n = static_cast<int>(tok.encode_content(filler).size());
+    }
+    return filler;
+}
+
+int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new) {
+    QwenTokenizer tok;
+    LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+
+    lmp::platform::SystemClock clock;
+    MlxBackend backend(clock);
+    auto t_load0 = Clock::now();
+    st = backend.load({qwen_dir(), draft_dir()});
+    if (!st.ok) {
+        std::printf("model load fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::printf("model load: %.1f s%s\n", ms(t_load0, Clock::now()) / 1000.0,
+                draft_dir()[0] != '\0' ? "  [MTP draft head loaded]" : "  [plain decode]");
+    std::printf("reuse_on: runs=%d prefix_tokens~%d suffix_tokens~%d max_new=%d\n", runs,
+                prefix_tokens, suffix_tokens, max_new);
+
+    const std::string prefix = filler_to_tokens(tok, prefix_tokens);
+    const std::string suffix = filler_to_tokens(tok, suffix_tokens);
+
+    ChatTemplate tmpl(tok);
+
+    class CapSink final : public TokenSink {
+      public:
+        explicit CapSink(int cap) : cap_(cap) {}
+        bool on_token(TokenId) override {
+            ++n_;
+            return n_ < cap_;
+        }
+
+      private:
+        int cap_;
+        int n_ = 0;
+    };
+
+    Ledger t1_ttft;
+    Ledger t1_prefill;
+    Ledger t2_ttft;
+    Ledger t2_prefill;
+    Ledger t2_reused;
+
+    for (int run = 0; run < runs; ++run) {
+        const std::vector<Message> turn1 = {
+            {Role::System, "You are a terse assistant."},
+            {Role::User, prefix + "\nSummarise the above in one line."},
+        };
+        std::vector<std::size_t> off1;
+        InferenceTask task1;
+        task1.prompt = tmpl.render_with_offsets(turn1, "", off1);
+        task1.checkpoint_at = off1[turn1.size() - 1];
+        task1.max_new_tokens = max_new;
+        task1.sampling.seed = 7;
+        CapSink sink1(max_new);
+        CancelToken cancel;
+        const GenResult r1 = backend.generate(task1, sink1, cancel);
+        std::printf("  run %d turn1: prompt=%zu reused=%zu ttft=%.0fms "
+                    "prefill=%.1f decode=%.1f tokens=%d status=%d\n",
+                    run, task1.prompt.size(), r1.prefill_reused_tokens, r1.ttft_ms,
+                    r1.prefill_tok_per_s, r1.decode_tok_per_s, r1.tokens_generated,
+                    static_cast<int>(r1.status));
+        if (r1.prefill_reused_tokens != 0) {
+            std::printf("  FAIL: turn1 expected prefill_reused_tokens==0 (cold), got %zu\n",
+                        r1.prefill_reused_tokens);
+        }
+
+        const std::vector<Message> turn2 = {
+            turn1[0],
+            turn1[1],
+            {Role::Assistant, "Summary: the build compiles units then links one binary."},
+            {Role::User, suffix},
+        };
+        std::vector<std::size_t> off2;
+        InferenceTask task2;
+        task2.prompt = tmpl.render_with_offsets(turn2, "", off2);
+        task2.checkpoint_at = off2[turn2.size() - 1];
+        task2.max_new_tokens = max_new;
+        task2.sampling.seed = 7;
+        CapSink sink2(max_new);
+        const GenResult r2 = backend.generate(task2, sink2, cancel);
+        const std::size_t suffix_prefill =
+            task2.prompt.size() > r2.prefill_reused_tokens
+                ? task2.prompt.size() - r2.prefill_reused_tokens
+                : 0;
+        std::printf("  run %d turn2: prompt=%zu reused=%zu ttft=%.0fms "
+                    "prefill=%.1f decode=%.1f suffix_prefill_tokens=%zu\n",
+                    run, task2.prompt.size(), r2.prefill_reused_tokens, r2.ttft_ms,
+                    r2.prefill_tok_per_s, r2.decode_tok_per_s, suffix_prefill);
+        if (r2.prefill_reused_tokens == 0) {
+            std::printf("  FAIL: turn2 reused==0 -- the KV reuse mechanism did not fire\n");
+        }
+
+        t1_ttft.add(r1.ttft_ms);
+        t1_prefill.add(r1.prefill_tok_per_s);
+        t2_ttft.add(r2.ttft_ms);
+        t2_prefill.add(r2.prefill_tok_per_s);
+        t2_reused.add(static_cast<double>(r2.prefill_reused_tokens));
+
+        backend.reset_cache();
+    }
+
+    std::printf("\nLM_Pipe reuse_on, %d runs:\n", runs);
+    t1_ttft.print("t1 ttft", "ms", 0.0);
+    t1_prefill.print("t1 prefill", "tok/s", 0.0);
+    t2_ttft.print("t2 ttft", "ms", 0.0);
+    t2_prefill.print("t2 prefill", "tok/s", 0.0);
+    t2_reused.print("t2 reused", "tok", 0.0);
+    return 0;
+}
+
+// --- compact ---------------------------------------------------------------
+//
+// M0 for shadow-swap: turn-to-turn reuse with a stable prefix, then the same
+// conversation after compact_oldest / collapse rewrites the prompt. No Agent, no
+// LMP_SHADOW_COMPACT -- this is the tax the flag exists to hide.
+// See docs/KV_SHADOW_SWAP.md and piper-bench/results/kv_compaction_baseline.md.
+
+lmp::context::ContextStore diag_fat_context(int turns) {
+    lmp::context::ContextStore ctx("keep the context honest");
+    for (int i = 0; i < turns; ++i) {
+        lmp::context::TurnRecord rec;
+        rec.tool_name = "read_file";
+        rec.tool_args_summary = "src/module_" + std::to_string(i) + ".txt";
+        rec.observed_path = "src/module_" + std::to_string(i) + ".txt";
+        rec.assistant_text =
+            "Reading module " + std::to_string(i) + " to see what it does.";
+        rec.observation =
+            "line one of the file body for module " + std::to_string(i) +
+            "; line two of the same file; line three, which carries enough "
+            "text that a dozen of these are worth compacting away. " +
+            std::string(80, 'x' + static_cast<char>(i % 10));
+        ctx.add_turn(std::move(rec));
+    }
+    return ctx;
+}
+
+int cmd_compact(int max_new) {
+    QwenTokenizer tok;
+    LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
+    if (!st.ok) {
+        std::printf("tok fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    lmp::platform::SystemClock clock;
+    MlxBackend backend(clock);
+    auto t_load0 = Clock::now();
+    st = backend.load({qwen_dir(), draft_dir()});
+    if (!st.ok) {
+        std::printf("model load fail: %s\n", st.error.c_str());
+        return 1;
+    }
+    std::printf("model load: %.1f s\n", ms(t_load0, Clock::now()) / 1000.0);
+
+    ChatTemplate tmpl(tok);
+    class CapSink final : public TokenSink {
+      public:
+        explicit CapSink(int cap) : cap_(cap) {}
+        bool on_token(TokenId) override {
+            ++n_;
+            return n_ < cap_;
+        }
+
+      private:
+        int cap_;
+        int n_ = 0;
+    };
+
+    const auto gen = [&](lmp::context::ContextStore& ctx) {
+        std::vector<Message> messages = ctx.render("");
+        std::vector<std::size_t> offsets;
+        InferenceTask task;
+        task.prompt = tmpl.render_with_offsets(messages, "", offsets);
+        const std::size_t stable = ctx.stable_message_count("");
+        task.checkpoint_at = stable < offsets.size() ? offsets[stable] : 0;
+        task.max_new_tokens = max_new;
+        task.sampling.temperature = 0.0F;
+        task.sampling.seed = 1;
+        CapSink sink(max_new);
+        CancelToken cancel;
+        const GenResult r = backend.generate(task, sink, cancel);
+        return std::pair<GenResult, std::size_t>{r, task.prompt.size()};
+    };
+
+    std::printf("\n== no compact (turn-to-turn reuse) ==\n");
+    {
+        lmp::context::ContextStore ctx = diag_fat_context(12);
+        auto [r1, n1] = gen(ctx);
+        ctx.add_user_message("continue with the next module");
+        auto [r2, n2] = gen(ctx);
+        std::printf("  turn1 prompt=%zu reused=%zu ttft=%.0fms\n", n1, r1.prefill_reused_tokens,
+                    r1.ttft_ms);
+        std::printf("  turn2 prompt=%zu reused=%zu ttft=%.0fms\n", n2, r2.prefill_reused_tokens,
+                    r2.ttft_ms);
+    }
+
+    std::printf("\n== after compact_oldest ==\n");
+    backend.reset_cache();
+    {
+        lmp::context::ContextStore ctx = diag_fat_context(12);
+        auto [r1, n1] = gen(ctx);
+        while (ctx.recent().size() > 4) {
+            if (ctx.compact_oldest(ctx.recent().size() - 1, /*count_as_event=*/false) == 0) {
+                break;
+            }
+        }
+        ctx.add_user_message("after compact");
+        auto [r2, n2] = gen(ctx);
+        std::printf("  pre-compact prompt=%zu reused=%zu ttft=%.0fms\n", n1,
+                    r1.prefill_reused_tokens, r1.ttft_ms);
+        std::printf("  post-compact prompt=%zu reused=%zu ttft=%.0fms recent=%zu spans=%zu\n",
+                    n2, r2.prefill_reused_tokens, r2.ttft_ms, ctx.recent().size(),
+                    ctx.compacted_spans().size());
+    }
+
+    std::printf("\n== collapse-only (stale copies superseded, no drop) ==\n");
+    backend.reset_cache();
+    {
+        lmp::context::ContextStore ctx = diag_fat_context(12);
+        auto [r1, n1] = gen(ctx);
+        const std::string path = "src/module_0.txt";
+        const std::string live = ctx.recent().back().observation;
+        const std::size_t n = ctx.supersede_stale_copies_of_path(
+            path, live, "see the latest read of " + path);
+        ctx.add_user_message("after collapse");
+        auto [r2, n2] = gen(ctx);
+        std::printf("  pre-collapse prompt=%zu reused=%zu ttft=%.0fms superseded=%zu\n", n1,
+                    r1.prefill_reused_tokens, r1.ttft_ms, n);
+        std::printf("  post-collapse prompt=%zu reused=%zu ttft=%.0fms\n", n2,
+                    r2.prefill_reused_tokens, r2.ttft_ms);
+    }
+    return 0;
+}
+
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1222,6 +1680,16 @@ int main(int argc, char** argv) {
             lengths = {1, 8, 64, 287, 512};
         }
         return cmd_scan(lengths);
+    }
+    if (cmd == "qsa") {
+        std::vector<int> lengths;
+        for (int i = 2; i < argc; ++i) {
+            lengths.push_back(std::atoi(argv[i]));
+        }
+        if (lengths.empty()) {
+            lengths = {8, 16, 32, 64};
+        }
+        return cmd_qsa(lengths);
     }
     if (cmd == "mask") {
         return cmd_mask();
@@ -1237,7 +1705,8 @@ int main(int argc, char** argv) {
         return cmd_step(argc > 2 ? std::atoi(argv[2]) : 50);
     }
     if (cmd == "graph") {
-        return cmd_graph(argc > 2 ? std::atoi(argv[2]) : 547);
+        return cmd_graph(argc > 2 ? std::atoi(argv[2]) : 547,
+                         argc > 3 ? std::atoi(argv[3]) : 1);
     }
     if (cmd == "layers") {
         return cmd_layers(argc > 2 ? std::atoi(argv[2]) : 1);
@@ -1265,12 +1734,25 @@ int main(int argc, char** argv) {
     if (cmd == "toolmask") {
         return cmd_toolmask(argc > 2 ? std::atoi(argv[2]) : 3);
     }
+    if (cmd == "smoke") {
+        return cmd_smoke(argc > 2 ? std::atoi(argv[2]) : 32);
+    }
     if (cmd == "bench") {
         const int runs = argc > 2 ? std::atoi(argv[2]) : 3;
         const int prompt_tokens = argc > 3 ? std::atoi(argv[3]) : 512;
         const int max_new = argc > 4 ? std::atoi(argv[4]) : 256;
         return cmd_bench(runs, prompt_tokens, max_new);
     }
-    std::printf("usage: lmp_diag [scan|mask|bench] ...\n");
+    if (cmd == "reuse") {
+        const int runs = argc > 2 ? std::atoi(argv[2]) : 3;
+        const int prefix_tokens = argc > 3 ? std::atoi(argv[3]) : 2048;
+        const int suffix_tokens = argc > 4 ? std::atoi(argv[4]) : 128;
+        const int max_new = argc > 5 ? std::atoi(argv[5]) : 32;
+        return cmd_reuse(runs, prefix_tokens, suffix_tokens, max_new);
+    }
+    if (cmd == "compact") {
+        return cmd_compact(argc > 2 ? std::atoi(argv[2]) : 8);
+    }
+    std::printf("usage: lmp_diag [scan|qsa|mask|smoke|bench|reuse|compact] ...\n");
     return 2;
 }

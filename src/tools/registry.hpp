@@ -43,6 +43,7 @@
 
 #include "src/model/backend.hpp"
 #include "src/platform/fs.hpp"
+#include "src/tools/think_blocks.hpp"
 #include "src/tools/tool_result.hpp"
 
 namespace lmp::pcc {
@@ -153,6 +154,11 @@ struct WorkspaceContext {
     // missing tool: the call succeeds, spends a turn, reports a cost in tokens, and the
     // damage only lands on the NEXT turn, in the backend, as a run-ending error.
     bool model_can_see = false;
+
+    // Harvest closed think fences and declare `commit_think_block`. Default on
+    // for IDE runs. `LMP_COMMIT_THINK=0|1` overrides when set. Tests set this
+    // field; they do not race on setenv.
+    bool commit_think = true;
 };
 
 // Cap on paths inside one read_many call. Matches TurnGrammar::kMaxCallsPerTurn so a
@@ -373,6 +379,12 @@ class Registry {
     // handlers_.emplace silently kept the first handler.
     bool declare_context_tools(ContextSourceFn source, TokenCounter count_tokens);
 
+    // Closed think fences for `commit_think_block`. Resolved at CALL time (same
+    // indirection as ContextSourceFn) so the handler never captures a dangling vector.
+    using ThinkBlocksFn = std::function<std::vector<ThinkBlock>()>;
+    void set_think_blocks_source(ThinkBlocksFn source);
+    void set_think_blocks(std::vector<ThinkBlock> blocks);
+
     // True when `rel` securely names an existing, non-empty regular file.
     [[nodiscard]] bool would_overwrite_existing(const std::string& rel) const;
 
@@ -431,6 +443,8 @@ class Registry {
     // Set by declare_context_tools. Read by remember_fact() too, which mirrors each note
     // into the store -- see memory_file.cpp.
     ContextSourceFn context_source_;
+    ThinkBlocksFn think_blocks_source_;
+    std::vector<ThinkBlock> think_blocks_owned_;
     std::vector<ToolDecl> decls_;
     std::vector<parsephony::ToolSpec> specs_;
     std::map<std::string, Handler> handlers_;

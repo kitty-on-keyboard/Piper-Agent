@@ -289,3 +289,72 @@ TEST(a_workspace_with_no_mcp_json_says_nothing_at_all) {
     // The common case is a project without one, and it must not cost an event.
     CHECK(f.bytes.find("mcp_config_file") == std::string::npos);
 }
+
+TEST(overlay_lmp_env_bool_only_honours_exact_0_or_1) {
+    ::unsetenv("LMP_COMMIT_THINK");
+    bool field = true;
+    lmp::surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &field);
+    CHECK(field);
+
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "0", 1) == 0);
+    field = true;
+    lmp::surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &field);
+    CHECK(!field);
+
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "1", 1) == 0);
+    field = false;
+    lmp::surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &field);
+    CHECK(field);
+
+    // Not a bare 0|1: leave the field alone (empty, "10", "true").
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "10", 1) == 0);
+    field = true;
+    lmp::surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &field);
+    CHECK(field);
+
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "", 1) == 0);
+    field = true;
+    lmp::surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &field);
+    CHECK(field);
+
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "true", 1) == 0);
+    field = false;
+    lmp::surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &field);
+    CHECK(!field);
+
+    ::unsetenv("LMP_COMMIT_THINK");
+}
+
+TEST(ensure_registry_commit_think_env_wins_over_config) {
+    ::unsetenv("LMP_COMMIT_THINK");
+    const char* base = std::getenv("TMPDIR");
+    std::string tmpl = std::string(base != nullptr ? base : "/tmp") + "/lmp_ct_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    const char* made = ::mkdtemp(buf.data());
+    REQUIRE(made != nullptr);
+    const std::string root(made);
+
+    lmp::platform::ManualClock c;
+    lmp::platform::EventLogWriter log;
+    REQUIRE(log.open({root + "/events.jsonl", 1 << 20, 3}).ok);
+
+    const char* start = R"({"method":"lmp/start","params":{"settings":{}}})";
+    Session session;
+    lmp::surface::ensure_registry(session, root, start, log, c);
+    REQUIRE(session.registry != nullptr);
+    CHECK(session.registry->find("commit_think_block") != nullptr);
+
+    // Toggles implied on, env 0 → off (acceptance 5).
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "0", 1) == 0);
+    lmp::surface::ensure_registry(session, root, start, log, c);
+    CHECK(session.registry->find("commit_think_block") == nullptr);
+
+    // Toggles off, env 1 → on (acceptance 6).
+    session.config.commit_think = false;
+    REQUIRE(::setenv("LMP_COMMIT_THINK", "1", 1) == 0);
+    lmp::surface::ensure_registry(session, root, start, log, c);
+    CHECK(session.registry->find("commit_think_block") != nullptr);
+
+    ::unsetenv("LMP_COMMIT_THINK");
+}

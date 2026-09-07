@@ -49,6 +49,12 @@ using surface::wire::notify;
 using surface::wire::reply_error;
 using surface::wire::reply_result;
 
+[[nodiscard]] std::string canonical_existing(const std::string& path) {
+    std::error_code ec;
+    const std::filesystem::path c = std::filesystem::canonical(path, ec);
+    return ec ? path : c.string();
+}
+
 // Leaves WITHOUT joining the reader thread.
 //
 // That thread is parked in read() on stdin and only EOF releases it, so a client that
@@ -154,7 +160,12 @@ loop::Observer make_observer(const std::string& id) {
         n.outcome = std::string(loop::to_string(t.outcome));
         n.tool_name = t.tool_name;
         n.tool_args = tool_args_json(t.tool_params);
-        n.tool_status = std::string(tools::to_string(t.tool_result.status));
+        // ToolResult defaults to ToolError. A text-only turn never ran a tool, so
+        // copying that default made every TextOnly row print as `(text) ToolError`
+        // (piper-bench bowling / connect storms). Empty means no tool ran.
+        n.tool_status = t.tool_name.empty()
+                            ? std::string{}
+                            : std::string(tools::to_string(t.tool_result.status));
         n.summary = t.tool_result.summary;
         n.duration_ms = duration_ms;
         n.think_tokens = static_cast<std::int64_t>(t.think_tokens);
@@ -650,18 +661,27 @@ class RunInbox {
 [[nodiscard]] bool apply_settings(const std::string& id, const std::string& message,
                                   loop::AgentConfig& config) {
     const std::string mode = surface::string_field(message, "mode");
-    if (mode == "plan") {
-        config.mode = loop::Mode::Plan;
-    } else if (mode == "debug") {
-        config.mode = loop::Mode::Debug;
-    } else if (mode == "agent" || mode.empty()) {
-        config.mode = loop::Mode::Agent;
-    } else {
-        // No silent fall back to the most permissive mode (S13). An unrecognised mode is
-        // a settings bug, and guessing Agent for it is how a plan-only run gets to write.
-        reply_error(id, "unrecognised mode '" + mode + "'; expected plan, debug or agent");
-        return false;
+    if (!mode.empty()) {
+        if (mode == "plan") {
+            config.mode = loop::Mode::Plan;
+        } else if (mode == "debug") {
+            config.mode = loop::Mode::Debug;
+        } else if (mode == "agent") {
+            config.mode = loop::Mode::Agent;
+        } else {
+            // No silent fall back to the most permissive mode (S13). An unrecognised mode
+            // is a settings bug, and guessing Agent for it is how a plan-only run gets to
+            // write.
+            reply_error(id, "unrecognised mode '" + mode +
+                                "'; expected plan, debug or agent");
+            return false;
+        }
     }
+    // Absent mode keeps whatever the caller already had. lmp/start builds a fresh
+    // AgentConfig (mode Agent); lmp/message must not smash a live Plan session back to
+    // Agent just because the client omitted settings (drive.py). An explicit mode still
+    // rebinds -- that is how switching the UI to Plan after a finished Agent run
+    // actually withholds writes.
 
     auto& s = config.sampling;
     const auto real = [&message](std::string_view key, float fallback) {
@@ -717,6 +737,17 @@ class RunInbox {
     if (surface::has_field(message, "verify_contract")) {
         config.operator_verify_contract = surface::string_field(message, "verify_contract");
     }
+
+    // Env 0|1 wins; else the start-message field if present; else AgentConfig default
+    // (true). Unset env + omitted field keeps the default on. See overlay_lmp_env_bool.
+    if (surface::has_field(message, "commit_think")) {
+        config.commit_think = surface::bool_field(message, "commit_think");
+    }
+    if (surface::has_field(message, "shadow_compact")) {
+        config.shadow_compact = surface::bool_field(message, "shadow_compact");
+    }
+    surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &config.commit_think);
+    surface::overlay_lmp_env_bool("LMP_SHADOW_COMPACT", &config.shadow_compact);
 
     return apply_autonomy(id, message, config);
 }
@@ -1281,13 +1312,21 @@ void handle_sessions(const std::string& id, const std::string& message,
 
     std::vector<context::RunSummary> runs = context::list_runs_from_log(log_path);
     protocol::SessionsResult out;
+    const std::string asked_canon = canonical_existing(workspace);
+    std::size_t skipped_workspace = 0;
+    std::size_t skipped_legacy = 0;
     // Newest first: the list is read top-down and the run you want back is nearly always
     // the one that just died.
     for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
         if (out.sessions.size() >= limit) {
             break;
         }
-        if (it->workspace_root != workspace || !surface::is_minted_run_id(it->run_id)) {
+        if (!surface::is_minted_run_id(it->run_id)) {
+            ++skipped_legacy;
+            continue;
+        }
+        if (canonical_existing(it->workspace_root) != asked_canon) {
+            ++skipped_workspace;
             continue;
         }
         protocol::SessionSummary sum;
@@ -1302,6 +1341,8 @@ void handle_sessions(const std::string& id, const std::string& message,
         sum.observations = it->observations;
         out.sessions.push_back(std::move(sum));
     }
+    (void)skipped_workspace;
+    (void)skipped_legacy;
     // Hand-built, like every other reply here: the generator emits append_value for
     // STRUCTS and for notifications, not for request RESULTS. The vector overload it does
     // emit handles the array, so the escaping stays in one place -- the platform layer,
@@ -1430,7 +1471,7 @@ void handle_resume(const std::string& id, const std::string& message,
     }
 
     context::ResumeIdentity current;
-    current.workspace_root = workspace;
+    current.workspace_root = canonical_existing(workspace);
     current.run_id = run_id;
     current.model_identity = model_dir;
     current.protocol_version = protocol::kProtocolVersion;
@@ -1438,6 +1479,7 @@ void handle_resume(const std::string& id, const std::string& message,
         session.registry == nullptr
             ? std::string{}
             : platform::content_sha256_hex(session.registry->tools_json());
+    rebuilt.identity.workspace_root = canonical_existing(rebuilt.identity.workspace_root);
     const context::ResumeGate gate =
         context::can_auto_resume(rebuilt.identity, current, rebuilt.edit_in_flight);
     if (!gate.allowed) {
@@ -1532,6 +1574,12 @@ bool continue_session(const std::string& id, const std::string& message,
     }
     if (session.ctx == nullptr) {
         reply_error(id, "there is no session to continue; send lmp/start first");
+        return false;
+    }
+    // Rebind from the editor's current settings BEFORE the next Agent is built.
+    // Switching the UI to Plan after a finished Agent run used to keep session.config
+    // on Agent, so the follow-up still advertised write_file.
+    if (!apply_settings(id, message, session.config)) {
         return false;
     }
     // The run this session IS, not the id of the request asking it to continue. A turn

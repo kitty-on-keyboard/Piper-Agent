@@ -285,8 +285,18 @@ export class SidecarClient extends EventEmitter {
    *  in flight the text is steering and lands at the next turn boundary; with nothing
    *  running it is a follow-up and starts a run over the same conversation. `started_run`
    *  in the reply says which happened. */
-  message(runId: string, text: string, imagePaths: string[] = []): Promise<Reply<MessageResult>> {
-    return this.request("lmp/message", { run_id: runId, text, image_paths: imagePaths });
+  message(
+    runId: string,
+    text: string,
+    imagePaths: string[] = [],
+    settings?: RunSettings
+  ): Promise<Reply<MessageResult>> {
+    return this.request("lmp/message", {
+      run_id: runId,
+      text,
+      image_paths: imagePaths,
+      ...(settings ? { settings } : {}),
+    });
   }
 
   shutdown(): Promise<Reply<{ ok: boolean }>> {

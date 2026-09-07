@@ -9,22 +9,29 @@
 #include "qwen35_moe_config.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "activations.hpp"
 #include "gated_delta.hpp"
+#include "gated_residual.hpp"
 #include "kv_cache.hpp"
 #include "quant_attention.hpp"
 #include "moe_trace.hpp"
+#include "ple.hpp"
+#include "qsa.hpp"
 #include "switch_glu.hpp"
 #include "vision_tower.hpp"
 #include "weight_store.hpp"
+#include "src/model/qwen4_exp_ops.hpp"
 
 #include "mlx/fast.h"
 #include "mlx/memory.h"
@@ -55,16 +62,46 @@ public:
         ffn_ = cfg_.ffn_kind();
         if (ffn_ == FfnKind::Unknown) {
             load_error_ = "unsupported architecture: model_type=\"" + cfg_.model_type +
-                          "\" (this build knows qwen3_5 / qwen3_5_text dense and "
-                          "qwen3_5_moe / qwen3_5_moe_text)";
+                          "\" (this build knows qwen3_5 / qwen3_5_text dense, "
+                          "qwen3_5_moe / qwen3_5_moe_text, and qwen4_exp / qwen4_exp_text)";
             return false;
+        }
+        if (cfg_.is_flash()) {
+            if (cfg_.hc_count <= 0 || cfg_.hc_lowrank <= 0) {
+                load_error_ = "qwen4_exp requires hc_count and hc_lowrank";
+                return false;
+            }
+            if (cfg_.linear_key_head_dim % 32 != 0) {
+                load_error_ = "qwen4_exp: linear_key_head_dim must be divisible by 32";
+                return false;
+            }
+            if (cfg_.indexer_compress_ratio > 0 && cfg_.indexer_budget > 0 &&
+                cfg_.indexer_budget % cfg_.indexer_compress_ratio != 0) {
+                load_error_ = "qwen4_exp: indexer_budget must be divisible by "
+                              "indexer_compress_ratio";
+                return false;
+            }
         }
         if (!weights_.load_directory(model_dir)) {
             return false;
         }
+        if (cfg_.is_flash()) {
+            constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+            std::fprintf(stderr,
+                         "qwen4_exp weights: resident %.2f GiB, PLE disk %s\n",
+                         static_cast<double>(weights_.eager_nbytes()) / kGiB,
+                         weights_.has_ple_disk() ? "pread" : "MISSING");
+        }
         sanitize_weights();
+        if (cfg_.is_flash()) {
+            infer_flash_attn_output_gate();
+            load_ple_tables();
+        }
         if (ffn_ == FfnKind::Moe && fuse_gate_up_enabled()) {
             fuse_expert_gate_up();
+        }
+        if (ffn_ == FfnKind::Dense && fuse_gate_up_enabled()) {
+            fuse_dense_shared_x();
         }
         reset_cache();
         cfg_.vocab_size = cfg_.vocab_size > 0 ? cfg_.vocab_size : 248320;
@@ -102,6 +139,8 @@ public:
         kv_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), KVCache{});
         qkv_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), QuantizedKVCache{});
         ssm_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), SsmCache{});
+        indexer_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), IndexerCache{});
+        ple_cache_.clear();
     }
 
     [[nodiscard]] int cache_seq_len() const noexcept {
@@ -179,15 +218,37 @@ public:
         // restore() cannot silently mis-pair a snapshot with a layer if the hybrid schedule
         // ever changes.
         std::vector<SsmCache::Snapshot> ssm;
+        PleCache ple;
     };
 
     [[nodiscard]] CacheCheckpoint checkpoint() const {
+        // ONE eval of every live SSM/PLE buffer, not one eval per layer. snapshot()
+        // would mx::eval conv_state and delta_state separately for each of 30 linear
+        // layers -- 60 Metal round-trips for handles the previous forward already
+        // computed. SpecPhases put that on the dense MTP hot path at ~5 ms/block.
+        std::vector<mx::array> live;
+        live.reserve(ssm_caches_.size() * 2 + 1);
+        for (const auto& c : ssm_caches_) {
+            if (c.conv_state) {
+                live.push_back(*c.conv_state);
+            }
+            if (c.delta_state) {
+                live.push_back(*c.delta_state);
+            }
+        }
+        if (ple_cache_.conv_state) {
+            live.push_back(*ple_cache_.conv_state);
+        }
+        if (!live.empty()) {
+            mx::eval(live);
+        }
         CacheCheckpoint cp;
         cp.seq_len = cache_seq_len();
         cp.ssm.reserve(ssm_caches_.size());
         for (const auto& c : ssm_caches_) {
-            cp.ssm.push_back(c.snapshot());
+            cp.ssm.push_back({c.conv_state, c.delta_state, c.offset});
         }
+        cp.ple = ple_cache_;
         return cp;
     }
 
@@ -209,6 +270,10 @@ public:
         for (std::size_t i = 0; i < n; ++i) {
             ssm_caches_[i].restore(cp.ssm[i]);
         }
+        for (auto& c : indexer_caches_) {
+            c.truncate_to(cp.seq_len);
+        }
+        ple_cache_ = cp.ple;
     }
 
     void eval_caches() {
@@ -220,6 +285,14 @@ public:
         }
         for (auto& c : ssm_caches_) {
             c.sync();
+        }
+        for (auto& c : indexer_caches_) {
+            if (c.keys) {
+                mx::eval(*c.keys);
+            }
+        }
+        if (ple_cache_.conv_state) {
+            mx::eval(*ple_cache_.conv_state);
         }
     }
 
@@ -298,9 +371,52 @@ public:
     // Prefix-addressed so the MTP head's identically-shaped MLP reuses it rather than
     // carrying a second copy of the same three matmuls.
     mx::array dense_mlp_at(const std::string& p, const mx::array& x) const {
-        return weights_.linear(lmp::model::mlxl::swiglu(weights_.linear(x, p + "gate_proj"),
-                                                        weights_.linear(x, p + "up_proj")),
+        const std::string fused = p + "gate_up_proj";
+        if (weights_.is_quantized(fused)) {
+            const mx::array gu = weights_.linear(x, fused);
+            const std::vector<mx::array> half = mx::split(gu, 2, -1);
+            return weights_.linear(swiglu(half[0], half[1]), p + "down_proj");
+        }
+        return weights_.linear(weights_.swiglu_gate_up(x, p + "gate_proj", p + "up_proj"),
                                p + "down_proj");
+    }
+
+    // post_attention_layernorm → MLP. LMP_FUSE_RMS folds the norm into gate/up QMV on
+    // the dense path only. MoE still norms once then routes.
+    mx::array ffn_from_residual(int layer, const std::string& layer_p,
+                                const mx::array& residual) const {
+        const std::string ln = layer_p + "post_attention_layernorm.weight";
+        if (q4_fuse_rms_on() && ffn_ == FfnKind::Dense) {
+            const std::string mp = layer_p + "mlp.";
+            if (weights_.is_quantized(mp + "gate_up_proj") || q4_fuse_glu_on()) {
+                return dense_mlp_at(mp, rms_norm(residual, ln));
+            }
+            const mx::array& gamma = weights_.get(ln);
+            const mx::array gate =
+                weights_.rms_linear(residual, gamma, cfg_.rms_norm_eps, mp + "gate_proj");
+            const mx::array up =
+                weights_.rms_linear(residual, gamma, cfg_.rms_norm_eps, mp + "up_proj");
+            return weights_.linear(swiglu(gate, up), mp + "down_proj");
+        }
+        return forward_ffn(layer, rms_norm(residual, ln));
+    }
+
+    mx::array dense_mlp_from_residual(const std::string& layer_p,
+                                      const mx::array& residual) const {
+        const std::string ln = layer_p + "post_attention_layernorm.weight";
+        const std::string mp = layer_p + "mlp.";
+        if (q4_fuse_rms_on()) {
+            if (weights_.is_quantized(mp + "gate_up_proj") || q4_fuse_glu_on()) {
+                return dense_mlp_at(mp, rms_norm(residual, ln));
+            }
+            const mx::array& gamma = weights_.get(ln);
+            const mx::array gate =
+                weights_.rms_linear(residual, gamma, cfg_.rms_norm_eps, mp + "gate_proj");
+            const mx::array up =
+                weights_.rms_linear(residual, gamma, cfg_.rms_norm_eps, mp + "up_proj");
+            return weights_.linear(swiglu(gate, up), mp + "down_proj");
+        }
+        return dense_mlp_at(mp, rms_norm(residual, ln));
     }
 
     // The single axis the two checkpoints differ on. Classified once at load(), which
@@ -319,19 +435,62 @@ public:
                 p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len);
             h = mx::add(x, attn_out);
         }
-        mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        return mx::add(h, forward_ffn(layer, mlp_in));
+        return mx::add(h, ffn_from_residual(layer, p, h));
     }
 
     mx::array forward_full_attn_layer(int layer, const mx::array& x, int seq_len) {
         const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
-        mx::array h = rms_norm(x, p + "input_layernorm.weight");
+        mx::array h = x;
+        const mx::array* fuse_ln = nullptr;
+        if (q4_fuse_rms_on()) {
+            fuse_ln = &weights_.get(p + "input_layernorm.weight");
+        } else {
+            h = rms_norm(x, p + "input_layernorm.weight");
+        }
         mx::array attn_out =
             forward_self_attn(p + "self_attn.", h, kv_caches_[static_cast<std::size_t>(layer)],
-                              qkv_caches_[static_cast<std::size_t>(layer)], seq_len);
+                              qkv_caches_[static_cast<std::size_t>(layer)], seq_len, fuse_ln);
         h = mx::add(x, attn_out);
-        mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        return mx::add(h, forward_ffn(layer, mlp_in));
+        return mx::add(h, ffn_from_residual(layer, p, h));
+    }
+
+    mx::array forward_flash_layer(int layer, const mx::array& x, int seq_len,
+                                  const mx::array& input_ids) {
+        const std::string p = prefix_ + "layers." + std::to_string(layer) + ".";
+        mx::array h = x;
+        if (cfg_.is_ple_layer(layer) && !ple_mults_.empty()) {
+            static const bool skip_ple = [] {
+                const char* v = std::getenv("LMP_SKIP_PLE");
+                return v != nullptr && std::string_view(v) == "1";
+            }();
+            if (!skip_ple) {
+                h = mx::add(h, ple_forward(h, input_ids, weights_, p + "ple.", ple_cache_, cfg_,
+                                           ple_mults_.data(), ple_sizes_.data(),
+                                           ple_offs_.data()));
+            }
+        }
+        const int hc = cfg_.hc_count;
+        const int d = cfg_.hidden_size;
+        const int rank = cfg_.hc_lowrank;
+        auto attn_gr = gated_residual_read(h, weights_, p + "attn_hyper_connection.", hc, d,
+                                           rank, cfg_.rms_norm_eps, true);
+        mx::array attn_y = attn_gr.mixed;
+        if (ablation() != Ablate::delta) {
+            if (cfg_.is_linear_layer(layer)) {
+                attn_y = forward_gated_delta(p + "linear_attn.", attn_gr.mixed,
+                                             ssm_caches_[static_cast<std::size_t>(layer)],
+                                             seq_len);
+            } else {
+                attn_y = forward_self_attn(
+                    p + "self_attn.", attn_gr.mixed, kv_caches_[static_cast<std::size_t>(layer)],
+                    qkv_caches_[static_cast<std::size_t>(layer)], seq_len, nullptr,
+                    &indexer_caches_[static_cast<std::size_t>(layer)]);
+            }
+        }
+        h = gated_residual_write(attn_gr, attn_y);
+        auto mlp_gr = gated_residual_read(h, weights_, p + "mlp_hyper_connection.", hc, d, rank,
+                                          cfg_.rms_norm_eps, true);
+        return gated_residual_write(mlp_gr, forward_ffn(layer, mlp_gr.mixed));
     }
 
     // Set when load() refuses; empty otherwise. MlxBackend surfaces it verbatim so the
@@ -389,10 +548,16 @@ public:
         mtp_cache_ = KVCache{};
         mtp_qcache_ = QuantizedKVCache{};
         mtp_loaded_ = true;
+        if (fuse_gate_up_enabled()) {
+            fuse_quant_out_rows({"mtp.layers.0.mlp.gate_proj", "mtp.layers.0.mlp.up_proj"},
+                                "mtp.layers.0.mlp.gate_up_proj");
+            mx::clear_cache();
+        }
         return true;
     }
 
     [[nodiscard]] bool is_dense() const noexcept { return ffn_ == FfnKind::Dense; }
+    [[nodiscard]] bool is_flash() const noexcept { return cfg_.is_flash(); }
     [[nodiscard]] bool has_mtp() const noexcept { return mtp_loaded_; }
     [[nodiscard]] int mtp_block_size() const noexcept { return mtp_block_size_; }
 
@@ -411,11 +576,16 @@ public:
         h = weights_.linear(h, "mtp.fc");
 
         const std::string p = "mtp.layers.0.";
-        const mx::array attn_in = rms_norm(h, p + "input_layernorm.weight");
-        h = mx::add(h,
-                    forward_self_attn(p + "self_attn.", attn_in, mtp_cache_, mtp_qcache_, seq_len));
-        const mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
-        h = mx::add(h, dense_mlp_at(p + "mlp.", mlp_in));
+        mx::array attn_in = h;
+        const mx::array* fuse_ln = nullptr;
+        if (q4_fuse_rms_on()) {
+            fuse_ln = &weights_.get(p + "input_layernorm.weight");
+        } else {
+            attn_in = rms_norm(h, p + "input_layernorm.weight");
+        }
+        h = mx::add(h, forward_self_attn(p + "self_attn.", attn_in, mtp_cache_, mtp_qcache_,
+                                         seq_len, fuse_ln));
+        h = mx::add(h, dense_mlp_from_residual(p, h));
         return rms_norm(h, "mtp.norm.weight");
     }
 
@@ -483,6 +653,7 @@ private:
     QuantizedKVCache mtp_qcache_{};
     std::optional<mx::array> last_hidden_;
     WeightStore weights_;
+    std::unordered_map<std::string, std::vector<int>> fused_out_cuts_;
     std::vector<KVCache> kv_caches_;
     // Parallel to kv_caches_ and empty until a context gets long enough to be worth
     // converting. `kv_caches_[l].offset` stays the single source of truth for the token
@@ -490,6 +661,11 @@ private:
     // back -- so the quantized cache mirrors that number rather than owning a second one.
     std::vector<QuantizedKVCache> qkv_caches_;
     std::vector<SsmCache> ssm_caches_;
+    std::vector<IndexerCache> indexer_caches_;
+    PleCache ple_cache_{};
+    std::vector<std::uint64_t> ple_mults_;
+    std::vector<std::int64_t> ple_sizes_;
+    std::vector<std::int64_t> ple_offs_;
 
     // LMP_FUSE_GATE_UP=0 is the control arm. Default on; read once, because a getenv
     // per layer would itself be a load-time cost and a getenv per token would be worse.
@@ -569,6 +745,97 @@ private:
         mx::clear_cache();
     }
 
+    // Dense 2D affine-4: concat packed rows along the output axis. Same contract as
+    // fuse_expert_gate_up (eval before erase) but axis 0, because these weights are
+    // [out, in/8] rather than [experts, out, in].
+    bool fuse_quant_out_rows(const std::vector<std::string>& bases, const std::string& out_key) {
+        if (bases.size() < 2) {
+            return false;
+        }
+        std::vector<QuantWeight> qs;
+        qs.reserve(bases.size());
+        for (const std::string& b : bases) {
+            if (!weights_.is_quantized(b)) {
+                return false;
+            }
+            qs.push_back(weights_.quant(b));
+        }
+        const QuantWeight& q0 = qs[0];
+        if (q0.weight.ndim() != 2) {
+            return false;
+        }
+        std::vector<int> cuts;
+        cuts.reserve(qs.size());
+        std::vector<mx::array> ws;
+        std::vector<mx::array> scs;
+        std::vector<mx::array> bis;
+        for (const QuantWeight& q : qs) {
+            if (q.group_size != q0.group_size || q.bits != q0.bits || q.mode != q0.mode ||
+                q.biases.has_value() != q0.biases.has_value() || q.weight.ndim() != 2 ||
+                q.weight.shape()[1] != q0.weight.shape()[1]) {
+                return false;
+            }
+            cuts.push_back(static_cast<int>(q.scales.shape()[0]));
+            ws.push_back(q.weight);
+            scs.push_back(q.scales);
+            if (q.biases) {
+                bis.push_back(*q.biases);
+            }
+        }
+        mx::array w = mx::concatenate(ws, 0);
+        mx::array sc = mx::concatenate(scs, 0);
+        std::vector<mx::array> force{w, sc};
+        std::optional<mx::array> bi;
+        if (!bis.empty()) {
+            bi = mx::concatenate(bis, 0);
+            force.push_back(*bi);
+        }
+        mx::eval(force);
+        weights_.set(out_key + ".weight", w);
+        weights_.set(out_key + ".scales", sc);
+        if (bi) {
+            weights_.set(out_key + ".biases", *bi);
+        }
+        for (const std::string& b : bases) {
+            weights_.erase(b + ".weight");
+            weights_.erase(b + ".scales");
+            weights_.erase(b + ".biases");
+        }
+        fused_out_cuts_[out_key] = std::move(cuts);
+        return true;
+    }
+
+    void fuse_dense_shared_x() {
+        int n_glu = 0;
+        int n_qkv = 0;
+        for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+            const std::string lp = prefix_ + "layers." + std::to_string(layer) + ".";
+            if (fuse_quant_out_rows({lp + "mlp.gate_proj", lp + "mlp.up_proj"},
+                                    lp + "mlp.gate_up_proj")) {
+                ++n_glu;
+            }
+            if (!cfg_.is_linear_layer(layer)) {
+                const std::string ap = lp + "self_attn.";
+                if (weights_.is_quantized(ap + "q_proj") &&
+                    weights_.is_quantized(ap + "k_proj") &&
+                    weights_.is_quantized(ap + "v_proj")) {
+                    const int nq = static_cast<int>(weights_.quant(ap + "q_proj").scales.shape()[0]);
+                    const int nk = static_cast<int>(weights_.quant(ap + "k_proj").scales.shape()[0]);
+                    const int nv = static_cast<int>(weights_.quant(ap + "v_proj").scales.shape()[0]);
+                    // attn_output_gate stores q as [q, gate] (N twice k/v). Do not concat.
+                    if (nq == nk && nk == nv &&
+                        fuse_quant_out_rows({ap + "q_proj", ap + "k_proj", ap + "v_proj"},
+                                            ap + "qkv_proj")) {
+                        ++n_qkv;
+                    }
+                }
+            }
+        }
+        std::fprintf(stderr, "dense concat: gate_up=%d qkv=%d / %d layers\n", n_glu, n_qkv,
+                     cfg_.num_hidden_layers);
+        mx::clear_cache();
+    }
+
     void sanitize_weights() {
         auto& w = weights_.mutable_weights();
 
@@ -579,19 +846,38 @@ private:
         // shift unconditionally would corrupt every norm weight in the model.
         bool has_mtp_weights = false;
         bool has_unsanitized_conv1d = false;
+        bool raw_hf = false;
         for (const auto& [key, val] : w) {
             if (key.find("mtp.") != std::string::npos) {
                 has_mtp_weights = true;
+            }
+            if (key.find("model.language_model.") != std::string::npos ||
+                key.find("experts.gate_up_proj") != std::string::npos) {
+                raw_hf = true;
             }
             if (key.find("conv1d.weight") != std::string::npos && val.ndim() == 3 &&
                 val.shape()[2] != 1) {
                 has_unsanitized_conv1d = true;
             }
         }
-        const bool should_shift_norm_weights = has_mtp_weights || has_unsanitized_conv1d;
+        // Flash-Next's MLX conversion (sh0wie) leaves HF-style zero-centered RMSNorm
+        // gammas. hc_norm mean is ~0 and goes negative; mlx-lm's Qwen3.5 exports already
+        // bake (1+w). PLE conv1d is still PyTorch layout ([C,1,K]), which also trips the
+        // conv fix, but do not rely on that side-effect: a conversion that ships MLX conv
+        // and raw norms would otherwise skip the shift and zero the residual.
+        const bool should_shift_norm_weights =
+            has_mtp_weights || has_unsanitized_conv1d || raw_hf || cfg_.is_flash();
+        if (cfg_.is_flash()) {
+            std::fprintf(stderr,
+                         "qwen4_exp sanitize: shift_norms=%s conv1d_unaligned=%s raw_hf=%s\n",
+                         should_shift_norm_weights ? "yes" : "no",
+                         has_unsanitized_conv1d ? "yes" : "no",
+                         raw_hf ? "yes" : "no");
+        }
 
         std::vector<std::pair<std::string, mx::array>> updated;
         std::vector<std::string> to_erase;
+        int n_norm_shifted = 0;
 
         for (auto& [key, val] : w) {
             // `vision_tower.*` used to be dropped here unconditionally, which is the
@@ -620,7 +906,13 @@ private:
                  key.ends_with(".post_attention_layernorm.weight") ||
                  key.ends_with("model.norm.weight") ||
                  key.ends_with(".q_norm.weight") ||
-                 key.ends_with(".k_norm.weight"))) {
+                 key.ends_with(".k_norm.weight") ||
+                 key.ends_with(".hc_norm.weight") ||
+                 key.ends_with(".q_layernorm.weight") ||
+                 key.ends_with(".k_layernorm.weight") ||
+                 key.ends_with(".norm_key.weight") ||
+                 key.ends_with(".norm_query.weight") ||
+                 key.ends_with(".norm_conv.weight"))) {
                 if (val.ndim() == 1) {
                     // astype, not a bare mx::array(1.0f). mlx-lm writes `v + 1.0`, and a
                     // Python float is weakly typed, so the weight stays bf16; the C++
@@ -635,6 +927,7 @@ private:
                     updated.emplace_back(key, mx::add(val, mx::astype(mx::array(1.0f),
                                                                       val.dtype())));
                     to_erase.push_back(key);
+                    ++n_norm_shifted;
                 }
             }
         }
@@ -644,7 +937,94 @@ private:
         for (auto& [k, v] : updated) {
             w.insert_or_assign(std::move(k), std::move(v));
         }
+        if (cfg_.is_flash()) {
+            std::fprintf(stderr, "qwen4_exp sanitize: norms_shifted=%d conv1d_moved=%d\n",
+                         n_norm_shifted, has_unsanitized_conv1d ? 1 : 0);
+        }
 
+    }
+
+    static std::vector<std::int64_t> copy_i64(const mx::array& a) {
+        mx::array c = mx::astype(mx::reshape(a, {-1}), mx::int64);
+        mx::eval(c);
+        const int n = static_cast<int>(c.size());
+        std::vector<std::int64_t> out(static_cast<std::size_t>(n));
+        const std::int64_t* p = c.data<int64_t>();
+        std::copy(p, p + n, out.begin());
+        return out;
+    }
+
+    // sh0wie's conversion stores attn_output_gate: null, but q_proj is still the fused
+    // [q, gate] layout (out = 2 * n_heads * head_dim). Trust the tensor, not the JSON.
+    void infer_flash_attn_output_gate() {
+        const int expected = cfg_.num_attention_heads * cfg_.head_dim;
+        if (expected <= 0) {
+            return;
+        }
+        for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+            if (cfg_.is_linear_layer(layer)) {
+                continue;
+            }
+            const std::string q =
+                prefix_ + "layers." + std::to_string(layer) + ".self_attn.q_proj.weight";
+            if (!weights_.has(q)) {
+                return;
+            }
+            const int out = static_cast<int>(weights_.get(q).shape()[0]);
+            if (out == expected * 2) {
+                cfg_.attn_output_gate = true;
+            } else if (out == expected) {
+                cfg_.attn_output_gate = false;
+            }
+            return;
+        }
+    }
+
+    void load_ple_tables() {
+        const int ngram = cfg_.ngram_size > 0 ? cfg_.ngram_size : 3;
+        const int hpn = cfg_.heads_per_ngram > 0 ? cfg_.heads_per_ngram : 8;
+        const int n_heads = (ngram - 1) * hpn;
+        int ple_idx = 0;
+        std::string pp;
+        for (int i = 0; i < cfg_.num_hidden_layers; ++i) {
+            if (!cfg_.is_ple_layer(i)) {
+                continue;
+            }
+            auto it = std::find(cfg_.ple_layer_ids.begin(), cfg_.ple_layer_ids.end(), i + 1);
+            if (it != cfg_.ple_layer_ids.end()) {
+                ple_idx = static_cast<int>(std::distance(cfg_.ple_layer_ids.begin(), it));
+            }
+            pp = prefix_ + "layers." + std::to_string(i) + ".ple.ple_embedding.";
+            break;
+        }
+        if (pp.empty()) {
+            return;
+        }
+        if (weights_.has(pp + "layer_multipliers")) {
+            const auto v = copy_i64(weights_.get(pp + "layer_multipliers"));
+            ple_mults_.assign(v.begin(), v.end());
+        } else {
+            ple_mults_ = lmp::model::qwen4::default_layer_multipliers(
+                lmp::model::qwen4::kDefaultHashSeed, ngram, cfg_.vocab_size, ple_idx);
+        }
+        if (weights_.has(pp + "ngram_heads_vocab_sizes") &&
+            weights_.has(pp + "ngram_heads_offsets")) {
+            ple_sizes_ = copy_i64(weights_.get(pp + "ngram_heads_vocab_sizes"));
+            ple_offs_ = copy_i64(weights_.get(pp + "ngram_heads_offsets"));
+        } else {
+            ple_sizes_.assign(static_cast<std::size_t>(n_heads), 0);
+            ple_offs_.assign(static_cast<std::size_t>(n_heads), 0);
+            std::int64_t total = 0;
+            const int base =
+                cfg_.ngram_vocab_size_base > 0 ? cfg_.ngram_vocab_size_base : 20000000;
+            for (int h = 0; h < n_heads; ++h) {
+                const int g = ple_idx * n_heads + h;
+                const int s = lmp::model::qwen4::nth_prime_after(base - 1, g + 1);
+                ple_sizes_[static_cast<std::size_t>(h)] = s;
+                ple_offs_[static_cast<std::size_t>(h)] = total;
+                total += s;
+            }
+        }
     }
 
     // The layer stack, shared verbatim by forward_logits and forward_logits_all so the two
@@ -655,6 +1035,21 @@ private:
             mx::array t = mx::astype(mx::reshape(input_ids, {-1}), mx::int32);
             mx::eval(t);
             MoeTrace::instance().set_token(t.data<int>()[0]);
+        }
+
+        if (cfg_.is_flash()) {
+            h = tile_hyper(h, cfg_.hc_count);
+            for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
+                h = forward_flash_layer(layer, h, seq_len, input_ids);
+            }
+            auto mix = gated_residual_read(h, weights_, prefix_ + "hyper_connection_mixer.",
+                                           cfg_.hc_count, cfg_.hidden_size, cfg_.hc_lowrank,
+                                           cfg_.rms_norm_eps, /*use_combine=*/false);
+            mx::array out = mix.mixed;
+            if (mtp_loaded_) {
+                last_hidden_ = out;
+            }
+            return out;
         }
 
         for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
@@ -732,9 +1127,24 @@ private:
         const int conv_dim = key_dim * 2 + value_dim;
 
         mx::array qkv = weights_.linear(inputs, p + "in_proj_qkv");
-        mx::array z = weights_.linear(inputs, p + "in_proj_z");
-        mx::array b = weights_.linear(inputs, p + "in_proj_b");
-        mx::array a = weights_.linear(inputs, p + "in_proj_a");
+        mx::array z = mx::array(0.0f, inputs.dtype());
+        mx::array b = mx::array(0.0f, inputs.dtype());
+        mx::array a = mx::array(0.0f, inputs.dtype());
+        const auto zba_it = fused_out_cuts_.find(p + "in_proj_zba");
+        if (zba_it != fused_out_cuts_.end()) {
+            const mx::array zba = weights_.linear(inputs, p + "in_proj_zba");
+            const int nz = zba_it->second[0];
+            const int nb = zba_it->second[1];
+            const std::vector<mx::array> parts =
+                mx::split(zba, mx::Shape{nz, nz + nb}, -1);
+            z = parts[0];
+            b = parts[1];
+            a = parts[2];
+        } else {
+            z = weights_.linear(inputs, p + "in_proj_z");
+            b = weights_.linear(inputs, p + "in_proj_b");
+            a = weights_.linear(inputs, p + "in_proj_a");
+        }
 
         mx::array conv_state = cache.conv_state.value_or(
             mx::zeros({B, cfg_.linear_conv_kernel_dim - 1, conv_dim}, inputs.dtype()));
@@ -780,8 +1190,17 @@ private:
         // arithmetically the same, but it allocates and evaluates a fresh array on every
         // one of these calls (twice per layer, 30 linear layers per token) and takes
         // rms_norm's weighted path instead of its unweighted one.
-        q = mx::multiply(inv2, mx::fast::rms_norm(q, std::nullopt, 1e-6f));
-        k = mx::multiply(inv1, mx::fast::rms_norm(k, std::nullopt, 1e-6f));
+        if (cfg_.is_flash()) {
+            // llama.cpp / the Flash reference L2-normalise q and k and stop there.
+            // The Qwen3.5 path below is RMS * 1/d on q (equivalent to L2/sqrt(d) on
+            // unit-scale inputs). Applying that extra 1/sqrt(d) here shrinks every
+            // GDN query by ~11x and is not how this checkpoint was trained.
+            q = exact_l2_norm(q);
+            k = exact_l2_norm(k);
+        } else {
+            q = mx::multiply(inv2, mx::fast::rms_norm(q, std::nullopt, 1e-6f));
+            k = mx::multiply(inv1, mx::fast::rms_norm(k, std::nullopt, 1e-6f));
+        }
 
         mx::array a_log = weights_.get(p + "A_log");
         mx::array dt_bias = weights_.get(p + "dt_bias");
@@ -804,7 +1223,14 @@ private:
         cache.offset += S;
 
         mx::array norm_w = weights_.get(p + "norm.weight");
-        mx::array gated = lmp::model::mlxl::precise_rms_norm_gated(out, z, norm_w, cfg_.rms_norm_eps);
+        // Flash: sigmoid, not silu. 36 of 48 layers are GDN; silu(z)=z*sigmoid(z)
+        // compounded across them is what collapsed skip-PLE decode to `!`. Do not
+        // key this off cfg_.output_gate_type — that string defaults to "sigmoid"
+        // on 27B/A3B, whose mlx-lm path is silu.
+        const auto gact = cfg_.is_flash() ? lmp::model::mlxl::GatedNormAct::Sigmoid
+                                          : lmp::model::mlxl::GatedNormAct::Silu;
+        mx::array gated =
+            lmp::model::mlxl::precise_rms_norm_gated(out, z, norm_w, cfg_.rms_norm_eps, gact);
         mx::array flat = mx::reshape(gated, {B, S, value_dim});
         return weights_.linear(flat, p + "out_proj");
     }
@@ -833,7 +1259,9 @@ private:
     }
 
     mx::array forward_self_attn(const std::string& p, const mx::array& h, KVCache& cache,
-                                QuantizedKVCache& qcache, int /*seq_len*/) {
+                                QuantizedKVCache& qcache, int /*seq_len*/,
+                                const mx::array* fuse_ln_gamma = nullptr,
+                                IndexerCache* indexer = nullptr) {
         namespace ff = mx::fast;
         const int B = static_cast<int>(h.shape()[0]);
         const int L = static_cast<int>(h.shape()[1]);
@@ -842,15 +1270,39 @@ private:
         const int head_dim = cfg_.head_dim;
         const int rotary_dim = static_cast<int>(head_dim * cfg_.partial_rotary_factor);
 
-        mx::array q_out = weights_.linear(h, p + "q_proj");
-        mx::array k = weights_.linear(h, p + "k_proj");
-        mx::array v = weights_.linear(h, p + "v_proj");
+        mx::array q_out = mx::array(0.0f, h.dtype());
+        mx::array k = mx::array(0.0f, h.dtype());
+        mx::array v = mx::array(0.0f, h.dtype());
+        const auto qkv_it = fused_out_cuts_.find(p + "qkv_proj");
+        if (qkv_it != fused_out_cuts_.end() && fuse_ln_gamma == nullptr) {
+            const mx::array qkv = weights_.linear(h, p + "qkv_proj");
+            const int nq = qkv_it->second[0];
+            const int nk = qkv_it->second[1];
+            const std::vector<mx::array> parts =
+                mx::split(qkv, mx::Shape{nq, nq + nk}, -1);
+            q_out = parts[0];
+            k = parts[1];
+            v = parts[2];
+        } else if (fuse_ln_gamma != nullptr && q4_fuse_rms_on()) {
+            q_out = weights_.rms_linear(h, *fuse_ln_gamma, cfg_.rms_norm_eps, p + "q_proj");
+            k = weights_.rms_linear(h, *fuse_ln_gamma, cfg_.rms_norm_eps, p + "k_proj");
+            v = weights_.rms_linear(h, *fuse_ln_gamma, cfg_.rms_norm_eps, p + "v_proj");
+        } else {
+            q_out = weights_.linear(h, p + "q_proj");
+            k = weights_.linear(h, p + "k_proj");
+            v = weights_.linear(h, p + "v_proj");
+        }
 
-        // q_proj emits [q_h0, g_h0, q_h1, g_h1, ...] per head — not [all_q, all_g].
-        const mx::array q_heads = mx::reshape(q_out, {B, L, n_heads, head_dim * 2});
-        const std::vector<mx::array> qg = mx::split(q_heads, 2, -1);
-        mx::array queries = mx::reshape(qg[0], {B, L, n_heads * head_dim});
-        mx::array gate = mx::reshape(qg[1], {B, L, n_heads * head_dim});
+        mx::array queries = q_out;
+        mx::array gate = mx::array(0.0f, h.dtype());
+        const bool fused_gate = cfg_.attn_output_gate;
+        if (fused_gate) {
+            // q_proj emits [q_h0, g_h0, q_h1, g_h1, ...] per head — not [all_q, all_g].
+            const mx::array q_heads = mx::reshape(q_out, {B, L, n_heads, head_dim * 2});
+            const std::vector<mx::array> qg = mx::split(q_heads, 2, -1);
+            queries = mx::reshape(qg[0], {B, L, n_heads * head_dim});
+            gate = mx::reshape(qg[1], {B, L, n_heads * head_dim});
+        }
 
         queries = mx::transpose(
             mx::reshape(ff::rms_norm(
@@ -871,6 +1323,17 @@ private:
         k = ff::rope(k, rotary_dim, false, cfg_.rope_theta, 1.0f, offset);
 
         const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+        std::optional<mx::array> qsa_mask;
+        if (indexer != nullptr && cfg_.indexer_head_dim > 0 && cfg_.indexer_budget > 0) {
+            const int idx_rotary = std::min(rotary_dim, cfg_.indexer_head_dim);
+            qsa_mask = qsa_indexer_mask(
+                h, weights_, p + "indexer.", *indexer, offset, cfg_.indexer_n_heads,
+                cfg_.indexer_kv_heads > 0 ? cfg_.indexer_kv_heads : 1, cfg_.indexer_head_dim,
+                cfg_.indexer_budget,
+                cfg_.indexer_compress_ratio > 0 ? cfg_.indexer_compress_ratio : 4, idx_rotary,
+                cfg_.rope_theta, cfg_.rms_norm_eps);
+        }
 
         // The conversion happens ONCE, on the first decode step of a long context, and
         // never during prefill. L == 1 is exactly the "prefill is behind us" signal: the
@@ -900,11 +1363,21 @@ private:
             // Say that with mask_mode rather than an empty mask argument: the type of that
             // argument changed between MLX 0.29 and 0.31 (vector<array> -> optional<array>),
             // and naming it here is what made the build version-specific.
-            attn = ff::scaled_dot_product_attention(
-                queries, k_cat, v_cat, scale, (L > 1) ? "causal" : "");
+            //
+            // MLX 0.32 refuses mask_mode="causal" together with an array mask. QSA's keep
+            // mask is already AND-causal, so pass it as mask_mode="array".
+            if (qsa_mask.has_value()) {
+                attn = ff::scaled_dot_product_attention(queries, k_cat, v_cat, scale, "array",
+                                                        qsa_mask);
+            } else {
+                attn = ff::scaled_dot_product_attention(
+                    queries, k_cat, v_cat, scale, (L > 1) ? "causal" : "");
+            }
         }
         attn = mx::reshape(mx::transpose(attn, {0, 2, 1, 3}), {B, L, n_heads * head_dim});
-        attn = mx::multiply(attn, mx::sigmoid(gate));
+        if (fused_gate) {
+            attn = mx::multiply(attn, mx::sigmoid(gate));
+        }
         return weights_.linear(attn, p + "o_proj");
     }
 };

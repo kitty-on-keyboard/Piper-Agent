@@ -67,6 +67,11 @@ struct KVCache {
                 mx::slice(*values, {0, 0, 0, 0}, {B, n_kv, offset, vd})};
     }
 
+    // Selected-token gather along the sequence axis. `indices` is [n] into [0, offset).
+    std::pair<mx::array, mx::array> fetch_gathered(const mx::array& indices) const {
+        return {mx::take(*keys, indices, 2), mx::take(*values, indices, 2)};
+    }
+
     // Rollback, for speculative decoding. `offset` is the ONLY thing that says how much of
     // the over-allocated buffer is real -- update_and_fetch slices to it, and forward_self_attn
     // reads it as rope's position base -- so discarding a tail is an integer assignment, not

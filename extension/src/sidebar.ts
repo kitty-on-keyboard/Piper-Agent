@@ -45,6 +45,7 @@ import {
  *  asked for, whether it worked, and roughly when.
  */
 interface RunRecord {
+  runId?: string;
   mission: string;
   reason: string;
   iterations: number;
@@ -241,6 +242,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private record(n: RunEndNotification): void {
     const runs = this.history();
     runs.unshift({
+      runId: n.run_id,
       mission: this.missionInFlight || "(untitled run)",
       reason: n.termination_reason,
       iterations: n.iterations,
@@ -269,29 +271,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // No ready() here on purpose: opening the history panel must not start a sidecar or
     // load 19 GB of weights. If one is already up its list is used, and if not the panel
     // falls back to what this window remembers.
+    let source = "memento";
+    let runs: Array<{
+      runId: string;
+      mission: string;
+      reason: string;
+      iterations: number;
+      completed: boolean;
+      finished?: boolean;
+      observations?: number;
+      at: number;
+      resumable: boolean;
+    }> = [];
     if (root && this.client.running) {
       const reply = await this.client.sessions(root);
-      if (!reply.error && reply.sessions) {
-        this.post("history", {
-          runs: reply.sessions.map((s: SessionSummary) => ({
-            runId: s.run_id,
-            mission: s.mission,
-            reason: s.termination_reason || (s.finished ? "" : "died mid-run"),
-            iterations: s.iterations,
-            completed: s.completed,
-            finished: s.finished,
-            observations: s.observations,
-            at: Math.round(s.started_wall_ns / 1e6),
-            resumable: s.observations > 0,
-          })),
-        });
-        return;
+      if (!reply.error && reply.sessions && reply.sessions.length > 0) {
+        source = "sidecar";
+        runs = reply.sessions.map((s: SessionSummary) => ({
+          runId: s.run_id,
+          mission: s.mission,
+          reason: s.termination_reason || (s.finished ? "" : "died mid-run"),
+          iterations: s.iterations,
+          completed: s.completed,
+          finished: s.finished,
+          observations: s.observations,
+          at: Math.round(s.started_wall_ns / 1e6),
+          // A minted run_id is enough. Requiring observations > 0 hid plan-heavy
+          // conversations and made the row look clickable-or-not at random.
+          resumable: Boolean(s.run_id),
+        }));
       }
     }
-    // No sidecar, or it refused: show what this window remembers, unresumable.
-    this.post("history", {
-      runs: this.history().map((r) => ({ ...r, runId: "", resumable: false })),
-    });
+    if (runs.length === 0) {
+      runs = this.history().map((r) => ({
+        ...r,
+        runId: r.runId || "",
+        resumable: Boolean(r.runId),
+      }));
+    }
+    this.post("history", { runs, source });
   }
 
   /** Reopens a previous run's conversation. Restores context; does not restart the run. */
@@ -685,6 +703,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     "prompts.plan",
     "prompts.debug",
     "speculativeDecoding",
+    "commitThink",
+    "shadowCompact",
   ];
 
   /** Pushes current configuration into the drawer. The drawer holds no state of its
@@ -884,7 +904,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // because that is when the context it names stops existing.
     if (this.currentRunId !== undefined) {
       this.runInFlight = true;
-      const reply = await this.client.message(this.currentRunId, text, imagePaths);
+      const reply = await this.client.message(
+        this.currentRunId,
+        text,
+        imagePaths,
+        this.host.settings()
+      );
       if (reply.error) this.fail(reply.error);
       else if (reply.run_id) this.currentRunId = reply.run_id;
       return;

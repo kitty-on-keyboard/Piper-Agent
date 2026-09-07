@@ -241,6 +241,37 @@ TEST(structure_is_rejected_inside_think) {
     CHECK(g.permitted(tok().specials().think_close));
 }
 
+TEST(commit_think_block_is_illegal_in_think_and_legal_after_close) {
+    REQUIRE(tok().loaded());
+    parsephony::ToolSpec spec;
+    spec.name = "commit_think_block";
+    parsephony::ParamSpec path;
+    path.name = "path";
+    path.type = parsephony::ParamType::Text;
+    path.required = true;
+    parsephony::ParamSpec id;
+    id.name = "block_id";
+    id.type = parsephony::ParamType::Number;
+    id.required = true;
+    spec.params.push_back(path);
+    spec.params.push_back(id);
+    const std::vector<parsephony::ToolSpec> tools = {spec};
+    TurnGrammar g(tok(), tools);
+    CHECK(g.advance(tok().specials().tool_call_open) == Advance::Rejected);
+    CHECK(!g.permitted(tok().specials().tool_call_open));
+    CHECK(g.mask().any());
+    CHECK(g.advance(tok().specials().think_close) == Advance::Ok);
+    CHECK(g.permitted(tok().specials().tool_call_open));
+    CHECK(g.advance(tok().specials().tool_call_open) == Advance::Ok);
+    CHECK(feed_text(g, "<function=commit_think_block>\n<parameter=path>\nout.txt\n"
+                       "</parameter>\n<parameter=block_id>\n0\n</parameter>\n"
+                       "</function>\n") == Advance::Ok);
+    CHECK(g.advance(tok().specials().tool_call_close) == Advance::Ok);
+    REQUIRE(g.has_tool_call());
+    CHECK_EQ(g.tool_name(), std::string("commit_think_block"));
+    CHECK(g.mask().any());
+}
+
 TEST(a_valid_tool_call_is_parsed_by_the_automaton) {
     REQUIRE(tok().loaded());
     const auto tools = one_tool();

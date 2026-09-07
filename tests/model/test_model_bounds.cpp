@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -114,6 +115,12 @@ TEST(ffn_kind_classifies_known_model_types_and_refuses_the_rest) {
     CHECK(ffn_kind_for("qwen3_5_moe") == FfnKind::Moe);
     CHECK(ffn_kind_for("qwen3_5_text") == FfnKind::Dense);
     CHECK(ffn_kind_for("qwen3_5") == FfnKind::Dense);
+
+    CHECK(ffn_kind_for("qwen4_exp") == FfnKind::Moe);
+    CHECK(ffn_kind_for("qwen4_exp_text") == FfnKind::Moe);
+    CHECK(mlxl::is_qwen4_exp("qwen4_exp"));
+    CHECK(mlxl::is_qwen4_exp("qwen4_exp_text"));
+    CHECK(!mlxl::is_qwen4_exp("qwen3_5_moe_text"));
 
     CHECK(ffn_kind_for("llama") == FfnKind::Unknown);
     CHECK(ffn_kind_for("") == FfnKind::Unknown);
@@ -417,6 +424,17 @@ TEST(a_context_budget_the_device_cannot_hold_is_refused) {
     CHECK(max_affordable_context_tokens(kv, weights, working_set * 2) > affordable);
 }
 
+TEST(flash_context_budget_excludes_offloaded_ple_from_resident_weights) {
+    using lmp::model::max_affordable_context_tokens;
+    // 16 full-attention layers, 2 kv heads, head_dim 256, plus QSA indexer keys.
+    const std::size_t kv = std::size_t{2} * 16 * 2 * 256 * 2 + 16 * 128 * 2;
+    const std::size_t working_set = 40200000000ULL;
+    const std::size_t resident = 32700000000ULL; // ~32.7 GB non-PLE
+    const std::size_t ple = 28800000000ULL;
+    CHECK(max_affordable_context_tokens(kv, resident, working_set) > 0);
+    CHECK_EQ(max_affordable_context_tokens(kv, resident + ple, working_set), 0);
+}
+
 // The three-level thinking control. Both halves of it are guessable-and-wrong, which is
 // the reason each has a test: `high` reads as an obvious fourth level and the reference
 // template raises on it, and the two checkpoints on this machine are indistinguishable by
@@ -488,4 +506,109 @@ TEST(reasoning_effort_support_is_read_from_the_template_not_the_name) {
     // Nothing readable at all answers false, so an unreadable checkpoint keeps its own
     // default rather than being handed an instruction it may not understand.
     CHECK(!supports_reasoning_effort(root + "/missing"));
+}
+
+TEST(qwen4_exp_config_round_trips_layer_types_and_ple_ids) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream out(root + "/config.json");
+        out << R"({
+  "model_type": "qwen4_exp",
+  "text_config": {
+    "model_type": "qwen4_exp_text",
+    "hidden_size": 2560,
+    "num_hidden_layers": 8,
+    "vocab_size": 248320,
+    "num_attention_heads": 24,
+    "num_key_value_heads": 2,
+    "head_dim": 256,
+    "partial_rotary_factor": 0.25,
+    "full_attention_interval": 4,
+    "hc_count": 4,
+    "hc_lowrank": 320,
+    "indexer_n_heads": 4,
+    "indexer_kv_heads": 1,
+    "indexer_head_dim": 128,
+    "indexer_budget": 2048,
+    "indexer_compress_ratio": 4,
+    "heads_per_ngram": 8,
+    "ngram_size": 3,
+    "ngram_vocab_size_base": 20000000,
+    "split_ngram_parts": 128,
+    "make_ngram_vocab_size_divisible_by": 128,
+    "ple_embed_dim": 2560,
+    "ple_conv_kernel_size": 4,
+    "ple_layer_ids": [2],
+    "attn_output_gate": true,
+    "output_gate_type": "sigmoid",
+    "layer_types": [
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention"
+    ]
+  }
+})";
+    }
+    mlxl::Qwen35MoeConfig cfg;
+    REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+    CHECK(cfg.model_type == "qwen4_exp_text");
+    CHECK(cfg.is_flash());
+    CHECK(cfg.ffn_kind() == mlxl::FfnKind::Moe);
+    CHECK_EQ(cfg.hc_count, 4);
+    CHECK_EQ(cfg.hc_lowrank, 320);
+    CHECK_EQ(cfg.indexer_n_heads, 4);
+    CHECK_EQ(cfg.indexer_kv_heads, 1);
+    CHECK_EQ(cfg.indexer_head_dim, 128);
+    CHECK_EQ(cfg.indexer_budget, 2048);
+    CHECK_EQ(cfg.indexer_compress_ratio, 4);
+    CHECK_EQ(cfg.heads_per_ngram, 8);
+    CHECK_EQ(cfg.ngram_size, 3);
+    CHECK_EQ(cfg.ngram_vocab_size_base, 20000000);
+    CHECK_EQ(cfg.split_ngram_parts, 128);
+    CHECK_EQ(cfg.ple_embed_dim, 2560);
+    CHECK_EQ(cfg.ple_conv_kernel_size, 4);
+    CHECK(cfg.attn_output_gate);
+    CHECK(cfg.output_gate_type == "sigmoid");
+    REQUIRE(cfg.layer_types.size() == 8);
+    CHECK(cfg.is_linear_layer(0));
+    CHECK(cfg.is_linear_layer(1));
+    CHECK(cfg.is_linear_layer(2));
+    CHECK(!cfg.is_linear_layer(3));
+    CHECK(!cfg.is_linear_layer(7));
+    REQUIRE(cfg.ple_layer_ids.size() == 1);
+    CHECK_EQ(cfg.ple_layer_ids[0], 2);
+    CHECK(!cfg.is_ple_layer(0));
+    CHECK(cfg.is_ple_layer(1)); // 0-indexed layer 1; config id 2
+    CHECK(!cfg.is_ple_layer(2));
+}
+
+TEST(qwen4_exp_falls_back_to_modulo_when_layer_types_absent) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream out(root + "/config.json");
+        out << R"({"text_config":{"model_type":"qwen4_exp_text","hidden_size":2560,
+            "num_hidden_layers":8,"vocab_size":248320,"full_attention_interval":4}})";
+    }
+    mlxl::Qwen35MoeConfig cfg;
+    REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+    CHECK(cfg.layer_types.empty());
+    CHECK(cfg.is_linear_layer(0));
+    CHECK(cfg.is_linear_layer(2));
+    CHECK(!cfg.is_linear_layer(3));
+    CHECK(!cfg.attn_output_gate);
+}
+
+TEST(qwen4_exp_null_attn_output_gate_disables_fused_q_gate) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream out(root + "/config.json");
+        out << R"({"text_config":{"model_type":"qwen4_exp_text","hidden_size":2560,
+            "num_hidden_layers":8,"vocab_size":248320,"attn_output_gate":null}})";
+    }
+    mlxl::Qwen35MoeConfig cfg;
+    REQUIRE(mlxl::load_qwen35_moe_config(root, cfg));
+    CHECK(cfg.is_flash());
+    CHECK(!cfg.attn_output_gate);
 }

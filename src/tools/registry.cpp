@@ -12,7 +12,9 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -32,6 +34,23 @@ namespace {
 namespace fsx = lmp::platform;
 using parsephony::ParamSpec;
 using parsephony::ParamType;
+
+void dbg_log(const char* loc, const char* msg, const char* hid, const std::string& data) {
+    // #region agent log
+    std::ofstream f(
+        "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
+        std::ios::app);
+    if (!f) {
+        return;
+    }
+    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    f << "{\"sessionId\":\"3dfcb2\",\"runId\":\"post-fix\",\"hypothesisId\":\"" << hid
+      << "\",\"location\":\"" << loc << "\",\"message\":\"" << msg << "\",\"data\":{" << data
+      << "},\"timestamp\":" << ts << "}\n";
+    // #endregion
+}
 
 // A failed write, classified by WHY -- because `retryable` tells the model (and any
 // consumer of the result) whether re-sending the identical bytes can ever come back
@@ -404,6 +423,15 @@ const ToolDecl* Registry::find(const std::string& name) const {
         }
     }
     return nullptr;
+}
+
+void Registry::set_think_blocks_source(ThinkBlocksFn source) {
+    think_blocks_source_ = std::move(source);
+}
+
+void Registry::set_think_blocks(std::vector<ThinkBlock> blocks) {
+    think_blocks_owned_ = std::move(blocks);
+    think_blocks_source_ = [this] { return think_blocks_owned_; };
 }
 
 ToolResult Registry::run_git(const std::string& args, int approved_tier) {
@@ -832,6 +860,35 @@ Registry::Registry(WorkspaceContext ctx)
                     "(" + path +
                         " does not look like an image. view_image reads png, jpg, heic, "
                         "gif, bmp, tiff and webp; for text use read_file.)");
+            }
+            // A path that is not on disk is a missing file, not a decode failure.
+            // ImageIO's "could not open PATH as an image" was read as a sandbox
+            // denial on r-18d29cca3dc62598: Blender had returned a rendered path
+            // that never landed, view_image failed, and the next two turns were
+            // df/mount/file at ~6k think tokens each.
+            {
+                const fsx::OpenedFile opened = workspace_fs_.open_file_readonly(path);
+                if (!opened.ok()) {
+                    if (opened.status == fsx::FsStatus::NotFound) {
+                        std::string err_msg = "File not found at '" + path + "'";
+                        const std::string where = suggest_paths_for(path);
+                        err_msg += where.empty()
+                                       ? ". Nothing by that name is in the workspace. "
+                                         "This read was not blocked -- the file is not "
+                                         "on disk."
+                                       : where;
+                        // #region agent log
+                        dbg_log("registry.cpp:view_image", "view_image_missing", "A",
+                                "\"path\":\"" + path + "\",\"error_class\":\"NotFound\"");
+                        // #endregion
+                        return ToolResult::error(ErrorClass::NotFound, false, err_msg);
+                    }
+                    // #region agent log
+                    dbg_log("registry.cpp:view_image", "view_image_open_fail", "A",
+                            "\"path\":\"" + path + "\"");
+                    // #endregion
+                    return ToolResult::error(ErrorClass::Malformed, false, opened.error);
+                }
             }
             // Decoded HERE as well as at render time, so a file that cannot be read is a
             // failed tool call the model can react to -- rather than a prompt that throws
@@ -1353,7 +1410,9 @@ Registry::Registry(WorkspaceContext ctx)
                         "replace_in_file: it is not just tidier, it is cheaper -- "
                         "replacing the whole of a file this run did not write destroys "
                         "the existing content and stops for a human decision, while a "
-                        "scoped edit does not.";
+                        "scoped edit does not. If one generation cannot finish a NEW "
+                        "file, write_file a first slice that will complete, then "
+                        "append_file the rest -- resending a landed chunk duplicates.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
                          param("content", ParamType::Text, true),
@@ -1417,6 +1476,117 @@ Registry::Registry(WorkspaceContext ctx)
                                  std::to_string(get(p, "content")->size()) +
                                  " bytes to " + *get(p, "path")),
                 get(p, "content")->size());
+        });
+    }
+    // --- commit_think_block -------------------------------------------------
+    //
+    // Exact bytes of a closed think fence, through the same write_file gates. Declared
+    // only when WorkspaceContext::commit_think is set; default on.
+    if (ctx_.commit_think) {
+        ToolDecl d;
+        d.name = "commit_think_block";
+        d.description =
+            "Write the exact bytes of a closed markdown fence harvested from this turn's "
+            "<think> to a file. A fence is a ``` opener (optional language tag) through "
+            "the next line that is only ```. block_id is that fence's 0-based index this "
+            "turn: the first closed fence is 0, the second is 1, at most 3. Same sandbox, "
+            "symlink/directory refuse, and read-before-write / expected_absent rules as "
+            "write_file. Does not invent or repair fences. Prefer this over pasting the "
+            "same bytes into write_file when a full file was drafted in think.";
+        d.spec.name = d.name;
+        d.spec.params = {param("path", ParamType::Text, true),
+                         param("block_id", ParamType::Number, true),
+                         param("expect_sha256", ParamType::Text, false)};
+        d.mutates_workspace = true;
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            const std::string* path_p = get(p, "path");
+            const std::string* id_p = get(p, "block_id");
+            if (path_p == nullptr || id_p == nullptr) {
+                return ToolResult::error(ErrorClass::Malformed, false,
+                                         "path and block_id are required");
+            }
+            const std::string& path = *path_p;
+            char* end = nullptr;
+            const long parsed = std::strtol(id_p->c_str(), &end, 10);
+            if (end == id_p->c_str() || *end != '\0' || parsed < 0) {
+                return ToolResult::error(ErrorClass::Malformed, false,
+                                         "block_id must be a non-negative integer");
+            }
+            const int block_id = static_cast<int>(parsed);
+            std::vector<ThinkBlock> blocks;
+            if (think_blocks_source_) {
+                blocks = think_blocks_source_();
+            }
+            if (blocks.empty()) {
+                return ToolResult::error(ErrorClass::NotFound, false,
+                                         "no closed markdown fences harvested this turn");
+            }
+            const ThinkBlock* block = nullptr;
+            for (const ThinkBlock& b : blocks) {
+                if (b.block_id == block_id) {
+                    block = &b;
+                    break;
+                }
+            }
+            if (block == nullptr) {
+                return ToolResult::error(ErrorClass::NotFound, false,
+                                         "no think block with block_id " +
+                                             std::to_string(block_id) +
+                                             " this turn");
+            }
+            const std::string* expect = get(p, "expect_sha256");
+            if (expect != nullptr && *expect != block->sha256) {
+                return ToolResult::error(ErrorClass::Conflict, false,
+                                         "expect_sha256 does not match harvested block");
+            }
+            const std::string_view content = block->content;
+            const fsx::ContainedPath resolved = workspace_fs_.contained_path(path);
+            if (!resolved.ok()) {
+                return contained_failure(path, resolved);
+            }
+            fsx::WritePrecondition pre;
+            const fsx::FileContents cur =
+                workspace_fs_.read_file_whole(path, ctx_.max_read_bytes);
+            if (cur.status == fsx::FsStatus::Symlink ||
+                cur.status == fsx::FsStatus::InvalidPath) {
+                return refused_path(path, cur.error);
+            }
+            if (cur.status == fsx::FsStatus::IsDirectory) {
+                return ToolResult::error(ErrorClass::Malformed, false, cur.error);
+            }
+            const bool exists =
+                cur.ok() || cur.status == fsx::FsStatus::TooLarge;
+            if (exists) {
+                if (cur.ok() && cur.bytes == content) {
+                    return ToolResult::no_change(
+                        path + " already contained exactly these " +
+                        std::to_string(content.size()) +
+                        " bytes; nothing was written and the file is unchanged.");
+                }
+                pre.expected_version = resolve_expected_version(resolved.absolute, p);
+                if (pre.expected_version.empty()) {
+                    return need_read_before_write(path);
+                }
+            } else if (cur.status == fsx::FsStatus::NotFound) {
+                pre.expected_absent = true;
+            } else {
+                return ToolResult::error(ErrorClass::Malformed, false, cur.error);
+            }
+            const CommitOutcome w = commit_write(resolved, content, pre);
+            if (!w.ok()) {
+                return write_failure(w.write);
+            }
+            if (w.unchanged) {
+                return ToolResult::no_change(
+                    path + " already contained exactly these " +
+                    std::to_string(content.size()) +
+                    " bytes; nothing was written and the file is unchanged.");
+            }
+            return measured_edit(
+                ToolResult::okay("wrote " + std::to_string(content.size()) +
+                                 " bytes to " + path + " from think block " +
+                                 std::to_string(block_id) + " sha256=" + block->sha256),
+                content.size());
         });
     }
     // --- replace_in_file ----------------------------------------------------
@@ -1757,8 +1927,11 @@ Registry::Registry(WorkspaceContext ctx)
         ToolDecl d;
         d.name = "append_file";
         d.description = "Append content to the end of a file, creating it if absent. "
-                        "An existing file's current bytes become the content version "
-                        "checked at apply time.";
+                        "Use this to finish a NEW file that will not fit in one "
+                        "write_file: first slice via write_file, then append_file the "
+                        "rest. Do not resend bytes that already landed -- that "
+                        "duplicates. An existing file's current bytes become the "
+                        "content version checked at apply time.";
         d.spec.name = d.name;
         d.spec.params = {param("path", ParamType::Text, true),
                          param("content", ParamType::Text, true),

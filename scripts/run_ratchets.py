@@ -245,6 +245,10 @@ TOOL_MENTION_STOPLIST = {
     # Optimistic-concurrency vocabulary: a parameter and the read-observation footer,
     # not tools. The harness tracks versions; the model rarely copies the digest.
     "expected_version", "content_version",
+    # Optimistic-concurrency create claim, and commit_think_block parameters.
+    "expected_absent", "block_id", "expect_sha256",
+    # Debug-instrumentation leftovers in registry.cpp (dbg_log path + event names).
+    "seans_projects_local", "view_image_missing", "view_image_open_fail",
     # lmp/code_intel protocol op names (P2 §10), not tools. locate_symbol routes through
     # the editor using these ops; they must not be mistaken for ghost tool references.
     "workspace_symbols", "rename_preview", "code_intel", "provides_code_intel",

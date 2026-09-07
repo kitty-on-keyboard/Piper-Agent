@@ -54,6 +54,8 @@ function settingsFromConfig(): RunSettings {
     sandbox_tier: cfg.get<number>("sandboxTier", 1),
     auto_approve_exec: cfg.get<boolean>("autoApproveExec", true),
     auto_approve_writes: cfg.get<boolean>("autoApproveWrites", true),
+    commit_think: cfg.get<boolean>("commitThink", true),
+    shadow_compact: cfg.get<boolean>("shadowCompact", true),
     require_approval: cfg.get<boolean>("requireApproval", false),
     // One prompt per mode, so switching mode switches persona. Empty is meaningful:
     // it means the built-in.
@@ -62,7 +64,7 @@ function settingsFromConfig(): RunSettings {
     // newline is the one character a shell command cannot carry unescaped.
     allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
-    max_new_tokens: cfg.get<number>("maxNewTokens", 4096),
+    max_new_tokens: cfg.get<number>("maxNewTokens", 32768),
     // How hard to think, in the checkpoint's own vocabulary. `medium` is the default
     // because `medium` is what every run has effectively had until now: the reference
     // template defaults to xhigh, but this harness renders its own prompt and has never

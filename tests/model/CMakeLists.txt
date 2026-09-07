@@ -67,6 +67,9 @@ lmp_add_test(test_model_bounds SOURCES test_model_bounds.cpp LABELS gate LINK lm
 add_dependencies(test_model_bounds lmp_mini_vocab)
 target_compile_definitions(test_model_bounds PRIVATE LMP_MINI_VOCAB_JSON="${LMP_MINI_VOCAB}")
 
+# Flash-Next / qwen4_exp CPU reference: GR, QSA mask, PLE hash. No GPU, no checkpoint.
+lmp_add_test(test_qwen4_exp_ops SOURCES test_qwen4_exp_ops.cpp LABELS gate)
+
 # Image -> patch tensor. Runs in the GATE: no checkpoint, no GPU, no MLX. The patch
 # ORDER it pins is a contract the vision tower cannot check for itself -- raster order and
 # merge-block order have identical shapes and both produce finite activations.
@@ -92,6 +95,9 @@ lmp_add_test(test_vision_tower SOURCES test_vision_tower.cpp LABELS realmodel
              LINK lmp_model simdjson TIMEOUT 900)
 lmp_stage_metallib(test_vision_tower)
 lmp_stage_metallib(test_kv_reuse_realmodel)
+lmp_add_test(test_kv_compact_realmodel SOURCES test_kv_compact_realmodel.cpp LABELS realmodel
+             LINK lmp_loop TIMEOUT 1800)
+lmp_stage_metallib(test_kv_compact_realmodel)
 lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK lmp_model simdjson TIMEOUT 900)
 # The gate/up fusion is a claim about arithmetic -- stacking two quantized weight matrices
 # on the OUTPUT axis cannot move an affine group boundary -- so it is asserted as exact
@@ -99,7 +105,20 @@ lmp_add_test(test_spec_cache SOURCES test_spec_cache.cpp LABELS realmodel LINK l
 # Metal but no weights, which is why it is `realmodel` yet finishes in milliseconds.
 lmp_add_test(test_switch_glu_fusion SOURCES test_switch_glu_fusion.cpp LABELS realmodel
              LINK lmp_model simdjson TIMEOUT 120)
+lmp_stage_metallib(test_switch_glu_fusion)
+# Affine-4 GEMM sidecar vs mx::quantized_matmul. Metal, synthetic weights, no checkpoint.
+lmp_add_test(test_qgemm SOURCES test_qgemm.cpp LABELS realmodel LINK lmp_model simdjson
+             TIMEOUT 420)
+lmp_stage_metallib(test_qgemm)
+set_source_files_properties(test_qgemm.cpp PROPERTIES COMPILE_OPTIONS
+  "-Wno-conversion;-Wno-sign-conversion;-Wno-old-style-cast;-Wno-shadow")
 lmp_stage_metallib(test_spec_cache)
+# Tiny Flash-Next modules (GR / QSA / PLE) vs the GPU-free spec. Metal, no checkpoint.
+lmp_add_test(test_qwen4_exp_graph SOURCES test_qwen4_exp_graph.cpp LABELS realmodel
+             LINK lmp_model simdjson TIMEOUT 120)
+lmp_stage_metallib(test_qwen4_exp_graph)
+set_source_files_properties(test_qwen4_exp_graph.cpp PROPERTIES COMPILE_OPTIONS
+  "-Wno-conversion;-Wno-sign-conversion;-Wno-old-style-cast;-Wno-shadow")
 # Same relaxation mlx_backend.cpp and the diag driver carry: this TU includes the vendored
 # MLX numerics directly, to drive Qwen35MoeModel's cache API below the backend seam.
 set_source_files_properties(test_spec_cache.cpp PROPERTIES COMPILE_OPTIONS
@@ -108,7 +127,7 @@ set_source_files_properties(test_spec_cache.cpp PROPERTIES COMPILE_OPTIONS
 # A diagnostic driver, not a test: prints the model's actual turn so a failure can be
 # attributed by observation rather than by guessing (S19.3). Built on demand.
 add_executable(lmp_diag EXCLUDE_FROM_ALL diag_main.cpp diag_moe.cpp)
-target_link_libraries(lmp_diag PRIVATE lmp_warnings lmp_assertions lmp_model simdjson)
+target_link_libraries(lmp_diag PRIVATE lmp_warnings lmp_assertions lmp_model lmp_context simdjson)
 lmp_stage_metallib(lmp_diag)
 # Same relaxation mlx_backend.cpp carries: these TUs include the vendored MLX numerics
 # directly so the scan can be benchmarked against its own reference implementation.

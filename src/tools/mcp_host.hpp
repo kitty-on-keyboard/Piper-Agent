@@ -28,9 +28,11 @@
 //      `irreversible`, which routes every call through the approval card. The operator
 //      opts a server into `trusted` explicitly; the server's own MCP annotations never
 //      decide this, because the MCP spec says they must not be trusted for security.
-//      On a trusted server, `readOnlyHint` / `destructiveHint` DO decide mutates vs
-//      read -- that is a statement about what the tool does, used for mode policy,
-//      not a bypass of Seatbelt. Untrusted servers keep the assume-worst flags.
+//      On a trusted server, `readOnlyHint` decides mutates vs read -- that is a
+//      statement about what the tool does, used for mode policy, not a bypass of
+//      Seatbelt. `destructiveHint` is already covered by mutates_workspace; it does
+//      not set `irreversible` (that flag is containment / delete-class cards).
+//      Untrusted servers keep the assume-worst flags.
 //   3. AVAILABILITY. A server that fails to spawn, refuses the handshake, or hangs leaves
 //      its tools ABSENT and the run continues. A broken server must never be able to
 //      stall a turn, so every call carries a timeout.

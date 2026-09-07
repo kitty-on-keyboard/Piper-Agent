@@ -1,11 +1,16 @@
 #include "src/model/mlx_backend.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
+#include <span>
 #include <variant>
+#include <vector>
 
 #include "src/model/sampler.hpp"
 
@@ -76,6 +81,10 @@ std::size_t prefill_chunk() {
 // Returns the displaced limit through `previous`, and whether it wired anything at all:
 // undoing this on unload is what gives the memory back (see ~MlxBackend), and undoing a
 // limit that was never raised would pin the WRONG value.
+//
+// Flash-Next PLE shards are never mx::eval'd (WeightStore::is_offloaded_key). Wiring
+// the recommended working set therefore cannot pin the 51B n-gram table; do not raise
+// the limit to "model size including PLE".
 bool wire_working_set(std::size_t& previous) {
     if (!mx::metal::is_available()) {
         return false;
@@ -451,14 +460,10 @@ class MlxSpecForward final : public SpecForward {
             return;
         }
         Phase _p(phases_.mtp_step_ms);
-        const std::array<TokenId, 1> ids_buf{tok};
-        mx::array ids = mx::array(ids_buf.data(), {1, 1}, mx::int32);
-        mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
-                                mx::float32);
-        mx::array next = mx::astype(model_.mtp_forward(ids, h), mx::float32);
-        mx::eval(next);
-        const float* data = next.data<float>();
-        out_hidden.assign(data, data + next.size());
+        mx::array next = mtp_forward_gpu(tok, hidden);
+        mx::array next_f = mx::astype(next, mx::float32);
+        mx::eval(next_f);
+        retain_mtp_hidden(std::move(next), next_f, out_hidden);
     }
 
     void mtp_logits(std::span<const float> hidden, std::vector<float>& row) override {
@@ -468,23 +473,73 @@ class MlxSpecForward final : public SpecForward {
         }
         Phase _p(phases_.mtp_logits_ms);
         ++phases_.mtp_logits_calls;
-        mx::array h = mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())},
-                                mx::float32);
-        // The TARGET's head. The MTP checkpoint ships none, which is also why a drafted
-        // token is not free -- this projection is the most expensive tensor either model
-        // touches, ~0.7 GB at 4-bit against the head body's ~0.15 GB.
-        mx::array logits = mx::astype(model_.logits_from_hidden_public(h), mx::float32);
+        mx::array logits = mx::astype(model_.logits_from_hidden_public(hidden_gpu(hidden)),
+                                      mx::float32);
         mx::eval(logits);
         const float* data = logits.data<float>();
         row.assign(data, data + logits.size());
     }
 
+    TokenId mtp_step_greedy(TokenId tok, std::span<const float> hidden,
+                            std::vector<float>& out_hidden) override {
+        out_hidden.clear();
+        if (!model_.has_mtp() || hidden.empty()) {
+            return 0;
+        }
+        // One eval of (layer + LM head + argmax). The vocab row never comes to the host:
+        // the drafter is greedy and the verifier is what preserves the target distribution.
+        Phase _p(phases_.mtp_logits_ms);
+        ++phases_.mtp_logits_calls;
+        mx::array next = mtp_forward_gpu(tok, hidden);
+        mx::array idx = mx::argmax(model_.logits_from_hidden_public(next));
+        mx::array next_f = mx::astype(next, mx::float32);
+        mx::eval({idx, next_f});
+        retain_mtp_hidden(std::move(next), next_f, out_hidden);
+        return static_cast<TokenId>(idx.data<std::uint32_t>()[0]);
+    }
+
+    TokenId mtp_argmax(std::span<const float> hidden) override {
+        if (!model_.has_mtp() || hidden.empty()) {
+            return 0;
+        }
+        Phase _p(phases_.mtp_logits_ms);
+        ++phases_.mtp_logits_calls;
+        mx::array idx = mx::argmax(model_.logits_from_hidden_public(hidden_gpu(hidden)));
+        mx::eval(idx);
+        return static_cast<TokenId>(idx.data<std::uint32_t>()[0]);
+    }
+
     void mtp_trim(std::size_t n) override { model_.mtp_trim(static_cast<int>(n)); }
-    void mtp_reset() override { model_.mtp_reset(); }
+    void mtp_reset() override {
+        mtp_h_gpu_.reset();
+        mtp_h_host_.clear();
+        model_.mtp_reset();
+    }
 
   private:
     mx::array impl_forward_all(const mx::array& ids) { return model_.forward_logits_all(ids); }
     mx::array impl_forward_last(const mx::array& ids) { return model_.forward_logits(ids); }
+
+    mx::array hidden_gpu(std::span<const float> hidden) {
+        if (mtp_h_gpu_ && mtp_h_host_.size() == hidden.size() &&
+            std::equal(mtp_h_host_.begin(), mtp_h_host_.end(), hidden.begin())) {
+            return *mtp_h_gpu_;
+        }
+        return mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())}, mx::float32);
+    }
+
+    mx::array mtp_forward_gpu(TokenId tok, std::span<const float> hidden) {
+        const std::array<TokenId, 1> ids_buf{tok};
+        mx::array ids = mx::array(ids_buf.data(), {1, 1}, mx::int32);
+        return model_.mtp_forward(ids, hidden_gpu(hidden));
+    }
+
+    void retain_mtp_hidden(mx::array gpu, const mx::array& host_f32, std::vector<float>& out) {
+        const float* data = host_f32.data<float>();
+        out.assign(data, data + host_f32.size());
+        mtp_h_gpu_ = std::move(gpu);
+        mtp_h_host_ = out;
+    }
 
     // Accumulates into one phase counter for the lifetime of the scope. Wall time, not
     // GPU time: every one of these phases ends in an mx::eval, so the barrier is inside
@@ -505,6 +560,8 @@ class MlxSpecForward final : public SpecForward {
     mlxl::Qwen35MoeModel::CacheCheckpoint mark_{};
     std::size_t ledger_mark_ = 0;
     SpecPhases phases_{};
+    std::optional<mx::array> mtp_h_gpu_;
+    std::vector<float> mtp_h_host_;
 };
 
 // The speculative decode loop. Separate from generate() so the plain path keeps the exact
@@ -771,6 +828,62 @@ std::vector<mlxl::Qwen35MoeModel::EmbedSplice> splices_for_chunk(
     return out;
 }
 
+void reset_live_kv(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
+                   mlxl::Qwen35MoeModel::CacheCheckpoint& ckpt_cp, std::size_t& ckpt_len,
+                   bool& ckpt_valid, GenResult& r) {
+    model.reset_cache();
+    ledger.clear();
+    ckpt_cp = {};
+    ckpt_len = 0;
+    ckpt_valid = false;
+    const std::size_t held = mx::get_cache_memory();
+    mx::clear_cache();
+    const std::size_t left = mx::get_cache_memory();
+    r.cache_reclaimed_bytes = held > left ? held - left : 0;
+}
+
+// Chunked prefill of task.prompt[start, end). `boundary` (if inside the range) is a
+// chunk edge where the turn checkpoint is snapshotted. Returns false on cancel.
+bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
+                    mlxl::Qwen35MoeModel::CacheCheckpoint& ckpt_cp, std::size_t& ckpt_len,
+                    bool& ckpt_valid, const InferenceTask& task, const CancelToken& cancel,
+                    const std::vector<ImageRows>& image_rows,
+                    const std::vector<ContentTag>& prompt_tags, std::size_t start,
+                    std::size_t end, std::size_t boundary, bool want_last_logits,
+                    std::vector<float>& logits_host, GenResult& r) {
+    const std::size_t kPrefillChunk = prefill_chunk();
+    std::size_t at = start;
+    while (at < end) {
+        if (cancel.cancelled()) {
+            r.status = GenStatus::Cancelled;
+            return false;
+        }
+        std::size_t chunk_end = std::min(at + kPrefillChunk, end);
+        if (boundary > at && boundary < chunk_end) {
+            chunk_end = boundary;
+        }
+        mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
+                                  {1, static_cast<int>(chunk_end - at)}, mx::int32);
+        model.set_embed_splices(splices_for_chunk(image_rows, at, chunk_end));
+        mx::array logits = model.forward_logits(ids);
+        model.eval_caches();
+        model.clear_embed_splices();
+        for (std::size_t i = at; i < chunk_end; ++i) {
+            ledger.append(task.prompt[i], i < prompt_tags.size() ? prompt_tags[i] : 0);
+        }
+        if (chunk_end == boundary) {
+            ckpt_cp = model.checkpoint();
+            ckpt_len = ledger.size();
+            ckpt_valid = true;
+        }
+        if (want_last_logits && chunk_end == end) {
+            logits_to_host(logits, logits_host);
+        }
+        at = chunk_end;
+    }
+    return true;
+}
+
 } // namespace
 
 GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
@@ -850,9 +963,6 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             break;
         case ReuseMode::Reset:
             // Stale context is never decoded past. One honest full re-prefill.
-            impl_->model.reset_cache();
-            ledger_.clear();
-            impl_->ckpt = {};
             // AND GIVE THE BUFFERS BACK, because this is the one moment in a run when
             // reclaim is free. reset_cache() drops the KV arrays, and MLX's allocator
             // parks their Metal buffers in its own cache rather than returning them --
@@ -877,12 +987,8 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             // crash report, which is the signature of an OS kill and not of MLX's valve.
             // The valve could not have caught them: it sits at the device working set,
             // ~40.2 GB, and the kills land near 38.
-            {
-                const std::size_t held = mx::get_cache_memory();
-                mx::clear_cache();
-                const std::size_t left = mx::get_cache_memory();
-                r.cache_reclaimed_bytes = held > left ? held - left : 0;
-            }
+            reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                          impl_->ckpt.valid, r);
             break;
     }
     const std::size_t start = plan.prefill_from;
@@ -891,7 +997,6 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     const auto t0 = clock_.mono();
 
     // --- chunked prefill ----------------------------------------------------
-    const std::size_t kPrefillChunk = prefill_chunk();
     std::vector<float> logits_host;
     const std::size_t prompt_n = task.prompt.size();
     // The stable boundary is made a CHUNK EDGE so the snapshot lands exactly on it. One
@@ -899,43 +1004,10 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     const std::size_t boundary =
         task.checkpoint_at > start && task.checkpoint_at <= prompt_n ? task.checkpoint_at
                                                                      : 0;
-    // Everything before the last token is pure prefill; the last token's forward pass
-    // produces the first sampling distribution.
-    // A while loop, not `at += kPrefillChunk`: the boundary shortens a chunk, so the step
-    // is whatever was actually consumed.
-    std::size_t at = start;
-    while (at < prompt_n) {
-        if (cancel.cancelled()) {
-            r.status = GenStatus::Cancelled;
-            return r;
-        }
-        std::size_t end = std::min(at + kPrefillChunk, prompt_n);
-        if (boundary > at && boundary < end) {
-            end = boundary;
-        }
-        mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
-                                  {1, static_cast<int>(end - at)}, mx::int32);
-        // Whatever part of each image lands inside THIS chunk. An image is hundreds of
-        // tokens and does not respect the chunk edge, so a chunk may carry a slice from
-        // the middle of one.
-        impl_->model.set_embed_splices(splices_for_chunk(image_rows, at, end));
-        mx::array logits = impl_->model.forward_logits(ids);
-        impl_->model.eval_caches();
-        impl_->model.clear_embed_splices();
-        for (std::size_t i = at; i < end; ++i) {
-            ledger_.append(task.prompt[i], i < prompt_tags.size() ? prompt_tags[i] : 0);
-        }
-        if (end == boundary) {
-            // Exactly one checkpoint is held, and it is overwritten each turn -- which is
-            // what bounds the memory the 30 gated-delta snapshots cost.
-            impl_->ckpt.cp = impl_->model.checkpoint();
-            impl_->ckpt.len = ledger_.size();
-            impl_->ckpt.valid = true;
-        }
-        if (end == prompt_n) {
-            logits_to_host(logits, logits_host);
-        }
-        at = end;
+    if (!prefill_tokens(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                        impl_->ckpt.valid, task, cancel, image_rows, prompt_tags, start,
+                        prompt_n, boundary, /*want_last_logits=*/true, logits_host, r)) {
+        return r;
     }
     const auto t_prefill = clock_.mono();
     const double prefill_ms = ms_between(t0, t_prefill);
@@ -1012,6 +1084,71 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     return r;
 }
 
+GenResult MlxBackend::warm_stable_prefix(const InferenceTask& task,
+                                         const CancelToken& cancel) {
+    try {
+        return warm_stable_prefix_impl(task, cancel);
+    } catch (const std::exception& e) {
+        GenResult r;
+        r.status = GenStatus::BackendError;
+        r.error = std::string("MLX threw during shadow compact: ") + e.what();
+        return r;
+    } catch (...) {
+        GenResult r;
+        r.status = GenStatus::BackendError;
+        r.error = "MLX threw a non-standard exception during shadow compact";
+        return r;
+    }
+}
+
+GenResult MlxBackend::warm_stable_prefix_impl(const InferenceTask& task,
+                                              const CancelToken& cancel) {
+    GenResult r;
+    if (!loaded_) {
+        r.error = "MlxBackend: no model loaded";
+        return r;
+    }
+    if (task.prompt.empty()) {
+        r.error = "MlxBackend: empty prompt";
+        return r;
+    }
+    const std::size_t end = task.checkpoint_at;
+    if (end == 0 || end > task.prompt.size()) {
+        r.error = "no_stable_prefix";
+        return r;
+    }
+
+    std::vector<ContentTag> prompt_tags;
+    std::vector<ImageRows> image_rows;
+    if (!task.images.empty()) {
+        std::string err;
+        if (!prepare_images(task, impl_->model, prompt_tags, image_rows, err)) {
+            r.error = "MlxBackend: " + err;
+            return r;
+        }
+    }
+
+    // ALWAYS Reset. The live cache is the pre-compact prompt; reusing it against the
+    // rewritten prefix is the silent-wrong failure S5.10 exists to prevent.
+    reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len, impl_->ckpt.valid,
+                  r);
+    r.prefill_reused_tokens = 0;
+
+    const auto t0 = clock_.mono();
+    std::vector<float> unused_logits;
+    if (!prefill_tokens(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                        impl_->ckpt.valid, task, cancel, image_rows, prompt_tags, 0, end,
+                        end, /*want_last_logits=*/false, unused_logits, r)) {
+        return r;
+    }
+    r.status = GenStatus::Complete;
+    r.ttft_ms = ms_between(t0, clock_.mono());
+    const double prefill_ms = r.ttft_ms;
+    r.prefill_tok_per_s =
+        prefill_ms > 0 ? static_cast<double>(end) / (prefill_ms / 1000.0) : 0.0;
+    return r;
+}
+
 #else // !LMP_HAVE_MLX
 
 struct MlxBackend::Impl {};
@@ -1052,6 +1189,22 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     r.status = GenStatus::BackendError;
     r.error = "MlxBackend: MLX not compiled in";
     return r;
+}
+
+GenResult MlxBackend::warm_stable_prefix(const InferenceTask& task,
+                                         const CancelToken& cancel) {
+    (void)task;
+    (void)cancel;
+    (void)clock_;
+    GenResult r;
+    r.status = GenStatus::BackendError;
+    r.error = "MlxBackend: MLX not compiled in";
+    return r;
+}
+
+GenResult MlxBackend::warm_stable_prefix_impl(const InferenceTask& task,
+                                              const CancelToken& cancel) {
+    return warm_stable_prefix(task, cancel);
 }
 
 #endif // LMP_HAVE_MLX

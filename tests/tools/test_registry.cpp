@@ -11,6 +11,7 @@
 #include "src/platform/fs.hpp"
 #include "src/tools/edit_diagnostics.hpp"
 #include "src/tools/registry.hpp"
+#include "src/tools/think_blocks.hpp"
 #include "src/tools/symbol_index.hpp"
 #include "src/tools/text_view.hpp"
 
@@ -104,7 +105,7 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // no clickable card. Fewer tools is the point -- every one is a decision the model can
     // get wrong, and a smaller model gets it wrong more often. This pin going DOWN is the
     // rare direction and is meant to be as deliberate as growing it.
-    CHECK_EQ(reg.decls().size(), std::size_t{23});
+    CHECK_EQ(reg.decls().size(), std::size_t{24});
     CHECK(reg.find("view_image") != nullptr);
     CHECK(reg.find("finish") != nullptr);
     CHECK(reg.find("find_files") != nullptr);
@@ -122,6 +123,9 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     CHECK(reg.find("shell") != nullptr);
     CHECK(reg.find("remember") != nullptr);
     CHECK(reg.find("no_such_tool") == nullptr);
+    // Product default on: commit_think_block is on the surface unless the field is
+    // cleared. Bakeoffs set LMP_COMMIT_THINK=0 rather than relying on this pin.
+    CHECK(reg.find("commit_think_block") != nullptr);
     // The guard specs mirror the declarations one-to-one -- the grammar constrains
     // exactly the advertised set (S6.4).
     CHECK_EQ(reg.guard_specs().size(), reg.decls().size());
@@ -1566,6 +1570,20 @@ TEST(view_image_refuses_bytes_that_are_not_decodable) {
     CHECK(r.images.empty());
 }
 
+TEST(view_image_missing_file_is_not_a_decode_failure) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const ToolResult r =
+        reg.execute("view_image", args({{"path", "out/_diag_before.png"}}), 0);
+    CHECK(!r.ok());
+    CHECK(r.images.empty());
+    CHECK(r.error_class == ErrorClass::NotFound);
+    CHECK(r.summary.find("could not be decoded") == std::string::npos);
+    CHECK(r.summary.find("could not open") == std::string::npos);
+    CHECK(r.summary.find("File not found") != std::string::npos);
+    CHECK(r.summary.find("not blocked") != std::string::npos);
+}
+
 TEST(view_image_stays_inside_the_workspace) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
@@ -1657,4 +1675,149 @@ TEST(a_missing_path_is_told_where_the_file_actually_is) {
     const ToolResult none = reg.execute("read_file", args({{"path", "nowhere.gd"}}), 1);
     CHECK(!none.ok());
     CHECK(none.summary.find("Nothing by that name") != std::string::npos);
+}
+
+Registry make_commit_think_registry(const std::string& root) {
+    WorkspaceContext ctx;
+    ctx.root = root;
+    ctx.max_read_bytes = 1U << 20;
+    ctx.max_model_read_bytes = 16384;
+    ctx.max_result_bytes = 8192;
+    ctx.max_observation_bytes = lmp::tools::kObservationBudgetBytes;
+    ctx.spool_dir = root + "/.spool";
+    ctx.shell_wall_clock_seconds = 20;
+    ctx.model_can_see = true;
+    ctx.commit_think = true;
+    return Registry(std::move(ctx));
+}
+
+std::vector<ThinkBlock> two_think_blocks() {
+    ThinkBlock a;
+    a.block_id = 0;
+    a.language = "txt";
+    a.content = "alpha-body\n";
+    a.sha256 = lmp::platform::content_sha256_hex(a.content);
+    ThinkBlock b;
+    b.block_id = 1;
+    b.language = "cpp";
+    b.content = "int x = 1;\n";
+    b.sha256 = lmp::platform::content_sha256_hex(b.content);
+    return {std::move(a), std::move(b)};
+}
+
+TEST(commit_think_block_is_declared_only_when_flag_on) {
+    const std::string root = temp_dir();
+    WorkspaceContext off_ctx;
+    off_ctx.root = root;
+    off_ctx.max_read_bytes = 1U << 20;
+    off_ctx.max_model_read_bytes = 16384;
+    off_ctx.max_result_bytes = 8192;
+    off_ctx.max_observation_bytes = lmp::tools::kObservationBudgetBytes;
+    off_ctx.spool_dir = root + "/.spool";
+    off_ctx.shell_wall_clock_seconds = 20;
+    off_ctx.model_can_see = true;
+    off_ctx.commit_think = false;
+    Registry off(std::move(off_ctx));
+    CHECK(off.find("commit_think_block") == nullptr);
+    CHECK_EQ(off.decls().size(), std::size_t{23});
+
+    Registry on = make_commit_think_registry(root);
+    REQUIRE(on.find("commit_think_block") != nullptr);
+    CHECK_EQ(on.decls().size(), std::size_t{24});
+    CHECK(on.find("commit_think_block")->mutates_workspace);
+}
+
+TEST(commit_think_block_writes_exact_harvested_bytes) {
+    const std::string root = temp_dir();
+    Registry reg = make_commit_think_registry(root);
+    const auto blocks = two_think_blocks();
+    reg.set_think_blocks(blocks);
+
+    const ToolResult w0 = reg.execute(
+        "commit_think_block",
+        args({{"path", "a.txt"}, {"block_id", "0"}}), 1);
+    REQUIRE(w0.ok());
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/a.txt", 1024).bytes, blocks[0].content);
+    CHECK(w0.summary.find(blocks[0].sha256) != std::string::npos);
+
+    const ToolResult w1 = reg.execute(
+        "commit_think_block",
+        args({{"path", "b.cpp"},
+              {"block_id", "1"},
+              {"expect_sha256", blocks[1].sha256}}),
+        1);
+    REQUIRE(w1.ok());
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/b.cpp", 1024).bytes, blocks[1].content);
+}
+
+TEST(commit_think_block_bad_id_or_sha_leaves_disk_unchanged) {
+    const std::string root = temp_dir();
+    Registry reg = make_commit_think_registry(root);
+    const auto blocks = two_think_blocks();
+    reg.set_think_blocks(blocks);
+
+    const ToolResult missing = reg.execute(
+        "commit_think_block", args({{"path", "x.txt"}, {"block_id", "9"}}), 1);
+    CHECK(missing.status == Status::ToolError);
+    CHECK(missing.error_class == ErrorClass::NotFound);
+    CHECK(missing.summary.find("block_id 9") != std::string::npos);
+    CHECK(!lmp::platform::read_file_whole(root + "/x.txt", 1024).ok());
+
+    const ToolResult bad_sha = reg.execute(
+        "commit_think_block",
+        args({{"path", "x.txt"},
+              {"block_id", "0"},
+              {"expect_sha256", std::string(64, '0')}}),
+        1);
+    CHECK(bad_sha.status == Status::ToolError);
+    CHECK(bad_sha.error_class == ErrorClass::Conflict);
+    CHECK(!lmp::platform::read_file_whole(root + "/x.txt", 1024).ok());
+}
+
+TEST(commit_think_block_empty_harvest_is_notfound_not_sha_conflict) {
+    const std::string root = temp_dir();
+    Registry reg = make_commit_think_registry(root);
+
+    const ToolResult empty = reg.execute(
+        "commit_think_block",
+        args({{"path", "should_not_exist.txt"}, {"block_id", "0"}}), 1);
+    CHECK(empty.status == Status::ToolError);
+    CHECK(empty.error_class == ErrorClass::NotFound);
+    CHECK(empty.summary.find("no closed markdown fences harvested this turn") !=
+          std::string::npos);
+    CHECK(empty.summary.find("expect_sha256") == std::string::npos);
+    CHECK(!lmp::platform::read_file_whole(root + "/should_not_exist.txt", 1024).ok());
+}
+
+TEST(commit_think_block_sandbox_and_overwrite_gates_match_write_file) {
+    const std::string root = temp_dir();
+    Registry reg = make_commit_think_registry(root);
+    const auto blocks = two_think_blocks();
+    reg.set_think_blocks(blocks);
+
+    const ToolResult esc = reg.execute(
+        "commit_think_block",
+        args({{"path", "../escaped/x.py"}, {"block_id", "0"}}), 1);
+    CHECK(esc.status == Status::Refused);
+
+    REQUIRE(reg.execute("write_file",
+                        args({{"path", "a.txt"}, {"content", "one\n"}}), 1)
+                .ok());
+    const ToolResult clobber = reg.execute(
+        "commit_think_block", args({{"path", "a.txt"}, {"block_id", "0"}}), 1);
+    CHECK(!clobber.ok());
+    CHECK(clobber.error_class == ErrorClass::Conflict);
+    CHECK(clobber.summary.find("read_file") != std::string::npos);
+    CHECK_EQ(lmp::platform::read_file_whole(root + "/a.txt", 1024).bytes,
+             std::string("one\n"));
+}
+
+TEST(append_file_description_says_it_chunks_a_file_that_will_not_fit) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    const ToolDecl* d = reg.find("append_file");
+    REQUIRE(d != nullptr);
+    CHECK(d->description.find("will not fit") != std::string::npos);
+    CHECK(d->description.find("write_file") != std::string::npos);
+    CHECK(d->description.find("duplicates") != std::string::npos);
 }

@@ -77,7 +77,7 @@ struct InferenceTask {
     // Empty for every text-only turn, which is nearly all of them.
     std::vector<PromptImage> images;
     SamplingParams sampling;
-    std::int32_t max_new_tokens = 4096;
+    std::int32_t max_new_tokens = 32768;
     // Constrained decoding (S5.6): the legal-token set for the current state, asked for
     // once per step rather than probed id by id. Null means unconstrained. ScriptedBackend
     // and ReplayBackend ignore it: their tokens are the script's business, and the loop's
@@ -175,6 +175,19 @@ class InferenceBackend {
 
     [[nodiscard]] virtual GenResult generate(const InferenceTask& task, TokenSink& sink,
                                              const CancelToken& cancel) = 0;
+
+    // Prefill `task.prompt[0, checkpoint_at)` into the live KV and snapshot there.
+    // Default is a no-op (Scripted/Replay). MlxBackend Resets first: the cache it
+    // inherited is the pre-compact prompt, which must not be reused against the
+    // rewritten prefix (S5.10). Does not decode.
+    [[nodiscard]] virtual GenResult warm_stable_prefix(const InferenceTask& task,
+                                                       const CancelToken& cancel) {
+        (void)task;
+        (void)cancel;
+        GenResult r;
+        r.status = GenStatus::Complete;
+        return r;
+    }
 };
 
 // --- ScriptedBackend -------------------------------------------------------

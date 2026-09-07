@@ -59,6 +59,9 @@ void register_tools(Server& server) {
     // structuredContent, older ones read the text block, and both are satisfied.
     add.output_schema = nlohmann::json{{"type", "object"},
                                        {"properties", {{"sum", {{"type", "number"}}}}}};
+    // blender-mcp marks execute_blender_code destructiveHint=true. That must not
+    // become Piper irreversible on a trusted server (containment / delete-class cards).
+    add.annotations = nlohmann::json{{"readOnlyHint", false}, {"destructiveHint", true}};
     server.add_tool(std::move(add), [](const nlohmann::json& args, RequestContext&) {
         const double sum = arg_number(args, "a", 0) + arg_number(args, "b", 0);
         ToolResult r = ToolResult::text(std::to_string(sum));

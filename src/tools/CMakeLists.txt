@@ -1,6 +1,7 @@
 add_library(lmp_tools
   registry.cpp
   memory_file.cpp
+  think_blocks.cpp
   concurrent_calls.cpp
   context_tools.cpp
   sandbox.cpp

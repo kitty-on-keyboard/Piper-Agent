@@ -21,6 +21,11 @@ namespace lmp::model {
 // working set. 0 means "cannot tell" -- no MLX, or an unreadable config -- and the
 // caller must then leave the operator's budget alone.
 //
+// `weights_bytes` is the RESIDENT working set. Flash-Next PLE n-gram shards are
+// offloaded (never eval'd / never wired) and must not be included here: counting the
+// ~28 GB table as resident would report "weights alone overflow" and clamp every run
+// to zero headroom.
+//
 // context_budget_tokens has only ever been checked against the checkpoint's
 // max_position_embeddings, which is a statement about what the MODEL can address and says
 // nothing about what the MACHINE can hold. A budget can pass that check and be physically

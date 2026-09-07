@@ -66,7 +66,10 @@ export function classifyCheckpoint(dir: string, io: CheckpointFs = nodeCheckpoin
   // (pointing draftModelDir at the target itself is the operator mistake it exists for).
   if (asString(cfg.model_type) === "qwen3_5_mtp") return "mtp";
   const mt = asString(cfg.text_config?.model_type) || asString(cfg.model_type);
-  if (mt === "qwen3_5_moe" || mt === "qwen3_5_moe_text") return "moe";
+  if (mt === "qwen3_5_moe" || mt === "qwen3_5_moe_text" ||
+      mt === "qwen4_exp" || mt === "qwen4_exp_text") {
+    return "moe";
+  }
   if (mt === "qwen3_5" || mt === "qwen3_5_text") return "dense";
   return "unknown";
 }

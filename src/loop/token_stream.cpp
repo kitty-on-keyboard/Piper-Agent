@@ -141,6 +141,9 @@ bool GrammarSink::on_token(model::TokenId id) {
 
     const bool is_think = g_.think_ids().size() > think_before;
     const bool is_text = g_.text_ids().size() > text_before;
+    if (!is_think && !is_text) {
+        tool_ids.push_back(id);
+    }
     if (streamer_ != nullptr) {
         if (is_think) {
             streamer_->push(id, StreamChannel::Thinking);

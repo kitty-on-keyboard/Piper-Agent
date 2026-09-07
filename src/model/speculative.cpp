@@ -2,12 +2,107 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <limits>
+#include <span>
+#include <sstream>
 
 #include "bakeoff/draft_proposer/suffix_proposer.hpp"
 #include "src/model/mtp_proposer.hpp"
 
 namespace lmp::model {
+namespace {
+
+void dbg_log(const char* loc, const char* msg, const char* hid, const std::string& data) {
+    // #region agent log
+    std::ofstream f(
+        "/Users/dev/Desktop/seans_projects_local/LM_Pipe_2/.cursor/debug-3dfcb2.log",
+        std::ios::app);
+    if (!f) {
+        return;
+    }
+    const auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    f << "{\"sessionId\":\"3dfcb2\",\"runId\":\"pre-fix\",\"hypothesisId\":\"" << hid
+      << "\",\"location\":\"" << loc << "\",\"message\":\"" << msg << "\",\"data\":{" << data
+      << "},\"timestamp\":" << ts << "}\n";
+    // #endregion
+}
+
+std::string logit_stats(const std::vector<float>& row) {
+    // #region agent log
+    std::size_t nan = 0, ninf = 0, pinf = 0, finite = 0;
+    float mn = 0.0F, mx = 0.0F;
+    bool any = false;
+    for (float v : row) {
+        if (std::isnan(v)) {
+            ++nan;
+        } else if (v == -std::numeric_limits<float>::infinity()) {
+            ++ninf;
+        } else if (v == std::numeric_limits<float>::infinity()) {
+            ++pinf;
+        } else {
+            ++finite;
+            if (!any) {
+                mn = mx = v;
+                any = true;
+            } else {
+                mn = std::min(mn, v);
+                mx = std::max(mx, v);
+            }
+        }
+    }
+    std::ostringstream o;
+    o << "\"row_size\":" << row.size() << ",\"nan\":" << nan << ",\"ninf\":" << ninf
+      << ",\"pinf\":" << pinf << ",\"finite\":" << finite;
+    if (any) {
+        o << ",\"min\":" << mn << ",\"max\":" << mx;
+    }
+    return o.str();
+    // #endregion
+}
+
+} // namespace
+
+TokenId SpecForward::mtp_step_greedy(TokenId tok, std::span<const float> hidden,
+                                     std::vector<float>& out_hidden) {
+    mtp_step(tok, hidden, out_hidden);
+    if (out_hidden.empty()) {
+        return 0;
+    }
+    std::vector<float> row;
+    mtp_logits(out_hidden, row);
+    if (row.empty()) {
+        out_hidden.clear();
+        return 0;
+    }
+    std::size_t best = 0;
+    for (std::size_t i = 1; i < row.size(); ++i) {
+        if (row[i] > row[best]) {
+            best = i;
+        }
+    }
+    return static_cast<TokenId>(best);
+}
+
+TokenId SpecForward::mtp_argmax(std::span<const float> hidden) {
+    std::vector<float> row;
+    mtp_logits(hidden, row);
+    if (row.empty()) {
+        return 0;
+    }
+    std::size_t best = 0;
+    for (std::size_t i = 1; i < row.size(); ++i) {
+        if (row[i] > row[best]) {
+            best = i;
+        }
+    }
+    return static_cast<TokenId>(best);
+}
 
 namespace {
 
@@ -232,6 +327,18 @@ SpecStep SpeculativeDecoder::decode_one(const TokenMask* mask,
     if (dist0.empty()) {
         // Genuinely nothing legal here. This IS the build defect the caller reports: the
         // ordinary path reached it with no speculation involved.
+        // #region agent log
+        {
+            std::ostringstream d;
+            d << logit_stats(row_) << ",\"mask_count\":"
+              << (mask != nullptr ? static_cast<long long>(mask->count()) : -1)
+              << ",\"pending\":" << pending_.size() << ",\"probe_n\":" << probe_n_
+              << ",\"blocks\":" << stats_.blocks << ",\"abandoned\":" << stats_.abandoned
+              << ",\"dist_ids\":" << dist0.ids.size() << ",\"dist_total\":" << dist0.total
+              << ",\"reason\":\"dist_empty\"";
+            dbg_log("speculative.cpp:decode_one", "no_legal_token", "A", d.str());
+        }
+        // #endregion
         out.no_legal_token = true;
         return out;
     }
@@ -240,11 +347,31 @@ SpecStep SpeculativeDecoder::decode_one(const TokenMask* mask,
     const SpecResult r =
         verifier_.verify({}, {}, std::span<const std::span<const float>>(rows));
     if (r.accepted.empty()) {
+        // #region agent log
+        {
+            std::ostringstream d;
+            d << logit_stats(row_) << ",\"mask_count\":"
+              << (mask != nullptr ? static_cast<long long>(mask->count()) : -1)
+              << ",\"pending\":" << pending_.size() << ",\"dist_ids\":" << dist0.ids.size()
+              << ",\"dist_total\":" << dist0.total << ",\"reason\":\"verify_accepted_empty\"";
+            dbg_log("speculative.cpp:decode_one", "no_legal_token", "E", d.str());
+        }
+        // #endregion
         out.no_legal_token = true;
         return out;
     }
     const auto idx = static_cast<std::size_t>(r.accepted.front());
     if (idx >= dist0.ids.size()) {
+        // #region agent log
+        {
+            std::ostringstream d;
+            d << logit_stats(row_) << ",\"mask_count\":"
+              << (mask != nullptr ? static_cast<long long>(mask->count()) : -1)
+              << ",\"idx\":" << idx << ",\"dist_ids\":" << dist0.ids.size()
+              << ",\"reason\":\"idx_oob\"";
+            dbg_log("speculative.cpp:decode_one", "no_legal_token", "E", d.str());
+        }
+        // #endregion
         out.no_legal_token = true;
         return out;
     }
@@ -315,6 +442,29 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     std::vector<std::vector<float>> rows;
     fwd.forward_all(std::span<const TokenId>(input), rows);
 
+    // #region agent log
+    const auto log_abandon = [&](const char* reason, const std::vector<float>* logits) {
+        std::ostringstream d;
+        if (logits != nullptr) {
+            d << logit_stats(*logits) << ",";
+        }
+        d << "\"reason\":\"" << reason << "\",\"prefix\":" << prefix
+          << ",\"pending\":" << pending_.size() << ",\"drafted\":" << drafted.size()
+          << ",\"rows\":" << rows.size() << ",\"probe_n\":" << probe_n_
+          << ",\"blocks\":" << stats_.blocks << ",\"input\":" << input.size();
+        dbg_log("speculative.cpp:step", "abandon_block", "E", d.str());
+    };
+    const auto* block_logits = [&]() -> const std::vector<float>* {
+        if (prefix == 0) {
+            return &row_;
+        }
+        if (prefix - 1 < rows.size()) {
+            return &rows[prefix - 1];
+        }
+        return nullptr;
+    }();
+    // #endregion
+
     // One shaped distribution per drafted position, plus the row for the position the
     // first draft sits at. With no prefix that is the row carried from the last block;
     // with one it is rows[prefix - 1], produced by the pass above. The repetition penalty
@@ -339,6 +489,9 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         // forward, tell the drafter nothing survived, pay for the deferred prefix, and
         // take one token the ordinary way -- which is the reference path and answers for
         // itself whether there is genuinely nothing legal here.
+        // #region agent log
+        log_abandon("empty_front", block_logits);
+        // #endregion
         fwd.restore();
         proposer_->settle(0, {}, prefix, fwd);
         ++stats_.abandoned;
@@ -397,6 +550,9 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         // forward, tell the drafter nothing survived, pay for the deferred prefix, and
         // take one token the ordinary way -- which is the reference path and answers for
         // itself whether there is genuinely nothing legal here.
+        // #region agent log
+        log_abandon("accepted_empty", block_logits);
+        // #endregion
         fwd.restore();
         proposer_->settle(0, {}, prefix, fwd);
         ++stats_.abandoned;
@@ -416,6 +572,22 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         // forward, tell the drafter nothing survived, pay for the deferred prefix, and
         // take one token the ordinary way -- which is the reference path and answers for
         // itself whether there is genuinely nothing legal here.
+        // #region agent log
+        {
+            std::ostringstream d;
+            if (block_logits != nullptr) {
+                d << logit_stats(*block_logits) << ",";
+            }
+            d << "\"reason\":\"tail_oob\",\"prefix\":" << prefix
+              << ",\"pending\":" << pending_.size() << ",\"drafted\":" << drafted.size()
+              << ",\"m\":" << m << ",\"tail_idx\":" << tail_idx
+              << ",\"dists\":" << dists.size() << ",\"dist_m_ids\":"
+              << (m < dists.size() ? dists[m].ids.size() : 0)
+              << ",\"dist_m_total\":" << (m < dists.size() ? dists[m].total : 0.0F)
+              << ",\"probe_n\":" << probe_n_ << ",\"blocks\":" << stats_.blocks;
+            dbg_log("speculative.cpp:step", "abandon_block", "C", d.str());
+        }
+        // #endregion
         fwd.restore();
         proposer_->settle(0, {}, prefix, fwd);
         ++stats_.abandoned;

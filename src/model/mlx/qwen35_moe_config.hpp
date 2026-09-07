@@ -1,6 +1,7 @@
 #ifndef LLM_MODELS_QWEN35_MOE_CONFIG_HPP
 #define LLM_MODELS_QWEN35_MOE_CONFIG_HPP
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <sstream>
@@ -25,13 +26,18 @@ enum class FfnKind { Unknown, Moe, Dense };
 // loader prefers the nested value and the two disagree (`qwen3_5` at the root vs
 // `qwen3_5_text` nested, and likewise for the MoE).
 [[nodiscard]] inline FfnKind ffn_kind_for(std::string_view model_type) noexcept {
-    if (model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text") {
+    if (model_type == "qwen3_5_moe" || model_type == "qwen3_5_moe_text" ||
+        model_type == "qwen4_exp" || model_type == "qwen4_exp_text") {
         return FfnKind::Moe;
     }
     if (model_type == "qwen3_5" || model_type == "qwen3_5_text") {
         return FfnKind::Dense;
     }
     return FfnKind::Unknown;
+}
+
+[[nodiscard]] inline bool is_qwen4_exp(std::string_view model_type) noexcept {
+    return model_type == "qwen4_exp" || model_type == "qwen4_exp_text";
 }
 
 struct Qwen35MoeConfig {
@@ -63,8 +69,42 @@ struct Qwen35MoeConfig {
     bool tie_word_embeddings{false};
     bool norm_topk_prob{true};
 
+    // Flash-Next / qwen4_exp. Absent on Qwen3.5/3.8; zeros and empty vectors keep the
+    // existing graph. Prefer `layer_types` when the checkpoint ships it; the modulo
+    // schedule is only a fallback (and happens to match 3 GDN + 1 QSA).
+    int hc_count{0};
+    int hc_lowrank{0};
+    int indexer_n_heads{0};
+    int indexer_kv_heads{0};
+    int indexer_head_dim{0};
+    int indexer_budget{0};
+    int indexer_compress_ratio{0};
+    int heads_per_ngram{0};
+    int ngram_size{0};
+    int ngram_vocab_size_base{0};
+    int split_ngram_parts{0};
+    int make_ngram_vocab_size_divisible_by{0};
+    int ple_embed_dim{0};
+    int ple_conv_kernel_size{0};
+    int eos_token_id{248044};
+    bool attn_output_gate{true};
+    std::string output_gate_type{"sigmoid"};
+    std::vector<std::string> layer_types;
+    std::vector<int> ple_layer_ids;
+
+    [[nodiscard]] bool is_flash() const noexcept { return is_qwen4_exp(model_type); }
+
     [[nodiscard]] bool is_linear_layer(int layer_idx) const noexcept {
+        if (layer_idx >= 0 && layer_idx < static_cast<int>(layer_types.size())) {
+            return layer_types[static_cast<std::size_t>(layer_idx)] == "linear_attention";
+        }
         return (layer_idx + 1) % full_attention_interval != 0;
+    }
+
+    [[nodiscard]] bool is_ple_layer(int layer_idx) const noexcept {
+        const int id = layer_idx + 1; // config is 1-indexed; tensors live at layers.{idx}
+        return std::find(ple_layer_ids.begin(), ple_layer_ids.end(), id) !=
+               ple_layer_ids.end();
     }
 
     [[nodiscard]] FfnKind ffn_kind() const noexcept { return ffn_kind_for(model_type); }
@@ -154,6 +194,55 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
     (void)get_f("rms_norm_eps", cfg.rms_norm_eps);
     (void)get_b("tie_word_embeddings", cfg.tie_word_embeddings);
     (void)get_b("norm_topk_prob", cfg.norm_topk_prob);
+
+    (void)get_i("hc_count", cfg.hc_count);
+    (void)get_i("hc_lowrank", cfg.hc_lowrank);
+    (void)get_i("indexer_n_heads", cfg.indexer_n_heads);
+    (void)get_i("indexer_kv_heads", cfg.indexer_kv_heads);
+    (void)get_i("indexer_head_dim", cfg.indexer_head_dim);
+    (void)get_i("indexer_budget", cfg.indexer_budget);
+    (void)get_i("indexer_compress_ratio", cfg.indexer_compress_ratio);
+    (void)get_i("heads_per_ngram", cfg.heads_per_ngram);
+    (void)get_i("ngram_size", cfg.ngram_size);
+    (void)get_i("ngram_vocab_size_base", cfg.ngram_vocab_size_base);
+    (void)get_i("split_ngram_parts", cfg.split_ngram_parts);
+    (void)get_i("make_ngram_vocab_size_divisible_by", cfg.make_ngram_vocab_size_divisible_by);
+    (void)get_i("ple_embed_dim", cfg.ple_embed_dim);
+    (void)get_i("ple_conv_kernel_size", cfg.ple_conv_kernel_size);
+    (void)get_i("eos_token_id", cfg.eos_token_id);
+    // 27B fused q/gate is on by default. Flash-Next's sh0wie MLX conversion stores
+    // attn_output_gate: null and a q_proj that is queries only — treating null as the
+    // struct default (true) would reshape that tensor as [q, gate] per head and throw
+    // (or worse, silently split) at the first full-attention layer.
+    if (is_qwen4_exp(cfg.model_type)) {
+        cfg.attn_output_gate = false;
+    }
+    (void)get_b("attn_output_gate", cfg.attn_output_gate);
+    std::string_view ogt;
+    if (!text_cfg["output_gate_type"].get_string().get(ogt)) {
+        cfg.output_gate_type = std::string(ogt);
+    }
+
+    simdjson::dom::array layer_types;
+    if (!text_cfg["layer_types"].get_array().get(layer_types)) {
+        cfg.layer_types.clear();
+        for (simdjson::dom::element e : layer_types) {
+            std::string_view s;
+            if (!e.get_string().get(s)) {
+                cfg.layer_types.emplace_back(s);
+            }
+        }
+    }
+    simdjson::dom::array ple_ids;
+    if (!text_cfg["ple_layer_ids"].get_array().get(ple_ids)) {
+        cfg.ple_layer_ids.clear();
+        for (simdjson::dom::element e : ple_ids) {
+            int64_t v = 0;
+            if (!e.get_int64().get(v)) {
+                cfg.ple_layer_ids.push_back(static_cast<int>(v));
+            }
+        }
+    }
 
     // Both keys can sit at this level (stock HF exports, transformers < 4.5x) or inside a
     // rope_parameters sub-object (newer exports). Read this level first so a root-level
@@ -365,9 +454,15 @@ inline int load_max_position_embeddings(const std::string& model_dir) {
         full = cfg.num_hidden_layers;
     }
     constexpr std::size_t kKvElementBytes = 2; // bf16
-    return std::size_t{2} * static_cast<std::size_t>(full) *
-           static_cast<std::size_t>(cfg.num_key_value_heads) *
-           static_cast<std::size_t>(cfg.head_dim) * kKvElementBytes;
+    std::size_t bytes = std::size_t{2} * static_cast<std::size_t>(full) *
+                        static_cast<std::size_t>(cfg.num_key_value_heads) *
+                        static_cast<std::size_t>(cfg.head_dim) * kKvElementBytes;
+    // QSA indexer keeps one raw key per token per full-attention layer (MQA).
+    if (cfg.indexer_head_dim > 0) {
+        bytes += static_cast<std::size_t>(full) *
+                 static_cast<std::size_t>(cfg.indexer_head_dim) * kKvElementBytes;
+    }
+    return bytes;
 }
 
 } // namespace lmp::model::mlxl

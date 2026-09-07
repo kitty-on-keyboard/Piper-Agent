@@ -511,6 +511,11 @@ std::string call_surface_form(const std::string& tool,
 // a tool added later is filtered by what it declares rather than by whether someone
 // remembered to update a list here.
 bool Agent::tool_allowed(const tools::ToolDecl& decl) const {
+    // Locked `plan` must not stay in the grammar. Refusing after sampling still spent a
+    // turn on it, and two of those refusals counted as inert and stalled the run.
+    if (decl.name == "plan" && !policy_.conversational && ctx_.plan_locked()) {
+        return false;
+    }
     if (decl.mutates_workspace && !policy_.allow_workspace_writes) {
         return false;
     }
@@ -675,7 +680,8 @@ std::optional<tools::ToolResult> Agent::gate_call(
     const std::string write_path =
         platform::lexically_normal(param_value(params, "path"));
     const bool overwrites_content =
-        decl != nullptr && decl->mutates_workspace && name == "write_file" &&
+        decl != nullptr && decl->mutates_workspace &&
+        (name == "write_file" || name == "commit_think_block") &&
         run_wrote_.find(write_path) == run_wrote_.end() &&
         registry_.would_overwrite_existing(write_path);
     // apply_patch deletes are irreversible like delete_file; updates stay ungated like

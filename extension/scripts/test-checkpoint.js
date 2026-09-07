@@ -42,6 +42,7 @@ function memFs(files) {
 
 const parent = path.join("/tmp", "lmp-models");
 const moe = path.join(parent, "Qwen3.6-35B-A3B-MLX-4bit");
+const flash = path.join(parent, "Qwen3.8-Flash-Next-REAP-288-MLX-4bit");
 const dense = path.join(parent, "Qwen3.8-27B-MLX-4bit");
 const mtp = path.join(parent, "Qwen3.8-27B-MTP-4bit");
 const otherMtp = path.join(parent, "unrelated-MTP");
@@ -51,6 +52,10 @@ const io = memFs({
   [path.join(moe, "config.json")]: JSON.stringify({
     model_type: "qwen3_5_moe",
     text_config: { model_type: "qwen3_5_moe_text" },
+  }),
+  [path.join(flash, "config.json")]: JSON.stringify({
+    model_type: "qwen4_exp",
+    text_config: { model_type: "qwen4_exp_text" },
   }),
   [path.join(dense, "config.json")]: JSON.stringify({
     model_type: "qwen3_5",
@@ -75,6 +80,7 @@ const io = memFs({
 });
 
 assert.strictEqual(classifyCheckpoint(moe, io), "moe");
+assert.strictEqual(classifyCheckpoint(flash, io), "moe");
 assert.strictEqual(classifyCheckpoint(dense, io), "dense");
 assert.strictEqual(classifyCheckpoint(mtp, io), "mtp");
 assert.strictEqual(classifyCheckpoint("/no/such", io), "unknown");
@@ -91,6 +97,11 @@ assert.strictEqual(
   effectiveDraftDir(moe, { speculative: true, draftModelDir: mtp }, io),
   "",
   "MoE must never be sent a leftover MTP path"
+);
+assert.strictEqual(
+  effectiveDraftDir(flash, { speculative: true, draftModelDir: mtp }, io),
+  "",
+  "Flash-Next is MoE: never send the 27B MTP head"
 );
 assert.strictEqual(
   effectiveDraftDir(dense, { speculative: false, draftModelDir: mtp }, io),
