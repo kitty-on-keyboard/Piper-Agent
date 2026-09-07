@@ -10,6 +10,7 @@
 // HUD are pinned outside the feed because they are live state rather than history.
 
 import * as vscode from "vscode";
+import { randomBytes } from "crypto";
 import { SidecarClient } from "./client";
 import { webviewHtml } from "./webview";
 import {
@@ -935,6 +936,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private html(): string {
     // Markup, styles and the view script live in webview.ts. This class owns the
     // protocol wiring; mixing a stylesheet into it made both harder to read.
-    return webviewHtml(Math.random().toString(36).slice(2));
+    // Use a cryptographically secure 128-bit random nonce for the CSP.
+    return webviewHtml(randomBytes(16).toString("hex"));
   }
 }
