@@ -79,6 +79,38 @@ SIDECAR = os.path.join(ROOT, "build", "src", "surface", "lmp_sidecar")
 # Qwen3's recommended thinking-mode operating point (S5.9). The CLI adds temperature
 # and seed so the historical default stays 0.6/7 while smoke and multi-seed runs are
 # explicit, recorded configurations.
+def detach_from_launch_session():
+    """Leave the launching Shell's job table.
+
+    Cursor (and zsh huponexit) kill the *job pid* when a `nohup … &` command
+    returns. The sidecar is already start_new_session, but it SIGPIPEs as soon
+    as that dead parent closes stdout. Double-fork so the surviving process
+    is PPID=1 and not in the killable process group.
+
+    Default: on when stdin is /dev/null (classic nohup) or stdout is a regular
+    file (`>> log`). Cursor's `nohup cmd &` keeps a piped stdin, so the file
+    check is what actually fires. LMP_DAEMONIZE=0 disables (mini-6 bash waits
+    on this pid). LMP_DAEMONIZE=1 forces it.
+    """
+    flag = os.environ.get("LMP_DAEMONIZE", "")
+    if flag == "0":
+        return
+    if flag != "1" and not stdin_is_devnull() and not stdout_is_regular_file():
+        return
+    if os.getppid() == 1:
+        return
+    if os.fork() > 0:
+        os._exit(0)
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    print(
+        f"detached pid={os.getpid()} ppid={os.getppid()} sid={os.getsid(0)}",
+        flush=True,
+    )
+
 DEFAULT_SAMPLING = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
                     "repetition_penalty": 1.05}
 DEFAULT_SEED = 7
@@ -1344,6 +1376,7 @@ for raw in sys.stdin:
 
 
 def main():
+    detach_from_launch_session()
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["run", "list", "self-test"])
     ap.add_argument("--split", choices=list(KNOWN_SPLITS))
