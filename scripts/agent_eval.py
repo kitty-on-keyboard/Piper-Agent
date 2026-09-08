@@ -63,11 +63,26 @@ import os
 import pathlib
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+
+
+def stdin_is_devnull():
+    try:
+        return os.path.samefile(sys.stdin.fileno(), "/dev/null")
+    except Exception:
+        return False
+
+
+def stdout_is_regular_file():
+    try:
+        return stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode)
+    except Exception:
+        return False
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASKS = os.path.join(ROOT, "evals", "agent", "tasks")
