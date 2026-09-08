@@ -63,6 +63,7 @@ import os
 import pathlib
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -79,6 +80,20 @@ SIDECAR = os.path.join(ROOT, "build", "src", "surface", "lmp_sidecar")
 # Qwen3's recommended thinking-mode operating point (S5.9). The CLI adds temperature
 # and seed so the historical default stays 0.6/7 while smoke and multi-seed runs are
 # explicit, recorded configurations.
+def stdin_is_devnull():
+    try:
+        return os.path.samefile(sys.stdin.fileno(), "/dev/null")
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+def stdout_is_regular_file():
+    try:
+        return stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode)
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
 def detach_from_launch_session():
     """Leave the launching Shell's job table.
 
