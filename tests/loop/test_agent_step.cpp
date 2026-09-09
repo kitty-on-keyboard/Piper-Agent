@@ -3648,6 +3648,38 @@ TEST(an_enumerated_text_turn_in_plan_mode_asks_instead_of_nudging) {
     CHECK(asked);
 }
 
+TEST(an_enumerated_summary_in_agent_mode_without_question_does_not_ask) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(
+        text_turn(tok, "summary",
+                  "Fixed two bugs in parser:\n1. Handled unary\n2. Fixed regex"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix bugs");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    // In Agent mode, a completion summary without '?' must NOT be promoted to ask_user.
+    CHECK(report.termination_reason != "awaiting_user");
+    bool asked = false;
+    for (const context::TurnRecord& t : ctx.recent()) {
+        if (t.tool_name == "ask_user") {
+            asked = true;
+        }
+    }
+    CHECK(!asked);
+}
+
 // The other half of the same contract: a text turn the model FOLLOWS with a tool call is
 // not an ending at all, and must not consume the run's patience. The counter resets on any
 // executed call, so narrate/act/narrate/act continues indefinitely -- which is what a run

@@ -2742,8 +2742,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // card path already parses this shape out of `question` (questionFromText); the
         // hole was that a TextOnly turn never took that path, and the nudge kept the run
         // generating instead of yielding.
+        const bool is_question_candidate =
+            (config_.mode == Mode::Plan) ||
+            (turn.assistant_text.find('?') != std::string::npos);
         const int enum_lines =
-            turn.outcome == Outcome::TextOnly && !turn.cut_for_looping
+            turn.outcome == Outcome::TextOnly && !turn.cut_for_looping && is_question_candidate
                 ? enumerated_choice_lines(turn.assistant_text)
                 : 0;
         if (enum_lines >= 2) {
