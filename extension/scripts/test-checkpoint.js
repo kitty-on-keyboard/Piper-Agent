@@ -19,6 +19,7 @@ const {
   findSiblingMtp,
   effectiveDraftDir,
   pushRecent,
+  clearConfigCache,
 } = require(out);
 
 function memFs(files) {
@@ -74,7 +75,30 @@ const io = memFs({
   }),
 });
 
-assert.strictEqual(classifyCheckpoint(moe, io), "moe");
+if (clearConfigCache) clearConfigCache();
+
+// Track readText calls to verify caching behaviour
+let reads = 0;
+const trackedIo = {
+  readText(p) {
+    reads++;
+    return io.readText(p);
+  },
+  listDirNames(dir) {
+    return io.listDirNames(dir);
+  },
+};
+
+assert.strictEqual(classifyCheckpoint(moe, trackedIo), "moe");
+const readsAfterFirst = reads;
+assert(readsAfterFirst > 0, "Expected at least one read for moe");
+assert.strictEqual(classifyCheckpoint(moe, trackedIo), "moe");
+assert.strictEqual(reads, readsAfterFirst, "Expected parseConfig to use cached result without re-reading file");
+
+assert.strictEqual(classifyCheckpoint(dense, trackedIo), "dense");
+assert.strictEqual(classifyCheckpoint(mtp, trackedIo), "mtp");
+assert.strictEqual(classifyCheckpoint("/no/such", trackedIo), "unknown");
+assert.strictEqual(classifyCheckpoint("", trackedIo), "unknown");
 assert.strictEqual(classifyCheckpoint(dense, io), "dense");
 assert.strictEqual(classifyCheckpoint(mtp, io), "mtp");
 assert.strictEqual(classifyCheckpoint("/no/such", io), "unknown");

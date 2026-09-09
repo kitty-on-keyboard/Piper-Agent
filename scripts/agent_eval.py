@@ -76,6 +76,28 @@ DEFAULT_MODEL = os.environ.get("LMP_QWEN_DIR", "")
 SIDECAR = os.path.join(ROOT, "build", "src", "surface", "lmp_sidecar")
 # Bakeoff isolation: product defaults are ON. LMP_COMMIT_THINK=0 LMP_SHADOW_COMPACT=0.
 
+def stdin_is_devnull():
+    """True when stdin is /dev/null (classic nohup / redirected-null launch)."""
+    try:
+        return os.path.samefile(os.devnull, f"/dev/fd/{sys.stdin.fileno()}")
+    except OSError:
+        try:
+            s0 = os.fstat(0)
+            sn = os.stat(os.devnull)
+            return s0.st_ino == sn.st_ino and s0.st_dev == sn.st_dev
+        except OSError:
+            return False
+
+
+def stdout_is_regular_file():
+    """True when stdout is a normal file (e.g. `>> log`), not a pipe/TTY."""
+    try:
+        import stat as _stat
+        return _stat.S_ISREG(os.fstat(1).st_mode)
+    except OSError:
+        return False
+
+
 # Qwen3's recommended thinking-mode operating point (S5.9). The CLI adds temperature
 # and seed so the historical default stays 0.6/7 while smoke and multi-seed runs are
 # explicit, recorded configurations.
@@ -408,7 +430,8 @@ def build_start_request(meta, model_dir, workspace, sampling, contract):
             "max_iterations": meta.get("max_iterations", 30),
             "wall_clock_seconds": meta.get("wall_clock_seconds", 900),
             "sandbox_tier": 1,
-            "auto_approve_exec": True, "auto_approve_writes": True,
+            "auto_approve_exec": bool(meta.get("auto_approve_exec", True)),
+            "auto_approve_writes": True,
             "require_approval": False, "system_prompt": "",
             "context_budget_tokens": 96000,
             # Captured from task.json before the writable workspace exists. The model
@@ -432,7 +455,7 @@ def build_start_request(meta, model_dir, workspace, sampling, contract):
 
 
 def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
-                  verbose=False, extra_env=None):
+                  verbose=False, extra_env=None, on_notification=None, quiet=False):
     """Runs one mission against the sidecar in `workspace` and returns the run state.
 
     Split out of run_one so that a second evaluator can drive the SAME protocol loop
@@ -443,6 +466,8 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
     a pins.json number comparable statements about the same agent.
 
     Provisioning the workspace, grading it, and deleting it stay with the caller.
+    on_notification(method, params) is optional; the worker CLI uses it to stream jsonl.
+    quiet sends the waitpid line to stderr so stdout can stay an event stream.
     """
     env = os.environ.copy()
     # The diagnostic trace is evaluator-owned. This does not make the workspace an
@@ -492,6 +517,9 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
             "thinking": {"events": 0, "bytes": 0},
             "answer": {"events": 0, "bytes": 0},
         },
+        "denied_irreversible": False,
+        "denied_irreversible_detail": None,
+        "deadline_killed": False,
     }
     lock = threading.Lock()
     ids = [10]
@@ -568,6 +596,8 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
                 # Hard cap. The old path wrote lmp/cancel then waited +120s to kill.
                 # If stdin is full (sidecar generating), that write blocks forever and
                 # kill never runs. Seed 13 bowling try 1 ran 2548s against a 900s cap.
+                with lock:
+                    state["deadline_killed"] = True
                 hard_kill()
                 return
             if cancel_file is not None and os.path.exists(cancel_file):
@@ -586,6 +616,8 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
         except json.JSONDecodeError:
             continue
         method, params = msg.get("method"), msg.get("params") or {}
+        if on_notification is not None and method:
+            on_notification(method, params)
 
         if method == "lmp/ready":
             send(build_start_request(meta, model_dir, workspace, sampling, contract))
@@ -639,11 +671,21 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
             # A task can insist the card be denied -- that is how the destructive task is
             # scored on whether the DATA survived rather than on what the agent said.
             approved = not meta.get("deny_approvals", False)
+            # Worker mode: never auto-approve irreversible calls. Eval leaves this unset.
+            if approved and meta.get("deny_irreversible") and params.get("irreversible"):
+                approved = False
+                state["denied_irreversible"] = True
+                state["denied_irreversible_detail"] = (
+                    params.get("preview") or params.get("command")
+                    or params.get("tool_name") or "irreversible tool"
+                )
             if not approved:
                 state["denied"] += 1
             send({"jsonrpc": "2.0", "id": str(ids[0]), "method": "lmp/approve",
                   "params": {"request_id": params.get("request_id"), "approved": approved}})
             ids[0] += 1
+            if state["denied_irreversible"] and not state["cancel_sent"]:
+                request_cancel("irreversible")
         elif method == "lmp/verification":
             state["verification_runs"] += 1
             ran = bool(params.get("ran"))
@@ -705,7 +747,10 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
     wait_line = f"sidecar waitpid: pid={proc.pid} returncode={rc}"
     if sig is not None:
         wait_line += f" signal={sig} ({sig_name})"
-    print(wait_line, flush=True)
+    if quiet:
+        print(wait_line, flush=True, file=sys.stderr)
+    else:
+        print(wait_line, flush=True)
     if _stderr_path:
         try:
             _stderr.write(wait_line + "\n")
@@ -1376,7 +1421,6 @@ for raw in sys.stdin:
 
 
 def main():
-    detach_from_launch_session()
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["run", "list", "self-test"])
     ap.add_argument("--split", choices=list(KNOWN_SPLITS))
@@ -1398,6 +1442,11 @@ def main():
 
     if args.command == "self-test":
         return self_test()
+
+    if args.command == "run":
+        # Bakeoff: Cursor Shell reaps the job pid. self-test/list must not fork
+        # or ctest would see the parent exit 0 and ignore grandchild failures.
+        detach_from_launch_session()
 
     # list shows heavy tasks too so operators can see the full suite inventory.
     include_heavy = args.include_heavy or args.command == "list"

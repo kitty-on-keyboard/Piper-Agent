@@ -20,6 +20,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "src/context/resume.hpp"
@@ -40,6 +43,8 @@
 #include "src/surface/session.hpp"
 #include "src/surface/transport.hpp"
 #include "src/surface/wire.hpp"
+#include "src/surface/worker.hpp"
+#include "src/surface/socket_reader.hpp"
 
 namespace {
 
@@ -849,22 +854,50 @@ void notify_model(const char* state, const std::string& model_dir,
     return loaded;
 }
 
+struct RunLoopHooks {
+    std::function<void(const std::string& channel, const std::string& text)> on_token;
+    std::function<void(const loop::TurnResult& t, double duration_ms)> on_turn;
+    std::function<void(const loop::RunReport& report)> on_run_end;
+    loop::Approver approver;
+};
+
 // Turns the loop once over an EXISTING session. Returns true when the run should be the
 // process's last. The caller has already replied to the request that triggered it, since
 // this blocks for as long as the mission takes.
 bool run_loop(const std::string& run_id, surface::Session& session,
               platform::SpscChannel<std::string>& inbox, model::CancelToken& cancel,
-              platform::EventLogWriter& log, const platform::Clock& clock) {
+              platform::EventLogWriter& log, const platform::Clock& clock,
+              const RunLoopHooks* hooks = nullptr) {
     loop::Agent agent(*session.tok, *session.backend, *session.registry, *session.ctx, log,
                       clock, session.config);
-    agent.set_observer(make_observer(run_id));
+    loop::Observer obs = make_observer(run_id);
+    if (hooks) {
+        if (hooks->on_token) {
+            auto base_tok = obs.on_token;
+            obs.on_token = [base_tok, h_tok = hooks->on_token](const std::string& channel, const std::string& text) {
+                if (base_tok) base_tok(channel, text);
+                h_tok(channel, text);
+            };
+        }
+        if (hooks->on_turn) {
+            auto base_turn = obs.on_turn;
+            obs.on_turn = [base_turn, h_turn = hooks->on_turn](const loop::TurnResult& t, double duration_ms) {
+                if (base_turn) base_turn(t, duration_ms);
+                h_turn(t, duration_ms);
+            };
+        }
+    }
+    agent.set_observer(std::move(obs));
 
     RunInbox run_inbox(inbox, run_id, session.registry->workspace().root, cancel);
     run_inbox.set_event_log(&log, &clock);
-    agent.set_approver([&run_inbox, &log, &clock](const std::string& tool,
-                                                  const std::string& command,
-                                                  const std::string& preview,
-                                                  const tools::RiskHint& hint) {
+    if (hooks && hooks->approver) {
+        agent.set_approver(hooks->approver);
+    } else {
+        agent.set_approver([&run_inbox, &log, &clock](const std::string& tool,
+                                                      const std::string& command,
+                                                      const std::string& preview,
+                                                      const tools::RiskHint& hint) {
         // An empty command is how gate_call spells "this is the write gate" -- the
         // command path always passes the command verbatim, because a truncated preview is
         // the wrong thing to build an allowlist rule from.
@@ -904,6 +937,7 @@ bool run_loop(const std::string& run_id, surface::Session& session,
         }
         return run_inbox.ask(tool, command, preview, hint);
     });
+    }
     agent.set_steer_source([&run_inbox]() { return run_inbox.take_messages(); });
 
     // Workspace writes go through the EDITOR (S12.4), so undo, dirty buffers and diff
@@ -934,6 +968,9 @@ bool run_loop(const std::string& run_id, surface::Session& session,
 
     cancel.reset();
     const loop::RunReport report = agent.run(cancel);
+    if (hooks && hooks->on_run_end) {
+        hooks->on_run_end(report);
+    }
 
     // Anything said in the last moments of the run, after the loop's final drain.
     //
@@ -963,7 +1000,8 @@ bool run_loop(const std::string& run_id, surface::Session& session,
 bool start_mission(const std::string& id, const std::string& message,
                    surface::Session& session, platform::SpscChannel<std::string>& inbox,
                    model::CancelToken& cancel, platform::EventLogWriter& log,
-                   const platform::Clock& clock) {
+                   const platform::Clock& clock,
+                   const RunLoopHooks* hooks = nullptr) {
     const std::string mission = surface::string_field(message, "mission");
     const std::string model_dir = surface::string_field(message, "model_dir");
     // Optional. Empty means no draft head, which is the default and the reference path.
@@ -1269,7 +1307,7 @@ bool start_mission(const std::string& id, const std::string& message,
         log.append(begin, clock);
     }
 
-    return run_loop(run_id, session, inbox, cancel, log, clock);
+    return run_loop(run_id, session, inbox, cancel, log, clock, hooks);
 }
 
 // Load the weights, as its own act (S12.2). Answers when the load is over; the surface
@@ -1692,7 +1730,714 @@ extern "C" void fatal_signal_handler(int sig) {
     std::raise(sig);
 }
 
-int main() {
+namespace lmp::surface::worker {
+
+int execute_task_packet(const TaskPacket& packet, surface::Session& session,
+                        platform::SystemClock& clock, bool jsonl, bool quiet,
+                        int client_fd = -1) {
+    ::setenv("LMP_COMMIT_THINK", packet.commit_think ? "1" : "0", 1);
+    ::setenv("LMP_SHADOW_COMPACT", packet.shadow_compact ? "1" : "0", 1);
+
+    struct SinkReset {
+        ~SinkReset() {
+            surface::wire::set_output_sink(nullptr);
+        }
+    } sink_reset;
+
+    if (jsonl) {
+        surface::wire::set_output_sink([client_fd](const std::string& line) {
+            if (client_fd >= 0) {
+                std::string nl = line + "\n";
+                (void)::write(client_fd, nl.data(), nl.size());
+            } else {
+                std::fwrite(line.data(), 1, line.size(), stdout);
+                std::fputc('\n', stdout);
+                std::fflush(stdout);
+            }
+        });
+    } else {
+        surface::wire::set_output_sink([](const std::string&) {});
+    }
+
+    std::error_code ec;
+    std::filesystem::path result_dir = std::filesystem::path(packet.result_path).parent_path();
+    std::filesystem::create_directories(result_dir, ec);
+    std::string durable_log = (result_dir / "events.ndjson").string();
+
+    platform::EventLogWriter log;
+    const platform::OpenResult opened = log.open({durable_log, 32U * 1024 * 1024, 4});
+    if (!opened.ok) {
+        std::fprintf(stderr, "piper: cannot open event log at %s: %s\n", durable_log.c_str(), opened.error.c_str());
+        RunResult r;
+        r.task_id = packet.id;
+        r.cwd = packet.cwd;
+        r.model_dir = packet.model_dir;
+        r.status = "error";
+        r.message = "cannot open event log: " + opened.error;
+        r.error = r.message;
+        write_result(packet.result_path, r);
+        if (!packet.orch_webhook.empty()) {
+            WebhookPayload hook_payload;
+            hook_payload.kind = "stalled";
+            hook_payload.task_id = packet.id;
+            hook_payload.run_id = "";
+            hook_payload.cwd = packet.cwd;
+            hook_payload.result_path = packet.result_path;
+            hook_payload.seq = 0;
+            hook_payload.status = "error";
+            hook_payload.question = "";
+            post_orch_webhook(packet.orch_webhook, hook_payload);
+        }
+        if (client_fd >= 0) {
+            nlohmann::json res_line = {{"status", r.status}, {"exit_code", kExitError}, {"error", r.error}};
+            std::string s = res_line.dump() + "\n";
+            (void)::write(client_fd, s.data(), s.size());
+        }
+        return kExitError;
+    }
+
+    model::CancelToken cancel;
+    platform::SpscChannel<std::string> inbox(256);
+
+    std::string answer_accum;
+    int generated_tokens = 0;
+    bool stopped_on_unanswered_ask = false;
+    std::string denied_irreversible_detail;
+    loop::RunReport final_report;
+
+    const auto wall_start = std::chrono::steady_clock::now();
+    const std::string awaiting_path = (result_dir / "awaiting_user.json").string();
+    const std::string answer_path = (result_dir / "answer.json").string();
+    std::unordered_set<std::string> denied_commands;
+    bool timed_out_awaiting_user = false;
+
+    RunLoopHooks hooks;
+    hooks.on_token = [&answer_accum](const std::string& channel, const std::string& text) {
+        if (channel == "answer") {
+            answer_accum += text;
+        }
+    };
+    hooks.on_turn = [&generated_tokens](const loop::TurnResult& t, double /*duration_ms*/) {
+        generated_tokens += static_cast<int>(t.think_tokens + t.text_tokens + t.tool_tokens);
+    };
+    int total_iterations = 0;
+    hooks.on_run_end = [&final_report, &total_iterations, &timed_out_awaiting_user](const loop::RunReport& rep) {
+        final_report = rep;
+        total_iterations += rep.iterations;
+        if (timed_out_awaiting_user) {
+            final_report.termination_reason = "timeout_awaiting_user";
+        }
+    };
+    hooks.approver = [&denied_commands, &timed_out_awaiting_user, &stopped_on_unanswered_ask,
+                      &denied_irreversible_detail, &cancel, &log, &clock, &packet, &session,
+                      &awaiting_path, &answer_path, wall_start]
+        (const std::string& tool, const std::string& command, const std::string& preview, const tools::RiskHint& hint) -> bool {
+        if (loop::is_irreversible(hint)) {
+            const std::string cmd = command.empty() ? preview : command;
+            if (denied_commands.count(cmd) > 0) {
+                platform::Event ev;
+                ev.kind = "approval";
+                ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "denied"}, {"why", "previously denied"}};
+                log.append(ev, clock);
+                return false;
+            }
+
+            platform::Event ask_ev;
+            ask_ev.kind = "approval";
+            ask_ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "ask"}};
+            log.append(ask_ev, clock);
+            log.flush();
+
+            IrreversibleAskParams ask_params;
+            ask_params.tool = tool;
+            ask_params.command_or_preview = cmd;
+            ask_params.run_id = session.run_id;
+            ask_params.task_id = packet.id;
+            ask_params.cwd = packet.cwd;
+            ask_params.result_path = packet.result_path;
+            ask_params.orch_webhook = packet.orch_webhook;
+            ask_params.awaiting_path = awaiting_path;
+            ask_params.answer_path = answer_path;
+            ask_params.seq = ask_ev.seq;
+            ask_params.timeout_s = packet.timeout_s;
+            ask_params.wall_start = wall_start;
+            ask_params.is_cancelled = [&cancel]() { return cancel.cancelled(); };
+
+            IrreversibleAskResult res = handle_irreversible_ask(ask_params);
+            if (res == IrreversibleAskResult::Allowed) {
+                platform::Event ev;
+                ev.kind = "approval";
+                ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "approved"}, {"by", "orchestrator"}};
+                log.append(ev, clock);
+                return true;
+            } else if (res == IrreversibleAskResult::Denied) {
+                denied_commands.insert(cmd);
+                platform::Event ev;
+                ev.kind = "approval";
+                ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "denied"}, {"by", "orchestrator"}};
+                log.append(ev, clock);
+                return false;
+            } else if (res == IrreversibleAskResult::Timeout) {
+                timed_out_awaiting_user = true;
+                denied_irreversible_detail = cmd;
+                platform::Event ev;
+                ev.kind = "approval";
+                ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "timeout"}};
+                log.append(ev, clock);
+                cancel.cancel();
+                return false;
+            } else { // Cancelled
+                stopped_on_unanswered_ask = true;
+                denied_irreversible_detail = cmd;
+                cancel.cancel();
+                return false;
+            }
+        }
+        if (!packet.auto_approve_exec) {
+            denied_irreversible_detail = "auto_approve_exec is false and tool required approval";
+            return false;
+        }
+        return true;
+    };
+
+    std::string start_msg = build_start_message(packet);
+
+    bool mission_ran = start_mission("1", start_msg, session, inbox, cancel, log, clock, &hooks);
+    if (timed_out_awaiting_user) {
+        final_report.termination_reason = "timeout_awaiting_user";
+    }
+
+    std::unordered_map<std::string, std::string> previous_answers;
+
+    while (final_report.termination_reason == "awaiting_user") {
+        log.flush();
+        std::optional<AwaitingUserInfo> ask_info = find_last_ask_user(durable_log, session.run_id);
+        std::string question = ask_info ? ask_info->question : "";
+        std::string options = ask_info ? ask_info->options : "";
+        uint64_t seq = ask_info ? ask_info->seq : 0;
+
+        std::string answer_text;
+        auto it = previous_answers.find(question);
+        if (it != previous_answers.end()) {
+            // Requirement 6: A repeated identical question still gets the previous answer, not a second wake-up.
+            answer_text = it->second;
+        } else {
+            AwaitingUserInfo info;
+            info.question = question;
+            info.options = options;
+            info.run_id = session.run_id;
+            info.seq = seq;
+            write_awaiting_user(awaiting_path, info);
+
+            if (!packet.orch_webhook.empty()) {
+                WebhookPayload hook_payload;
+                hook_payload.kind = "ask";
+                hook_payload.task_id = packet.id;
+                hook_payload.run_id = session.run_id;
+                hook_payload.cwd = packet.cwd;
+                hook_payload.result_path = packet.result_path;
+                hook_payload.seq = info.seq;
+                hook_payload.status = "";
+                hook_payload.question = info.question;
+                post_orch_webhook(packet.orch_webhook, hook_payload);
+            }
+
+            bool got_answer = false;
+            while (!cancel.cancelled()) {
+                auto now = std::chrono::steady_clock::now();
+                double elapsed = std::chrono::duration<double>(now - wall_start).count();
+                if (elapsed >= packet.timeout_s) {
+                    final_report.termination_reason = "timeout_awaiting_user";
+                    break;
+                }
+                auto ans = read_and_consume_answer(answer_path, awaiting_path);
+                if (ans.has_value()) {
+                    answer_text = std::move(*ans);
+                    previous_answers[question] = answer_text;
+                    got_answer = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+
+            if (!got_answer) {
+                if (final_report.termination_reason != "timeout_awaiting_user") {
+                    final_report.termination_reason = cancel.cancelled() ? "cancelled" : "timeout_awaiting_user";
+                }
+                break;
+            }
+        }
+
+        if (session.ctx != nullptr) {
+            session.ctx->add_user_message(answer_text);
+        }
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - wall_start).count();
+        double rem = std::max(1.0, packet.timeout_s - elapsed);
+        session.config.budget.wall_clock_seconds = static_cast<int>(rem);
+        cancel.reset();
+        run_loop(session.run_id, session, inbox, cancel, log, clock, &hooks);
+    }
+
+    const auto wall_end = std::chrono::steady_clock::now();
+    double wall_seconds = std::chrono::duration<double>(wall_end - wall_start).count();
+
+    RunResult result;
+    result.task_id = packet.id;
+    result.cwd = packet.cwd;
+    result.model_dir = packet.model_dir;
+    result.wall_seconds = wall_seconds;
+    result.turns = total_iterations;
+    result.generated_tokens = generated_tokens;
+    result.log_path = durable_log;
+
+    int exit_code = kExitOk;
+    if (!mission_ran && final_report.iterations == 0 && final_report.termination_reason.empty()) {
+        result.status = "error";
+        result.error = "mission failed to start (check model_dir or settings)";
+        exit_code = kExitError;
+    } else if (final_report.termination_reason == "timeout_awaiting_user") {
+        result.status = "timeout";
+        result.error = "timeout awaiting user answer (" + std::to_string(static_cast<int>(packet.timeout_s)) + "s)";
+        exit_code = kExitTimeout;
+    } else if (final_report.termination_reason == "wall_clock") {
+        result.status = "timeout";
+        result.error = "wall clock exceeded (" + std::to_string(packet.timeout_s) + "s)";
+        exit_code = kExitTimeout;
+    } else if (final_report.completed) {
+        result.status = "ok";
+        exit_code = kExitOk;
+    } else if (final_report.termination_reason == "max_turns") {
+        result.status = "error";
+        result.error = "agent did not complete (max_turns)";
+        exit_code = kExitError;
+    } else if (stopped_on_unanswered_ask) {
+        result.status = "error";
+        result.error = "irreversible tool denied (orchestrator must escalate): " + denied_irreversible_detail;
+        exit_code = kExitError;
+    } else {
+        result.status = "error";
+        std::string reason = final_report.termination_reason.empty() ? "no_run_end" : final_report.termination_reason;
+        result.error = "agent did not complete (" + reason + ")";
+        exit_code = kExitError;
+    }
+
+    result.files_touched = collect_files_touched(durable_log, packet.cwd);
+    collect_git(packet.cwd, result_dir.string(), result);
+
+    std::string clean_answer = strip_think_leak(answer_accum);
+    if (!clean_answer.empty()) {
+        result.message = clean_answer;
+    } else if (!result.error.empty()) {
+        result.message = result.error;
+    } else {
+        std::string bits = "status=" + result.status;
+        if (!final_report.termination_reason.empty()) bits += "; reason=" + final_report.termination_reason;
+        if (!result.files_touched.empty()) {
+            bits += "; files: ";
+            for (size_t i = 0; i < std::min<size_t>(result.files_touched.size(), 12); ++i) {
+                if (i > 0) bits += ", ";
+                bits += result.files_touched[i];
+            }
+        }
+        result.message = bits;
+    }
+    if (result.message.size() > 2000) result.message.resize(2000);
+
+    run_check(packet, result);
+    if (result.test.ran && result.test.exit_code != 0 && exit_code == kExitOk) {
+        exit_code = kExitError;
+    }
+
+    write_result(packet.result_path, result);
+    log.close();
+
+    if (!packet.orch_webhook.empty()) {
+        WebhookPayload hook_payload;
+        const bool is_completed = final_report.completed && (result.status == "ok");
+        hook_payload.kind = is_completed ? "done" : "stalled";
+        hook_payload.task_id = packet.id;
+        hook_payload.run_id = session.run_id;
+        hook_payload.cwd = packet.cwd;
+        hook_payload.result_path = packet.result_path;
+        hook_payload.seq = 0;
+        hook_payload.status = (final_report.termination_reason == "timeout_awaiting_user") ? "timeout_awaiting_user" : result.status;
+        hook_payload.question = "";
+        post_orch_webhook(packet.orch_webhook, hook_payload);
+    }
+
+    if (!quiet && !jsonl) {
+        std::fprintf(stderr, "piper: task %s finished with status '%s' (exit %d, %.1fs, %d turns, %zu files touched)\n",
+                     packet.id.c_str(), result.status.c_str(), exit_code, wall_seconds, result.turns, result.files_touched.size());
+    }
+
+    if (client_fd >= 0) {
+        nlohmann::json res_line = {
+            {"status", result.status},
+            {"exit_code", exit_code},
+            {"result_path", packet.result_path}
+        };
+        std::string s = res_line.dump() + "\n";
+        (void)::write(client_fd, s.data(), s.size());
+    }
+
+    return exit_code;
+}
+
+namespace {
+DaemonListener* g_active_daemon_listener = nullptr;
+void handle_daemon_sig(int sig) {
+    if (g_active_daemon_listener) {
+        g_active_daemon_listener->stop();
+    }
+    ::_exit(128 + sig);
+}
+
+static constexpr const char* kParentContractBanner =
+    "piper: you are the parent. Stay attached and read the exit and result.json.\n"
+    "Do not detach unless you pass --orch-webhook. No default URL. Events:\n"
+    "ask (write answer.json), done, stalled (not success), died (do not relaunch).\n"
+    "See PIPER.md if present.\n";
+
+static constexpr const char* kWorkerHelpText =
+    "Usage: piper <command> [options]\n\n"
+    "Commands:\n"
+    "  init [dir]                      Initialize PIPER.md and .cursor/rules/piper-parent.mdc\n"
+    "  run --task <task.json> [flags]  Run one task packet (synonym for worker run)\n"
+    "  serve [flags]                   Run keep-warm daemon\n"
+    "  worker <subcommand>             Worker commands (run, serve, init)\n\n"
+    "Flags for run:\n"
+    "  --task <path>                   task.json path or directory containing task.json\n"
+    "  --orch-webhook <url>            Webhook URL to wake parent orchestrator (ask/done/stalled/died)\n"
+    "  --detach                        Detach from launch session (requires --orch-webhook)\n"
+    "  --jsonl                         Stream JSONL notifications on stdout\n"
+    "  --quiet                         Suppress progress logs on stderr\n"
+    "  --no-daemon                     Do not attempt connecting to daemon\n\n"
+    "Flags for serve:\n"
+    "  --socket <path>                 Unix domain socket path\n"
+    "  --idle-timeout <seconds>        Idle timeout in seconds (default: 3600)\n\n"
+    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
+    "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
+    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, or LMP_ORCH_WEBHOOK). "
+    "A run that writes result.json POSTs done if completed, stalled if stopped/failed. Process exit with no result.json POSTs died. "
+    "Silent detached workers are refused.\n";
+} // namespace
+
+int worker_main(int argc, char** argv) {
+    std::signal(SIGPIPE, SIG_IGN);
+
+    if (argc <= 1) {
+        std::fprintf(stdout, "%s", kWorkerHelpText);
+        return kExitInvalid;
+    }
+
+    std::string subcommand;
+    std::string task_arg;
+    std::string cli_orch_webhook;
+    std::string init_target_dir = ".";
+    bool jsonl = false;
+    bool quiet = false;
+    bool serve = false;
+    bool no_daemon = false;
+    bool cli_detach = false;
+    double idle_timeout = 3600.0;
+    std::string socket_path;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == "--worker" || arg == "worker") {
+            continue;
+        } else if (arg == "init") {
+            subcommand = "init";
+        } else if (arg == "run") {
+            subcommand = "run";
+        } else if (arg == "serve" || arg == "--serve") {
+            subcommand = "serve";
+            serve = true;
+        } else if (arg == "--help" || arg == "-h") {
+            std::fprintf(stdout, "%s", kWorkerHelpText);
+            return kExitOk;
+        } else if (arg == "--version" || arg == "-v") {
+            std::fprintf(stdout, "piper 0.1.0 (LM_Pipe_2 native C++ worker)\n");
+            return kExitOk;
+        } else if (arg == "--task" && i + 1 < argc) {
+            task_arg = argv[++i];
+            if (subcommand.empty()) subcommand = "run";
+        } else if (arg == "--dir" && i + 1 < argc) {
+            init_target_dir = argv[++i];
+            if (subcommand.empty()) subcommand = "init";
+        } else if (arg == "--orch-webhook" && i + 1 < argc) {
+            cli_orch_webhook = argv[++i];
+        } else if (arg == "--jsonl") {
+            jsonl = true;
+        } else if (arg == "--quiet") {
+            quiet = true;
+        } else if (arg == "--no-daemon") {
+            no_daemon = true;
+        } else if (arg == "--detach" || arg == "--detached") {
+            cli_detach = true;
+        } else if (arg == "--idle-timeout" && i + 1 < argc) {
+            try { idle_timeout = std::stod(argv[++i]); } catch (...) {}
+        } else if (arg == "--socket" && i + 1 < argc) {
+            socket_path = argv[++i];
+        } else if (!arg.empty() && arg[0] != '-') {
+            if (subcommand == "init") {
+                init_target_dir = std::string(arg);
+            } else if (task_arg.empty()) {
+                task_arg = std::string(arg);
+                if (subcommand.empty()) subcommand = "run";
+            }
+        }
+    }
+
+    if (subcommand.empty()) {
+        if (serve) {
+            subcommand = "serve";
+        } else if (!task_arg.empty()) {
+            subcommand = "run";
+        } else {
+            std::fprintf(stdout, "%s", kWorkerHelpText);
+            return kExitInvalid;
+        }
+    }
+
+    if (subcommand == "init") {
+        return init_project(init_target_dir);
+    }
+
+    if (subcommand == "serve") {
+        DaemonConfig dcfg;
+        dcfg.socket_path = socket_path.empty() ? default_socket_path() : socket_path;
+        dcfg.pid_path = default_pid_path();
+        dcfg.idle_timeout_s = idle_timeout;
+
+        DaemonListener listener(dcfg);
+        if (!listener.start()) {
+            std::fprintf(stderr, "piper: failed to start keep-warm daemon on %s (is another daemon running?)\n",
+                         dcfg.socket_path.c_str());
+            return kExitError;
+        }
+        std::fprintf(stderr, "piper: keep-warm daemon listening on %s (PID %d, idle timeout %.0fs)\n",
+                     dcfg.socket_path.c_str(), ::getpid(), dcfg.idle_timeout_s);
+
+        g_active_daemon_listener = &listener;
+        std::signal(SIGINT, handle_daemon_sig);
+        std::signal(SIGTERM, handle_daemon_sig);
+
+        surface::Session session;
+        platform::SystemClock clock;
+
+        while (true) {
+            int client_fd = listener.accept_client();
+            if (client_fd < 0) {
+                std::fprintf(stderr, "piper: daemon idle timeout or shutdown\n");
+                break;
+            }
+
+            std::string line;
+            char ch;
+            while (line.size() < 65536 && ::read(client_fd, &ch, 1) > 0) {
+                if (ch == '\n') break;
+                line.push_back(ch);
+            }
+
+            auto req = nlohmann::json::parse(line, nullptr, false);
+            if (!req.is_discarded() && req.is_object()) {
+                std::string method = req.value("method", "run");
+                if (method == "ping") {
+                    std::string resp = "{\"status\":\"ok\"}\n";
+                    (void)::write(client_fd, resp.data(), resp.size());
+                    ::close(client_fd);
+                    continue;
+                }
+                if (method == "stop") {
+                    std::string resp = "{\"status\":\"stopping\"}\n";
+                    (void)::write(client_fd, resp.data(), resp.size());
+                    ::close(client_fd);
+                    break;
+                }
+                if (method == "run") {
+                    std::string task_file = req.value("task", "");
+                    bool cli_jsonl = req.value("jsonl", false);
+                    std::string err;
+                    auto pkt = load_packet(task_file, err);
+                    if (!pkt) {
+                        nlohmann::json err_res = {
+                            {"status", "error"},
+                            {"error", err},
+                            {"exit_code", kExitInvalid}
+                        };
+                        std::string s = err_res.dump() + "\n";
+                        (void)::write(client_fd, s.data(), s.size());
+                        ::close(client_fd);
+                        continue;
+                    }
+                    execute_task_packet(*pkt, session, clock, cli_jsonl, quiet, client_fd);
+                    ::close(client_fd);
+                    continue;
+                }
+            }
+            ::close(client_fd);
+        }
+
+        g_active_daemon_listener = nullptr;
+        std::signal(SIGINT, SIG_DFL);
+        std::signal(SIGTERM, SIG_DFL);
+
+        surface::unload_model(session);
+        listener.stop();
+        return kExitOk;
+    }
+
+    if (task_arg.empty()) {
+        std::fprintf(stderr, "piper: missing --task argument\n");
+        return kExitInvalid;
+    }
+
+    std::string resolved_sock = socket_path.empty() ? default_socket_path() : socket_path;
+    if (!no_daemon && is_daemon_alive(resolved_sock)) {
+        std::error_code ec;
+        std::string abs_task = std::filesystem::absolute(task_arg, ec).string();
+        auto code = forward_to_daemon(resolved_sock, abs_task, jsonl);
+        if (code.has_value()) {
+            return *code;
+        }
+    }
+
+    std::string error;
+    auto packet_opt = load_packet(task_arg, error);
+    if (!packet_opt) {
+        std::fprintf(stderr, "piper: %s\n", error.c_str());
+        try {
+            std::filesystem::path tp(task_arg);
+            if (std::filesystem::is_directory(tp)) tp = tp / "task.json";
+            std::filesystem::path parent = tp.parent_path();
+            if (!parent.empty() && std::filesystem::is_directory(parent)) {
+                std::filesystem::path res = parent / "result.json";
+                RunResult r;
+                r.status = "error";
+                r.message = error;
+                r.error = error;
+                write_result(res.string(), r);
+            }
+        } catch (...) {}
+        return kExitInvalid;
+    }
+
+    if (!cli_orch_webhook.empty()) {
+        packet_opt->orch_webhook = cli_orch_webhook;
+    }
+
+    const bool is_detached = is_detached_launch(cli_detach);
+    if (is_detached && packet_opt->orch_webhook.empty()) {
+        std::fprintf(stderr, "create YOUR wake URL and pass it, or stay attached\n");
+        return kExitInvalid;
+    }
+
+    if (!std::getenv("LMP_BANNER_PRINTED")) {
+        std::fprintf(stderr, "%s", kParentContractBanner);
+        std::fflush(stderr);
+        ::setenv("LMP_BANNER_PRINTED", "1", 1);
+    }
+
+    std::error_code rm_ec;
+    std::filesystem::remove(packet_opt->result_path, rm_ec);
+
+    if (cli_detach && ::getppid() != 1) {
+        pid_t f1 = ::fork();
+        if (f1 < 0) {
+            std::fprintf(stderr, "piper: fork() failed for detach: %s\n", std::strerror(errno));
+            return kExitError;
+        }
+        if (f1 > 0) {
+            ::_exit(0);
+        }
+        ::setsid();
+        pid_t f2 = ::fork();
+        if (f2 < 0) {
+            std::fprintf(stderr, "piper: fork() failed for supervisor: %s\n", std::strerror(errno));
+            return kExitError;
+        }
+        if (f2 > 0) {
+            // Supervisor parent in background: waits for worker child, and if no result.json was written, POSTs died.
+            int status = 0;
+            ::waitpid(f2, &status, 0);
+            std::error_code ec;
+            if (!std::filesystem::exists(packet_opt->result_path, ec) && !packet_opt->orch_webhook.empty()) {
+                WebhookPayload died_payload;
+                died_payload.kind = "died";
+                died_payload.task_id = packet_opt->id;
+                died_payload.run_id = "";
+                died_payload.cwd = packet_opt->cwd;
+                died_payload.result_path = packet_opt->result_path;
+                died_payload.seq = 0;
+                died_payload.status = "";
+                died_payload.question = "";
+                post_orch_webhook(packet_opt->orch_webhook, died_payload);
+            }
+            int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1);
+            ::_exit(code);
+        }
+        std::signal(SIGHUP, SIG_IGN);
+        std::signal(SIGPIPE, SIG_IGN);
+    } else if (!packet_opt->orch_webhook.empty()) {
+        // Attached mode with webhook: fork supervisor parent before loading model so supervisor survives any OOM / crash
+        pid_t child = ::fork();
+        if (child < 0) {
+            std::fprintf(stderr, "piper: fork() failed for supervisor: %s\n", std::strerror(errno));
+            return kExitError;
+        }
+        if (child > 0) {
+            int status = 0;
+            ::waitpid(child, &status, 0);
+            std::error_code ec;
+            if (!std::filesystem::exists(packet_opt->result_path, ec) && !packet_opt->orch_webhook.empty()) {
+                WebhookPayload died_payload;
+                died_payload.kind = "died";
+                died_payload.task_id = packet_opt->id;
+                died_payload.run_id = "";
+                died_payload.cwd = packet_opt->cwd;
+                died_payload.result_path = packet_opt->result_path;
+                died_payload.seq = 0;
+                died_payload.status = "";
+                died_payload.question = "";
+                post_orch_webhook(packet_opt->orch_webhook, died_payload);
+            }
+            int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1);
+            return code;
+        }
+    }
+
+    surface::Session session;
+    platform::SystemClock clock;
+    return execute_task_packet(*packet_opt, session, clock, jsonl, quiet);
+}
+
+} // namespace lmp::surface::worker
+
+int main(int argc, char** argv) {
+    std::string_view prog = (argc > 0 && argv[0]) ? argv[0] : "";
+    auto slash = prog.rfind('/');
+    std::string_view prog_name = (slash != std::string_view::npos) ? prog.substr(slash + 1) : prog;
+
+    bool is_piper = (prog_name == "piper");
+    bool has_worker_cmd = false;
+    if (argc >= 2) {
+        std::string_view first_arg = argv[1];
+        if (first_arg == "--worker" || first_arg == "worker" || first_arg == "run" ||
+            first_arg == "serve" || first_arg == "init" || first_arg == "--task") {
+            has_worker_cmd = true;
+        } else if (is_piper && (first_arg == "--help" || first_arg == "-h" || first_arg == "--version" || first_arg == "-v")) {
+            has_worker_cmd = true;
+        }
+    } else if (is_piper) {
+        has_worker_cmd = true;
+    }
+
+    if (is_piper || has_worker_cmd) {
+        return lmp::surface::worker::worker_main(argc, argv);
+    }
+
     platform::SystemClock clock;
     platform::EventLogWriter log;
     // Chosen, not inherited from the launcher's CWD -- see default_event_log_path.

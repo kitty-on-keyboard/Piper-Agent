@@ -26,3 +26,4 @@ lmp_add_test(test_run_id SOURCES test_run_id.cpp LABELS gate LINK lmp_surface)
 # stall the host and a cut through the middle of a codepoint -- which loses the whole
 # transcript to a parse error, not just the entry it mangled.
 lmp_add_test(test_transcript SOURCES test_transcript.cpp LABELS gate LINK lmp_surface)
+lmp_add_test(test_worker SOURCES test_worker.cpp LABELS gate LINK lmp_surface)

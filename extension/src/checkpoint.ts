@@ -40,14 +40,35 @@ interface ConfigJson {
   text_config?: { model_type?: unknown };
 }
 
+// Cache for config.json parse results per directory path.
+// Eliminates redundant synchronous file I/O and JSON parsing when classifying models
+// or scanning parent directories for sibling MTP draft heads.
+const configCache = new Map<string, ConfigJson | null>();
+
 function parseConfig(dir: string, io: CheckpointFs): ConfigJson | undefined {
+  if (configCache.has(dir)) {
+    const cached = configCache.get(dir);
+    return cached === null ? undefined : cached;
+  }
+
   const raw = io.readText(path.join(dir, "config.json"));
-  if (raw === undefined) return undefined;
-  try {
-    return JSON.parse(raw) as ConfigJson;
-  } catch {
+  if (raw === undefined) {
+    configCache.set(dir, null);
     return undefined;
   }
+  try {
+    const parsed = JSON.parse(raw) as ConfigJson;
+    configCache.set(dir, parsed);
+    return parsed;
+  } catch {
+    configCache.set(dir, null);
+    return undefined;
+  }
+}
+
+/** Clear cached config.json parse results (useful for tests or filesystem changes). */
+export function clearConfigCache(): void {
+  configCache.clear();
 }
 
 function asString(v: unknown): string {

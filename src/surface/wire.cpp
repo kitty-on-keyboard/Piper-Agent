@@ -13,10 +13,25 @@ std::mutex& stdout_lock() {
     return m;
 }
 
+std::function<void(const std::string&)>& sink_storage() {
+    static std::function<void(const std::string&)> sink = nullptr;
+    return sink;
+}
+
 } // namespace
+
+void set_output_sink(std::function<void(const std::string&)> sink) {
+    const std::lock_guard<std::mutex> guard(stdout_lock());
+    sink_storage() = std::move(sink);
+}
 
 void write_line(const std::string& line) {
     const std::lock_guard<std::mutex> guard(stdout_lock());
+    auto& sink = sink_storage();
+    if (sink) {
+        sink(line);
+        return;
+    }
     std::fwrite(line.data(), 1, line.size(), stdout);
     std::fputc('\n', stdout);
     std::fflush(stdout);

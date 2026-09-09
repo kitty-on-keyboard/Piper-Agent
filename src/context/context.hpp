@@ -425,6 +425,18 @@ class ContextStore {
         return collapsed;
     }
 
+    // Floor compaction: replace one observation body without dropping the turn shell
+    // (tool name, call text, args stay). Clears observed_path so stale-copy logic does
+    // not treat the stub as a file snapshot.
+    bool rewrite_observation(std::size_t index, std::string observation) {
+        if (index >= recent_.size()) {
+            return false;
+        }
+        recent_[index].observation = std::move(observation);
+        recent_[index].observed_path.clear();
+        return true;
+    }
+
     // What the human said, mid-run or between runs. Not prompt IMPURITY: a user
     // instruction is an observed fact about this session, in the same sense a tool
     // result is (S8.4). What stays forbidden is text nobody said -- an inferred

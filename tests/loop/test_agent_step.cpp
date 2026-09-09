@@ -1506,8 +1506,58 @@ context::ContextStore fat_context(int turns) {
     return ctx;
 }
 
+// Four recent turns, one godot_guide-shaped body that dominates the prompt. The 75/35
+// drop loop cannot peel it: kMinRecentTurns is 4.
+context::ContextStore floor_fat_context() {
+    context::ContextStore ctx("keep the context honest");
+    for (int i = 0; i < 3; ++i) {
+        context::TurnRecord rec;
+        rec.tool_name = "read_file";
+        rec.tool_args_summary = "src/small_" + std::to_string(i) + ".txt";
+        rec.assistant_text = "Reading a small file.";
+        rec.tool_call_text = "<function=read_file>\n<parameter=path>\nsrc/small_" +
+                             std::to_string(i) + ".txt\n</parameter>\n</function>";
+        rec.observation = "ok";
+        ctx.add_turn(std::move(rec));
+    }
+    context::TurnRecord fat;
+    fat.tool_name = "godot_guide";
+    fat.tool_args_summary = "scene spec";
+    fat.assistant_text = "Need the scene spec.";
+    fat.tool_call_text =
+        "<function=godot_guide>\n<parameter=topic>\nscene spec\n</parameter>\n</function>";
+    fat.observation.reserve(80000);
+    for (int i = 0; i < 1500; ++i) {
+        fat.observation += "godot_guide payload line " + std::to_string(i) +
+                           " with unique content so the tokenizer cannot collapse it.\n";
+    }
+    ctx.add_turn(std::move(fat));
+    return ctx;
+}
+
+context::ContextStore tiny_prefix_context() {
+    context::ContextStore ctx("keep the context honest");
+    for (int i = 0; i < 4; ++i) {
+        context::TurnRecord rec;
+        rec.tool_name = "read_file";
+        rec.tool_args_summary = "src/tiny_" + std::to_string(i) + ".txt";
+        rec.assistant_text = "x";
+        rec.observation = "ok";
+        ctx.add_turn(std::move(rec));
+    }
+    return ctx;
+}
+
 std::size_t first_prompt_tokens(const model::ScriptedBackend& backend) {
     return backend.received().empty() ? 0 : backend.received().front().prompt.size();
+}
+
+std::size_t max_prompt_tokens(const model::ScriptedBackend& backend) {
+    std::size_t n = 0;
+    for (const model::InferenceTask& t : backend.received()) {
+        n = std::max(n, t.prompt.size());
+    }
+    return n;
 }
 
 } // namespace
@@ -1660,11 +1710,267 @@ TEST(one_compaction_pass_counts_as_one_event) {
         const model::CancelToken cancel;
         (void)agent.run(cancel);
 
-        CHECK_EQ(ctx.compaction_count(), std::size_t{1});
+        // compact_to_budget now runs at the start of step() as well as after the turn is
+        // recorded, so one iteration can note one or two passes. Each pass still counts
+        // once, however many turns it peels.
+        CHECK(ctx.compaction_count() >= std::size_t{1});
+        CHECK(ctx.compaction_count() <= std::size_t{2});
         CHECK(ctx.recent().size() < std::size_t{20});
         CHECK(ctx.recent().size() >= std::size_t{4});
         CHECK(std::size_t{20} - ctx.recent().size() > std::size_t{1});
     }
+}
+
+// The 4-turn floor used to stop compact_to_budget while the render was still over the
+// applied budget, then generate anyway. A fat tool body inside that window has to be
+// stubbed locally so prompt_tokens() fits before generate.
+TEST(compaction_floor_stubs_a_fat_tool_body_instead_of_generating_over_budget) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::size_t prompt = 0;
+    {
+        model::ScriptedBackend backend;
+        backend.enqueue_response(text_turn(tok, "thinking", "one"));
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = floor_fat_context();
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.shadow_compact = false;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+        prompt = first_prompt_tokens(backend);
+        REQUIRE(prompt > 0);
+        CHECK_EQ(ctx.recent().size(), std::size_t{4});
+        CHECK(ctx.recent().back().observation.find("godot_guide payload line 100") !=
+              std::string::npos);
+    }
+
+    const std::string root = temp_dir();
+    const std::string log_path = root + "/events.jsonl";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "thinking", "one"));
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx = floor_fat_context();
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.context_budget_tokens = static_cast<std::int32_t>(prompt * 100 / 120);
+    config.shadow_compact = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    log.flush();
+
+    REQUIRE(config.context_budget_tokens > 0);
+    const auto budget = static_cast<std::size_t>(config.context_budget_tokens);
+    REQUIRE(!backend.received().empty());
+    CHECK(backend.received().front().prompt.size() <= budget);
+    CHECK(turn.outcome != loop::Outcome::BackendError);
+    CHECK_EQ(ctx.recent().size(), std::size_t{4});
+    CHECK_EQ(ctx.recent().back().tool_name, std::string("godot_guide"));
+    CHECK(ctx.recent().back().tool_call_text.find("godot_guide") != std::string::npos);
+    CHECK(ctx.recent().back().observation.find("truncated at context budget") !=
+          std::string::npos);
+    CHECK(ctx.recent().back().observation.find("fetch again") != std::string::npos);
+    CHECK(ctx.recent().back().observation.find("godot_guide payload line 100") ==
+          std::string::npos);
+    CHECK(ctx.recent().back().observed_path.empty());
+
+    const std::string rendered = tok.decode(backend.received().front().prompt);
+    CHECK(rendered.find("godot_guide") != std::string::npos);
+    CHECK(rendered.find("truncated at context budget") != std::string::npos);
+    CHECK(rendered.find("fetch again") != std::string::npos);
+    CHECK(rendered.find("godot_guide payload line 100") == std::string::npos);
+
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"compaction_floor\"") != std::string::npos);
+    CHECK(f.bytes.find("\"results_truncated\"") != std::string::npos);
+    CHECK(f.bytes.find("\"kind\":\"prompt_over_budget\"") == std::string::npos);
+}
+
+// Recency is a preference, not a reason to compact. Under the 75% high-water mark the
+// fat body stays verbatim.
+TEST(compaction_floor_does_not_stub_when_under_the_high_water_mark) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::size_t prompt = 0;
+    {
+        model::ScriptedBackend backend;
+        backend.enqueue_response(text_turn(tok, "thinking", "one"));
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = floor_fat_context();
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.shadow_compact = false;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+        prompt = first_prompt_tokens(backend);
+        REQUIRE(prompt > 0);
+    }
+
+    const std::string root = temp_dir();
+    const std::string log_path = root + "/events.jsonl";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "thinking", "one"));
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx = floor_fat_context();
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    // Prompt sits at 50% of budget -- under the 75% mark, so neither drop nor floor.
+    config.context_budget_tokens = static_cast<std::int32_t>(prompt * 100 / 50);
+    config.shadow_compact = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.step(cancel);
+    log.flush();
+
+    REQUIRE(!backend.received().empty());
+    CHECK_EQ(backend.received().front().prompt.size(), prompt);
+    CHECK_EQ(ctx.recent().size(), std::size_t{4});
+    CHECK(ctx.recent().back().observation.find("godot_guide payload line 100") !=
+          std::string::npos);
+    CHECK(ctx.recent().back().observation.find("truncated at context budget") ==
+          std::string::npos);
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"compaction_floor\"") == std::string::npos);
+    CHECK(f.bytes.find("\"kind\":\"compaction\"") == std::string::npos);
+}
+
+// Prefix (system + schemas + mission) over the applied budget: shrinking every tool body
+// still cannot fit. Fail closed; do not generate.
+TEST(prefix_over_budget_fails_closed_without_generating) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::size_t prompt = 0;
+    {
+        model::ScriptedBackend backend;
+        backend.enqueue_response(text_turn(tok, "thinking", "one"));
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = tiny_prefix_context();
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.shadow_compact = false;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+        prompt = first_prompt_tokens(backend);
+        REQUIRE(prompt > 8);
+    }
+
+    const std::string root = temp_dir();
+    const std::string log_path = root + "/events.jsonl";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "thinking", "one"));
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx = tiny_prefix_context();
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.context_budget_tokens = static_cast<std::int32_t>(prompt / 4);
+    config.shadow_compact = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    log.flush();
+
+    CHECK(turn.outcome == loop::Outcome::BackendError);
+    CHECK(backend.received().empty());
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"prompt_over_budget\"") != std::string::npos);
+    CHECK(f.bytes.find("\"refused\":\"context_budget\"") != std::string::npos);
+}
+
+// Floor shrink rewrites history the same way dropping a turn does: the next generate
+// must not Extend a KV prefix that no longer matches.
+TEST(compaction_floor_invalidates_kv_so_shadow_compact_cannot_reuse_the_old_prefix) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::size_t prompt = 0;
+    {
+        model::ScriptedBackend backend;
+        backend.enqueue_response(text_turn(tok, "thinking", "one"));
+        tools::Registry registry(workspace("/tmp"));
+        context::ContextStore ctx = floor_fat_context();
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.shadow_compact = false;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.step(cancel);
+        prompt = first_prompt_tokens(backend);
+        REQUIRE(prompt > 0);
+    }
+
+    const std::string root = temp_dir();
+    const std::string log_path = root + "/events.jsonl";
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "thinking", "one"));
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx = floor_fat_context();
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.context_budget_tokens = static_cast<std::int32_t>(prompt * 100 / 120);
+    config.shadow_compact = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.step(cancel);
+    log.flush();
+
+    REQUIRE(!backend.received().empty());
+    CHECK(backend.received().front().prompt.size() <=
+          static_cast<std::size_t>(config.context_budget_tokens));
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"compaction_floor\"") != std::string::npos);
+    CHECK(f.bytes.find("\"kind\":\"shadow_compact\"") != std::string::npos);
+    CHECK(f.bytes.find("shadow_compact_fallback") == std::string::npos);
 }
 
 // The switch in the editor said "auto-approve command execution", the operator turned it
@@ -2128,24 +2434,47 @@ TEST(a_repeated_read_is_answered_and_the_older_copy_is_collapsed) {
     const std::string read_body =
         "<function=read_file>\n<parameter=path>\nf.txt\n</parameter>\n</function>\n";
 
-    model::ScriptedBackend backend;
-    backend.enqueue_response(call_turn(tok, read_body)); // 1: the real read
-    backend.enqueue_response(call_turn(tok, read_body)); // 2: the repeat, cache-served
-    backend.enqueue_response(text_turn(tok, "t", "done"));
+    const auto play = [&](model::ScriptedBackend& b) {
+        b.enqueue_response(call_turn(tok, read_body)); // 1: the real read
+        b.enqueue_response(call_turn(tok, read_body)); // 2: the repeat, cache-served
+        b.enqueue_response(text_turn(tok, "t", "done"));
+    };
 
+    // Measure the prompt AFTER the first read, then set the budget so that prompt sits
+    // at 90% -- over the 75% compact mark (so the queued collapse drains), under the
+    // applied budget so the floor does not stub the remaining copy. Compact after that
+    // read turns the older body into a pointer; the repeat note on the newest copy keeps
+    // it verbatim.
+    std::size_t after_first_read = 0;
+    {
+        model::ScriptedBackend backend;
+        backend.enqueue_response(call_turn(tok, read_body));
+        backend.enqueue_response(text_turn(tok, "t", "done"));
+        tools::Registry registry(workspace(root));
+        context::ContextStore ctx("read it");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        config.budget.max_iterations = 2;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+        REQUIRE(backend.received().size() >= 2);
+        after_first_read = backend.received()[1].prompt.size();
+        REQUIRE(after_first_read > 0);
+    }
+
+    model::ScriptedBackend backend;
+    play(backend);
     tools::Registry registry(workspace(root));
     context::ContextStore ctx("read it");
     platform::EventLogWriter log;
     platform::SystemClock clock;
     loop::AgentConfig config;
     config.auto_syntax_check = false;
-    // The collapse is QUEUED when the repeat is seen and APPLIED by compact_to_budget,
-    // because rewriting a record inside the KV-cached prefix costs a full re-prefill and
-    // compaction is the one moment that prefill is already being paid -- see
-    // collapse_duplicate_read(). This budget is small enough that the trim fires, which is
-    // what drains the queue; kMinRecentTurns still stops it dropping a real turn here, so
-    // the collapse is the only thing that reclaims anything.
-    config.context_budget_tokens = 100;
+    config.context_budget_tokens = static_cast<std::int32_t>(after_first_read * 100 / 90);
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
     const model::CancelToken cancel;
     // Driven through run(), not step(): the turn RECORDS and the cache are what this is
@@ -2170,8 +2499,15 @@ TEST(a_repeated_read_is_answered_and_the_older_copy_is_collapsed) {
             ++refused;
         }
     }
+    for (const std::string& span : ctx.compacted_spans()) {
+        if (span.find("collapsed to keep one copy") != std::string::npos) {
+            ++collapsed;
+        }
+    }
+    // The older copy may still be in recent_, or already folded into a span if later
+    // 75/35 drops peeled it -- either way the collapse happened.
     CHECK_EQ(verbatim, std::size_t{1});
-    CHECK_EQ(collapsed, std::size_t{1});
+    CHECK(collapsed >= std::size_t{1});
     CHECK_EQ(refused, std::size_t{0});
 }
 
@@ -2461,17 +2797,41 @@ TEST(a_run_leaves_a_trace_that_explains_its_own_repeats) {
     const std::string read_body =
         "<function=read_file>\n<parameter=path>\nnotes.txt\n</parameter>\n</function>\n";
 
-    model::ScriptedBackend backend;
-    backend.enqueue_response(call_turn(tok, plan_body));
-    backend.enqueue_response(call_turn(tok, write_body));
-    backend.enqueue_response(call_turn(tok, read_body)); // the real read
-    backend.enqueue_response(call_turn(tok, read_body)); // the repeat: cache-served
-    // The repeat is itself the first INERT turn -- it ran and learned nothing -- so the
-    // ending streak starts there and these three narrations finish it.
-    backend.enqueue_response(text_turn(tok, "t", "done"));
-    backend.enqueue_response(text_turn(tok, "t", "done"));
-    backend.enqueue_response(text_turn(tok, "t", "done"));
+    const auto play = [&](model::ScriptedBackend& b) {
+        b.enqueue_response(call_turn(tok, plan_body));
+        b.enqueue_response(call_turn(tok, write_body));
+        b.enqueue_response(call_turn(tok, read_body)); // the real read
+        b.enqueue_response(call_turn(tok, read_body)); // the repeat: cache-served
+        // The repeat is itself the first INERT turn -- it ran and learned nothing -- so the
+        // ending streak starts there and these three narrations finish it.
+        b.enqueue_response(text_turn(tok, "t", "done"));
+        b.enqueue_response(text_turn(tok, "t", "done"));
+        b.enqueue_response(text_turn(tok, "t", "done"));
+    };
 
+    std::size_t measured = 0;
+    {
+        model::ScriptedBackend backend;
+        play(backend);
+        tools::Registry registry(workspace(root));
+        context::ContextStore ctx("read the file");
+        platform::EventLogWriter log;
+        platform::SystemClock clock;
+        loop::AgentConfig config;
+        config.auto_syntax_check = false;
+        config.context_budget_tokens = 1000000;
+        loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+        const model::CancelToken cancel;
+        (void)agent.run(cancel);
+        measured = max_prompt_tokens(backend);
+        REQUIRE(measured > 0);
+    }
+    // Control wrote notes.txt. A second write of the same path is irreversible and is
+    // refused even with auto_approve_writes, so the real pass would never emit `write`.
+    (void)::system(("rm -f " + root + "/notes.txt").c_str());
+
+    model::ScriptedBackend backend;
+    play(backend);
     tools::Registry registry(workspace(root));
     context::ContextStore ctx("read the file");
     platform::EventLogWriter log;
@@ -2483,11 +2843,10 @@ TEST(a_run_leaves_a_trace_that_explains_its_own_repeats) {
     platform::SystemClock clock;
     loop::AgentConfig config;
     config.auto_syntax_check = false;
-    // UNDER CONTEXT PRESSURE, because that is the only condition under which the collapse
-    // runs at all -- see collapse_duplicate_read(). A budget this small puts every prompt
-    // above the collapse mark while leaving compaction alone: the trim needs MORE than
-    // kMinRecentTurns records to drop one, and this run never holds more than four.
-    config.context_budget_tokens = 100;
+    // Compact must fire so the queued collapse drains, but the prompt must still fit
+    // after collapse or the floor stubs the remaining verbatim copy. 85% of the
+    // uncompacted two-copy prompt is over 75% and under 100%.
+    config.context_budget_tokens = static_cast<std::int32_t>(measured * 100 / 85);
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
     const model::CancelToken cancel;
     (void)agent.run(cancel);

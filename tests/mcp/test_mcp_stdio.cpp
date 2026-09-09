@@ -51,7 +51,8 @@ TEST(stdio_session_against_a_real_subprocess) {
     const std::vector<Tool> tools = client.list_tools();
     CHECK_EQ(tools.size(), std::size_t(5)); // + screenshot, the image round-trip
     bool saw_echo_ro = false;
-    bool saw_add_unannotated = false;
+    bool saw_add_destructive = false;
+    bool saw_slow_unannotated = false;
     for (const Tool& t : tools) {
         if (t.name == "echo") {
             REQUIRE(t.annotations.has_value());
@@ -59,12 +60,18 @@ TEST(stdio_session_against_a_real_subprocess) {
             saw_echo_ro = true;
         }
         if (t.name == "add") {
+            REQUIRE(t.annotations.has_value());
+            CHECK(t.annotations->at("destructiveHint").get<bool>());
+            saw_add_destructive = true;
+        }
+        if (t.name == "slow_count") {
             CHECK(!t.annotations.has_value());
-            saw_add_unannotated = true;
+            saw_slow_unannotated = true;
         }
     }
     CHECK(saw_echo_ro);
-    CHECK(saw_add_unannotated);
+    CHECK(saw_add_destructive);
+    CHECK(saw_slow_unannotated);
 
     const ToolResult r = client.call_tool("echo", nlohmann::json{{"text", "over a pipe"}});
     CHECK(!r.is_error);

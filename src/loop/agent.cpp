@@ -45,6 +45,65 @@ bool trace_text_enabled() {
 // whole log.
 constexpr std::size_t kTraceFieldCap = 8192;
 
+// Local truncate of a tool body that the 4-turn floor would otherwise pin above the
+// applied KV budget. Distinct from the observation-budget clamp: that one fires at
+// add_turn, this one fires when the render still does not fit after turn-drop.
+constexpr std::string_view kFloorStubPrefix = "[truncated at context budget:";
+
+bool observation_is_floor_stub(const std::string& observation) {
+    return observation.find(kFloorStubPrefix) == 0;
+}
+
+std::string floor_stub_for(const context::TurnRecord& t) {
+    const std::string& topic =
+        t.observed_path.empty() ? t.tool_args_summary : t.observed_path;
+    std::string out;
+    out += kFloorStubPrefix;
+    out += ' ';
+    out += t.tool_name.empty() ? "tool" : t.tool_name;
+    if (!topic.empty()) {
+        out += " (";
+        out += topic;
+        out += ')';
+    }
+    out += ". Body dropped; fetch again.]";
+    return out;
+}
+
+bool tool_body_is_shrinkable(const context::TurnRecord& t) {
+    if (!t.user_text.empty() || t.observation.empty() ||
+        observation_is_floor_stub(t.observation)) {
+        return false;
+    }
+    return t.observation.size() > floor_stub_for(t).size();
+}
+
+std::size_t oldest_shrinkable_observation(
+    const std::vector<context::TurnRecord>& recent) {
+    for (std::size_t i = 0; i < recent.size(); ++i) {
+        if (tool_body_is_shrinkable(recent[i])) {
+            return i;
+        }
+    }
+    return static_cast<std::size_t>(-1);
+}
+
+std::size_t largest_shrinkable_observation(
+    const std::vector<context::TurnRecord>& recent) {
+    std::size_t best = static_cast<std::size_t>(-1);
+    std::size_t best_n = 0;
+    for (std::size_t i = 0; i < recent.size(); ++i) {
+        if (!tool_body_is_shrinkable(recent[i])) {
+            continue;
+        }
+        if (recent[i].observation.size() > best_n) {
+            best_n = recent[i].observation.size();
+            best = i;
+        }
+    }
+    return best;
+}
+
 std::string capped(std::string s) {
     if (s.size() <= kTraceFieldCap) {
         return s;
@@ -992,6 +1051,12 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     think_blocks_.clear();
     warmed_stable_prefix_ = false;
 
+    // Compact BEFORE render so a fat body already sitting in the protected window cannot
+    // be sent. The end-of-turn call in run() still shrinks a result recorded this turn
+    // before the operator check; this call covers the first generate of a pre-seeded
+    // store and any observation added after the previous compact (steer, operator check).
+    compact_to_budget();
+
     // PHASE MARKERS EXIST BECAUSE A CRASH LEAVES NO OTHER TRACE.
     //
     // The sidecar has twice died with the event log ending on a `turn` and no `run_end`,
@@ -1084,6 +1149,28 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // exists for: turn n of a given config always gets the same seed. What it stops being
     // is reproducible ACROSS turns of the same run, which was never a feature.
     task.sampling.seed = seed_for_turn(config_.seed, turns_generated_++);
+
+    // Applied context budget, not the requested 96000: sidecar may have clamped this to
+    // what KV can hold beside the weights. Compaction is supposed to get us under it;
+    // if the prefix alone still does not fit, fail closed rather than prefill past KV.
+    const auto budget =
+        static_cast<std::size_t>(std::max(1, config_.context_budget_tokens));
+    if (task.prompt.size() > budget) {
+        turn.generation.status = model::GenStatus::BackendError;
+        turn.generation.error =
+            "prompt (" + std::to_string(task.prompt.size()) + ") exceeds context budget (" +
+            std::to_string(budget) + ")";
+        turn.outcome = Outcome::BackendError;
+        emit("prompt_over_budget",
+             {{"tokens", std::to_string(task.prompt.size())},
+              {"budget_tokens", std::to_string(budget)},
+              {"recent_turns", std::to_string(ctx_.recent().size())}});
+        emit("prompt", {{"tokens", std::to_string(task.prompt.size())},
+                        {"messages", std::to_string(messages.size())},
+                        {"refused", "context_budget"},
+                        {"error", turn.generation.error}});
+        return turn;
+    }
 
     // Hard model ceiling: prompt + reserved generation must fit. Compaction is supposed
     // to keep the prompt under context_budget_tokens, but a mis-set editor budget or a
@@ -2322,11 +2409,32 @@ void Agent::compact_to_budget() {
         tokens = prompt_tokens();
     }
     const std::size_t dropped = turns_before - ctx_.recent().size();
+    // Recency is a preference. Fitting the applied budget is the requirement. When the
+    // drop loop hits kMinRecentTurns (or a single body is larger than the remaining
+    // budget) the 75/35 path stops; shrinking tool payloads in the protected window is
+    // what remains. Stop at the applied budget, not the 35% low-water mark.
+    const std::size_t floor_before = tokens;
+    std::size_t truncated = 0;
+    while (tokens > budget) {
+        std::size_t idx = oldest_shrinkable_observation(ctx_.recent());
+        if (idx == static_cast<std::size_t>(-1)) {
+            idx = largest_shrinkable_observation(ctx_.recent());
+        }
+        if (idx == static_cast<std::size_t>(-1)) {
+            break;
+        }
+        if (!ctx_.rewrite_observation(idx, floor_stub_for(ctx_.recent()[idx]))) {
+            break;
+        }
+        ++truncated;
+        tokens = prompt_tokens();
+    }
     // One event per compaction EVENT, carrying both ends of it. Emitting per dropped turn
     // said how often the trim looped and never said whether it achieved anything. The
     // public counter used to follow the loop too, which is why the chip jumped from 0 to
-    // "compacted 30×" the first time the bar filled.
-    if (dropped > 0) {
+    // "compacted 30×" the first time the bar filled. A shrink-only floor pass counts too:
+    // history was rewritten even though recent_turns did not drop.
+    if (dropped > 0 || truncated > 0) {
         ctx_.note_compaction();
         kv_invalidated_by_compact_ = true;
     }
@@ -2335,6 +2443,14 @@ void Agent::compact_to_budget() {
                         {"budget_tokens", std::to_string(budget)},
                         {"turns_dropped", std::to_string(dropped)},
                         {"recent_turns", std::to_string(ctx_.recent().size())}});
+    if (truncated > 0) {
+        emit("compaction_floor",
+             {{"tokens_before", std::to_string(floor_before)},
+              {"tokens_after", std::to_string(tokens)},
+              {"budget_tokens", std::to_string(budget)},
+              {"results_truncated", std::to_string(truncated)},
+              {"recent_turns", std::to_string(ctx_.recent().size())}});
+    }
 }
 
 void Agent::maybe_warm_stable_prefix(const model::InferenceTask& task,
