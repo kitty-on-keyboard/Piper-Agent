@@ -1,8 +1,9 @@
 # Piper Agent
 
-A local coding agent for Apple Silicon: a VS Code / Cursor extension plus one native
-sidecar that loads a **single** Qwen3 model in-process via [MLX](https://github.com/ml-explore/mlx)
-and drives a tool-using loop against the workspace you open.
+A local coding agent for Apple Silicon: one native sidecar that loads a **single** Qwen3
+model in-process via [MLX](https://github.com/ml-explore/mlx) and drives a tool-using
+loop against a workspace. Two interfaces, one agent: a VS Code / Cursor extension for
+humans, and a `piper` CLI worker for cloud orchestrators / scripts.
 
 **Scope:** Mac-local Qwen/MLX, one model loaded, no subagents, no second inference server.
 
@@ -33,6 +34,26 @@ already-open window.
 
 To package a VSIX locally: `cd extension && npm run package`, then Extensions → `...` →
 Install from VSIX.
+
+**VSIX for humans, CLI for agents.** The CLI runs the native C++ sidecar without the editor.
+Cloud models plan and review; local Piper (typically A3B) executes scoped edits. One
+MLX process at a time — do not load the sidebar and the worker together.
+
+```bash
+cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
+ln -s "$(pwd)/scripts/piper_worker.py" /usr/local/bin/piper   # once
+piper --help
+
+# One-shot headless dispatch:
+piper worker run --task /path/to/task.json   # blocks; then read result.json
+
+# Or keep-warm daemon mode (keeps weights resident in Unified Memory across slices):
+piper worker serve                           # listens on ~/.piper/worker.sock
+piper worker run --task /path/to/task.json   # automatically forwards to warm daemon!
+```
+
+Direct binary invocation is also supported: `lmp_sidecar --worker --task <path>` or `lmp_sidecar --worker --serve`.
+Override the binary with `LMP_SIDECAR`; the model with `model_dir` in the packet or `LMP_QWEN_DIR`.
 
 ## Use
 

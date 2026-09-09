@@ -17,6 +17,7 @@ const path = require("path");
 // Antigravity first: it is the current target. Note the two bundles -- "Antigravity.app"
 // is not the IDE, "Antigravity IDE.app" is the Code-OSS fork with the CLI.
 const candidates = [
+  path.join(process.env.HOME || "", ".antigravity-ide", "antigravity-ide", "bin", "antigravity-ide"),
   "/Applications/Antigravity IDE.app/Contents/Resources/app/bin/antigravity-ide",
   "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
   "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",

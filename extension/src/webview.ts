@@ -2356,8 +2356,9 @@ const Q_TRAILING_TOOL_XML = /(?:<\\/(?:parameter|function|tool_call)>)+$/i;
 // the label goes into the button as textContent AND back to the model as the answer, so
 // the asterisks would be visible in both. Stripped here rather than at the call sites,
 // because both paths produce labels and only one of them used to be reachable.
+// Combined regex replacement to strip bold/italic markdown emphasis in a single pass.
 function stripEmphasis(s) {
-  return s.replace(/\\*\\*/g, '').replace(/__/g, '').trim();
+  return s.replace(/\\*\\*|__/g, '').trim();
 }
 
 function questionBlockToOption(block) {
@@ -2477,18 +2478,24 @@ function questionOptions(argsObj) {
 // I..." is not an option and "A) ..." is.
 const Q_ENUM_LINE = /^(?:option\\s+[0-9a-z]+\\s*[:.\\)]|[0-9]{1,2}\\s*[.\\)]\\s|[a-z]\\s*[.\\)]\\s)/i;
 
+// Single-pass question parsing: tracks first marker and marker count in one loop
+// without intermediate array allocations (filter/slice) or redundant line trimming.
 function questionFromText(text) {
   const empty = { question: text, options: [] };
   if (typeof text !== 'string' || !text.trim()) {
     return empty;
   }
   const lines = text.replace(/\\r\\n/g, '\\n').split(/\\n/);
-  const firstMarker = lines.findIndex((l) => Q_ENUM_LINE.test(l.trim()));
-  if (firstMarker < 0) {
-    return empty;
+  let firstMarker = -1;
+  let markerCount = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed && Q_ENUM_LINE.test(trimmed)) {
+      if (firstMarker < 0) firstMarker = i;
+      markerCount++;
+    }
   }
-  const markerCount = lines.filter((l) => Q_ENUM_LINE.test(l.trim())).length;
-  if (markerCount < 2) {
+  if (firstMarker < 0 || markerCount < 2) {
     return empty;
   }
 
@@ -2499,14 +2506,15 @@ function questionFromText(text) {
   // A marker line opens an option; anything after it that is not a marker is its detail,
   // which is how a model writes a choice that needs a sentence of justification.
   const groups = [];
-  for (const line of lines.slice(firstMarker)) {
-    if (!line.trim()) {
+  for (let i = firstMarker; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
       continue;
     }
-    if (Q_ENUM_LINE.test(line.trim()) || groups.length === 0) {
-      groups.push([line.trim()]);
+    if (Q_ENUM_LINE.test(trimmed) || groups.length === 0) {
+      groups.push([trimmed]);
     } else {
-      groups[groups.length - 1].push(line.trim());
+      groups[groups.length - 1].push(trimmed);
     }
   }
   const options = groups

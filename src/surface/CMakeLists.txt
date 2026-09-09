@@ -1,5 +1,5 @@
 add_library(lmp_surface transport.cpp protocol.cpp mcp_settings.cpp context_journal.cpp
-  session.cpp wire.cpp)
+  session.cpp wire.cpp worker.cpp socket_reader.cpp)
 target_include_directories(lmp_surface PUBLIC "${PROJECT_SOURCE_DIR}")
 # lmp_tools is PUBLIC because mcp_settings.hpp hands back tools:: types, and lmp_context
 # and lmp_pcc for the same reason from context_journal.hpp -- it is the adapter between
@@ -15,6 +15,12 @@ target_link_libraries(lmp_sidecar PRIVATE lmp_warnings lmp_assertions
   lmp_surface lmp_loop lmp_tools lmp_context lmp_model lmp_platform)
 # MLX opens its Metal kernels from beside the executable. No-op when MLX is off.
 lmp_stage_metallib(lmp_sidecar)
+
+# Direct native CLI: piper on PATH or in build directory is a symlink to lmp_sidecar
+add_custom_command(TARGET lmp_sidecar POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E create_symlink lmp_sidecar "${CMAKE_CURRENT_BINARY_DIR}/piper"
+  COMMENT "Creating piper symlink to lmp_sidecar"
+  VERBATIM)
 
 # `cmake --build build --target vsix` produces extension/lm-pipe.vsix with THIS binary
 # inside it, verified by hash. Not part of `all`: packaging is a deliberate act, and a

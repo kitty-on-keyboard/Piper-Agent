@@ -24,6 +24,12 @@ lmp_add_script_test(test_pin_attribution
   COMMAND "${PROJECT_SOURCE_DIR}/scripts/agent_eval.py" self-test
   LABELS gate)
 
+# Headless worker CLI: packet parse, result.json, exit codes, irreversible deny.
+# Fake sidecar only — does not load a model.
+lmp_add_script_test(test_piper_worker
+  COMMAND "${PROJECT_SOURCE_DIR}/scripts/piper_worker.py" self-test
+  LABELS gate)
+
 # The bake-off pins, including the assertion that the holdout stays harder (S11.3).
 lmp_add_script_test(test_bakeoff_pins
   COMMAND "${CMAKE_COMMAND}" -E env "LMP_BUILD_DIR=${CMAKE_BINARY_DIR}"

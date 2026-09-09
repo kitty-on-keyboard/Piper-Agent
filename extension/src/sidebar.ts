@@ -9,6 +9,7 @@
 // falsifiability state, and HITL cards with capability chips. The checklist and the perf
 // HUD are pinned outside the feed because they are live state rather than history.
 
+import * as crypto from "crypto";
 import * as vscode from "vscode";
 import { SidecarClient } from "./client";
 import { webviewHtml } from "./webview";
@@ -935,6 +936,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private html(): string {
     // Markup, styles and the view script live in webview.ts. This class owns the
     // protocol wiring; mixing a stylesheet into it made both harder to read.
-    return webviewHtml(Math.random().toString(36).slice(2));
+    return webviewHtml(crypto.randomBytes(16).toString("hex"));
   }
 }

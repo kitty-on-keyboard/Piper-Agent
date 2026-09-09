@@ -43,7 +43,9 @@ jobs:
         # half of a protocol change goes unchecked. That check exists precisely so "a
         # protocol change that breaks the TS side must fail here, not in someone's editor
         # three days later", and it had never once run on CI.
-        run: npm ci --prefix extension
+        run: |
+          npm ci --prefix extension
+          npm run compile --prefix extension
 
       - name: Configure
         # -DLMP_WITH_MLX=OFF is not a downgrade of what CI checks: it is what CI has
@@ -77,7 +79,9 @@ jobs:
 
       # Same reason as the gate job: without node_modules the pinned manifest and the
       # selected set disagree, and test_gate_manifest fails by design.
-      - run: npm ci --prefix extension
+      - run: |
+          npm ci --prefix extension
+          npm run compile --prefix extension
 
       # The asan preset never had MLX either (same probe, same absent interpreter), and
       # LMP_WITH_MLX defaults OFF, so this stays as it was.

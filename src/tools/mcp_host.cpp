@@ -259,30 +259,24 @@ std::optional<bool> annotation_bool(const std::optional<nlohmann::json>& ann,
     return std::nullopt;
 }
 
-// Trust answers containment (cards). Annotations on a trusted server answer
-// mutates vs read. The previous `mutates = !trusted` made every trusted tool look
-// like a read, and `remote` was then used as a second gate to take that back —
-// which hid orientation tools from Plan mode.
+// Trust answers containment (cards) for mutating tools. `readOnlyHint` true means
+// the call is not a write and not destroy, trusted or not (see docs/ASK_USER_CLOUD_HANDOFF.md).
+// Untrusted mutating tools are marked irreversible (containment), while trusted mutating
+// tools leave irreversible false so approved-write workflows can run without per-call cards.
 void apply_mcp_decl_flags(ToolDecl& decl, bool trusted, const mcp::Tool& tool) {
     decl.remote = true;
     decl.executes_commands = false;
-    if (!trusted) {
-        decl.mutates_workspace = true;
-        decl.needs_execution = true;
-        decl.irreversible = true;
-        return;
-    }
     const bool read_only =
         annotation_bool(tool.annotations, "readOnlyHint").value_or(false);
-    decl.mutates_workspace = !read_only;
-    decl.needs_execution = !read_only;
-    // irreversible is CONTAINMENT, not "the tool has side effects". Untrusted
-    // servers set it above. On a trusted server, MCP's destructiveHint means
-    // "may perform destructive updates", which is already mutates_workspace via
-    // !readOnlyHint. Mapping it onto irreversible made execute_blender_code
-    // (destructiveHint=true) raise a "destroys data" card with auto_approve_writes
-    // on, against the trust event: "tools run outside Seatbelt without per-call cards".
-    decl.irreversible = false;
+    if (read_only) {
+        decl.mutates_workspace = false;
+        decl.needs_execution = false;
+        decl.irreversible = false;
+        return;
+    }
+    decl.mutates_workspace = true;
+    decl.needs_execution = true;
+    decl.irreversible = !trusted;
 }
 
 constexpr std::size_t kMaxInstructionsBytes = 32U * 1024;

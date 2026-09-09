@@ -203,20 +203,29 @@ TEST(a_remote_tool_is_namespaced_only_when_its_name_would_shadow) {
 
 TEST(an_untrusted_servers_tools_are_irreversible_and_a_trusted_servers_are_not) {
     // THE containment decision. A remote tool runs in the server's process, which Seatbelt
-    // does not cover, so an untrusted server's tools each raise an approval card. The
-    // server's own annotations never participate.
+    // does not cover. Mutating tools on an untrusted server each raise an approval card (irreversible),
+    // while tools annotated readOnlyHint=true are safe reads and need no card (docs/ASK_USER_CLOUD_HANDOFF.md).
     Registry untrusted_reg(workspace());
     McpHost untrusted_host;
     (void)untrusted_host.connect_and_register({demo("demo", false)}, untrusted_reg);
     const ToolDecl* u = find(untrusted_reg, "echo");
     REQUIRE(u != nullptr);
-    CHECK(u->irreversible);
-    CHECK(u->mutates_workspace);
-    CHECK(u->needs_execution);
+    CHECK(!u->irreversible);
+    CHECK(!u->mutates_workspace);
+    CHECK(!u->needs_execution);
     CHECK(!u->executes_commands);
     CHECK(u->remote);
     // The model is told where this came from and that we are not containing it.
     CHECK(u->description.find("outside the sandbox") != std::string::npos);
+
+    // Mutating tool on untrusted server must still be contained (irreversible=true).
+    const ToolDecl* u_add = find(untrusted_reg, "add");
+    REQUIRE(u_add != nullptr);
+    CHECK(u_add->irreversible);
+    CHECK(u_add->mutates_workspace);
+    CHECK(u_add->needs_execution);
+    CHECK(!u_add->executes_commands);
+    CHECK(u_add->remote);
 
     Registry trusted_reg(workspace());
     McpHost trusted_host;

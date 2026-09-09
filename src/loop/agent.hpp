@@ -430,6 +430,7 @@ class Agent {
     // The prompt step() would send right now, in tokens. One function so the budget check
     // and the context meter cannot measure a different prompt from the one that is sent.
     [[nodiscard]] std::size_t prompt_tokens() const;
+    // 75/35 turn-drop, then floor-shrink tool bodies if still over the applied budget.
     void compact_to_budget();
     // Prefill `[0, checkpoint_at)` after compact invalidated the live prefix.
     // No-op unless `config_.shadow_compact` and `kv_invalidated_by_compact_`.
@@ -549,8 +550,8 @@ class Agent {
     // Closed fences harvested from this turn's think text. Cleared at the start of
     // every step(); Registry reads them through ThinkBlocksFn, never a captured pointer.
     std::vector<tools::ThinkBlock> think_blocks_;
-    // Set by compact_to_budget when collapses or dropped turns rewrote history.
-    // Consumed by maybe_warm_stable_prefix at the start of the next step().
+    // Set by compact_to_budget when collapses, dropped turns, or floor stubs rewrote
+    // history. Consumed by maybe_warm_stable_prefix after the next render.
     bool kv_invalidated_by_compact_ = false;
     // True when this step successfully warmed the stable prefix; generate should then
     // reuse ≫ 0, and a 0 is shadow_compact_fallback (id mismatch).

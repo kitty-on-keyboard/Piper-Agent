@@ -17,12 +17,16 @@
 // Two threads reach it today (the run thread for turn/verification/perf, the token
 // streamer for per-token text) and the model-status notifications made a third.
 //
+#include <functional>
 #include <string>
 #include <string_view>
 
 #include "src/surface/protocol_generated.hpp"
 
 namespace lmp::surface::wire {
+
+// Intercept or redirect outbound lines. Set to nullptr to restore default stdout writing.
+void set_output_sink(std::function<void(const std::string&)> sink);
 
 // One whole line, atomically against every other writer. The lock is held across the
 // flush deliberately; see above.
