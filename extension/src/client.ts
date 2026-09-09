@@ -133,14 +133,18 @@ export class SidecarClient extends EventEmitter {
 
   private onStdout(chunk: Buffer): void {
     this.accumulator += chunk.toString("utf8");
-    // Split on newline; anything after the last newline is an incomplete message and
-    // stays buffered. Nothing inspects a partial message.
-    let nl = this.accumulator.indexOf("\n");
-    while (nl >= 0) {
-      const message = this.accumulator.slice(0, nl);
-      this.accumulator = this.accumulator.slice(nl + 1);
-      if (message.length > 0) this.dispatch(message);
-      nl = this.accumulator.indexOf("\n");
+    const lastNl = this.accumulator.lastIndexOf("\n");
+    if (lastNl === -1) return;
+
+    // Single-pass extraction: slice complete messages up to the last newline in one go,
+    // avoiding quadratic string re-allocations (accumulator.slice(nl + 1)) on multi-line chunks.
+    const complete = this.accumulator.slice(0, lastNl);
+    this.accumulator = this.accumulator.slice(lastNl + 1);
+
+    const lines = complete.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.length > 0) this.dispatch(line);
     }
   }
 
