@@ -1988,6 +1988,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
             }
 
             bool got_answer = false;
+            auto last_heartbeat = std::chrono::steady_clock::now();
             while (!cancel.cancelled()) {
                 auto now = std::chrono::steady_clock::now();
                 double elapsed = std::chrono::duration<double>(now - wall_start).count();
@@ -2001,6 +2002,14 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
                     previous_answers[question] = answer_text;
                     got_answer = true;
                     break;
+                }
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat).count() >= 5) {
+                    last_heartbeat = now;
+                    std::fprintf(stderr,
+                                 "piper: awaiting_user.json written (seq %llu). Question: %s\n"
+                                 "Waiting for answer.json...\n",
+                                 static_cast<unsigned long long>(info.seq), info.question.c_str());
+                    std::fflush(stderr);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
@@ -2049,7 +2058,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         result.status = "timeout";
         result.error = "wall clock exceeded (" + std::to_string(packet.timeout_s) + "s)";
         exit_code = kExitTimeout;
-    } else if (final_report.completed) {
+    } else if (final_report.completed || final_report.termination_reason == "plan_ready") {
         result.status = "ok";
         exit_code = kExitOk;
     } else if (final_report.termination_reason == "max_turns") {
@@ -2099,7 +2108,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
 
     if (!packet.orch_webhook.empty()) {
         WebhookPayload hook_payload;
-        const bool is_completed = final_report.completed && (result.status == "ok");
+        const bool is_completed = (final_report.completed || final_report.termination_reason == "plan_ready") && (result.status == "ok");
         hook_payload.kind = is_completed ? "done" : "stalled";
         hook_payload.task_id = packet.id;
         hook_payload.run_id = session.run_id;

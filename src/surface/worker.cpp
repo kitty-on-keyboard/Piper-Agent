@@ -1126,6 +1126,7 @@ IrreversibleAskResult handle_irreversible_ask(const IrreversibleAskParams& param
         std::fflush(stderr);
     }
 
+    auto last_heartbeat = std::chrono::steady_clock::now();
     while (true) {
         if (params.is_cancelled && params.is_cancelled()) {
             return IrreversibleAskResult::Cancelled;
@@ -1143,6 +1144,14 @@ IrreversibleAskResult handle_irreversible_ask(const IrreversibleAskParams& param
             }
             return parse_approval_answer(*ans) ? IrreversibleAskResult::Allowed
                                                : IrreversibleAskResult::Denied;
+        }
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat).count() >= 5) {
+            last_heartbeat = now;
+            std::fprintf(stderr,
+                         "piper: awaiting_user.json written for irreversible tool '%s' (%s). "
+                         "Waiting for answer.json...\n",
+                         params.tool.c_str(), params.command_or_preview.c_str());
+            std::fflush(stderr);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

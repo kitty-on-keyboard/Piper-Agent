@@ -3234,7 +3234,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
     //
     // This still says nothing about whether the work is right. It says the model did not
     // finish the list it wrote.
-    if (report.termination_reason == "ended") {
+    if (report.termination_reason == "ended" || report.termination_reason == "plan_ready") {
         const bool list_clear = report.unfinished_items == 0;
         if (config_.operator_verify_contract.empty()) {
             report.completed = list_clear;
