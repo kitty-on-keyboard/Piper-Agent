@@ -15,14 +15,17 @@ function relPath(uri: vscode.Uri): string {
   return uri.fsPath;
 }
 
+// Formats a location string. Accepts either a vscode.Uri or a pre-computed relative path string
+// to avoid redundant VS Code API calls (getWorkspaceFolder and asRelativePath).
 function formatLocation(
-  uri: vscode.Uri,
+  uriOrPath: vscode.Uri | string,
   range: vscode.Range | undefined,
   detail: string
 ): string {
   const line = range ? range.start.line + 1 : 1;
   const text = detail.replace(/\s+/g, " ").trim();
-  return `${relPath(uri)}:${line}:${text}`;
+  const pathStr = typeof uriOrPath === "string" ? uriOrPath : relPath(uriOrPath);
+  return `${pathStr}:${line}:${text}`;
 }
 
 async function workspaceSymbols(query: string): Promise<string> {
@@ -81,7 +84,10 @@ async function diagnostics(path: string): Promise<string> {
   const all = vscode.languages.getDiagnostics();
   const lines: string[] = [];
   for (const [uri, diags] of all) {
-    if (path && uri.fsPath !== path && relPath(uri) !== path) {
+    if (!diags.length) continue;
+    // Compute relative path once per document URI to avoid redundant workspace API calls per diagnostic
+    const rel = relPath(uri);
+    if (path && uri.fsPath !== path && rel !== path) {
       continue;
     }
     for (const d of diags.slice(0, 40)) {
@@ -92,7 +98,7 @@ async function diagnostics(path: string): Promise<string> {
             ? "warning"
             : "info";
       lines.push(
-        formatLocation(uri, d.range, `${sev} ${d.message}`)
+        formatLocation(rel, d.range, `${sev} ${d.message}`)
       );
       if (lines.length >= 80) {
         return lines.join("\n");
@@ -125,12 +131,14 @@ async function renamePreview(
   }
   const lines: string[] = [];
   for (const [target, edits] of edit.entries()) {
+    // Compute relative path once per target URI for edit formatting
+    const rel = relPath(target);
     for (const e of edits) {
       lines.push(
         formatLocation(
-          target,
+          rel,
           e.range,
-          `rename -> ${e.newText.replace(/\s+/g, " ").trim()}`
+          `rename -> ${e.newText}`
         )
       );
       if (lines.length >= 60) {
