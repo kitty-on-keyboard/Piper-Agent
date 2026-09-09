@@ -39,6 +39,8 @@ struct TaskPacket {
     std::string mode = "agent";           // "agent" | "plan" | "debug"
     double timeout_s = 900.0;
     bool auto_approve_exec = true;
+    bool auto_approve_writes = true;
+    bool auto_approve_irreversible = false;
     bool commit_think = true;
     bool shadow_compact = true;
     std::string result_path;

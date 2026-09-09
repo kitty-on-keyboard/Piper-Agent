@@ -1,4 +1,111 @@
-# Piper worker wake standard
+# Piper Local Worker — Orchestrator Guide & Parent Runbook
+
+## Overview
+**Core Principle:** Cloud directs, local writes, cloud verifies, repeat.
+
+Piper is a fast headless coding worker running locally on Apple Silicon (via MLX). It executes edits, shell commands, and file operations inside `cwd` with zero cloud output token cost.
+
+The cloud orchestrator (Cursor, Claude, Gemini, Antigravity, or custom script) acts as the high-level brain:
+- Maintains the long-horizon plan and acceptance criteria.
+- Decomposes complex tasks into bounded packets (1–3 files per packet).
+- Directs Piper by writing task packets (`task.json`).
+- Verifies outcomes (diffs, test execution, acceptance checks).
+- Loops until the entire mission is verified complete.
+
+## The Long-Horizon Execution Loop
+```
+┌─────────────────────────┐         task.json            ┌──────────────────────────┐
+│   Cloud Orchestrator    │ ───────────────────────────► │       Piper Worker       │
+│  (Cursor, Claude, etc.) │                              │  (MLX on Apple Silicon)  │
+│                         │ ◄─────────────────────────── │                          │
+│ plan · review · verify  │     result.json + diff       │  edits · tools · loop    │
+└─────────────────────────┘                              └──────────────────────────┘
+             │                                                         │
+             └────────── repeat until horizon acceptance passes ───────┘
+```
+
+### Roles
+
+| Who | Owns | Does not own |
+|---|---|---|
+| **Cloud Orchestrator** | Goal decomposition, file-level direction, acceptance criteria, high-level review, troubleshooting, "are we done?" | Bulk code generation tokens, local tool thrash |
+| **Piper Worker** | Edits, tool execution, test commands, local iteration inside `cwd` | Long-horizon judgment, multi-repo strategy |
+
+Local models work best on scoped packets: **packets must be specific**, and **every turn gets an orchestrator review**. Trust outcomes (diff + tests + `result.json`), not vibes.
+
+### Step-by-Step Procedure
+
+1. **Frame the Horizon**
+   Define the overarching objective and an acceptance checklist (e.g. unit tests pass, new command works, UI renders).
+
+2. **Slice into Discrete Packets**
+   Pick the smallest incremental step towards the goal.
+   - Scope each slice to 1–3 files.
+   - Explicitly list which files to EDIT, CREATE, and DO NOT TOUCH.
+
+3. **Write `task.json`**
+   Write a task packet in the workspace or a task directory:
+   ```json
+   {
+     "id": "slice-001",
+     "cwd": "/absolute/path/to/workspace",
+     "mode": "agent",
+     "model_dir": "/Users/dev/Desktop/Models/Qwen3.6-35B-A3B-MLX-4bit",
+     "prompt": "## Horizon Context\nBuilding feature X.\n\n## This Slice Only\nAdd validator in src/validator.cpp and test in tests/test_validator.cpp.\n\n## Files\n- EDIT: src/validator.cpp\n- CREATE: tests/test_validator.cpp\n- DO NOT TOUCH: src/core.cpp\n\n## Done When\n- Unit test passes with `ctest -R test_validator`",
+     "auto_approve_exec": true,
+     "auto_approve_writes": true,
+     "auto_approve_irreversible": true,
+     "timeout_s": 600,
+     "result_path": "/absolute/path/to/result.json"
+   }
+   ```
+
+4. **Dispatch Piper**
+   Run the CLI command:
+   ```bash
+   piper run --task /path/to/task.json
+   # or equivalently:
+   piper worker run --task /path/to/task.json
+   # For autonomous unattended execution without prompts or pauses:
+   piper run --task /path/to/task.json --auto-approve-irreversible
+   # Or approve all (exec + writes + irreversible):
+   piper run --task /path/to/task.json --auto-approve-all
+   ```
+   - **Attached mode (standard)**: Process waits and exits when the slice completes.
+     - `0`: Completed normally.
+     - `1`: Worker error.
+     - `2`: Execution timed out (`timeout_s`).
+     - `3`: Invalid task packet or missing wake URL for detached run.
+   - **Detached mode**: If launching in the background (nohup, screen), you MUST pass `--orch-webhook <URL>`. Silent background launches without a webhook are refused.
+   - **Irreversible tools**: Destructive tools or project managers (like `godot_project`, `delete_file`, or whole-file overwrites) escalate to `gate: irreversible`. Set `"auto_approve_irreversible": true` or pass `--auto-approve-irreversible` / `--auto-approve-all` for unattended runs; otherwise Piper pauses and writes `awaiting_user.json` for `answer.json`.
+
+5. **Review `result.json` & Inspect Changes**
+   Piper writes a structured result upon completion:
+   ```json
+   {
+     "task_id": "slice-001",
+     "status": "ok",
+     "message": "Implemented validation logic and verified with unit test.",
+     "files_touched": ["src/validator.cpp", "tests/test_validator.cpp"],
+     "diff_stat": "+52 -2",
+     "git_diff_path": "/path/to/slice.diff"
+   }
+   ```
+
+   **Review Rubric (Keep it cheap):**
+   - **Status**: Is `status == "ok"`? If `"error"` or `"stalled"`, inspect the message.
+   - **Files Touched**: Are changes confined to expected paths? Reject drive-by edits.
+   - **Diff**: Skim git diff for regressions or unnecessary churn.
+   - **Acceptance**: Run verification commands or tests to validate the slice.
+
+6. **Iterate or Complete**
+   - **Pass**: If acceptance criteria for the slice pass, dispatch the next slice.
+   - **Fail**: Send a narrowed/clarified packet, or perform that specific edit yourself.
+   - **Done**: When all acceptance checklist items are verified, complete the mission.
+
+---
+
+## Piper worker wake standard
 
 Any agent that starts Piper is the parent. Piper does not come find you.
 A human must not copy a URL from a panel. A timer that checks the folder is
