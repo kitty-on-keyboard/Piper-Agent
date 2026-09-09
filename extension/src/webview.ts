@@ -819,8 +819,8 @@ body.in-flight #send { display: none; }
 function markup(): string {
   return `
 <div id="head">
-  <button id="histBtn" title="Run history">◷</button>
-  <button id="gear" title="Settings">⚙</button>
+  <button id="histBtn" title="Run history" aria-label="Run history">◷</button>
+  <button id="gear" title="Settings" aria-label="Settings">⚙</button>
   <div id="headRow">
     <div id="headText">
       <div class="wordmark">
@@ -842,7 +842,7 @@ function markup(): string {
     <span id="modelDot" class="dot unloaded"></span>
     <span id="modelName">No model</span>
     <button id="modelAction">Load</button>
-    <button id="modelPick" title="Choose a different model directory">Change</button>
+    <button id="modelPick" title="Choose a different model directory" aria-label="Choose a different model directory">Change</button>
   </div>
   <div id="modelSwitch" class="seg" hidden></div>
   <div id="history"></div>
@@ -871,22 +871,22 @@ function markup(): string {
     <div class="warnbox" id="specWarn"></div>
     <div class="set">
       <label>Check command <b id="checkState"></b></label>
-      <input type="text" id="checkBox" placeholder="e.g. swift build — empty for no check">
+      <input type="text" id="checkBox" placeholder="e.g. swift build — empty for no check" aria-label="Check command">
       <div class="warnbox" id="checkWarn"></div>
     </div>
     <div class="set">
       <label>Turn limit <b id="turnVal"></b></label>
-      <input type="range" id="turnRange" min="20" max="600" step="10">
+      <input type="range" id="turnRange" min="20" max="600" step="10" aria-label="Turn limit">
       <label style="margin-top:8px">Time limit <b id="clockVal"></b></label>
-      <input type="range" id="clockRange" min="300" max="43200" step="300">
+      <input type="range" id="clockRange" min="300" max="43200" step="300" aria-label="Time limit">
       <label style="margin-top:8px">Stop if stuck for <b id="stallVal"></b></label>
-      <input type="range" id="stallRange" min="60" max="7200" step="60">
+      <input type="range" id="stallRange" min="60" max="7200" step="60" aria-label="Stall limit">
       <div class="warnbox" id="budgetWarn"></div>
     </div>
     <div class="set" id="sliders"></div>
     <div class="set">
       <label>System prompt <b id="promptMode"></b></label>
-      <textarea id="promptBox" placeholder="Empty uses the built-in Piper persona"></textarea>
+      <textarea id="promptBox" placeholder="Empty uses the built-in Piper persona" aria-label="System prompt"></textarea>
     </div>
     <div class="set">
       <label>Advanced</label>
@@ -909,9 +909,9 @@ function markup(): string {
   <div id="dropVeil">Drop an image to show it to the agent</div>
   <div id="attachments"></div>
   <div id="composer">
-    <textarea id="say" rows="1" placeholder="Message the agent…"></textarea>
-    <button id="stop" title="Stop this run">■</button>
-    <button id="send" title="Send">↑</button>
+    <textarea id="say" rows="1" placeholder="Message the agent…" aria-label="Message the agent"></textarea>
+    <button id="stop" title="Stop this run" aria-label="Stop this run">■</button>
+    <button id="send" title="Send" aria-label="Send message">↑</button>
   </div>
   <div id="hint"></div>
 </div>`;
@@ -1760,6 +1760,9 @@ function renderAttachments() {
     x.className = 'x';
     x.textContent = '×';
     x.title = 'Remove';
+    x.setAttribute('role', 'button');
+    x.setAttribute('tabindex', '0');
+    x.setAttribute('aria-label', 'Remove attachment');
     x.onclick = () => { attached.delete(id); renderAttachments(); };
     chip.appendChild(x);
     strip.appendChild(chip);
