@@ -188,20 +188,23 @@ TEST(the_container_invocation_carries_its_containment) {
     // Mounted at the SAME path it has on the host: every diagnostic the model has already
     // seen names the host path, and remapping would describe a filesystem nothing else in
     // the run knows about.
-    CHECK(cmd.find("--volume /work/space:/work/space") != std::string::npos);
+    CHECK(cmd.find("--volume '/work/space:/work/space'") != std::string::npos);
+    CHECK(cmd.find("--workdir '/work/space'") != std::string::npos);
     CHECK(cmd.find("img@sha256:deadbeef") != std::string::npos);  // pinned by digest
     CHECK(cmd.find("'pytest -q'") != std::string::npos);          // quoted, not injected
 }
 
-// A command carrying a quote must not break out of the -c argument.
+// A command, workspace path, or cwd carrying spaces or quotes must not break out.
 TEST(the_container_invocation_quotes_the_command) {
     ContainerRuntime rt;
     rt.available = true;
     rt.binary = "docker";
     rt.image = "i";
     const std::string cmd =
-        container_command(rt, "echo 'a'; rm -rf /", "/w", "/w", limits(5));
+        container_command(rt, "echo 'a'; rm -rf /", "/work/my repo", "/work/my repo/sub", limits(5));
     CHECK(cmd.find("'echo '\\''a'\\''; rm -rf /'") != std::string::npos);
+    CHECK(cmd.find("--workdir '/work/my repo/sub'") != std::string::npos);
+    CHECK(cmd.find("--volume '/work/my repo:/work/my repo'") != std::string::npos);
 }
 
 TEST(output_is_capped_not_unbounded) {

@@ -280,6 +280,9 @@ def write_result(path, payload):
 def post_orch_webhook(url, payload, timeout=5.0):
     if not url:
         return False
+    if not (url.startswith("http://") or url.startswith("https://")):
+        print(f"piper: warning: refusing webhook URL with non-http(s) scheme: {url}", file=sys.stderr)
+        return False
     try:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -1358,11 +1361,19 @@ def self_test():
             f"worker run must print parent paragraph to stderr even without PIPER.md, got {run_stderr.getvalue()!r}"
         )
 
+        # 10. Non-HTTP/HTTPS webhook URL -> refused
+        refused_buf = io.StringIO()
+        with contextlib.redirect_stderr(refused_buf):
+            res = post_orch_webhook("file:///etc/passwd", {"kind": "done"})
+        check(res is False, "file:// webhook URL must be refused")
+        check("refusing webhook URL with non-http(s) scheme" in refused_buf.getvalue(),
+              f"expected non-http warning in stderr, got {refused_buf.getvalue()!r}")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 9 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 10 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
