@@ -30,6 +30,19 @@ constexpr const char* kDefaultImage =
 // Is `binary` on PATH and does it answer? `command -v` alone is not enough: a shim that
 // exists and cannot reach its daemon is the common macOS failure, and it must refuse
 // rather than be discovered mid-run.
+std::string shell_quote(const std::string& s) {
+    std::string quoted = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted.push_back(c);
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
 bool probe(const std::string& binary, std::string& detail) {
     const std::string cmd =
         "command -v " + binary + " >/dev/null 2>&1 && " + binary + " system info >/dev/null 2>&1";
@@ -100,23 +113,13 @@ std::string container_command(const ContainerRuntime& rt, const std::string& com
     argv += " --network none";                     // egress denial, by the runtime
     argv += " --memory " + std::to_string(limits.memory_bytes);
     argv += " --pids-limit " + std::to_string(limits.max_processes);
-    argv += " --workdir " + cwd;
-    argv += " --volume " + workspace_root + ":" + workspace_root;
-    argv += " --env TMPDIR=" + workspace_root + "/.lmp_tmp"; // scratch inside the jail,
+    argv += " --workdir " + shell_quote(cwd);
+    argv += " --volume " + shell_quote(workspace_root + ":" + workspace_root);
+    argv += " --env " + shell_quote("TMPDIR=" + workspace_root + "/.lmp_tmp"); // scratch inside the jail,
                                                              // the same fix Seatbelt needed
     argv += " " + rt.image;
     argv += " /bin/sh -c ";
-
-    std::string quoted = "'";
-    for (char c : command) {
-        if (c == '\'') {
-            quoted += "'\\''";
-        } else {
-            quoted.push_back(c);
-        }
-    }
-    quoted += "'";
-    argv += quoted;
+    argv += shell_quote(command);
 
     // Returned rather than executed: run_sandboxed spawns it down the shared path, so
     // the wall-clock killer, the process group and the output cap stay with the HARNESS.
