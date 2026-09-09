@@ -1834,6 +1834,14 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         (const std::string& tool, const std::string& command, const std::string& preview, const tools::RiskHint& hint) -> bool {
         if (loop::is_irreversible(hint)) {
             const std::string cmd = command.empty() ? preview : command;
+            if (packet.auto_approve_irreversible) {
+                platform::Event ev;
+                ev.kind = "approval";
+                ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "approved"}, {"by", "task_policy"}};
+                log.append(ev, clock);
+                return true;
+            }
+
             if (denied_commands.count(cmd) > 0) {
                 platform::Event ev;
                 ev.kind = "approval";
@@ -2108,6 +2116,8 @@ static constexpr const char* kWorkerHelpText =
     "  worker <subcommand>             Worker commands (run, serve, init)\n\n"
     "Flags for run:\n"
     "  --task <path>                   task.json path or directory containing task.json\n"
+    "  --auto-approve-irreversible     Auto-approve irreversible tool calls (destroys data / overwrite)\n"
+    "  --auto-approve-all              Auto-approve all tool calls (exec + writes + irreversible)\n"
     "  --orch-webhook <url>            Webhook URL to wake parent orchestrator (ask/done/stalled/died)\n"
     "  --detach                        Detach from launch session (requires --orch-webhook)\n"
     "  --jsonl                         Stream JSONL notifications on stdout\n"
@@ -2140,6 +2150,8 @@ int worker_main(int argc, char** argv) {
     bool serve = false;
     bool no_daemon = false;
     bool cli_detach = false;
+    bool cli_auto_approve_irreversible = false;
+    bool cli_auto_approve_all = false;
     double idle_timeout = 3600.0;
     std::string socket_path;
 
@@ -2168,6 +2180,10 @@ int worker_main(int argc, char** argv) {
             if (subcommand.empty()) subcommand = "init";
         } else if (arg == "--orch-webhook" && i + 1 < argc) {
             cli_orch_webhook = argv[++i];
+        } else if (arg == "--auto-approve-irreversible") {
+            cli_auto_approve_irreversible = true;
+        } else if (arg == "--auto-approve-all") {
+            cli_auto_approve_all = true;
         } else if (arg == "--jsonl") {
             jsonl = true;
         } else if (arg == "--quiet") {
@@ -2272,6 +2288,12 @@ int worker_main(int argc, char** argv) {
                         ::close(client_fd);
                         continue;
                     }
+                    if (req.value("auto_approve_all", false)) {
+                        pkt->auto_approve_exec = true;
+                        pkt->auto_approve_irreversible = true;
+                    } else if (req.value("auto_approve_irreversible", false)) {
+                        pkt->auto_approve_irreversible = true;
+                    }
                     execute_task_packet(*pkt, session, clock, cli_jsonl, quiet, client_fd);
                     ::close(client_fd);
                     continue;
@@ -2298,7 +2320,7 @@ int worker_main(int argc, char** argv) {
     if (!no_daemon && is_daemon_alive(resolved_sock)) {
         std::error_code ec;
         std::string abs_task = std::filesystem::absolute(task_arg, ec).string();
-        auto code = forward_to_daemon(resolved_sock, abs_task, jsonl);
+        auto code = forward_to_daemon(resolved_sock, abs_task, jsonl, cli_auto_approve_irreversible, cli_auto_approve_all);
         if (code.has_value()) {
             return *code;
         }
@@ -2322,6 +2344,13 @@ int worker_main(int argc, char** argv) {
             }
         } catch (...) {}
         return kExitInvalid;
+    }
+
+    if (cli_auto_approve_all) {
+        packet_opt->auto_approve_exec = true;
+        packet_opt->auto_approve_irreversible = true;
+    } else if (cli_auto_approve_irreversible) {
+        packet_opt->auto_approve_irreversible = true;
     }
 
     if (!cli_orch_webhook.empty()) {

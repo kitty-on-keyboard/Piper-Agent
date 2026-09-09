@@ -126,6 +126,8 @@ TEST(build_start_message_formats_proper_jsonrpc) {
     CHECK_EQ(j["params"]["settings"]["mode"].get<std::string>(), "plan");
     CHECK_EQ(j["params"]["settings"]["wall_clock_seconds"].get<int>(), 300);
     CHECK_EQ(j["params"]["settings"]["verify_contract"].get<std::string>(), "npm test");
+    CHECK_EQ(j["params"]["settings"]["auto_approve_writes"].get<bool>(), true);
+    CHECK_EQ(j["params"]["settings"]["auto_approve_irreversible"].get<bool>(), false);
 }
 
 TEST(collect_files_touched_parses_event_log) {
@@ -895,20 +897,26 @@ TEST(init_project_creates_files_and_preserves_godoer) {
     int code = init_project(tmp_dir.string());
     CHECK_EQ(code, kExitOk);
 
-    // Verify PIPER.md exists and contains the wake standard
+    // Verify PIPER.md exists and contains the orchestrator guide and wake standard
     std::filesystem::path piper_md = tmp_dir / "PIPER.md";
     CHECK(std::filesystem::exists(piper_md));
     std::ifstream pf(piper_md.string());
     std::string piper_text((std::istreambuf_iterator<char>(pf)), std::istreambuf_iterator<char>());
     CHECK(piper_text.find("Piper worker wake standard") != std::string::npos);
+    CHECK(piper_text.find("Cloud directs, local writes") != std::string::npos);
+    CHECK(piper_text.find("task.json") != std::string::npos);
+    CHECK(piper_text.find("result.json") != std::string::npos);
 
-    // Verify .cursor/rules/piper-parent.mdc exists and has frontmatter
+    // Verify .cursor/rules/piper-parent.mdc exists and has frontmatter and orchestrator instructions
     std::filesystem::path cursor_rule = tmp_dir / ".cursor" / "rules" / "piper-parent.mdc";
     CHECK(std::filesystem::exists(cursor_rule));
     std::ifstream cf(cursor_rule.string());
     std::string cursor_text((std::istreambuf_iterator<char>(cf)), std::istreambuf_iterator<char>());
     CHECK(cursor_text.find("alwaysApply: true") != std::string::npos);
     CHECK(cursor_text.find("piper: you are the parent.") != std::string::npos);
+    CHECK(cursor_text.find("Cloud directs, local writes") != std::string::npos);
+    CHECK(cursor_text.find("task.json") != std::string::npos);
+    CHECK(cursor_text.find("piper run --task") != std::string::npos);
 
     // Verify Godoer briefs remain completely intact
     auto read_file = [](const std::filesystem::path& p) -> std::string {
@@ -931,6 +939,76 @@ TEST(init_project_creates_files_and_preserves_godoer) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+TEST(load_packet_parses_auto_approve_irreversible) {
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_load_auto_irr";
+    std::filesystem::remove_all(tmp_dir);
+    std::filesystem::create_directories(tmp_dir);
 
+    std::string err;
 
+    // 1. Default when omitted: auto_approve_writes=true, auto_approve_irreversible=false
+    {
+        nlohmann::json j = {
+            {"id", "test-default"},
+            {"cwd", tmp_dir.string()},
+            {"prompt", "hello"},
+            {"model_dir", tmp_dir.string()}
+        };
+        std::ofstream f((tmp_dir / "task.json").string());
+        f << j.dump();
+    }
+    auto p1 = load_packet((tmp_dir / "task.json").string(), err);
+    CHECK(p1.has_value());
+    CHECK(p1->auto_approve_writes);
+    CHECK(!p1->auto_approve_irreversible);
 
+    // 2. Explicit true
+    {
+        nlohmann::json j = {
+            {"id", "test-irr-true"},
+            {"cwd", tmp_dir.string()},
+            {"prompt", "hello"},
+            {"model_dir", tmp_dir.string()},
+            {"auto_approve_irreversible", true}
+        };
+        std::ofstream f((tmp_dir / "task.json").string());
+        f << j.dump();
+    }
+    auto p2 = load_packet((tmp_dir / "task.json").string(), err);
+    CHECK(p2.has_value());
+    CHECK(p2->auto_approve_irreversible);
+
+    // 3. String "true" and "1"
+    {
+        nlohmann::json j = {
+            {"id", "test-irr-str"},
+            {"cwd", tmp_dir.string()},
+            {"prompt", "hello"},
+            {"model_dir", tmp_dir.string()},
+            {"auto_approve_irreversible", "true"}
+        };
+        std::ofstream f((tmp_dir / "task.json").string());
+        f << j.dump();
+    }
+    auto p3 = load_packet((tmp_dir / "task.json").string(), err);
+    CHECK(p3.has_value());
+    CHECK(p3->auto_approve_irreversible);
+
+    // 4. Explicit false
+    {
+        nlohmann::json j = {
+            {"id", "test-irr-false"},
+            {"cwd", tmp_dir.string()},
+            {"prompt", "hello"},
+            {"model_dir", tmp_dir.string()},
+            {"auto_approve_irreversible", false}
+        };
+        std::ofstream f((tmp_dir / "task.json").string());
+        f << j.dump();
+    }
+    auto p4 = load_packet((tmp_dir / "task.json").string(), err);
+    CHECK(p4.has_value());
+    CHECK(!p4->auto_approve_irreversible);
+
+    std::filesystem::remove_all(tmp_dir);
+}

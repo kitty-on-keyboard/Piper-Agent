@@ -85,7 +85,8 @@ bool is_daemon_alive(const std::string& socket_path) {
 }
 
 std::optional<int> forward_to_daemon(
-    const std::string& socket_path, const std::string& task_path, bool jsonl) {
+    const std::string& socket_path, const std::string& task_path, bool jsonl,
+    bool auto_approve_irreversible, bool auto_approve_all) {
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return std::nullopt;
 
@@ -101,7 +102,9 @@ std::optional<int> forward_to_daemon(
     nlohmann::json req = {
         {"method", "run"},
         {"task", task_path},
-        {"jsonl", jsonl}
+        {"jsonl", jsonl},
+        {"auto_approve_irreversible", auto_approve_irreversible},
+        {"auto_approve_all", auto_approve_all}
     };
     std::string req_str = req.dump() + "\n";
     if (::write(fd, req_str.data(), req_str.size()) <= 0) {

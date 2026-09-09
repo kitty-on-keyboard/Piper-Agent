@@ -28,7 +28,8 @@ struct DaemonConfig {
 // Forward a task packet to the running daemon and wait for completion.
 // Returns the exit code on success, or std::nullopt if daemon unreachable.
 [[nodiscard]] std::optional<int> forward_to_daemon(
-    const std::string& socket_path, const std::string& task_path, bool jsonl);
+    const std::string& socket_path, const std::string& task_path, bool jsonl,
+    bool auto_approve_irreversible = false, bool auto_approve_all = false);
 
 class DaemonListener {
   public:
