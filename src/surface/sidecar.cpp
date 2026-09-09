@@ -6,6 +6,7 @@
 
 #include <execinfo.h>
 #include <unistd.h>
+#include <sys/socket.h>
 
 #include <algorithm>
 #include <csignal>
@@ -2263,12 +2264,14 @@ int worker_main(int argc, char** argv) {
                 if (method == "ping") {
                     std::string resp = "{\"status\":\"ok\"}\n";
                     (void)::write(client_fd, resp.data(), resp.size());
+                    ::shutdown(client_fd, SHUT_RDWR);
                     ::close(client_fd);
                     continue;
                 }
                 if (method == "stop") {
                     std::string resp = "{\"status\":\"stopping\"}\n";
                     (void)::write(client_fd, resp.data(), resp.size());
+                    ::shutdown(client_fd, SHUT_RDWR);
                     ::close(client_fd);
                     break;
                 }
@@ -2285,6 +2288,7 @@ int worker_main(int argc, char** argv) {
                         };
                         std::string s = err_res.dump() + "\n";
                         (void)::write(client_fd, s.data(), s.size());
+                        ::shutdown(client_fd, SHUT_RDWR);
                         ::close(client_fd);
                         continue;
                     }
@@ -2295,10 +2299,12 @@ int worker_main(int argc, char** argv) {
                         pkt->auto_approve_irreversible = true;
                     }
                     execute_task_packet(*pkt, session, clock, cli_jsonl, quiet, client_fd);
+                    ::shutdown(client_fd, SHUT_RDWR);
                     ::close(client_fd);
                     continue;
                 }
             }
+            ::shutdown(client_fd, SHUT_RDWR);
             ::close(client_fd);
         }
 

@@ -1,4 +1,5 @@
 #include "src/surface/worker.hpp"
+#include "src/surface/socket_reader.hpp"
 
 #include <arpa/inet.h>
 #include <filesystem>
@@ -6,6 +7,7 @@
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_set>
@@ -1010,5 +1012,96 @@ TEST(load_packet_parses_auto_approve_irreversible) {
     CHECK(p4.has_value());
     CHECK(!p4->auto_approve_irreversible);
 
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(forward_to_daemon_exits_on_result_without_hanging) {
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_fwd_daemon";
+    std::filesystem::remove_all(tmp_dir);
+    std::filesystem::create_directories(tmp_dir);
+
+    std::string sock_path = (tmp_dir / "test.sock").string();
+    int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(listen_fd >= 0);
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+    CHECK_EQ(::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
+    CHECK_EQ(::listen(listen_fd, 1), 0);
+
+    std::thread server_thread([listen_fd]() {
+        int client = ::accept(listen_fd, nullptr, nullptr);
+        if (client < 0) return;
+
+        // Read request
+        char buf[1024];
+        ssize_t n = ::read(client, buf, sizeof(buf));
+        (void)n;
+
+        // Send intermediate jsonl line then final result with exit_code: 0
+        std::string line1 = "{\"kind\":\"status\",\"step\":1}\n";
+        (void)::write(client, line1.data(), line1.size());
+
+        std::string line2 = "{\"status\":\"ok\",\"exit_code\":0,\"result_path\":\"/tmp/r.json\"}\n";
+        (void)::write(client, line2.data(), line2.size());
+
+        // Intentionally keep client socket open for 500ms to verify client does NOT block waiting for EOF!
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        ::shutdown(client, SHUT_RDWR);
+        ::close(client);
+    });
+
+    auto start_t = std::chrono::steady_clock::now();
+    auto res = forward_to_daemon(sock_path, "/tmp/task.json", false);
+    auto end_t = std::chrono::steady_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(end_t - start_t).count();
+
+    CHECK(res.has_value());
+    CHECK_EQ(*res, 0);
+    // Client should have returned immediately upon reading exit_code, well before the 500ms delay!
+    CHECK(elapsed_ms < 350.0);
+
+    server_thread.join();
+    ::close(listen_fd);
+    ::unlink(sock_path.c_str());
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(forward_to_daemon_handles_clean_eof_and_exit_code) {
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_fwd_eof";
+    std::filesystem::remove_all(tmp_dir);
+    std::filesystem::create_directories(tmp_dir);
+
+    std::string sock_path = (tmp_dir / "test_eof.sock").string();
+    int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(listen_fd >= 0);
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+    CHECK_EQ(::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
+    CHECK_EQ(::listen(listen_fd, 1), 0);
+
+    std::thread server_thread([listen_fd]() {
+        int client = ::accept(listen_fd, nullptr, nullptr);
+        if (client < 0) return;
+
+        char buf[1024];
+        (void)::read(client, buf, sizeof(buf));
+
+        std::string line = "{\"status\":\"error\",\"exit_code\":2,\"error\":\"failed\"}\n";
+        (void)::write(client, line.data(), line.size());
+        ::shutdown(client, SHUT_RDWR);
+        ::close(client);
+    });
+
+    auto res = forward_to_daemon(sock_path, "/tmp/task.json", false);
+    CHECK(res.has_value());
+    CHECK_EQ(*res, 2);
+
+    server_thread.join();
+    ::close(listen_fd);
+    ::unlink(sock_path.c_str());
     std::filesystem::remove_all(tmp_dir);
 }
