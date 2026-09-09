@@ -143,6 +143,18 @@ std::optional<int> forward_to_daemon(
                     exit_code = j["exit_code"].get<int>();
                     saw_result = true;
                     break;
+                } else if (j.value("kind", "") == "ask") {
+                    std::fprintf(stderr,
+                                 "piper: awaiting_user.json written (seq %llu). Question: %s\n"
+                                 "Waiting for answer.json...\n",
+                                 static_cast<unsigned long long>(j.value("seq", 0ULL)),
+                                 j.value("question", "").c_str());
+                    std::fflush(stderr);
+                    if (jsonl) {
+                        std::fwrite(line.data(), 1, line.size(), stdout);
+                        std::fputc('\n', stdout);
+                        std::fflush(stdout);
+                    }
                 } else if (jsonl) {
                     std::fwrite(line.data(), 1, line.size(), stdout);
                     std::fputc('\n', stdout);
