@@ -1,6 +1,6 @@
 // The artifact store: deduplication, delta chains, and the bound on them.
 //
-// The cook-off this component came from (docs/BAKEOFF_PCC.md) had twelve entrants
+// The cook-off this component came from (the measured PCC design notes) had twelve entrants
 // implement roughly this and not one of them tested the thing that actually breaks:
 // what a delta chain costs after the fortieth revision. Two of the checks here exist
 // specifically because no entrant had them.

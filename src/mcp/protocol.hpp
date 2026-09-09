@@ -4,7 +4,7 @@
 //
 // Everything in this file is a fact about the protocol, not a choice we made, so it
 // lives apart from the code that acts on it. The cook-off's most uniform defect was
-// burying "2024-11-05" as a literal in fourteen separate call sites (docs/BAKEOFF_MCP.md);
+// burying "2024-11-05" as a literal in fourteen separate call sites (the measured MCP design notes);
 // a version that appears once can be negotiated, and one that appears eleven times
 // cannot.
 //

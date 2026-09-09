@@ -1,7 +1,7 @@
 # PCC — the Persistent Context Core
 
 `src/pcc/`. A durable, searchable, bi-temporal store for everything an agent learns, with
-an MCP server in front of it. Built 2026-08-02 out of `docs/BAKEOFF_PCC.md`.
+an MCP server in front of it. Built 2026-08-02 from a measured store design.
 
 ## The problem it solves
 
@@ -81,7 +81,7 @@ does not link, and `never-run-two-mlx-processes` rules out a second one alongsid
 model. `recall()` fuses **rank lists rather than scores** (reciprocal rank fusion, k=60)
 precisely so that embedder can arrive later as a third list with nothing else changing.
 Fusing ranks also sidesteps the scale problem that made one entrant's freshness factor
-rank fresh memories strictly worse — see the bug named in `docs/BAKEOFF_PCC.md`.
+rank fresh memories strictly worse — a bug found while measuring candidate stores.
 
 Ties in the fused score are common rather than exotic (two lists over one candidate set
 tie whenever their orders are reverses), and freshness breaks them.

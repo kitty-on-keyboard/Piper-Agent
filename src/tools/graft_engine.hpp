@@ -3,7 +3,7 @@
 // Ported from v1 src/tools/graft_engine.hpp with its provenance comment intact -- like
 // the S18 corpora, it is the survivor of a measured cookoff, and its neutral corpus
 // lesson ("all ten claimed 0% false applies; nine had them") is the founding story of
-// this repo's bakeoff discipline. std-only, unmodified apart from this note.
+// this repo's measured-engine discipline. std-only, unmodified apart from this note.
 //
 // graft_engine -- whitespace-tolerant, refusal-first application of a model
 // edit (old_text -> new_text) to a file.

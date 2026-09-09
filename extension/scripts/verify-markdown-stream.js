@@ -3,8 +3,7 @@
 // The state machine that ships is a STRING inside out/webview.js (the view script is
 // injected into the webview, so it cannot be a module). This evaluates that exact string
 // rather than a copy -- verifying a copy would verify the copy -- and prints the same
-// canonical event trace that bakeoff/markdown_stream/dump.cpp prints for the C++ amalgam.
-// The two traces are compared with `diff`; see bakeoff/markdown_stream/README.md.
+// canonical event stream for the parser. Feed tests/testdata/markdown_stream/corpus.txt.
 //
 //   node scripts/verify-markdown-stream.js <corpus.txt>   # after `npm run compile`
 //

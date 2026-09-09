@@ -7,7 +7,7 @@
 // The second is the one that matters. A stale-cache bug does not crash and does not
 // produce garbage -- it decodes fluent, plausible, WRONG text. Byte-identity between a
 // run with reuse and a run without it is the only assertion that catches it, which is why
-// docs/PHASES.md names it as the falsifier for the whole item.
+// historical build notes names it as the falsifier for the whole item.
 //
 // Labelled realmodel: excluded from the gate, never run in parallel (S11.6).
 

@@ -11,7 +11,7 @@
 // reachable by a peer that was compiled against the same queue, so the moment we invent
 // a transport, every server that speaks it is a server we wrote. That trades away the
 // entire point of MCP -- the ecosystem of servers we did not write -- to save time that
-// measurement says is not being spent (bakeoff/mcp/bench_transport.cpp: a stdio round
+// measurement says is not being spent (tests/mcp/bench_transport.cpp: a stdio round
 // trip is tens of microseconds against tool calls that take milliseconds).
 //
 // So the ring goes where both ends genuinely are ours: LM_Pipe's own tools, exposed

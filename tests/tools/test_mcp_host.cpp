@@ -204,7 +204,7 @@ TEST(a_remote_tool_is_namespaced_only_when_its_name_would_shadow) {
 TEST(an_untrusted_servers_tools_are_irreversible_and_a_trusted_servers_are_not) {
     // THE containment decision. A remote tool runs in the server's process, which Seatbelt
     // does not cover. Mutating tools on an untrusted server each raise an approval card (irreversible),
-    // while tools annotated readOnlyHint=true are safe reads and need no card (docs/ASK_USER_CLOUD_HANDOFF.md).
+    // while tools annotated readOnlyHint=true are safe reads and need no card (the worker ask_user flow).
     Registry untrusted_reg(workspace());
     McpHost untrusted_host;
     (void)untrusted_host.connect_and_register({demo("demo", false)}, untrusted_reg);

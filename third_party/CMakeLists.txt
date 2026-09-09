@@ -1,9 +1,9 @@
 # Vendored dependencies. Copied in, not fetched: the benchmark corpora are unrunnable
-# without their parsers, and v1's lesson (bakeoff/blast_radius/README.md) is that a
+# without their parsers, and the corpus-loader lesson (tests/testdata/blast_radius) is that a
 # benchmark you cannot re-run today is a benchmark you have lost. A network fetch between
 # a fresh clone and a runnable gate is a way to lose it.
 #
-#   simdjson 4.6.1   -- bakeoff corpus loaders (verbatim v1 code depends on it)
+#   simdjson 4.6.1   -- corpus loaders under tests/testdata (verbatim v1 code depends on it)
 #   pcre2 10.43      -- frankentok's pretokenizer (Split regex read from tokenizer.json)
 #   utf8proc 2.x     -- frankentok's NFC normalizer (tokenizer.json declares NFC)
 #   lmp_nlohmann     -- frankentok's tokenizer.json parse (header-only)

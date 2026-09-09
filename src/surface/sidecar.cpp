@@ -169,7 +169,7 @@ loop::Observer make_observer(const std::string& id) {
         n.tool_args = tool_args_json(t.tool_params);
         // ToolResult defaults to ToolError. A text-only turn never ran a tool, so
         // copying that default made every TextOnly row print as `(text) ToolError`
-        // (piper-bench bowling / connect storms). Empty means no tool ran.
+        // (high-churn tool storms). Empty means no tool ran.
         n.tool_status = t.tool_name.empty()
                             ? std::string{}
                             : std::string(tools::to_string(t.tool_result.status));

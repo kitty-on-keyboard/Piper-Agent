@@ -30,8 +30,8 @@ lmp_add_script_test(test_piper_worker
   COMMAND "${PROJECT_SOURCE_DIR}/scripts/piper_worker.py" self-test
   LABELS gate)
 
-# The bake-off pins, including the assertion that the holdout stays harder (S11.3).
-lmp_add_script_test(test_bakeoff_pins
+# The corpus pins, including the assertion that the holdout stays harder (S11.3).
+lmp_add_script_test(test_corpus_pins
   COMMAND "${CMAKE_COMMAND}" -E env "LMP_BUILD_DIR=${CMAKE_BINARY_DIR}"
           "${PROJECT_SOURCE_DIR}/scripts/eval.py" --root "${PROJECT_SOURCE_DIR}" score
   LABELS gate)

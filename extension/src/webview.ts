@@ -919,10 +919,10 @@ function markup(): string {
 
 /** The incremental markdown state machine, as view-script source.
  *
- *  Ported from the winner of the MarkdownStream cook-off (Brief E, entrant e4 plus the
- *  nested-list fix) -- see `bakeoff/markdown_stream/README.md` for the scoreboard that
- *  chose it. Bytes in, render events out, no DOM: the renderer below is the only part
- *  that touches the document, so the parser stays checkable against the C++ original.
+ *  Ported from a measured MarkdownStream design (historical cook-off winner).
+ *  Bytes in, render events out, no DOM: the renderer below is the only part
+ *  that touches the document, so the parser stays checkable against its fixture
+ *  corpus under tests/testdata/markdown_stream/.
  *
  *  Exported so `scripts/verify-markdown-stream.js` can eval THIS text and diff it against
  *  the C++ amalgam on the cook-off corpus. Verifying a copy would verify the copy.

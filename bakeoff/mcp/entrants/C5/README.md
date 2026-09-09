@@ -1,1 +1,0 @@
-# mcp-client-cpp

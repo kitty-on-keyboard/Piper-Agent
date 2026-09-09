@@ -445,7 +445,7 @@ def build_start_request(meta, model_dir, workspace, sampling, contract):
     if draft_dir:
         settings["draft_model_dir"] = draft_dir
     # Product-optimal agent features (defaults ON in sidecar). Send explicitly so
-    # bakeoff summaries and wire captures record what ran. Env LMP_COMMIT_THINK /
+    # eval summaries and wire captures record what ran. Env LMP_COMMIT_THINK /
     # LMP_SHADOW_COMPACT =0|1 still overlays inside the sidecar after parse.
     settings["commit_think"] = os.environ.get("LMP_COMMIT_THINK", "1") != "0"
     settings["shadow_compact"] = os.environ.get("LMP_SHADOW_COMPACT", "1") != "0"
