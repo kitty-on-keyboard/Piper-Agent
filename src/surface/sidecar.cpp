@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -859,6 +860,7 @@ struct RunLoopHooks {
     std::function<void(const std::string& channel, const std::string& text)> on_token;
     std::function<void(const loop::TurnResult& t, double duration_ms)> on_turn;
     std::function<void(const loop::RunReport& report)> on_run_end;
+    std::function<void(const std::string& plan)> on_plan_ready;
     loop::Approver approver;
 };
 
@@ -885,6 +887,13 @@ bool run_loop(const std::string& run_id, surface::Session& session,
             obs.on_turn = [base_turn, h_turn = hooks->on_turn](const loop::TurnResult& t, double duration_ms) {
                 if (base_turn) base_turn(t, duration_ms);
                 h_turn(t, duration_ms);
+            };
+        }
+        if (hooks->on_plan_ready) {
+            auto base_plan = obs.on_plan_ready;
+            obs.on_plan_ready = [base_plan, h_plan = hooks->on_plan_ready](const std::string& plan) {
+                if (base_plan) base_plan(plan);
+                h_plan(plan);
             };
         }
     }
@@ -1812,7 +1821,11 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     std::unordered_set<std::string> denied_commands;
     bool timed_out_awaiting_user = false;
 
+    std::string plan_accum;
     RunLoopHooks hooks;
+    hooks.on_plan_ready = [&plan_accum](const std::string& plan) {
+        plan_accum = plan;
+    };
     hooks.on_token = [&answer_accum](const std::string& channel, const std::string& text) {
         if (channel == "answer") {
             answer_accum += text;
@@ -2076,11 +2089,24 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         exit_code = kExitError;
     }
 
+    if (!plan_accum.empty()) {
+        std::error_code ec_p;
+        std::filesystem::path plan_file = std::filesystem::path(packet.cwd) / "PLAN.md";
+        std::ofstream pf(plan_file.string());
+        if (pf.is_open()) {
+            pf << plan_accum << "\n";
+            std::fprintf(stderr, "piper: plan written to %s (%zu chars)\n", plan_file.c_str(), plan_accum.size());
+            std::fflush(stderr);
+        }
+    }
+
     result.files_touched = collect_files_touched(durable_log, packet.cwd);
     collect_git(packet.cwd, result_dir.string(), result);
 
     std::string clean_answer = strip_think_leak(answer_accum);
-    if (!clean_answer.empty()) {
+    if (final_report.termination_reason == "plan_ready" && !plan_accum.empty()) {
+        result.message = plan_accum;
+    } else if (!clean_answer.empty()) {
         result.message = clean_answer;
     } else if (!result.error.empty()) {
         result.message = result.error;
