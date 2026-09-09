@@ -1938,6 +1938,42 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
             info.seq = seq;
             write_awaiting_user(awaiting_path, info);
 
+            if (client_fd >= 0) {
+                nlohmann::json ask_ev = {
+                    {"kind", "ask"},
+                    {"task_id", packet.id},
+                    {"seq", info.seq},
+                    {"question", info.question},
+                    {"options", info.options},
+                    {"awaiting_path", awaiting_path},
+                    {"answer_path", answer_path}
+                };
+                std::string s = ask_ev.dump() + "\n";
+                (void)::write(client_fd, s.data(), s.size());
+            }
+
+            if (jsonl) {
+                nlohmann::json ask_ev = {
+                    {"kind", "ask"},
+                    {"task_id", packet.id},
+                    {"seq", info.seq},
+                    {"question", info.question},
+                    {"options", info.options},
+                    {"awaiting_path", awaiting_path},
+                    {"answer_path", answer_path}
+                };
+                std::string s = ask_ev.dump() + "\n";
+                std::fwrite(s.data(), 1, s.size(), stdout);
+                std::fputc('\n', stdout);
+                std::fflush(stdout);
+            }
+
+            std::fprintf(stderr,
+                         "piper: awaiting_user.json written (seq %llu). Question: %s\n"
+                         "Waiting for answer.json...\n",
+                         static_cast<unsigned long long>(info.seq), info.question.c_str());
+            std::fflush(stderr);
+
             if (!packet.orch_webhook.empty()) {
                 WebhookPayload hook_payload;
                 hook_payload.kind = "ask";
