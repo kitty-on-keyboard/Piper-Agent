@@ -119,7 +119,16 @@ std::optional<int> forward_to_daemon(
 
     while (true) {
         ssize_t n = ::read(fd, buf, sizeof(buf));
-        if (n <= 0) break;
+        if (n <= 0) {
+            if (!accum.empty()) {
+                auto j = nlohmann::json::parse(accum, nullptr, false);
+                if (!j.is_discarded() && j.is_object() && j.contains("exit_code")) {
+                    exit_code = j["exit_code"].get<int>();
+                    saw_result = true;
+                }
+            }
+            break;
+        }
         accum.append(buf, static_cast<size_t>(n));
 
         size_t nl;
@@ -133,6 +142,7 @@ std::optional<int> forward_to_daemon(
                 if (j.contains("exit_code")) {
                     exit_code = j["exit_code"].get<int>();
                     saw_result = true;
+                    break;
                 } else if (jsonl) {
                     std::fwrite(line.data(), 1, line.size(), stdout);
                     std::fputc('\n', stdout);
@@ -140,6 +150,7 @@ std::optional<int> forward_to_daemon(
                 }
             }
         }
+        if (saw_result) break;
     }
 
     ::close(fd);
@@ -166,6 +177,7 @@ bool DaemonListener::start() {
 
     listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return false;
+    ::fcntl(listen_fd_, F_SETFD, FD_CLOEXEC);
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
@@ -210,7 +222,11 @@ int DaemonListener::accept_client() {
         return -1;
     }
 
-    return ::accept(listen_fd_, nullptr, nullptr);
+    int client_fd = ::accept(listen_fd_, nullptr, nullptr);
+    if (client_fd >= 0) {
+        ::fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+    }
+    return client_fd;
 }
 
 void DaemonListener::stop() {
