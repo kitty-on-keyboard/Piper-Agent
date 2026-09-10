@@ -11,6 +11,7 @@
 
 import * as crypto from "crypto";
 import * as vscode from "vscode";
+import { rememberableCommand } from "./allowlist";
 import { SidecarClient } from "./client";
 import { webviewHtml } from "./webview";
 import {
@@ -831,14 +832,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  Refuses a rule the matcher could never hit, as a backstop behind the card: the button
    *  is only offered when the gate says `can_remember`, but this is the function that grows
    *  a settings file the user then has to read, and a rule in there that cannot fire is a
-   *  lie told in writing. The one condition checkable on this side is shell chaining, which
-   *  is the condition that actually fired -- all 19 dead rules in the run that prompted
-   *  this carried `;` or `|`. Kept in sync with loop::is_allowlisted by matching its
-   *  character set exactly; the authority is still the gate. */
+   *  lie told in writing. Shell chaining is one condition that actually fired -- all 19
+   *  dead rules in the run that prompted this carried `;` or `|`. Embedded newlines are
+   *  another: they would become extra allowlist lines when settings are joined for the
+   *  wire. Kept in sync with loop::is_allowlisted by matching its character set exactly;
+   *  the authority is still the gate. */
   private remember(command: string): void {
-    const trimmed = command.trim();
+    const trimmed = rememberableCommand(command);
     if (!trimmed) return;
-    if (/[;|&`<>]|\$\(/.test(trimmed)) return;
     const cfg = vscode.workspace.getConfiguration("lmPipe");
     const current = cfg.get<string[]>("allowedCommands", []);
     if (current.includes(trimmed)) return;
