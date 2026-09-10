@@ -1,7 +1,7 @@
 // Line framing and the JSON-RPC message model.
 //
 // These are the two layers where the cook-off entrants failed silently rather than
-// loudly (docs/BAKEOFF_MCP.md): three clients wrote LSP `Content-Length:` preambles
+// loudly (the measured MCP design notes): three clients wrote LSP `Content-Length:` preambles
 // into a newline-delimited stream, and six keyed their correlation map on uint64 so
 // every string id collapsed to 0. Both bugs pass a happy-path test. The checks here
 // are the ones that would have caught them.

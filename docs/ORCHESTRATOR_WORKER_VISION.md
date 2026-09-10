@@ -8,7 +8,7 @@ records issues, and keeps slicing until the big task is done.
 ```
 ┌─────────────────────┐         task packet          ┌──────────────────────┐
 │ Cloud agent         │ ───────────────────────────► │ Piper CLI worker     │
-│ (Cursor Grok / Bot) │                              │ (A3B on Apple Silicon)│
+│ (cloud orchestrator)│                              │ (A3B on Apple Silicon)│
 │                     │ ◄─────────────────────────── │                      │
 │ plan · review · QA  │       result.json + diff     │ write · tools · loop │
 │ restart · log issues│                              │                      │

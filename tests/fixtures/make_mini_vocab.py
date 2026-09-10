@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates a miniature Qwen-SHAPED tokenizer.json for the gate (G0).
 
-WHY THIS EXISTS. docs/PHASES.md names four surviving mutants and says three of them
+WHY THIS EXISTS. historical build notes names four surviving mutants and says three of them
 (grammar.cpp:105, agent.cpp:168, agent.cpp:287) are blocked on the same thing: there is no
 vocabulary in the gate, so TurnGrammar and Agent::step are only ever exercised by
 `realmodel` tests, which are excluded. Everything that needs to assert "the mask forbade

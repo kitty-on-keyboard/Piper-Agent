@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Evaluation harness (spec S11.3 - S11.5).
 
-  ./scripts/eval.py score        bake-off scores, corpus AND held-out, both pinned
+  ./scripts/eval.py score        corpus scores (blast radius), tuned AND held-out, both pinned
   ./scripts/eval.py mutants      mutation testing -- a survivor is a finding about the SUITE
   ./scripts/eval.py reliability  N-run ledger; one number is not a result
 
@@ -102,13 +102,13 @@ def cmd_score(root, args):
     # LMP_BUILD_DIR lets a probe copy (whose build dir is not named "build") point at
     # its own. Another thing the null mutant found.
     build = os.environ.get("LMP_BUILD_DIR") or os.path.join(root, "build")
-    br = os.path.join(build, "bakeoff", "blast_radius_score_e00_merged")
+    br = os.path.join(build, "tests", "testdata", "blast_radius_score_shipped")
     if not os.path.exists(br):
         print("build the scoreboards first: cmake --build --preset dev")
         return 1
     corpus = parse_scoreboard(run([br]).stdout)
     holdout = parse_scoreboard(
-        run([br, os.path.join(root, "bakeoff/blast_radius/holdout.jsonl")]).stdout)
+        run([br, os.path.join(root, "tests/testdata/blast_radius/holdout.jsonl")]).stdout)
 
     pins = PINS["blast_radius"]
     print("blast_radius (engine: src/security/blast_radius.hpp)")

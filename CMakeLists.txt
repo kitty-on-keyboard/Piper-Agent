@@ -70,7 +70,6 @@ endif()
 
 add_subdirectory(third_party)
 add_subdirectory(src)
-add_subdirectory(bakeoff)
 
 if(LMP_BUILD_TESTING)
   enable_testing()

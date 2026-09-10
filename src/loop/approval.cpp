@@ -282,7 +282,7 @@ struct RedirectScan {
 } // namespace
 
 double risk_score(const tools::RiskHint& hint) {
-    // The published weights from bakeoff/blast_radius: write_out, destroy and priv are
+    // Capability miss weights (write_out, destroy, priv) match tests/testdata/blast_radius:
     // worth three ordinary capabilities. Partial parse is itself risk -- it is the
     // signal that says "sandbox this regardless of the flags". The score alone is not
     // enough: see forces_escalation(), which is the property override.

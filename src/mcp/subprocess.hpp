@@ -10,7 +10,7 @@
 // The stderr policy is the part to read carefully. Cook-off entrant C6 piped the
 // child's stderr and never read it, which deadlocks against any server that logs: once
 // the 64 KB pipe buffer fills, the child blocks in write(2) forever and stops answering.
-// Reproduced in docs/BAKEOFF_MCP.md against a server emitting 150 KB of startup noise --
+// Reproduced in the measured MCP design notes against a server emitting 150 KB of startup noise --
 // C6 hung until killed. So the default here is kInherit, and kCapture is only honoured
 // by a transport that actually drains it.
 //

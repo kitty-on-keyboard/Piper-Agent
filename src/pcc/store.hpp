@@ -36,7 +36,7 @@
 //   SHA-256 bytes reinterpreted as floats, `[0.1] * 384`, and twice `np.random.seed(
 //   hash(text))`. Every one returns arbitrary rows with total confidence, and two of them
 //   then built "semantic deduplication" on top, which can only ever match exact
-//   duplicates. Counted from the branches, not remembered: docs/BAKEOFF_PCC.md.
+//   duplicates. Counted from the branches, not remembered: the measured PCC design notes.
 //
 //   Retrieval here is BM25 over SQLite's FTS5: real, tested, deterministic, and strong on
 //   the identifiers, paths and error strings that agent memory is mostly made of. Adding

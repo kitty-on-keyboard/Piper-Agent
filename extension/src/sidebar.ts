@@ -836,6 +836,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  this carried `;` or `|`. Kept in sync with loop::is_allowlisted by matching its
    *  character set exactly; the authority is still the gate. */
   private remember(command: string): void {
+    if (typeof command !== "string") return;
+    // Security: Reject commands with newlines (\r, \n) anywhere (before trimming)
+    // or shell operators to prevent newline injection into allowedCommands, which
+    // would corrupt the newline-separated wire protocol and inject unauthorized commands.
+    if (/[\r\n]/.test(command)) return;
     const trimmed = command.trim();
     if (!trimmed) return;
     if (/[;|&`<>]|\$\(/.test(trimmed)) return;

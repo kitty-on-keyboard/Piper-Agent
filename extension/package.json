@@ -336,7 +336,8 @@
     "package": "vsce package --no-dependencies --allow-missing-repository --out lm-pipe.vsix && node scripts/verify-vsix.js",
     "install-local": "npm run package && node scripts/install-local.js",
     "verify-vsix": "node scripts/verify-vsix.js",
-    "test:view-script": "npm run compile && node scripts/test-view-script.js"
+    "test:view-script": "npm run compile && node scripts/test-view-script.js",
+    "test:remember-allowlist": "npm run compile && node scripts/test-remember-allowlist.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

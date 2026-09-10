@@ -35,7 +35,7 @@
 namespace lmp::surface {
 
 // Precedence for commit_think / shadow_compact:
-//   1. env exactly `0` or `1` wins (headless / bakeoff)
+//   1. env exactly `0` or `1` wins (headless / eval)
 //   2. else the start-message / RunSettings field if present
 //   3. else the C++ struct default (true)
 // Unset env + omitted field → on. Tests set the struct field; they do not race on setenv.

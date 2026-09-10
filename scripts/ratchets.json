@@ -95,24 +95,22 @@
     "removed: the dead-code gate reads this list too, so the name described one",
     "consumer of two.",
     "",
-    "Everything here is code we did not write or must not edit -- vendored source,",
-    "and cook-off entrants that are EVIDENCE. An entrant reformatted to this repo's",
-    "conventions is no longer the artifact its scoreboard scored, so a gate that",
-    "made us touch it would quietly detach every measured number from the code it",
-    "describes."
+    "Everything here is code we did not write or must not casually edit -- vendored",
+    "source, and pinned corpus / scoreboard harness under tests/testdata. Editing a",
+    "graded engine without re-scoring detaches the measured number from shipped code."
   ],
   "scan_exempt": [
-    {
-      "path": "bakeoff/",
-      "reason": "Ported verbatim from v1 (S18). These are the falsifiers, and an entrant edited to satisfy anything is no longer the thing that was measured."
-    },
     {
       "path": "third_party/",
       "reason": "Vendored simdjson 4.6.1, upstream source."
     },
     {
+      "path": "tests/testdata/",
+      "reason": "Gate corpora, loaders, and the minimal shipped-engine scoreboard harness. Historical cook-off entrants were removed; what remains is pinned answer-key material."
+    },
+    {
       "path": "src/security/blast_radius.hpp",
-      "reason": "The consolidated blast-radius engine, ported from v1 unmodified. It is graded by bakeoff/blast_radius (0 wmiss corpus, 15 wmiss holdout, re-measured 2026-07-30 in this repo) and the e00_merged scoreboard includes THIS header, so editing it detaches the measured number from the shipped code. If it is ever rewritten, the rewrite must be re-scored first."
+      "reason": "The consolidated blast-radius engine, ported from v1 unmodified. It is graded by tests/testdata/blast_radius (0 wmiss corpus, 15 wmiss holdout, re-measured 2026-07-30 in this repo) and the shipped scoreboard includes THIS header, so editing it detaches the measured number from the shipped code. If it is ever rewritten, the rewrite must be re-scored first."
     },
     {
       "path": "src/tools/graft_engine.hpp",

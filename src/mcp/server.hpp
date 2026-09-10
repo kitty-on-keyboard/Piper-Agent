@@ -2,7 +2,7 @@
 //
 // MCP server.
 //
-// Two decisions here are direct consequences of the cook-off (docs/BAKEOFF_MCP.md).
+// Two decisions here are direct consequences of the cook-off (the measured MCP design notes).
 //
 // The lifecycle gate: nothing but `initialize` and `ping` is served until
 // `notifications/initialized` has arrived. Six of the seven server entrants would answer

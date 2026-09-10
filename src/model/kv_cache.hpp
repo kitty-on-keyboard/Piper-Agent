@@ -18,7 +18,7 @@
 // loud cheaply.
 //
 // TRUNCATION AND THE FINGERPRINT (adopted 2026-08-01 from the Brief D cook-off; the
-// amalgamation and its scoreboard are in bakeoff/prefix_ledger/). This used to be
+// ideas were measured historically before landing here). This used to be
 // append-only, with "one honest full re-prefill" as the only trim, because under
 // append-only KV a fresh window was the natural restart. Speculative decoding needs the
 // thing in between: it forwards k guessed tokens and keeps only the ones that survive.

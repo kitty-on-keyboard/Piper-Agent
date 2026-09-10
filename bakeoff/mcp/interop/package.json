@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "@modelcontextprotocol/server-everything": "^2026.7.4",
-    "@modelcontextprotocol/server-filesystem": "^2026.7.10"
-  }
-}

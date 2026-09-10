@@ -103,4 +103,5 @@ Apple Silicon only. One in-process model, no inference server, no subagents. C++
 staging, committing and branching are yours.
 
 Developers: `cmake --preset dev && cmake --build --preset dev -j8 && ctest --preset gate`.
-See [CONTRIBUTING.md](CONTRIBUTING.md). Measurements live in [docs/PHASES.md](docs/PHASES.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Capability and log-compaction corpora live under
+`tests/testdata/`; engines that were measured historically ship under `src/`.

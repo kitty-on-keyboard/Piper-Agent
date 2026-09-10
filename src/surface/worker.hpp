@@ -5,7 +5,7 @@
 // The extension speaks lmp/* over stdio and is driven by a human. Worker mode
 // speaks the SAME protocol to the SAME session/loop, but the producer is a
 // task.json file and the consumer is a result.json file. One agent, two
-// interfaces (spec PIPER_WORKER_CLI_HANDOFF.md).
+// interfaces (worker CLI).
 //
 // Why this exists instead of a Python wrapper: the sidecar already owns the
 // model, the loop, the approval flow and the watchdog. The Python driver
@@ -51,10 +51,10 @@ struct TaskPacket {
     std::string check_command;
     double check_timeout_s = 60.0;
 
-    // Operator-owned MCP trust voucher (spec WORKER_MCP_TRUST_HANDOFF.md).
+    // Operator-owned MCP trust voucher (operator MCP trust).
     std::vector<std::string> trust_mcp;
 
-    // Cloud orchestrator webhook URL (spec ORCH_WAKE_HANDOFF.md).
+    // Cloud orchestrator webhook URL (orchestrator wake).
     std::string orch_webhook;
 };
 
@@ -124,7 +124,7 @@ void collect_git(const std::string& cwd, const std::string& out_dir,
 void run_check(const TaskPacket& packet, RunResult& result);
 
 // ------------------------------------------------------------------
-// Cloud handoff for ask_user (spec ASK_USER_CLOUD_HANDOFF.md).
+// Cloud handoff for ask_user (cloud ask_user).
 // ------------------------------------------------------------------
 
 struct AwaitingUserInfo {
@@ -148,7 +148,7 @@ void write_awaiting_user(const std::string& path, const AwaitingUserInfo& info);
     const std::string& answer_path, const std::string& awaiting_path);
 
 // ------------------------------------------------------------------
-// Cloud wake-up webhook (spec ORCH_WAKE_HANDOFF.md).
+// Cloud wake-up webhook (orchestrator wake).
 // ------------------------------------------------------------------
 
 struct WebhookPayload {
@@ -174,7 +174,7 @@ bool post_orch_webhook(const std::string& webhook_url,
 [[nodiscard]] bool is_detached_launch(bool cli_detach);
 
 // ------------------------------------------------------------------
-// Irreversible call escalation (spec IRREVERSIBLE_ESCALATE_HANDOFF.md).
+// Irreversible call escalation (irreversible escalate).
 // ------------------------------------------------------------------
 
 enum class IrreversibleAskResult {
@@ -216,7 +216,7 @@ struct IrreversibleAskParams {
     const IrreversibleAskParams& params);
 
 // ------------------------------------------------------------------
-// Project initialization (spec PIPER_INIT_HANDOFF.md).
+// Project initialization (project init).
 // ------------------------------------------------------------------
 
 // Initialize PIPER.md and .cursor/rules/piper-parent.mdc in target_dir.

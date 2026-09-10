@@ -4,7 +4,7 @@
 //
 // There is no length header. Three of the seven cook-off clients wrote LSP-style
 // `Content-Length:` preambles -- one of them under a comment reading "For standard MCP"
-// -- and the wire trace in docs/BAKEOFF_MCP.md shows the result: a parse error at the
+// -- and the wire trace in the measured MCP design notes shows the result: a parse error at the
 // server for every message sent. They pass their own tests because they ship a mock
 // that speaks the same invented dialect.
 //

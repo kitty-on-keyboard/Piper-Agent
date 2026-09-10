@@ -19,21 +19,11 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "LMP_SANITIZE": "ON"
       }
-    },
-    {
-      "name": "bakeoff",
-      "displayName": "Every per-entrant scoreboard",
-      "binaryDir": "${sourceDir}/build-bakeoff",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "LMP_BUILD_SCOREBOARDS": "ON"
-      }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "asan", "configurePreset": "asan" },
-    { "name": "bakeoff", "configurePreset": "bakeoff" }
+    { "name": "asan", "configurePreset": "asan" }
   ],
   "testPresets": [
     {

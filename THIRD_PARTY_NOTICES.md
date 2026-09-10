@@ -63,7 +63,7 @@ checkpoint separately and point `lmPipe.modelDir` / `LMP_QWEN_DIR` at it. Comply
 **that checkpoint's** license; typical Qwen3 community checkpoints are Apache-2.0, but
 some Qwen3.8 variants use a different community license.
 
-## Test / bakeoff-only
+## Test-only
 
-GoogleTest (BSD-3-Clause) and extra nlohmann/json copies may be FetchContent'd by bakeoff
-entrants. They are not part of the sidecar.
+Historical cook-off entrants (removed) sometimes FetchContent'd GoogleTest or extra
+nlohmann/json copies. Those are not part of the sidecar.
