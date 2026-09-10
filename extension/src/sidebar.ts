@@ -777,8 +777,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (msg.kind === "resume" && typeof msg.runId === "string") {
           void this.resume(msg.runId);
         }
-        if (msg.kind === "message" && msg.text) {
-          void this.send(msg.text, Array.isArray(msg.images) ? msg.images : []);
+        if (msg.kind === "message" && typeof msg.text === "string" && msg.text.trim()) {
+          const images = Array.isArray(msg.images)
+            ? msg.images.filter((img): img is string => typeof img === "string")
+            : [];
+          void this.send(msg.text, images);
         }
         // Bytes dropped or pasted into the pane. Written to a file here, in the HOST --
         // the webview has no filesystem, and shipping the bytes on to the sidecar would

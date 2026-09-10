@@ -74,6 +74,11 @@ assert.strictEqual(
   "pytest",
   "empty strings are not allowlist rules"
 );
+assert.strictEqual(
+  serializeAllowedCommands(["pytest", "pytest; rm -rf /", "cargo test", "a | b"]),
+  "pytest\ncargo test",
+  "shell-chaining settings entries must be dropped before join"
+);
 
 // Call sites still use the helpers (not a raw join / unchecked push).
 const sidebar = fs.readFileSync(path.join(root, "src/sidebar.ts"), "utf8");
