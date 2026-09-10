@@ -8,6 +8,7 @@
 
 import * as vscode from "vscode";
 import * as path from "path";
+import { serializeAllowedCommands } from "./allowlist";
 import { SidecarClient } from "./client";
 import { ExtensionHost, SidebarProvider } from "./sidebar";
 import { McpServerSettings, RunSettings } from "./protocol.generated";
@@ -61,8 +62,11 @@ function settingsFromConfig(): RunSettings {
     // it means the built-in.
     system_prompt: cfg.get<string>(`prompts.${mode}`, ""),
     // Newline-separated on the wire: the generated protocol has no array type, and a
-    // newline is the one character a shell command cannot carry unescaped.
-    allowed_commands: cfg.get<string[]>("allowedCommands", []).join("\n"),
+    // newline is the one character a shell command cannot carry unescaped. Filter again
+    // here so a poisoned workspace settings entry cannot inject extra allowlist lines.
+    allowed_commands: serializeAllowedCommands(
+      cfg.get<string[]>("allowedCommands", [])
+    ),
     context_budget_tokens: cfg.get<number>("contextBudgetTokens", 96000),
     max_new_tokens: cfg.get<number>("maxNewTokens", 32768),
     // How hard to think, in the checkpoint's own vocabulary. `medium` is the default

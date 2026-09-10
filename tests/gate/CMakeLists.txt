@@ -93,6 +93,10 @@ if(LMP_NODE)
     COMMAND "${LMP_NODE}"
             "${PROJECT_SOURCE_DIR}/extension/scripts/test-checkpoint.js"
     LABELS gate)
+  lmp_add_script_test(test_remember_allowlist
+    COMMAND "${LMP_NODE}"
+            "${PROJECT_SOURCE_DIR}/extension/scripts/test-remember-allowlist.js"
+    LABELS gate)
 else()
   message(STATUS "transcript order check skipped: node not found")
 endif()
