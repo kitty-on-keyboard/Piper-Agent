@@ -13,7 +13,7 @@
 //   lmp_diag compact [max_new]
 //                           post-compaction KV tax (no shadow-swap): turn-to-turn reuse,
 //                           then compact_oldest, then collapse-only. Feeds
-//                           piper-bench/results/kv_compaction_baseline.md
+//                           docs/KV_SHADOW_SWAP.md
 //   lmp_diag graph [prompt] the decode step's graph as dot, unevaluated -- the only
 //                           subcommand here that is not a timing. Diff its primitive
 //                           histogram against mlx-lm's with scripts/graph_histogram.py
@@ -1220,7 +1220,7 @@ int cmd_bench(int runs, int prompt_tokens, int max_new) {
 // M0 for shadow-swap: turn-to-turn reuse with a stable prefix, then the same
 // conversation after compact_oldest / collapse rewrites the prompt. No Agent, no
 // LMP_SHADOW_COMPACT -- this is the tax the flag exists to hide.
-// See docs/KV_SHADOW_SWAP.md and piper-bench/results/kv_compaction_baseline.md.
+// See docs/KV_SHADOW_SWAP.md and docs/KV_SHADOW_SWAP.md.
 
 lmp::context::ContextStore diag_fat_context(int turns) {
     lmp::context::ContextStore ctx("keep the context honest");

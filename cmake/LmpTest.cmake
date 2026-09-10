@@ -9,7 +9,7 @@
 # Known labels:
 #   gate      -- must run with no model, no network, under 5 minutes total (S11.1)
 #   realmodel -- loads a real model; excluded from the gate; NEVER run in parallel (S11.6)
-#   bakeoff   -- scores a corpus; part of the gate when it needs no model
+#   corpus    -- scores a fixture corpus; part of the gate when it needs no model
 
 function(lmp_add_test name)
   cmake_parse_arguments(T "" "TIMEOUT" "SOURCES;LABELS;LINK" ${ARGN})

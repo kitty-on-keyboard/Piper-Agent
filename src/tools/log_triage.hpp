@@ -6,7 +6,7 @@
 // This is the consolidated engine from the log-triage cookoff (round 1, 2026-07-30, 15
 // entrants). What was taken from whom, and what was
 // rejected, is recorded at the bottom of this file. The benchmark it is measured on lives at
-// bakeoff/log_triage/ and its answer key was written by the compiler, not by us.
+// tests/testdata/log_triage/ and its answer key was written by the compiler, not by us.
 //
 // The problem, stated once. A build fails. The shell tool captures 12 MB of output. The
 // model gets 8 KB. If the 40 bytes saying WHICH LINE OF ITS OWN CODE to edit are not in that
@@ -1032,7 +1032,7 @@ inline void parse_counts(std::string_view log, StructuredTriage& t) {
 
 // ---------------------------------------------------------------------------
 // Provenance: log-triage cookoff round 1, 2026-07-30. 15 entrants, all shipped code.
-// Benchmark and full results at bakeoff/log_triage/README.md.
+// Corpus and pins live under tests/testdata/log_triage/ and tests/corpus/.
 //
 // TAKEN
 //   e05  The proximity boost, whole. Scoring lines by keyword and then boosting neighbours
@@ -1062,7 +1062,7 @@ inline void parse_counts(std::string_view log, StructuredTriage& t) {
 //        compiler emits, and returns the EMPTY STRING on all 75 scoring points. It was
 //        written for syslog-style application logs.
 //   e08 and e15's signatures. Neither takes a budget at all.
-//   e02 and e09's ranking. Both look strong only because the bakeoff adapter binary-searches
+//   e02 and e09's ranking. Both look strong only because a historical cook-off adapter binary-searched
 //        their non-byte budget against the byte cap -- an oracle production does not have.
 //        Estimating instead, e02 goes 78 -> 516 weighted and exceeds the budget on 31 of 75
 //        points. Their SELECTION was good; their interface was not.

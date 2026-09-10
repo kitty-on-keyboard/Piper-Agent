@@ -35,3 +35,10 @@ cd extension && npm install && npm run compile && node scripts/verify-question-o
 
 `npm run install-local` packages a `.vsix` and installs it into every VS Code-family
 editor it finds. Override with `LMP_EDITOR_CLI`.
+
+## Measured engines
+
+Some components under `src/` (blast-radius classifier, log triage, draft proposer, MCP,
+PCC) were selected by historical bake-offs. The cook-off museums are gone; pinned corpora
+and the shipped-engine scoreboards live under `tests/testdata/`. Re-score before rewriting
+a graded header.

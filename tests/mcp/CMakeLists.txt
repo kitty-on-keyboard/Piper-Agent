@@ -7,3 +7,7 @@ lmp_add_test(test_mcp_stdio SOURCES test_mcp_stdio.cpp LABELS gate LINK lmp_mcp 
 target_compile_definitions(test_mcp_stdio PRIVATE
   LMP_MCP_DEMO_SERVER="$<TARGET_FILE:mcp_demo_server>")
 add_dependencies(test_mcp_stdio mcp_demo_server)
+
+# Optional microbench: in-process MCP transport vs stdio. Not part of ctest.
+add_executable(bench_mcp_transport bench_transport.cpp)
+target_link_libraries(bench_mcp_transport PRIVATE lmp_mcp lmp_warnings lmp_assertions)

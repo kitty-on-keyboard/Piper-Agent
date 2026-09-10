@@ -204,7 +204,7 @@
       {
         "name": "commit_think",
         "type": "bool",
-        "_comment": "When true, harvest closed markdown fences after </think> and declare commit_think_block. Default true for IDE; set LMP_COMMIT_THINK=0 for bakeoffs that must not see the tool. Precedence: env exactly 0|1 wins, else this field if present, else the C++ struct default (true)."
+        "_comment": "When true, harvest closed markdown fences after </think> and declare commit_think_block. Default true for IDE; set LMP_COMMIT_THINK=0 for evals that must not see the tool. Precedence: env exactly 0|1 wins, else this field if present, else the C++ struct default (true)."
       },
       {
         "name": "shadow_compact",

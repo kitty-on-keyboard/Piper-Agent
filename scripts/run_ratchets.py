@@ -422,7 +422,7 @@ def self_test(root, cfg):
         gate = label.split(":")[0]
         with tempfile.TemporaryDirectory() as tmp:
             copy_tree_for_probe(root, os.path.join(tmp, "repo"),
-                                extra=("third_party", "bakeoff"))
+                                extra=("third_party", "testdata"))
             repo = os.path.join(tmp, "repo")
             probe = os.path.join(repo, relpath)
             os.makedirs(os.path.dirname(probe), exist_ok=True)

@@ -3,9 +3,8 @@
 A client and a server for MCP, written against the spec rather than against a mock.
 Lives in `src/mcp/`, links nothing from LM_Pipe, and is liftable into its own repo.
 
-Built after judging 14 Jules entrants (`docs/BAKEOFF_MCP.md`). Where a decision here
-looks over-specified, it is usually because an entrant got it wrong in a way that only
-showed up against real software.
+Where a decision here looks over-specified, it is usually because an earlier measured
+design got it wrong in a way that only showed up against real software.
 
 ## Status
 
@@ -41,22 +40,17 @@ progress, resources, prompts, `completion/complete`, `ping`, `logging/setLevel` 
 error codes. **18 passed, 0 failed.** This is the direction that matters most: our own
 conformance harness can only find bugs we thought to look for.
 
-**Conformance board.** `bakeoff/mcp/conform.py` scores 12 spec behaviours. Our server
-takes **12/12**; the best entrant took 12/12 and the worst 3/12. The board is falsified
-in both directions first — `bakeoff/mcp/falsifiers/` holds a correct reference server
-that must score 12/12 and a broken one carrying seven planted defects that must be
-caught individually.
-
-It earned its keep immediately: it caught a real bug in *this* implementation, where the
-transport treated stdin EOF as "closed" and dropped every reply the worker pool had not
-yet written. That scored 5/12 before the fix.
+**Conformance.** The implementation was graded against 12 spec behaviours (historical
+harness, since removed). Our server took **12/12**. That board caught a real bug here
+where the transport treated stdin EOF as "closed" and dropped every reply the worker
+pool had not yet written.
 
 ## The transport question
 
 > "I see you are using stdio but you told me that's horrendously slow. Can we use SPSC
 > queues instead or something?"
 
-Measured, not asserted (`bakeoff/mcp/bench_transport.cpp`, M-series, 20,000 requests):
+Measured, not asserted (`tests/mcp/bench_transport.cpp`, M-series, 20,000 requests):
 
 | | p50 | p99 | throughput |
 |---|---|---|---|

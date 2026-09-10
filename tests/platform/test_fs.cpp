@@ -220,7 +220,7 @@ TEST(lexical_normalisation_never_touches_the_disk) {
 }
 
 TEST(containment_matches_blast_radius_rule_one) {
-    // Rule 1 of bakeoff/blast_radius/README.md, verbatim: containment is textual,
+    // Containment rule (textual, not resolved): 
     // nothing is stat()ed, and `/work/repo/../repo/build` is INSIDE.
     CHECK(is_within("/work/repo", "/work/repo/../repo/build"));
     CHECK(is_within("/work/repo", "/work/repo"));

@@ -5,7 +5,7 @@
   ./scripts/mutation_test.py --only NAME     run one
   ./scripts/mutation_test.py --list          show the catalogue and exit
 
-WHY THIS FILE EXISTS AT ALL. docs/PHASES.md reported "3/8 killed, 5 survivors" and named
+WHY THIS FILE EXISTS AT ALL. historical build notes reported "3/8 killed, 5 survivors" and named
 the survivors, but the harness that produced that number was never committed -- so the
 figure was a report of a run nobody could reproduce, which is the precise thing
 `ctest -E realmodel` is condemned for on the previous page of the same document. A
@@ -20,7 +20,7 @@ copy failing looks exactly like every mutation being caught. So an UNMUTATED cop
 build and pass the gate before any kill in this run is believed, and all three of those
 defects are guarded against below by construction.
 
-WHY MUTATIONS ARE STRINGS AND NOT LINE NUMBERS. PHASES.md names its survivors as
+WHY MUTATIONS ARE STRINGS AND NOT LINE NUMBERS. historical build notes names its survivors as
 `grammar.cpp:105`, `agent.cpp:168`. Those line numbers no longer point at what they
 described -- the files moved underneath them. An exact source string either still matches
 or fails loudly, which is the behaviour worth having.
@@ -46,7 +46,7 @@ def is_build_dir(path):
 
     Not by name. The original harness used `ignore_patterns("build*")`, which also matched
     `third_party/simdjson/include/simdjson/builder.h` and broke every copy. Replacing it
-    with an exact list of {build, build-asan, build-bakeoff} rotted immediately in the
+    with an exact list of {build, build-asan} rotted immediately in the
     other direction: this tree also holds `build-mcp` and `build-mcp-asan` from an earlier
     session, and the first run of this file copied 194 MB of stale object files because
     the list had never heard of them. A name is the wrong thing to test either way.
@@ -134,7 +134,7 @@ MUTATIONS = [
         "file": "src/surface/sidecar.cpp",
         "old": "    log.close();\n    std::fflush(nullptr);\n    ::_exit(0);",
         "new": "    log.close();\n    std::fflush(nullptr);\n    ::_exit(1);",
-        "note": "PHASES.md's sidecar.cpp survivor: the dispatch loop has no test, so the "
+        "note": "historical build notes's sidecar.cpp survivor: the dispatch loop has no test, so the "
                 "process exit status is unasserted",
         "expect": "survived",
     },

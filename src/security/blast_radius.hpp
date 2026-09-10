@@ -5,7 +5,7 @@
 //
 // Consolidated from round 1 of the blast-radius-engine cookoff (14 submissions,
 // 11 with code). The neutral corpus, the scorer and the ten labelling rules are
-// in bakeoff/blast_radius/; this header is scored by the same binary every
+// in tests/testdata/blast_radius/; this header is scored by the same binary every
 // entrant was, on the same 187 cases, and its number is pinned in
 // test_blast_radius_corpus.cpp.
 //

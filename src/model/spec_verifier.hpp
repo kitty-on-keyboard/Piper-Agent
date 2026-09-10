@@ -2,7 +2,7 @@
 //
 // SpecVerifier -- the acceptance rule for speculative decoding.
 //
-// ADOPTED from the Brief C cook-off (bakeoff/spec_verifier/), entrant e3, which was the
+// ADOPTED from a measured draft-acceptance design (historical cook-off entrant e3), which was the
 // most compact of five implementations that all scored identically at the sampling-noise
 // floor. The procedure is unchanged; only the namespace and the row type differ.
 //

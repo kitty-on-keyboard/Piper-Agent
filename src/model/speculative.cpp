@@ -4,7 +4,7 @@
 #include <array>
 #include <cstdlib>
 
-#include "bakeoff/draft_proposer/suffix_proposer.hpp"
+#include "src/model/draft_proposer/suffix_proposer.hpp"
 #include "src/model/mtp_proposer.hpp"
 
 namespace lmp::model {
@@ -54,7 +54,7 @@ namespace {
 // The scalar residual reduction is not distribution-preserving for a soft drafter (worst
 // total-variation 0.23 by exact enumeration); at q = 1 it is exact to machine precision
 // (8.3e-17). Acceptance then reduces to `u < p(t)`: keep the drafted token with the
-// target's own probability for it. See bakeoff/spec_verifier/README.md.
+// target's own probability for it. See src/model/spec_verifier.hpp.
 constexpr float kDeterministicDrafter = 1.0F;
 
 // The repetition-penalty window MlxBackend::generate keeps. Speculative rows must be

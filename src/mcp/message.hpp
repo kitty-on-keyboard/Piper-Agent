@@ -6,7 +6,7 @@
 // a correlation map keyed on uint64 silently coerces `"abc-1"` to 0 -- which is how a
 // client that talks to two servers at once starts delivering one server's replies to
 // the other's futures. Six of the seven cook-off clients keyed on uint64
-// (docs/BAKEOFF_MCP.md); they get away with it only because they are also the only
+// (the measured MCP design notes); they get away with it only because they are also the only
 // party ever generating ids. A server has no such luxury: it must echo back exactly
 // what it was sent, with the type intact.
 //

@@ -2,7 +2,7 @@
 """Run LM_Pipe over SWE-bench instances and emit patches for SWE-bench's own grader.
 
 WHY THIS EXISTS. Every score this project has published is first-person: our agent, our
-six tasks, our checker. docs/BAKEOFF_HARNESS.md beat Cline 6/6 to 5/6 on the same weights
+six tasks, our checker. an earlier harness bakeoff beat Cline 6/6 to 5/6 on the same weights
 and the same machine, and the obvious objection is that we wrote the benchmark we win.
 SWE-bench answers that objection because someone else wrote it, someone else grades it,
 and there is a published anchor to calibrate against.
