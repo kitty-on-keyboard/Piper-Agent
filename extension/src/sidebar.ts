@@ -87,6 +87,9 @@ export interface ExtensionHost {
   /** The once-per-window trusted-MCP confirmation. May clear `trusted` on every server;
    *  returns false if the operator backed out entirely. */
   confirmTrustedMcp(settings: RunSettings): Promise<boolean>;
+  /** The once-per-window workspace `.mcp.json` spawn confirmation. Sets
+   *  `allow_workspace_mcp`; returns false if the operator backed out entirely. */
+  confirmWorkspaceMcp(settings: RunSettings): Promise<boolean>;
 }
 
 
@@ -477,6 +480,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.fail("Cancelled: the run needs a trusted-MCP choice.");
       return;
     }
+    if (!(await this.host.confirmWorkspaceMcp(settings))) {
+      this.fail("Cancelled: the run needs a workspace-MCP choice.");
+      return;
+    }
     // A fresh run, not a follow-up. Clearing the id is what makes the composer's next
     // message continue the IMPLEMENTATION rather than the planning conversation whose
     // session this would otherwise still be pointing at.
@@ -495,6 +502,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (problems.length > 0) return this.fail(problems.join("\n"));
     if (!(await this.host.confirmContainment(settings))) return;
     if (!(await this.host.confirmTrustedMcp(settings))) return;
+    if (!(await this.host.confirmWorkspaceMcp(settings))) return;
     this.beginRun(mission);
     const reply = await this.client.start_run(mission, settings);
     if (reply.error) this.fail(reply.error);
@@ -926,6 +934,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
     if (!(await this.host.confirmTrustedMcp(settings))) {
       this.fail("Cancelled: the run needs a trusted-MCP choice.");
+      return;
+    }
+    if (!(await this.host.confirmWorkspaceMcp(settings))) {
+      this.fail("Cancelled: the run needs a workspace-MCP choice.");
       return;
     }
     this.beginRun(text, false);

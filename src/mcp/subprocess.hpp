@@ -36,7 +36,11 @@ public:
     struct Options {
         std::string program;                                     // resolved via PATH
         std::vector<std::string> args;                           // excluding argv[0]
-        std::vector<std::pair<std::string, std::string>> env;    // added to the parent's
+        // Extra KEY=VALUE pairs for the child. The parent environ is not copied
+        // wholesale: only a small allowlist (PATH, HOME, locale, temp dirs) is
+        // inherited, then these entries replace or add keys. Operator-intended
+        // secrets belong here. See build_child_environ.
+        std::vector<std::pair<std::string, std::string>> env;
         // WHERE THE CHILD STARTS. Empty inherits ours, which is what this did before it
         // was an option -- and ours is whatever the editor launched the sidecar with. On
         // macOS a GUI-launched process gets `/`, so an MCP server asked for the relative

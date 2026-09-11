@@ -20,6 +20,8 @@ let output: vscode.OutputChannel;
 let unsandboxedAcknowledged = false;
 /** Set once the operator has confirmed trusted MCP servers in this window. */
 let trustedMcpAcknowledged = false;
+/** Once decided this window: true = spawn `.mcp.json`, false = skip it, null = ask. */
+let workspaceMcpDecision: boolean | null = null;
 
 function settingsFromConfig(): RunSettings {
   const cfg = vscode.workspace.getConfiguration("lmPipe");
@@ -94,6 +96,7 @@ function settingsFromConfig(): RunSettings {
     // `trusted` in particular is compared to `true` rather than coerced: it is the
     // operator vouching that a server may run OUTSIDE the sandbox without a card for
     // every call, and any value we did not understand must not read as yes.
+    allow_workspace_mcp: false,
     mcp_servers: cfg
       .get<Partial<McpServerSettings>[]>("mcpServers", [])
       .filter((s) => typeof s?.name === "string" && typeof s?.command === "string")
@@ -178,6 +181,63 @@ async function confirmTrustedMcp(settings: RunSettings): Promise<boolean> {
   return true;
 }
 
+/** Once-per-window acknowledgement before spawning servers from workspace `.mcp.json`.
+ *
+ *  Trusting the folder is not consent to run a checkout's commands. Settings-sourced
+ *  servers are unchanged; this only gates the file-sourced list the sidecar would
+ *  otherwise connect at run start. Declining leaves allow_workspace_mcp false so the
+ *  sidecar skips the file; dismissing cancels the run. */
+async function confirmWorkspaceMcp(settings: RunSettings): Promise<boolean> {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    settings.allow_workspace_mcp = false;
+    return true;
+  }
+  const mcpUri = vscode.Uri.joinPath(folders[0].uri, ".mcp.json");
+  let raw: string;
+  try {
+    raw = Buffer.from(await vscode.workspace.fs.readFile(mcpUri)).toString("utf8");
+  } catch {
+    settings.allow_workspace_mcp = false;
+    return true;
+  }
+  let names: string[] = [];
+  try {
+    const parsed = JSON.parse(raw) as { mcpServers?: Record<string, { command?: string }> };
+    const servers = parsed.mcpServers ?? {};
+    names = Object.keys(servers);
+  } catch {
+    settings.allow_workspace_mcp = false;
+    return true;
+  }
+  if (names.length === 0) {
+    settings.allow_workspace_mcp = false;
+    return true;
+  }
+  if (workspaceMcpDecision !== null) {
+    settings.allow_workspace_mcp = workspaceMcpDecision;
+    return true;
+  }
+  const label = names.length <= 3 ? names.join(", ") : `${names.slice(0, 3).join(", ")} (+${names.length - 3} more)`;
+  const choice = await vscode.window.showWarningMessage(
+    `This workspace's .mcp.json will start MCP server${names.length === 1 ? "" : "s"} ` +
+      `'${label}' when the run begins (before the model runs). That executes the commands ` +
+      `named in the file on your machine.`,
+    { modal: true },
+    "Start workspace MCP servers",
+    "Skip workspace .mcp.json"
+  );
+  if (choice === undefined) return false;
+  if (choice === "Skip workspace .mcp.json") {
+    settings.allow_workspace_mcp = false;
+    workspaceMcpDecision = false;
+  } else {
+    settings.allow_workspace_mcp = true;
+    workspaceMcpDecision = true;
+  }
+  return true;
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("LM_Pipe");
   client = new SidecarClient();
@@ -200,6 +260,7 @@ export function activate(context: vscode.ExtensionContext): void {
     problems: validate,
     confirmContainment,
     confirmTrustedMcp,
+    confirmWorkspaceMcp,
   };
 
   const sidebar = new SidebarProvider(

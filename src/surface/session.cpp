@@ -11,6 +11,7 @@
 #include "src/model/model_limits.hpp"
 #include "src/platform/fs.hpp"
 #include "src/surface/mcp_settings.hpp"
+#include "src/surface/transport.hpp"
 
 namespace lmp::surface {
 namespace {
@@ -114,10 +115,38 @@ void ensure_registry(Session& session, const std::string& workspace,
     // Cursor and Gemini CLI reached LM_Pipe with no servers, no event, and a model that
     // burned six turns discovering by trial that the tools its AGENTS.md named were not
     // there. See parse_mcp_json_file for why trust is not inherited from it.
+    // Workspace `.mcp.json` is opt-in on the wire. A trusted-folder open is not consent
+    // to spawn whatever command a checkout named -- the IDE confirms and sets
+    // allow_workspace_mcp. Workers inject named trust_mcp servers as settings
+    // mcp_servers instead of flipping this flag, so unnamed file servers stay skipped.
+    // Headless CLIs that want the whole file pass the flag themselves.
+    // Absent or false: parse nothing from the file (settings-sourced servers still connect).
+    const bool allow_workspace_mcp = surface::bool_field(message, "allow_workspace_mcp");
     std::string file_signature;
     std::size_t trusted_ignored = 0;
-    std::vector<tools::McpServerConfig> from_file =
-        parse_mcp_json_file(workspace, file_signature, trusted_ignored);
+    std::vector<tools::McpServerConfig> from_file;
+    if (allow_workspace_mcp) {
+        from_file = parse_mcp_json_file(workspace, file_signature, trusted_ignored);
+    } else {
+        // Still detect a file so we can log that it was skipped (operator visibility),
+        // without ever handing its command to the host.
+        std::size_t ignored_probe = 0;
+        std::string probe_sig;
+        const auto probe = parse_mcp_json_file(workspace, probe_sig, ignored_probe);
+        if (!probe.empty() || ignored_probe > 0) {
+            platform::Event skip;
+            skip.kind = "mcp_config_file";
+            skip.fields.push_back({"path", workspace + "/.mcp.json"});
+            skip.fields.push_back({"servers", std::to_string(probe.size())});
+            skip.fields.push_back({"trusted_ignored", std::to_string(ignored_probe)});
+            skip.fields.push_back(
+                {"skipped", "1"});
+            skip.fields.push_back(
+                {"why", "allow_workspace_mcp is false; confirm workspace MCP spawn "
+                        "(IDE) or pass allow_workspace_mcp in the start settings"});
+            log.append(skip, clock);
+        }
+    }
     const std::size_t from_file_count = from_file.size();
     const bool had_file = from_file_count > 0 || trusted_ignored > 0;
     const std::vector<tools::McpServerConfig> servers =

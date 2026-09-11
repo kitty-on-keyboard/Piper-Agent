@@ -1,4 +1,5 @@
 #include "src/mcp/subprocess.hpp"
+#include "src/mcp/spawn_env.hpp"
 
 #include <cerrno>
 #include <csignal>
@@ -127,14 +128,12 @@ Subprocess::Subprocess(Options options) {
     }
     std::vector<char*> argv_ptrs = argv.finish();
 
-    // Environment: the parent's, plus the caller's additions. MCP servers routinely
-    // need credentials passed this way, and inheriting a bare environ is not enough.
+    // Filtered parent inherit, then the caller's KEY=VALUE pairs. MCP servers routinely
+    // need credentials passed this way; inheriting the sidecar's full environ is how
+    // those credentials leaked into a process Seatbelt does not cover. See spawn_env.hpp.
     ArgvBuilder envp;
-    for (char** e = environ; *e != nullptr; ++e) {
-        envp.push(*e);
-    }
-    for (const auto& [k, v] : options.env) {
-        envp.push(k + "=" + v);
+    for (const std::string& kv : build_child_environ(environ, options.env)) {
+        envp.push(kv);
     }
     std::vector<char*> envp_ptrs = envp.finish();
 

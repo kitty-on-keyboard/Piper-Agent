@@ -145,7 +145,8 @@
             "T2 - container. REQUIRED for unattended runs (S7.2); refuses until wired.",
             "T3 - UNSANDBOXED. Commands run on the host with no filesystem jail and no egress denial. Wall-clock, memory and output limits still apply. Opt in deliberately."
           ],
-          "description": "How commands are contained. The numbers are identities, not ranks: 3 is the LEAST contained."
+          "description": "How commands are contained. The numbers are identities, not ranks: 3 is the LEAST contained.",
+          "scope": "application"
         },
         "lmPipe.requireApproval": {
           "type": "boolean",
@@ -222,7 +223,7 @@
         "lmPipe.maxNewTokens": {
           "type": "number",
           "default": 32768,
-          "markdownDescription": "Generation cap for one turn. High enough that a new source file can finish in one write_file. The sidecar still clamps this to the checkpoint leftover and to memory. A turn that hits the cap makes no tool call and leaves nothing on disk. VS Code remembers a previous value (4096 or 8192) if you set one — that pin, not this default, is what still cuts a create. Raise it rather than the turn budget."
+          "markdownDescription": "Generation cap for one turn. High enough that a new source file can finish in one write_file. The sidecar still clamps this to the checkpoint leftover and to memory. A turn that hits the cap makes no tool call and leaves nothing on disk. VS Code remembers a previous value (4096 or 8192) if you set one \u2014 that pin, not this default, is what still cuts a create. Raise it rather than the turn budget."
         },
         "lmPipe.reasoningEffort": {
           "type": "string",
@@ -242,17 +243,20 @@
         "lmPipe.verifyContract": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Shell command the harness runs after any turn that writes a file \u2014 its output is shown to the model and exit 0 counts as pass. A run's final `Complete` requires the last reading to have passed. Empty disables the check. Example: `cd /path/to/project && swift build`."
+          "markdownDescription": "Shell command the harness runs after any turn that writes a file \u2014 its output is shown to the model and exit 0 counts as pass. A run's final `Complete` requires the last reading to have passed. Empty disables the check. Example: `cd /path/to/project && swift build`.",
+          "scope": "application"
         },
         "lmPipe.autoApproveExec": {
           "type": "boolean",
           "default": true,
-          "description": "Run ordinary, fully-parsed commands without asking. Irreversible capabilities and opaque (partially parsed / unparseable) commands always raise a card; a remembered allowlist entry cannot skip those. Turn off to get a card for every command."
+          "description": "Run ordinary, fully-parsed commands without asking. Irreversible capabilities and opaque (partially parsed / unparseable) commands always raise a card; a remembered allowlist entry cannot skip those. Turn off to get a card for every command.",
+          "scope": "application"
         },
         "lmPipe.autoApproveWrites": {
           "type": "boolean",
           "default": true,
-          "description": "Let the agent write files without asking. Turn off to get a card for every file it edits or creates, showing the path before it lands."
+          "description": "Let the agent write files without asking. Turn off to get a card for every file it edits or creates, showing the path before it lands.",
+          "scope": "application"
         },
         "lmPipe.prompts.agent": {
           "type": "string",
@@ -311,7 +315,7 @@
                   "type": "string"
                 },
                 "default": [],
-                "description": "Extra environment for the server process, as KEY=VALUE entries. Added to the ones this process already has."
+                "description": "Extra environment for the server process, as KEY=VALUE entries. Merged after a filtered inherit set (PATH, HOME, locale, temp dirs); parent secrets are not forwarded unless named here."
               },
               "trusted": {
                 "type": "boolean",
@@ -321,7 +325,8 @@
             }
           },
           "default": [],
-          "description": "MCP servers to connect at the start of each run. Their tools are registered alongside the built-in ones and constrained by the same grammar. A server that fails to start, refuses the handshake or hangs leaves its tools absent and the run continues."
+          "description": "MCP servers to connect at the start of each run. Their tools are registered alongside the built-in ones and constrained by the same grammar. A server that fails to start, refuses the handshake or hangs leaves its tools absent and the run continues.",
+          "scope": "application"
         }
       }
     }

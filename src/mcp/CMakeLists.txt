@@ -7,6 +7,7 @@ add_library(lmp_mcp
   message.cpp
   framing.cpp
   content.cpp
+  spawn_env.cpp
   subprocess.cpp
   transport.cpp
   inproc_transport.cpp

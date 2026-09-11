@@ -457,6 +457,11 @@ std::string build_start_message(const TaskPacket& packet, const std::string& req
                         mcp_servers_list.push_back(s_obj);
                     }
                 }
+                // Named servers only. trust_mcp is an allowlist of which `.mcp.json`
+                // entries to start (and vouch for), not consent to spawn every other
+                // command in the file. Leaving allow_workspace_mcp unset keeps the
+                // sidecar skip-gate on unnamed file servers. Godoer workers that pass
+                // trust_mcp: ["godoer"] still get godoer plus its config env.
                 settings["mcp_servers"] = mcp_servers_list;
             }
         }

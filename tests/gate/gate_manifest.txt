@@ -58,6 +58,7 @@ test_ratchets
 test_registry
 test_sandbox
 test_session
+test_spawn_env
 test_syntax_check
 test_think_blocks
 test_ratchets_falsifiable

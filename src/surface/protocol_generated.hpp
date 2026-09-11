@@ -154,6 +154,7 @@ struct RunSettings {
     std::string reasoning_effort;
     std::string verify_contract;
     std::vector<McpServerSettings> mcp_servers;
+    bool allow_workspace_mcp = false;
     bool commit_think = false;
     bool shadow_compact = false;
 };
@@ -221,6 +222,9 @@ inline void append_value(std::string& out, const RunSettings& v) {
     out += ",";
     out += "\"mcp_servers\":";
     append_value(out, v.mcp_servers);
+    out += ",";
+    out += "\"allow_workspace_mcp\":";
+    append_value(out, v.allow_workspace_mcp);
     out += ",";
     out += "\"commit_think\":";
     append_value(out, v.commit_think);

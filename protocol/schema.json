@@ -89,7 +89,7 @@
         "repeated": true
       },
       {
-        "_comment": "Extra environment for the server process, as KEY=VALUE entries.",
+        "_comment": "Extra environment for the server process, as KEY=VALUE entries. Applied after a filtered inherit of PATH/HOME/locale/temp; parent tokens and cloud creds are not forwarded unless listed here.",
         "name": "env",
         "type": "string",
         "repeated": true
@@ -200,6 +200,11 @@
         "name": "mcp_servers",
         "type": "McpServerSettings",
         "repeated": true
+      },
+      {
+        "_comment": "When true, the sidecar may spawn servers listed in the workspace `.mcp.json` at connect time. Defaults false: a checkout must not start processes until the operator confirms (IDE) or an explicit worker/CLI opt-in. Settings-sourced mcp_servers are unaffected. Trusted vouching remains settings-only.",
+        "name": "allow_workspace_mcp",
+        "type": "bool"
       },
       {
         "name": "commit_think",
