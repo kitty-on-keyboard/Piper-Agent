@@ -1,5 +1,6 @@
 lmp_add_test(test_mcp_framing SOURCES test_mcp_framing.cpp LABELS gate LINK lmp_mcp TIMEOUT 60)
 lmp_add_test(test_mcp_session SOURCES test_mcp_session.cpp LABELS gate LINK lmp_mcp TIMEOUT 120)
+lmp_add_test(test_spawn_env SOURCES test_spawn_env.cpp LABELS gate LINK lmp_mcp TIMEOUT 60)
 
 # The stdio test drives the demo server as a real subprocess, so it needs the binary's
 # path -- and a build-order dependency, or it races the thing it is trying to spawn.

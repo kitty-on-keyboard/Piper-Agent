@@ -50,6 +50,7 @@ export interface RunSettings {
   reasoning_effort: string;
   verify_contract: string;
   mcp_servers: McpServerSettings[];
+  allow_workspace_mcp: boolean;
   commit_think: boolean;
   shadow_compact: boolean;
 }

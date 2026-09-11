@@ -244,7 +244,7 @@ TEST(ensure_registry_reads_the_projects_own_mcp_json) {
     Session session;
     // A start message carrying no mcp_servers at all -- the shape every run has had.
     const std::string message =
-        R"({"method":"lmp/start","params":{"mission":"m","settings":{"model_dir":"/m"}}})";
+        R"({"method":"lmp/start","params":{"mission":"m","settings":{"model_dir":"/m","allow_workspace_mcp":true}}})";
     lmp::surface::ensure_registry(session, root, message, log, c);
     log.flush();
 
@@ -264,7 +264,90 @@ TEST(ensure_registry_reads_the_projects_own_mcp_json) {
     CHECK(f.bytes.find("\"trusted\":\"0\"") != std::string::npos);
 }
 
+
+TEST(ensure_registry_skips_mcp_json_without_allow_flag) {
+    const char* base = std::getenv("TMPDIR");
+    std::string tmpl = std::string(base != nullptr ? base : "/tmp") + "/lmp_skip_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    const char* made = ::mkdtemp(buf.data());
+    REQUIRE(made != nullptr);
+    const std::string root(made);
+    {
+        std::FILE* f = std::fopen((root + "/.mcp.json").c_str(), "wb");
+        REQUIRE(f != nullptr);
+        const std::string body =
+            R"({"mcpServers":{"x":{"command":"/nonexistent/piper_poc","args":["-c","true"]}}})";
+        std::fwrite(body.data(), 1, body.size(), f);
+        std::fclose(f);
+    }
+
+    const std::string log_path = root + "/events.jsonl";
+    lmp::platform::ManualClock c;
+    lmp::platform::EventLogWriter log;
+    REQUIRE(log.open({log_path, 1 << 20, 3}).ok);
+
+    Session session;
+    // Default / absent allow_workspace_mcp must NOT spawn file-sourced servers.
+    const std::string message =
+        R"({"method":"lmp/start","params":{"mission":"m","settings":{"model_dir":"/m"}}})";
+    lmp::surface::ensure_registry(session, root, message, log, c);
+    log.flush();
+
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(log_path, 1 << 20);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"mcp_config_file\"") != std::string::npos);
+    CHECK(f.bytes.find("\"skipped\":\"1\"") != std::string::npos);
+    // No connect attempt for the file server.
+    CHECK(f.bytes.find("\"kind\":\"mcp_server\"") == std::string::npos);
+}
+
+TEST(ensure_registry_still_connects_settings_servers_without_allow_flag) {
+    // The skip-gate is file-sourced only. A settings server must still reach the host
+    // when allow_workspace_mcp is absent -- otherwise "skip the checkout's .mcp.json"
+    // would also drop operator-configured lmPipe.mcpServers.
+    const char* base = std::getenv("TMPDIR");
+    std::string tmpl = std::string(base != nullptr ? base : "/tmp") + "/lmp_set_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    const char* made = ::mkdtemp(buf.data());
+    REQUIRE(made != nullptr);
+    const std::string root(made);
+    {
+        std::FILE* f = std::fopen((root + "/.mcp.json").c_str(), "wb");
+        REQUIRE(f != nullptr);
+        const std::string body =
+            R"({"mcpServers":{"from_file":{"command":"/nonexistent/file_srv"}}})";
+        std::fwrite(body.data(), 1, body.size(), f);
+        std::fclose(f);
+    }
+
+    const std::string log_path = root + "/events.jsonl";
+    lmp::platform::ManualClock c;
+    lmp::platform::EventLogWriter log;
+    REQUIRE(log.open({log_path, 1 << 20, 3}).ok);
+
+    Session session;
+    const std::string message =
+        R"({"method":"lmp/start","params":{"mission":"m","settings":{"model_dir":"/m",)"
+        R"("mcp_servers":[{"name":"from_settings","command":"/nonexistent/settings_srv"}]}}})";
+    lmp::surface::ensure_registry(session, root, message, log, c);
+    log.flush();
+
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(log_path, 1 << 20);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"mcp_config_file\"") != std::string::npos);
+    CHECK(f.bytes.find("\"skipped\":\"1\"") != std::string::npos);
+    CHECK(f.bytes.find("\"kind\":\"mcp_server\"") != std::string::npos);
+    CHECK(f.bytes.find("\"name\":\"from_settings\"") != std::string::npos);
+    CHECK(f.bytes.find("\"source\":\"settings\"") != std::string::npos);
+    CHECK(f.bytes.find("\"name\":\"from_file\"") == std::string::npos);
+}
+
 TEST(a_workspace_with_no_mcp_json_says_nothing_at_all) {
+
     const char* base = std::getenv("TMPDIR");
     std::string tmpl = std::string(base != nullptr ? base : "/tmp") + "/lmp_wire2_XXXXXX";
     std::vector<char> buf(tmpl.begin(), tmpl.end());

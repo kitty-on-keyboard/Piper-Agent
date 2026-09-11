@@ -461,6 +461,8 @@ TEST(build_start_message_includes_trusted_mcp_servers) {
         }
         CHECK(has_var1);
     }
+    // The unnamed file server must not ride in through the workspace-MCP gate.
+    CHECK(!settings.contains("allow_workspace_mcp"));
 
     // Packet with empty trust_mcp has no mcp_servers
     packet.trust_mcp.clear();
