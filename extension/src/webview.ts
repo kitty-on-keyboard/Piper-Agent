@@ -1400,7 +1400,7 @@ function flushQueue() {
   // clearing it would let the next pump() schedule a second one -- two step() chains
   // draining one queue, each granting itself a full budget. The pending frame will find
   // the queue empty and stand itself down, which is the same thing one tick later.
-  feed.scrollTop = feed.scrollHeight;
+  feed.scrollTop = 1e9;
 }
 
 // WHERE THE NEXT THING GOES, for every writer into the transcript.
@@ -1463,10 +1463,12 @@ function step() {
   // a backlog of 600 characters clears in about six frames rather than five seconds.
   const budget = pending > MAX_PENDING ? Number.MAX_SAFE_INTEGER
                                        : Math.max(24, Math.ceil(pending / 6));
+  // Read layout BEFORE DOM mutation to avoid layout thrashing
+  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
   drain(budget);
 
-  const pinned = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
-  if (pinned) feed.scrollTop = feed.scrollHeight;
+  // Set to max value to scroll to bottom without reading scrollHeight again (which triggers layout)
+  if (pinned) feed.scrollTop = 1e9;
   requestAnimationFrame(step);
 }
 
@@ -1637,7 +1639,7 @@ function add(el, cls) {
     // Before the live row, never after it: #live is a permanent last child, and appending
     // past it would put the transcript underneath the thing that reports on it.
     feed.insertBefore(el, live);
-    feed.scrollTop = feed.scrollHeight;
+    feed.scrollTop = 1e9;
   });
   return el;
 }
