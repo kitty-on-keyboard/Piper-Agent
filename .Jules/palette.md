@@ -1,0 +1,3 @@
+## 2024-09-12 - Inaccessible Custom Toggles
+**Learning:** Found custom toggles implemented using simple `<div class="sw">` elements with only `onclick` events. This is a common pattern that fails completely for keyboard/screen reader users, rendering settings untoggleable. A custom toggle control needs `role="switch"`, a `tabindex="0"`, dynamic `aria-checked` bindings, and keyboard handlers for `Enter` and `Space` to replicate native behavior.
+**Action:** When implementing or refactoring custom `div`-based toggles, always ensure `role="switch"`, `tabindex="0"`, dynamic `aria-checked`, and keyboard handlers are applied alongside the visual states. Also, `outline` properties need to be configured for `.sw:focus-visible` to aid visual tracking during keyboard navigation.

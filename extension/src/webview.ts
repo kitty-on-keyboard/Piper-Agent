@@ -614,6 +614,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; }
   width: 34px; height: 19px; border-radius: 999px; background: var(--faint);
   position: relative; cursor: pointer; transition: background .2s var(--ease); flex: none;
 }
+.toggle .sw:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .toggle .sw::after {
   content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px;
   border-radius: 50%; background: #fff; transition: transform .2s var(--ease);
@@ -865,9 +866,9 @@ function markup(): string {
       </div>
       <div class="warnbox" id="effortWarn"></div>
     </div>
-    <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec"></div></div>
-    <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite"></div></div>
-    <div class="toggle" id="specRow"><span>Speculative decoding</span><div class="sw" id="swSpec"></div></div>
+    <div class="toggle"><span>Run commands without asking</span><div class="sw" id="swExec" role="switch" tabindex="0" aria-label="Run commands without asking"></div></div>
+    <div class="toggle"><span>Write files without asking</span><div class="sw" id="swWrite" role="switch" tabindex="0" aria-label="Write files without asking"></div></div>
+    <div class="toggle" id="specRow"><span>Speculative decoding</span><div class="sw" id="swSpec" role="switch" tabindex="0" aria-label="Speculative decoding"></div></div>
     <div class="warnbox" id="specWarn"></div>
     <div class="set">
       <label>Check command <b id="checkState"></b></label>
@@ -890,8 +891,8 @@ function markup(): string {
     </div>
     <div class="set">
       <label>Advanced</label>
-      <div class="toggle"><span>Commit from thinking</span><div class="sw" id="swCommitThink"></div></div>
-      <div class="toggle"><span>Shadow KV after compact</span><div class="sw" id="swShadowCompact"></div></div>
+      <div class="toggle"><span>Commit from thinking</span><div class="sw" id="swCommitThink" role="switch" tabindex="0" aria-label="Commit from thinking"></div></div>
+      <div class="toggle"><span>Shadow KV after compact</span><div class="sw" id="swShadowCompact" role="switch" tabindex="0" aria-label="Shadow KV after compact"></div></div>
       <div class="warnbox" id="advWarn"></div>
     </div>
     <div class="set"><label>View build <b id="viewBuild"></b></label></div>
@@ -2047,17 +2048,22 @@ seg('segTier', 'sandboxTier', Number);
 seg('segEffort', 'reasoningEffort', String);
 
 function sw(id, key) {
-  $(id).onclick = () => { put(key, !settings[key]); paint(); };
+  const el = $(id);
+  const toggle = () => { put(key, !settings[key]); paint(); };
+  el.onclick = toggle;
+  el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } };
 }
 sw('swExec', 'autoApproveExec');
 sw('swWrite', 'autoApproveWrites');
 sw('swCommitThink', 'commitThink');
 sw('swShadowCompact', 'shadowCompact');
-$('swSpec').onclick = () => {
+const toggleSpec = () => {
   if (settings.checkpointKind !== 'dense') return;
   put('speculativeDecoding', !settings.speculativeDecoding);
   paint();
 };
+$('swSpec').onclick = toggleSpec;
+$('swSpec').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSpec(); } };
 
 // --- the thinking toggle --------------------------------------------------
 // Applied to the disclosures ALREADY IN THE FEED as well as the ones still to come, which
@@ -2198,6 +2204,7 @@ function paintSpec() {
   const dense = settings.checkpointKind === 'dense';
   $('specRow').classList.toggle('off', !dense);
   $('swSpec').classList.toggle('on', settings.speculativeDecoding === true);
+  $('swSpec').setAttribute('aria-checked', String(settings.speculativeDecoding === true));
   const warn = $('specWarn');
   if (settings.checkpointKind !== 'dense') {
     warn.className = 'warnbox';
@@ -2246,9 +2253,13 @@ function paint() {
   $('segTier').querySelectorAll('button').forEach(
     (b) => b.classList.toggle('on', Number(b.dataset.v) === settings.sandboxTier));
   $('swExec').classList.toggle('on', settings.autoApproveExec === true);
+  $('swExec').setAttribute('aria-checked', String(settings.autoApproveExec === true));
   $('swWrite').classList.toggle('on', settings.autoApproveWrites === true);
+  $('swWrite').setAttribute('aria-checked', String(settings.autoApproveWrites === true));
   $('swCommitThink').classList.toggle('on', settings.commitThink === true);
+  $('swCommitThink').setAttribute('aria-checked', String(settings.commitThink === true));
   $('swShadowCompact').classList.toggle('on', settings.shadowCompact === true);
+  $('swShadowCompact').setAttribute('aria-checked', String(settings.shadowCompact === true));
   $('advWarn').textContent = 'Applies on the next run.';
   paintSpec();
   paintModelSwitch();
