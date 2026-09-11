@@ -3265,13 +3265,25 @@ function viewBuildId(text: string): string {
   return h.toString(16).padStart(8, '0');
 }
 
+// Cached webview static assets and computed build ID.
+// Avoids re-generating >100KB of CSS, HTML, and JS strings and re-computing the
+// 102,222-character FNV-1a build hash on every webview creation or panel restore.
+let cachedStyles: string | undefined;
+let cachedMarkup: string | undefined;
+let cachedBody: string | undefined;
+let cachedBuild: string | undefined;
+
 export function webviewHtml(nonce: string): string {
-  const body = script();
-  const build = viewBuildId(body);
+  if (!cachedStyles) cachedStyles = styles();
+  if (!cachedMarkup) cachedMarkup = markup();
+  if (!cachedBody) {
+    cachedBody = script();
+    cachedBuild = viewBuildId(cachedBody);
+  }
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>${styles()}</style></head><body>${markup()}
-<script nonce="${nonce}">const VIEW_BUILD = ${JSON.stringify(build)};
-${body}</script></body></html>`;
+<style>${cachedStyles}</style></head><body>${cachedMarkup}
+<script nonce="${nonce}">const VIEW_BUILD = ${JSON.stringify(cachedBuild)};
+${cachedBody}</script></body></html>`;
 }
