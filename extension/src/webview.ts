@@ -479,6 +479,11 @@ button.ghost {
   transform: translateX(4px);
   box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 20%, transparent);
 }
+.q-opt-btn:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
 .q-opt-btn.selected {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 22%, var(--surface-hi));
@@ -2786,6 +2791,7 @@ window.addEventListener('message', (e) => {
             const btn = document.createElement('button');
             btn.className = 'q-opt-btn';
             btn.type = 'button';
+            btn.setAttribute('aria-pressed', 'false');
 
             const badge = document.createElement('span');
             badge.className = 'q-opt-badge';
@@ -2810,14 +2816,16 @@ window.addEventListener('message', (e) => {
 
             btn.append(badge, txt);
 
-            btn.onclick = () => {
+            const toggleOpt = () => {
               if (selectedIndices.has(idx)) {
                 selectedIndices.delete(idx);
                 btn.classList.remove('selected');
+                btn.setAttribute('aria-pressed', 'false');
                 badge.textContent = letterBadge;
               } else {
                 selectedIndices.add(idx);
                 btn.classList.add('selected');
+                btn.setAttribute('aria-pressed', 'true');
                 badge.textContent = '✓';
               }
 
@@ -2829,6 +2837,14 @@ window.addEventListener('message', (e) => {
                 submitSelection();
               } else {
                 submitBtn.style.display = 'none';
+              }
+            };
+
+            btn.onclick = toggleOpt;
+            btn.onkeydown = (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleOpt();
               }
             };
 
