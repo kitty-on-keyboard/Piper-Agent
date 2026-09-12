@@ -122,17 +122,26 @@ export function findSiblingMtp(
 ): string | undefined {
   const parent = path.dirname(denseDir);
   const base = path.basename(denseDir);
+  const siblings = io.listDirNames(parent);
+
+  // OPTIMIZATION: Check high-confidence naming convention guesses first using directory names alone
+  // before reading/parsing config.json files across all sibling directories.
+  // In standard MLX model setups, the sibling MTP draft directory name directly matches one of `guessMtpNames`.
+  // Checking guessed paths first reduces directory I/O and JSON parsing from O(N_siblings) to O(1) in common cases.
+  for (const guess of guessMtpNames(base)) {
+    if (siblings.includes(guess)) {
+      const full = path.join(parent, guess);
+      if (isUsableMtp(full, io)) return full;
+    }
+  }
+
   const mtpDirs: string[] = [];
-  for (const name of io.listDirNames(parent)) {
+  for (const name of siblings) {
     if (name === base) continue;
     const full = path.join(parent, name);
     if (isUsableMtp(full, io)) mtpDirs.push(full);
   }
   if (mtpDirs.length === 0) return undefined;
-  for (const guess of guessMtpNames(base)) {
-    const hit = mtpDirs.find((d) => path.basename(d) === guess);
-    if (hit) return hit;
-  }
   mtpDirs.sort(
     (a, b) => sharedPrefixLen(path.basename(b), base) - sharedPrefixLen(path.basename(a), base)
   );
