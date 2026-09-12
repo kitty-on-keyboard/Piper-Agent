@@ -391,6 +391,7 @@ button {
 }
 button:hover { filter: brightness(1.12); }
 button:active { transform: scale(.97); }
+button:focus-visible { outline: 2px solid var(--vscode-focusBorder, var(--accent)); outline-offset: 2px; }
 button.primary { background: var(--accent); color: #fff; flex: 1; }
 button.ghost {
   background: transparent; color: var(--fg);
@@ -820,8 +821,8 @@ body.in-flight #send { display: none; }
 function markup(): string {
   return `
 <div id="head">
-  <button id="histBtn" title="Run history" aria-label="Run history">◷</button>
-  <button id="gear" title="Settings" aria-label="Settings">⚙</button>
+  <button id="histBtn" title="Run history" aria-label="Run history" aria-expanded="false" aria-controls="history">◷</button>
+  <button id="gear" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="drawer">⚙</button>
   <div id="headRow">
     <div id="headText">
       <div class="wordmark">
@@ -833,7 +834,7 @@ function markup(): string {
     </div>
   </div>
   <div id="modeBar">
-    <div class="seg" id="segMode">
+    <div class="seg" id="segMode" role="group" aria-label="Mode">
       <button data-v="agent">Agent</button>
       <button data-v="plan">Plan</button>
       <button data-v="debug">Debug</button>
@@ -850,7 +851,7 @@ function markup(): string {
   <div id="drawer">
     <div class="set">
       <label>Containment</label>
-      <div class="seg" id="segTier">
+      <div class="seg" id="segTier" role="group" aria-label="Containment">
         <button data-v="0">None</button>
         <button data-v="1">Sandbox</button>
         <button data-v="3">Host</button>
@@ -859,7 +860,7 @@ function markup(): string {
     </div>
     <div class="set">
       <label>Thinking <b id="effortState"></b></label>
-      <div class="seg" id="segEffort">
+      <div class="seg" id="segEffort" role="group" aria-label="Thinking effort">
         <button data-v="low" title="Keep thinking brief and move to the conclusion">Low</button>
         <button data-v="medium" title="No instruction either way — the checkpoint's untouched behaviour">Medium</button>
         <button data-v="xhigh" title="Think carefully, validate assumptions, weigh alternatives — the slowest level">xHigh</button>
@@ -899,7 +900,7 @@ function markup(): string {
   </div>
 </div>
 <div id="plan"></div>
-<div id="feed"><div id="live"><span id="liveOrb">${orbMarkup()}</span><span id="liveLabel"></span><button id="thinkToggle" title="Keep reasoning open in the chat">Thinking</button></div></div>
+<div id="feed"><div id="live"><span id="liveOrb">${orbMarkup()}</span><span id="liveLabel"></span><button id="thinkToggle" title="Keep reasoning open in the chat" aria-pressed="false">Thinking</button></div></div>
 <div id="foot">
   <div id="ctx" class="idle">
     <div id="ctxTrack"><div id="ctxFill"></div></div>
@@ -1952,6 +1953,8 @@ $('histBtn').onclick = () => {
   const el = $('history');
   const open = el.classList.toggle('open');
   $('histBtn').classList.toggle('on', open);
+  $('histBtn').setAttribute('aria-expanded', String(open));
+  $('gear').setAttribute('aria-expanded', 'false');
   if (open) {
     $('drawer').classList.remove('open');
     $('gear').classList.remove('on');
@@ -2031,6 +2034,8 @@ $('viewBuild').textContent = VIEW_BUILD;
 $('gear').onclick = () => {
   const open = $('drawer').classList.toggle('open');
   $('gear').classList.toggle('on', open);
+  $('gear').setAttribute('aria-expanded', String(open));
+  $('histBtn').setAttribute('aria-expanded', 'false');
   if (open) {
     $('history').classList.remove('open');
     $('histBtn').classList.remove('on');
@@ -2079,6 +2084,7 @@ $('swSpec').onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.pre
 function setThinking(on) {
   showThinking = on;
   $('thinkToggle').classList.toggle('on', on);
+  $('thinkToggle').setAttribute('aria-pressed', String(on));
   for (const d of feed.querySelectorAll('details.thought')) d.open = on;
 }
 $('thinkToggle').onclick = () => {
@@ -2251,9 +2257,17 @@ buildSliders();
 
 function paint() {
   $('segMode').querySelectorAll('button').forEach(
-    (b) => b.classList.toggle('on', b.dataset.v === settings.mode));
+    (b) => {
+      const isOn = b.dataset.v === settings.mode;
+      b.classList.toggle('on', isOn);
+      b.setAttribute('aria-pressed', String(isOn));
+    });
   $('segTier').querySelectorAll('button').forEach(
-    (b) => b.classList.toggle('on', Number(b.dataset.v) === settings.sandboxTier));
+    (b) => {
+      const isOn = Number(b.dataset.v) === settings.sandboxTier;
+      b.classList.toggle('on', isOn);
+      b.setAttribute('aria-pressed', String(isOn));
+    });
   $('swExec').classList.toggle('on', settings.autoApproveExec === true);
   $('swExec').setAttribute('aria-checked', String(settings.autoApproveExec === true));
   $('swWrite').classList.toggle('on', settings.autoApproveWrites === true);
@@ -2270,7 +2284,9 @@ function paint() {
   // the value it holds and say why it is doing nothing here -- a control that vanishes
   // reads as a missing feature, and one that looks live reads as a lie.
   $('segEffort').querySelectorAll('button').forEach((b) => {
-    b.classList.toggle('on', b.dataset.v === settings.reasoningEffort);
+    const isOn = b.dataset.v === settings.reasoningEffort;
+    b.classList.toggle('on', isOn);
+    b.setAttribute('aria-pressed', String(isOn));
     b.disabled = !effortSupported;
   });
   $('segEffort').classList.toggle('off', !effortSupported);
@@ -2786,6 +2802,7 @@ window.addEventListener('message', (e) => {
             const btn = document.createElement('button');
             btn.className = 'q-opt-btn';
             btn.type = 'button';
+            btn.setAttribute('aria-pressed', 'false');
 
             const badge = document.createElement('span');
             badge.className = 'q-opt-badge';
@@ -2814,10 +2831,12 @@ window.addEventListener('message', (e) => {
               if (selectedIndices.has(idx)) {
                 selectedIndices.delete(idx);
                 btn.classList.remove('selected');
+                btn.setAttribute('aria-pressed', 'false');
                 badge.textContent = letterBadge;
               } else {
                 selectedIndices.add(idx);
                 btn.classList.add('selected');
+                btn.setAttribute('aria-pressed', 'true');
                 badge.textContent = '✓';
               }
 
