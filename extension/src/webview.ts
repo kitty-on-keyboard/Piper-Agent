@@ -2421,10 +2421,8 @@ function questionOptions(argsObj) {
     return [];
   }
   // Real newlines, or the two-character escape "\\n" that survives a round trip as text.
-  const normalized = argsObj.options
-    .replace(/\\\\r\\\\n/g, '\\n')
-    .replace(/\\\\n/g, '\\n')
-    .replace(/\\r\\n/g, '\\n');
+  // Single pass regex replacement avoids intermediate string allocations.
+  const normalized = argsObj.options.replace(/\\\\r\\\\n|\\\\n|\\r\\n/g, '\\n');
 
   // 1. A blank line is unambiguous, and the only delimiter that still reads correctly when
   //    an option carries detail lines of its own.
