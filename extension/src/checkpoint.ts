@@ -122,6 +122,17 @@ export function findSiblingMtp(
 ): string | undefined {
   const parent = path.dirname(denseDir);
   const base = path.basename(denseDir);
+
+  // Fast path: check guessed sibling names first via direct target checks.
+  // This avoids scanning and parsing config.json for all unrelated directories
+  // in parent when standard naming conventions (e.g. *-MTP-4bit) are used.
+  for (const guess of guessMtpNames(base)) {
+    const full = path.join(parent, guess);
+    if (isUsableMtp(full, io)) return full;
+  }
+
+  // Fallback: scan all sibling directories in parent and pick the one with
+  // the longest shared prefix.
   const mtpDirs: string[] = [];
   for (const name of io.listDirNames(parent)) {
     if (name === base) continue;
@@ -129,10 +140,6 @@ export function findSiblingMtp(
     if (isUsableMtp(full, io)) mtpDirs.push(full);
   }
   if (mtpDirs.length === 0) return undefined;
-  for (const guess of guessMtpNames(base)) {
-    const hit = mtpDirs.find((d) => path.basename(d) === guess);
-    if (hit) return hit;
-  }
   mtpDirs.sort(
     (a, b) => sharedPrefixLen(path.basename(b), base) - sharedPrefixLen(path.basename(a), base)
   );
