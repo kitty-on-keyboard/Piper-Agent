@@ -1,3 +1,7 @@
 ## 2024-09-12 - Inaccessible Custom Toggles
 **Learning:** Found custom toggles implemented using simple `<div class="sw">` elements with only `onclick` events. This is a common pattern that fails completely for keyboard/screen reader users, rendering settings untoggleable. A custom toggle control needs `role="switch"`, a `tabindex="0"`, dynamic `aria-checked` bindings, and keyboard handlers for `Enter` and `Space` to replicate native behavior.
 **Action:** When implementing or refactoring custom `div`-based toggles, always ensure `role="switch"`, `tabindex="0"`, dynamic `aria-checked`, and keyboard handlers are applied alongside the visual states. Also, `outline` properties need to be configured for `.sw:focus-visible` to aid visual tracking during keyboard navigation.
+
+## 2026-03-29 - Segmented Controls & Panel Toggle ARIA States
+**Learning:** Custom button groups acting as segmented controls or drawer disclosures relied solely on visual CSS classes (`.on`, `.open`, `.selected`) without mapping states to ARIA attributes (`aria-pressed`, `aria-expanded`). Screen readers announced these controls without revealing selection state or disclosure expansion.
+**Action:** Always pair visual class toggles with `aria-pressed` for segmented/toggle buttons and `aria-expanded` (with `aria-controls`) for drawer/disclosure toggles. Ensure `role="group"` is assigned to segmented button containers.
