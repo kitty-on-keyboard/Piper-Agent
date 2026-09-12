@@ -74,6 +74,11 @@ assert.strictEqual(
   "pytest",
   "empty strings are not allowlist rules"
 );
+assert.strictEqual(
+  serializeAllowedCommands(["pytest", "ls; rm -rf /", "npm test", "cat < secret"]),
+  "pytest\nnpm test",
+  "shell chaining or redirecting entries in settings must be dropped before join"
+);
 
 // Call sites still use the helpers (not a raw join / unchecked push).
 const sidebar = fs.readFileSync(path.join(root, "src/sidebar.ts"), "utf8");

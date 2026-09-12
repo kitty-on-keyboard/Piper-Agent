@@ -16,9 +16,9 @@ export function rememberableCommand(command: string): string | undefined {
   return trimmed;
 }
 
-/** Join settings entries for the wire, dropping any that contain line breaks. */
+/** Join settings entries for the wire, dropping any that contain line breaks or shell chaining operators. */
 export function serializeAllowedCommands(commands: readonly string[]): string {
   return commands
-    .filter((c) => typeof c === "string" && c.length > 0 && !/[\r\n]/.test(c))
+    .filter((c) => typeof c === "string" && rememberableCommand(c) !== undefined)
     .join("\n");
 }
