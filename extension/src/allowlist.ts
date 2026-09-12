@@ -6,7 +6,8 @@
 // and drop it again at serialize.
 
 /** Returns the trimmed command if it is safe to persist; otherwise undefined. */
-export function rememberableCommand(command: string): string | undefined {
+export function rememberableCommand(command: unknown): string | undefined {
+  if (typeof command !== "string") return undefined;
   const trimmed = command.trim();
   if (!trimmed) return undefined;
   // Newlines would become extra allowlist entries when joined for the wire protocol.
