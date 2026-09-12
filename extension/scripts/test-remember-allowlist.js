@@ -21,6 +21,11 @@ assert.strictEqual(rememberableCommand("pytest"), "pytest");
 assert.strictEqual(rememberableCommand("  npm test  "), "npm test");
 assert.strictEqual(rememberableCommand(""), undefined);
 assert.strictEqual(rememberableCommand("   "), undefined);
+assert.strictEqual(rememberableCommand(null), undefined);
+assert.strictEqual(rememberableCommand(undefined), undefined);
+assert.strictEqual(rememberableCommand(123), undefined);
+assert.strictEqual(rememberableCommand({}), undefined);
+assert.strictEqual(rememberableCommand(true), undefined);
 
 assert.strictEqual(
   rememberableCommand("pytest\nrm -rf /"),

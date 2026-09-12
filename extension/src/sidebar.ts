@@ -751,7 +751,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // The session a history row asks to reopen.
         runId?: string;
       }) => {
-        if (msg.kind === "approve" && msg.id !== undefined) {
+        if (msg.kind === "approve" && typeof msg.id === "string") {
           // "Always allow" is an approval PLUS a remembered rule. The rule is stored on
           // this side, not the sidecar's: it has to outlive the run, and the sidecar
           // deliberately owns no persistent state.
@@ -760,7 +760,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           // lmp/start, so the run that raised this card would ask about the identical
           // command again on the next turn and the button would read as broken. The
           // sidecar latches it for the rest of the run; settings carry it past the end.
-          if (msg.remember) this.remember(msg.remember);
+          if (typeof msg.remember === "string") this.remember(msg.remember);
           // Run-scoped consent is the answer for everything "Always allow" cannot cover.
           // Both roads end at the same latch in the sidecar; only the first also writes a
           // rule to settings, and it is only offered where a rule can match.
@@ -773,7 +773,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             msg.id,
             msg.approved === true,
             msg.allowWrites === true,
-            (msg.remember !== undefined && msg.remember !== "") || msg.allowForRun === true
+            (typeof msg.remember === "string" && msg.remember !== "") || msg.allowForRun === true
           );
         }
         if (msg.kind === "cancel") {
@@ -785,8 +785,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (msg.kind === "resume" && typeof msg.runId === "string") {
           void this.resume(msg.runId);
         }
-        if (msg.kind === "message" && msg.text) {
-          void this.send(msg.text, Array.isArray(msg.images) ? msg.images : []);
+        if (msg.kind === "message" && typeof msg.text === "string" && msg.text) {
+          const images = Array.isArray(msg.images)
+            ? msg.images.filter((img): img is string => typeof img === "string")
+            : [];
+          void this.send(msg.text, images);
         }
         // Bytes dropped or pasted into the pane. Written to a file here, in the HOST --
         // the webview has no filesystem, and shipping the bytes on to the sidecar would
@@ -810,7 +813,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           this.pushSettings();
           this.post("model", this.model);
         }
-        if (msg.kind === "setting" && msg.key !== undefined) {
+        if (msg.kind === "setting" && typeof msg.key === "string") {
           // Only the keys the drawer owns. A webview message is untrusted input, and
           // "write whatever key it names into the user's settings" is not a thing to
           // offer on trust.
@@ -845,7 +848,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  another: they would become extra allowlist lines when settings are joined for the
    *  wire. Kept in sync with loop::is_allowlisted by matching its character set exactly;
    *  the authority is still the gate. */
-  private remember(command: string): void {
+  private remember(command: unknown): void {
     const trimmed = rememberableCommand(command);
     if (!trimmed) return;
     const cfg = vscode.workspace.getConfiguration("lmPipe");
