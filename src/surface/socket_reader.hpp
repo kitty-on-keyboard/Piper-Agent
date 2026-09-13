@@ -21,12 +21,13 @@ struct DaemonConfig {
 // Default pid path: ~/.piper/worker.pid.
 [[nodiscard]] std::string default_pid_path();
 
-// Probes whether a daemon is actively listening on socket_path.
-// If socket exists but is unresponsive, unlinks stale socket & pid files.
+// Probes whether a daemon is listening on socket_path, including a busy daemon
+// that cannot answer a ping yet. Refused connections remove stale socket files.
 [[nodiscard]] bool is_daemon_alive(const std::string& socket_path);
 
 // Forward a task packet to the running daemon and wait for completion.
-// Returns the exit code on success, or std::nullopt if daemon unreachable.
+// Returns std::nullopt only if no connection could be made. After connecting,
+// transport failure returns kExitError: the task may have run and must not replay.
 [[nodiscard]] std::optional<int> forward_to_daemon(
     const std::string& socket_path, const std::string& task_path, bool jsonl,
     bool auto_approve_irreversible = false, bool auto_approve_all = false);
