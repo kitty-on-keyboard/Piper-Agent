@@ -394,7 +394,7 @@ bool is_allowlisted(const std::string& command, const std::vector<std::string>& 
     }
     // Anything that can chain, substitute or redirect is out of scope for prefix
     // matching. `pytest` on the list must never authorise `pytest; rm -rf ~`.
-    if (cmd.find_first_of(";|&`<>") != std::string::npos ||
+    if (cmd.find_first_of(";|&`<>\r\n") != std::string::npos ||
         cmd.find("$(") != std::string::npos) {
         return false;
     }
