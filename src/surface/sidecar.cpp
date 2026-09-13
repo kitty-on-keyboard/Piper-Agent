@@ -1810,6 +1810,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     platform::SpscChannel<std::string> inbox(256);
 
     std::string answer_accum;
+    std::string finish_summary;
     int generated_tokens = 0;
     bool stopped_on_unanswered_ask = false;
     std::string denied_irreversible_detail;
@@ -1831,8 +1832,18 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
             answer_accum += text;
         }
     };
-    hooks.on_turn = [&generated_tokens](const loop::TurnResult& t, double /*duration_ms*/) {
+    hooks.on_turn = [&generated_tokens, &finish_summary](const loop::TurnResult& t, double /*duration_ms*/) {
         generated_tokens += static_cast<int>(t.think_tokens + t.text_tokens + t.tool_tokens);
+        // The answer stream also carries interim narration. Prefer the explicit
+        // completion handoff so its summary is not buried beyond the message cap.
+        if (t.tool_name == "finish" && t.tool_result.ok()) {
+            finish_summary = loop::param_value(t.tool_params, "summary");
+        }
+        for (const auto& call : t.extra_calls) {
+            if (call.tool_name == "finish" && call.result.ok()) {
+                finish_summary = loop::param_value(call.params, "summary");
+            }
+        }
     };
     int total_iterations = 0;
     hooks.on_run_end = [&final_report, &total_iterations, &timed_out_awaiting_user](const loop::RunReport& rep) {
@@ -2103,7 +2114,8 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     result.files_touched = collect_files_touched(durable_log, packet.cwd);
     collect_git(packet.cwd, result_dir.string(), result);
 
-    std::string clean_answer = strip_think_leak(answer_accum);
+    std::string clean_answer = strip_think_leak(
+        finish_summary.empty() ? answer_accum : finish_summary);
     if (final_report.termination_reason == "plan_ready" && !plan_accum.empty()) {
         result.message = plan_accum;
     } else if (!clean_answer.empty()) {

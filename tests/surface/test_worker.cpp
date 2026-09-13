@@ -1107,3 +1107,90 @@ TEST(forward_to_daemon_handles_clean_eof_and_exit_code) {
     ::unlink(sock_path.c_str());
     std::filesystem::remove_all(tmp_dir);
 }
+
+TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_fwd_disconnect_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "worker.sock").string();
+    int listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(listener >= 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    CHECK_EQ(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    CHECK_EQ(::listen(listener, 1), 0);
+    std::string received;
+    std::thread server([&]() {
+        int client = ::accept(listener, nullptr, nullptr);
+        if (client < 0) return;
+        char ch;
+        while (::read(client, &ch, 1) == 1) {
+            received += ch;
+            if (ch == '\n') break;
+        }
+        // The task may already have changed files when the transport dies.
+        ::close(client);
+    });
+    const auto result = forward_to_daemon(path, "/tmp/non-idempotent-task.json", false);
+    server.join();
+    CHECK(received.find("non-idempotent-task.json") != std::string::npos);
+    // nullopt tells worker_main to execute the same task again locally.
+    CHECK(result.has_value());
+    if (result) CHECK_EQ(*result, kExitError);
+    ::close(listener);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(worker_check_timeout_survives_early_output_close) {
+    TaskPacket packet;
+    packet.cwd = std::filesystem::temp_directory_path().string();
+    packet.check_command = "exec 1>&- 2>&-; sleep 2";
+    packet.check_timeout_s = 0.1;
+    RunResult result;
+    result.status = "ok";
+    const auto start = std::chrono::steady_clock::now();
+    run_check(packet, result);
+    const double seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+    CHECK(seconds < 1.0);
+    CHECK(result.test.ran);
+    CHECK(result.test.exit_code != 0);
+    CHECK_EQ(result.status, "error");
+    CHECK(result.test.output_tail.find("timeout") != std::string::npos);
+}
+
+TEST(worker_check_retains_output_and_exit_status) {
+    TaskPacket packet;
+    packet.cwd = std::filesystem::temp_directory_path().string();
+    packet.check_timeout_s = 2.0;
+    for (const int exit_code : {0, 7}) {
+        packet.check_command = "printf check-output; exit " + std::to_string(exit_code);
+        RunResult result;
+        result.status = "ok";
+        run_check(packet, result);
+        CHECK_EQ(result.test.exit_code, exit_code);
+        CHECK_EQ(result.test.output_tail, "check-output");
+        CHECK_EQ(result.status, exit_code == 0 ? "ok" : "error");
+    }
+}
+
+TEST(busy_daemon_is_not_mistaken_for_absent_worker) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_busy_daemon_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "worker.sock").string();
+    int listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(listener >= 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    CHECK_EQ(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    CHECK_EQ(::listen(listener, 1), 0);
+    // A serial daemon cannot answer its next ping until the current task ends.
+    // The kernel still accepts the connection into its backlog.
+    CHECK(is_daemon_alive(path));
+    CHECK(std::filesystem::exists(path));
+    ::close(listener);
+    std::filesystem::remove_all(dir);
+}

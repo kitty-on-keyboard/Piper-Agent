@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -79,8 +80,16 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
     const auto start = std::chrono::steady_clock::now();
     char buf[4096];
     bool timed_out = false;
+    bool output_closed = false;
+    bool child_exited = false;
+    int status = 0;
 
     while (true) {
+        if (!child_exited) {
+            const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+            if (waited == pid) child_exited = true;
+        }
+        if (child_exited && output_closed) break;
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - start).count();
         if (timeout_s > 0 && elapsed >= timeout_s) {
@@ -96,7 +105,9 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
         }
 
         struct pollfd pfd{};
-        pfd.fd = pipefd[0];
+        // EOF is independent of child exit. Keep enforcing the deadline when a
+        // still-running command closes its output descriptors early.
+        pfd.fd = output_closed ? -1 : pipefd[0];
         pfd.events = POLLIN | POLLHUP | POLLERR;
 
         int ret = ::poll(&pfd, 1, poll_timeout_ms);
@@ -107,7 +118,7 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
                     output.append(buf, static_cast<size_t>(n));
                 }
             } else if (n == 0) {
-                break;
+                output_closed = true;
             }
         } else if (ret > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
             // Drain remaining bytes
@@ -121,13 +132,14 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
                     break;
                 }
             }
-            break;
+            output_closed = true;
         }
     }
 
     ::close(pipefd[0]);
-    int status = 0;
-    ::waitpid(pid, &status, 0);
+    if (!child_exited) {
+        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
 
     if (timed_out) {
         exit_code = -1;
@@ -1465,4 +1477,3 @@ int init_project(const std::string& target_dir_in) {
 }
 
 } // namespace lmp::surface::worker
-

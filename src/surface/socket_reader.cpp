@@ -1,6 +1,7 @@
 #include "src/surface/socket_reader.hpp"
 
 #include <chrono>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -69,7 +70,18 @@ bool is_daemon_alive(const std::string& socket_path) {
     struct pollfd pfd{};
     pfd.fd = fd;
     pfd.events = POLLIN;
-    if (::poll(&pfd, 1, 2000) <= 0 || !(pfd.revents & POLLIN)) {
+    int polled;
+    do {
+        polled = ::poll(&pfd, 1, 2000);
+    } while (polled < 0 && errno == EINTR);
+    if (polled == 0) {
+        // The daemon serves one mission at a time. A successful connection
+        // whose ping is queued behind inference is busy, not absent. Returning
+        // false would let worker_main load a second model (or serve unlink it).
+        ::close(fd);
+        return true;
+    }
+    if (polled < 0 || !(pfd.revents & POLLIN)) {
         ::close(fd);
         return false;
     }
@@ -107,9 +119,17 @@ std::optional<int> forward_to_daemon(
         {"auto_approve_all", auto_approve_all}
     };
     std::string req_str = req.dump() + "\n";
-    if (::write(fd, req_str.data(), req_str.size()) <= 0) {
-        ::close(fd);
-        return std::nullopt;
+    size_t sent = 0;
+    while (sent < req_str.size()) {
+        const ssize_t n = ::write(fd, req_str.data() + sent, req_str.size() - sent);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            ::close(fd);
+            // Once connected, an uncertain submission is not permission to replay.
+            std::fprintf(stderr, "piper: daemon submission failed; task was not retried\n");
+            return kExitError;
+        }
+        sent += static_cast<size_t>(n);
     }
 
     std::string accum;
@@ -119,6 +139,7 @@ std::optional<int> forward_to_daemon(
 
     while (true) {
         ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) {
             if (!accum.empty()) {
                 auto j = nlohmann::json::parse(accum, nullptr, false);
@@ -166,7 +187,12 @@ std::optional<int> forward_to_daemon(
     }
 
     ::close(fd);
-    return saw_result ? std::optional<int>(exit_code) : std::nullopt;
+    if (!saw_result) {
+        std::fprintf(stderr,
+                     "piper: daemon disconnected without a result; task may have run. "
+                     "Inspect its result and workspace before retrying.\n");
+    }
+    return saw_result ? exit_code : kExitError;
 }
 
 DaemonListener::DaemonListener(DaemonConfig config)

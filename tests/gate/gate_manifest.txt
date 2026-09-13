@@ -9,7 +9,7 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 55
+count 56
 
 test_agent_step
 test_arena
