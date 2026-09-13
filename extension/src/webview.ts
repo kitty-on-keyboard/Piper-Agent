@@ -3230,7 +3230,9 @@ window.addEventListener('message', (e) => {
     if (payload.completed && payload.unfinished_items > 0) {
       t += ' · ' + payload.unfinished_items + ' item(s) still open on its own checklist';
     }
-    d.innerHTML = '<b>' + label + '</b> — ';
+    const bold = document.createElement('b');
+    bold.textContent = label;
+    d.append(bold, ' — ');
     d.append(document.createTextNode(t));
     // Through add(), like every other block. Appending directly is what let the footer
     // land while the last paragraph of the answer was still being typed above it.
