@@ -7,12 +7,19 @@ import * as vscode from "vscode";
 import { CodeIntelNotification } from "./protocol.generated";
 import { SidecarClient } from "./client";
 
-function relPath(uri: vscode.Uri): string {
-  const folder = vscode.workspace.getWorkspaceFolder(uri);
-  if (folder) {
-    return vscode.workspace.asRelativePath(uri, false);
+// Caches relative path computations per URI string to avoid redundant VS Code workspace API calls.
+function relPath(uri: vscode.Uri, cache?: Map<string, string>): string {
+  const key = uri.toString();
+  if (cache) {
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
   }
-  return uri.fsPath;
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  const res = folder ? vscode.workspace.asRelativePath(uri, false) : uri.fsPath;
+  if (cache) {
+    cache.set(key, res);
+  }
+  return res;
 }
 
 // Formats a location string. Accepts either a vscode.Uri or a pre-computed relative path string
@@ -20,11 +27,12 @@ function relPath(uri: vscode.Uri): string {
 function formatLocation(
   uriOrPath: vscode.Uri | string,
   range: vscode.Range | undefined,
-  detail: string
+  detail: string,
+  cache?: Map<string, string>
 ): string {
   const line = range ? range.start.line + 1 : 1;
   const text = detail.replace(/\s+/g, " ").trim();
-  const pathStr = typeof uriOrPath === "string" ? uriOrPath : relPath(uriOrPath);
+  const pathStr = typeof uriOrPath === "string" ? uriOrPath : relPath(uriOrPath, cache);
   return `${pathStr}:${line}:${text}`;
 }
 
@@ -34,11 +42,17 @@ async function workspaceSymbols(query: string): Promise<string> {
       "vscode.executeWorkspaceSymbolProvider",
       query
     )) ?? [];
+  const cache = new Map<string, string>();
   const lines: string[] = [];
   for (const s of symbols.slice(0, 40)) {
     const loc = s.location;
     lines.push(
-      formatLocation(loc.uri, loc.range, `${s.kind} ${s.name}${s.containerName ? " in " + s.containerName : ""}`)
+      formatLocation(
+        loc.uri,
+        loc.range,
+        `${s.kind} ${s.name}${s.containerName ? " in " + s.containerName : ""}`,
+        cache
+      )
     );
   }
   return lines.join("\n");
@@ -51,14 +65,15 @@ async function definitions(path: string, line: number, character: number): Promi
     (await vscode.commands.executeCommand<
       (vscode.Location | vscode.LocationLink)[]
     >("vscode.executeDefinitionProvider", uri, pos)) ?? [];
+  const cache = new Map<string, string>();
   const lines: string[] = [];
   for (const loc of locs.slice(0, 40)) {
     if (loc instanceof vscode.Location) {
-      lines.push(formatLocation(loc.uri, loc.range, "definition"));
+      lines.push(formatLocation(loc.uri, loc.range, "definition", cache));
     } else {
       const target = loc.targetUri;
       const range = loc.targetSelectionRange ?? loc.targetRange;
-      lines.push(formatLocation(target, range, "definition"));
+      lines.push(formatLocation(target, range, "definition", cache));
     }
   }
   return lines.join("\n");
@@ -73,20 +88,22 @@ async function references(path: string, line: number, character: number): Promis
       uri,
       pos
     )) ?? [];
+  const cache = new Map<string, string>();
   const lines: string[] = [];
   for (const loc of locs.slice(0, 60)) {
-    lines.push(formatLocation(loc.uri, loc.range, "reference"));
+    lines.push(formatLocation(loc.uri, loc.range, "reference", cache));
   }
   return lines.join("\n");
 }
 
 async function diagnostics(path: string): Promise<string> {
   const all = vscode.languages.getDiagnostics();
+  const cache = new Map<string, string>();
   const lines: string[] = [];
   for (const [uri, diags] of all) {
     if (!diags.length) continue;
     // Compute relative path once per document URI to avoid redundant workspace API calls per diagnostic
-    const rel = relPath(uri);
+    const rel = relPath(uri, cache);
     if (path && uri.fsPath !== path && rel !== path) {
       continue;
     }
@@ -129,10 +146,11 @@ async function renamePreview(
   if (!edit) {
     return "(no rename edits)";
   }
+  const cache = new Map<string, string>();
   const lines: string[] = [];
   for (const [target, edits] of edit.entries()) {
     // Compute relative path once per target URI for edit formatting
-    const rel = relPath(target);
+    const rel = relPath(target, cache);
     for (const e of edits) {
       lines.push(
         formatLocation(
