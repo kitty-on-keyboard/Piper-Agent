@@ -9,3 +9,7 @@
 ## 2026-03-31 - Redundant IIFE Closure Allocations in Webview Render Loop
 **Learning:** In `webview.ts`, `renderMd` used a legacy IIFE pattern `((ev) => () => applyMd(ctx, ev))(e)` inside `for (const e of events)`. In ES6, `const` loop variables create per-iteration bindings natively, so the IIFE allocated two closure function instances instead of one on every non-text markdown event during live streaming.
 **Action:** Avoid IIFE wrappers in `for (const x of ...)` loops; pass `() => fn(x)` directly to queue callbacks.
+
+## 2026-04-05 - Batching String Slice Flushes in Parser Automata
+**Learning:** In `ToolCallGuard::push_byte` (`ValueText` state), character-by-character back-tracking flushes when partial parameter terminators fail to match trigger repeated single-character appends, causing copy-on-write reallocation checks and string allocations.
+**Action:** Use `value_append(std::string_view)` to flush partial matching slices in a single string append operation rather than looping character-by-character.
