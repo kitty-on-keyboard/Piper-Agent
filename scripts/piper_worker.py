@@ -175,35 +175,39 @@ def collect_files_touched(log_path, cwd):
     seen = set()
     if not log_path or not os.path.isfile(log_path):
         return ordered
-    with open(log_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("kind") != "write":
-                continue
-            if ev.get("changed") == "0":
-                continue
-            path = ev.get("path") or ev.get("normalised") or ""
-            if not path:
-                continue
-            rel = path
-            if os.path.isabs(path) and cwd:
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
                 try:
-                    cand = os.path.relpath(path, cwd)
-                except ValueError:
-                    cand = path
-                else:
-                    if not cand.startswith(".."):
-                        rel = cand
-            rel = rel.replace("\\", "/")
-            if rel not in seen:
-                seen.add(rel)
-                ordered.append(rel)
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("kind") != "write":
+                    continue
+                if ev.get("changed") == "0":
+                    continue
+                path = ev.get("path") or ev.get("normalised") or ""
+                if not path:
+                    continue
+                rel = path
+                if os.path.isabs(path) and cwd:
+                    try:
+                        cand = os.path.relpath(path, cwd)
+                    except ValueError:
+                        cand = path
+                    else:
+                        if not cand.startswith(".."):
+                            rel = cand
+                rel = rel.replace("\\", "/")
+                if rel not in seen:
+                    seen.add(rel)
+                    ordered.append(rel)
+    except Exception as exc:
+        print(f"piper: failed to parse event log: {exc}", file=sys.stderr)
+        return []
     return ordered
 
 
@@ -1369,11 +1373,28 @@ def self_test():
         check("refusing webhook URL with non-http(s) scheme" in refused_buf.getvalue(),
               f"expected non-http warning in stderr, got {refused_buf.getvalue()!r}")
 
+        # 11. collect_files_touched handles errors on stderr without stdout clutter
+        corrupt_log = os.path.join(tmp, "unreadable_events.ndjson")
+        with open(corrupt_log, "w", encoding="utf-8") as fh:
+            fh.write("line\n")
+        os.chmod(corrupt_log, 0o000)
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+                res_touched = collect_files_touched(corrupt_log, tmp)
+        finally:
+            os.chmod(corrupt_log, 0o644)
+        check(res_touched == [], f"corrupt log must return [], got {res_touched!r}")
+        check(stdout_buf.getvalue() == "", f"collect_files_touched must not print to stdout, got {stdout_buf.getvalue()!r}")
+        check("piper: failed to parse event log:" in stderr_buf.getvalue(),
+              f"expected 'piper: failed to parse event log:' in stderr, got {stderr_buf.getvalue()!r}")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 10 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 11 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
