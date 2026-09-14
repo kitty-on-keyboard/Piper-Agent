@@ -1563,7 +1563,9 @@ function applyMd(ctx, e) {
 function renderMd(ctx, events) {
   for (const e of events) {
     if (e.kind === 'text' || e.kind === 'codeText') typeMd(ctx, e.text, e.kind === 'text');
-    else queueOp(((ev) => () => applyMd(ctx, ev))(e));
+    // Avoid double IIFE closure allocation per non-text event; ES6 block-scoped const e
+    // binds per loop iteration, so () => applyMd(ctx, e) directly captures e.
+    else queueOp(() => applyMd(ctx, e));
   }
 }
 
