@@ -207,6 +207,17 @@ TEST(the_container_invocation_quotes_the_command) {
     CHECK(cmd.find("--volume '/work/my repo:/work/my repo'") != std::string::npos);
 }
 
+TEST(the_container_invocation_quotes_image_and_binary) {
+    ContainerRuntime rt;
+    rt.available = true;
+    rt.binary = "custom docker";
+    rt.image = "debian; touch /tmp/pwned";
+    const std::string cmd =
+        container_command(rt, "pytest", "/work/space", "/work/space", limits(5));
+    CHECK(cmd.find("'custom docker'") != std::string::npos);
+    CHECK(cmd.find("'debian; touch /tmp/pwned'") != std::string::npos);
+}
+
 TEST(output_is_capped_not_unbounded) {
     const std::string root = temp_dir();
     REQUIRE(!root.empty());
