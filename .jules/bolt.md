@@ -6,6 +6,10 @@
 **Learning:** `findSiblingMtp` previously scanned all sibling directories in a model folder and read/parsed `config.json` for every directory before evaluating guessed sibling names. In directories with many model checkpoints, this caused unnecessary filesystem I/O and JSON parsing for unrelated models.
 **Action:** Always check targeted guesses/known naming conventions first via direct path existence checks before falling back to full directory scanning and filtering.
 
+## 2026-04-01 - Fast-Path State Tracking for Number Literal Parsing
+**Learning:** `StreamParser` performed repeated linear scans (`buf_.find('.')` and `buf_.find_first_of("eE")`) over the accumulated buffer on every byte in `push_byte()`, `allowed_bytes()`, and `state_signature()`. For streaming/token probing on float/exponent number literals, this turned byte accumulation and constraint checking into an $O(N^2)$ operation per token.
+**Action:** Maintain boolean state flags (`num_has_dot_`, `num_has_exp_`) during incremental token accumulation to allow $O(1)$ grammar and constraint validation.
+
 ## 2026-03-31 - Redundant IIFE Closure Allocations in Webview Render Loop
 **Learning:** In `webview.ts`, `renderMd` used a legacy IIFE pattern `((ev) => () => applyMd(ctx, ev))(e)` inside `for (const e of events)`. In ES6, `const` loop variables create per-iteration bindings natively, so the IIFE allocated two closure function instances instead of one on every non-text markdown event during live streaming.
 **Action:** Avoid IIFE wrappers in `for (const x of ...)` loops; pass `() => fn(x)` directly to queue callbacks.

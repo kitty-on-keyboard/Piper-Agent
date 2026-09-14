@@ -161,6 +161,8 @@ private:
     bool key_pending_ = false;     // the string being read is an object key
 
     std::string buf_;              // current string / number / literal text
+    bool num_has_dot_ = false;     // tracking dot seen in current number literal
+    bool num_has_exp_ = false;     // tracking exponent (e/E) seen in current number literal
     std::string_view literal_;     // which literal we are matching
     size_t literal_idx_ = 0;
 
