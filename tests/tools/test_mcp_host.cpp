@@ -308,6 +308,25 @@ TEST(a_server_that_cannot_start_leaves_its_tools_absent_and_the_run_alive) {
     CHECK(registry.execute("echo", {{"text", "still here"}}, 0).ok());
 }
 
+TEST(a_server_that_fails_handshake_reports_error_and_does_not_crash_host) {
+    // A command that starts successfully but exits immediately (or produces invalid
+    // JSON-RPC during initialization/list_tools) throws an exception during MCP
+    // connection setup. The host must catch the exception, mark status.connected = false,
+    // record status.error, and allow execution to continue.
+    Registry registry(workspace());
+    McpServerConfig failing;
+    failing.name = "aborter";
+    failing.command = "true"; // binary exits zero without speaking MCP stdio protocol
+
+    McpHost host;
+    const auto report = host.connect_and_register({failing}, registry);
+
+    REQUIRE(report.size() == 1);
+    CHECK(!report[0].connected);
+    CHECK(!report[0].error.empty());
+    CHECK_EQ(report[0].registered, static_cast<std::size_t>(0));
+}
+
 TEST(a_server_that_dies_mid_run_fails_its_calls_without_stalling_the_turn) {
     Registry registry(workspace());
     McpHost host;
