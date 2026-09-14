@@ -123,6 +123,7 @@ private:
     Error advance_literal(unsigned char c, std::string_view lit, Ph next);
     Error finish_param();
     void  value_append(unsigned char c);
+    void  value_append(std::string_view bytes);
     ByteSet type_start_set(ParamType t) const;
     bool json_completes_on_newline() const;
 

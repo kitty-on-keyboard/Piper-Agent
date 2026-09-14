@@ -53,6 +53,14 @@ void ToolCallGuard::value_append(unsigned char c) {
     value_->push_back(char(c));
 }
 
+void ToolCallGuard::value_append(std::string_view bytes) {
+    if (probing_ || bytes.empty()) return;
+    if (value_.use_count() > 1) {
+        value_ = std::make_shared<std::string>(*value_);
+    }
+    value_->append(bytes);
+}
+
 Error ToolCallGuard::finish_param() {
     if (!probing_) {
         if (params_.use_count() > 1) {
@@ -219,9 +227,10 @@ Error ToolCallGuard::push_byte(unsigned char c) {
                 return Error::Ok;
             }
             // The partial terminator match was actually value content.
-            for (uint32_t i = 0; i < term_pos_; ++i)
-                value_append(static_cast<unsigned char>(kTerm[i]));
-            term_pos_ = 0;
+            if (term_pos_ > 0) {
+                value_append(kTerm.substr(0, term_pos_));
+                term_pos_ = 0;
+            }
             if (c == static_cast<unsigned char>(kTerm[0])) {   // '\n' restarts
                 term_pos_ = 1;
                 return Error::Ok;

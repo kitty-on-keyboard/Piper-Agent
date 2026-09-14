@@ -1259,6 +1259,77 @@ TEST(worker_main_handles_idle_timeout_conversions) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+TEST(collect_git_returns_zero_stats_for_non_git_dir) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_collect_git_nongit_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+
+    RunResult res;
+    collect_git(dir.string(), dir.string(), res);
+
+    CHECK_EQ(res.diff_stat.insertions, 0);
+    CHECK_EQ(res.diff_stat.deletions, 0);
+    CHECK_EQ(res.diff_stat.files, 0);
+    CHECK(res.git_diff_path.empty());
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST(collect_git_handles_numstat_invalid_integers_and_untracked) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_collect_git_mock_" + std::to_string(::getpid()));
+    const auto bin_dir = dir / "bin";
+    std::filesystem::create_directories(bin_dir);
+
+    // Create a mock git script that returns invalid integer strings in --numstat
+    std::filesystem::path mock_git = bin_dir / "git";
+    {
+        std::ofstream f(mock_git.string());
+        f << "#!/bin/sh\n"
+          << "if [ \"$1\" = \"rev-parse\" ]; then\n"
+          << "  echo \"true\"\n"
+          << "  exit 0\n"
+          << "elif [ \"$1\" = \"diff\" ] && [ \"$2\" = \"--numstat\" ]; then\n"
+          << "  echo \"abc def invalid_file.txt\"\n"
+          << "  echo \"10 5 valid_file.txt\"\n"
+          << "  echo \"- - binary_file.bin\"\n"
+          << "  echo \"9999999999999999999999 9999999999999999999999 overflow.txt\"\n"
+          << "  exit 0\n"
+          << "elif [ \"$1\" = \"diff\" ]; then\n"
+          << "  echo \"diff --git a/valid_file.txt b/valid_file.txt\"\n"
+          << "  exit 0\n"
+          << "elif [ \"$1\" = \"status\" ]; then\n"
+          << "  exit 0\n"
+          << "fi\n"
+          << "exit 1\n";
+    }
+    std::filesystem::permissions(mock_git,
+                                 std::filesystem::perms::owner_read |
+                                 std::filesystem::perms::owner_write |
+                                 std::filesystem::perms::owner_exec);
+
+    // Set PATH to use mock git first
+    const char* old_path = std::getenv("PATH");
+    std::string new_path = bin_dir.string() + ":" + (old_path ? old_path : "");
+    ::setenv("PATH", new_path.c_str(), 1);
+
+    RunResult res;
+    collect_git(dir.string(), dir.string(), res);
+
+    if (old_path) {
+        ::setenv("PATH", old_path, 1);
+    } else {
+        ::unsetenv("PATH");
+    }
+
+    CHECK_EQ(res.diff_stat.files, 4);
+    CHECK_EQ(res.diff_stat.insertions, 10);
+    CHECK_EQ(res.diff_stat.deletions, 5);
+    CHECK(!res.git_diff_path.empty());
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST(worker_check_timeout_survives_early_output_close) {
     TaskPacket packet;
     packet.cwd = std::filesystem::temp_directory_path().string();
