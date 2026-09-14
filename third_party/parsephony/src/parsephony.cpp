@@ -1,7 +1,9 @@
 #include "parsephony/parsephony.hpp"
 #include "parsephony/swar.hpp"
 
+#if defined(__APPLE__)
 #include <xlocale.h>
+#endif
 
 #include <cerrno>
 #include <charconv>
@@ -507,8 +509,15 @@ Value Value::operator[](size_t i) const noexcept {
     if (!doc_) return {};
     const Node& n = doc_->node(idx_);
     if (n.type != Type::Array || i >= n.len) return {};
-    uint32_t cur = idx_ + 1;
-    for (size_t k = 0; k < i; ++k) cur = next_sibling(doc_, cur);
+    uint32_t start = idx_ + 1;
+    if (n.off - start == n.len) {
+        return Value(doc_, start + uint32_t(i));
+    }
+    uint32_t cur = start;
+    for (size_t k = 0; k < i; ++k) {
+        const Node& cn = doc_->node(cur);
+        cur = (cn.type == Type::Array || cn.type == Type::Object) ? cn.off : cur + 1;
+    }
     return Value(doc_, cur);
 }
 
