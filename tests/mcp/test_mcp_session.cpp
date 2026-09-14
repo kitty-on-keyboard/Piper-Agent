@@ -93,6 +93,13 @@ private:
             throw std::runtime_error("handler exploded");
         });
 
+        Tool non_std_thrower;
+        non_std_thrower.name = "non_std_thrower";
+        non_std_thrower.description = "throws a non-std C++ exception";
+        s.add_tool(std::move(non_std_thrower), [](const nlohmann::json&, RequestContext&) -> ToolResult {
+            throw 42;
+        });
+
         Tool slow;
         slow.name = "slow";
         slow.description = "reports progress, honours cancellation";
@@ -194,6 +201,24 @@ TEST(a_throwing_handler_becomes_a_tool_failure_not_a_crash) {
     const ToolResult r = s.client().call_tool("thrower", nlohmann::json::object());
     CHECK(r.is_error);
     CHECK_EQ(text_of(r), std::string("handler exploded"));
+
+    // And the session survives it.
+    const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
+    CHECK_EQ(text_of(after), std::string("still alive"));
+}
+
+TEST(a_non_std_throwing_handler_yields_internal_error_not_a_crash) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+    bool threw = false;
+    try {
+        static_cast<void>(s.client().call_tool("non_std_thrower", nlohmann::json::object()));
+    } catch (const McpError& e) {
+        threw = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kInternalError));
+        CHECK(std::string(e.what()).find("unknown exception in handler") != std::string::npos);
+    }
+    CHECK(threw);
 
     // And the session survives it.
     const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
