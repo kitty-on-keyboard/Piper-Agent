@@ -47,6 +47,7 @@ import json
 import os
 import re
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -162,10 +163,12 @@ def install_instance(workspace, env_dir, timeout=1800, spec=None):
     if (spec or {}).get("pre_install"):
         for step in spec["pre_install"]:
             step = re.sub(r"\bsed -i (?!')", "sed -i '' ", step)
-            subprocess.run(step, cwd=workspace, shell=True, env=env,
+            step_args = shlex.split(step)
+            subprocess.run(step_args, cwd=workspace, shell=False, env=env,
                            capture_output=True, text=True, timeout=600)
     for command in attempts:
-        res = subprocess.run(command, cwd=workspace, shell=True, env=env,
+        cmd_args = shlex.split(command)
+        res = subprocess.run(cmd_args, cwd=workspace, shell=False, env=env,
                              capture_output=True, text=True, timeout=timeout)
         if res.returncode == 0:
             return True, command, ""
