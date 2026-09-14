@@ -67,11 +67,13 @@ struct Node {
     uint8_t  flags;
     uint16_t _pad;
 
-    static constexpr uint8_t kEscaped = 1u << 0;  // string lives in the decode buffer
-    static constexpr uint8_t kFloat   = 1u << 1;  // number has '.' or an exponent
+    static constexpr uint8_t kEscaped       = 1u << 0;  // string lives in the decode buffer
+    static constexpr uint8_t kFloat         = 1u << 1;  // number has '.' or an exponent
+    static constexpr uint8_t kDuplicateKeys = 1u << 2;  // object has duplicate keys
 
     bool escaped() const noexcept { return (flags & kEscaped) != 0; }
     bool is_float() const noexcept { return (flags & kFloat) != 0; }
+    bool has_duplicate_keys() const noexcept { return (flags & kDuplicateKeys) != 0; }
 };
 
 static_assert(sizeof(Node) == 12, "tape node should stay compact");

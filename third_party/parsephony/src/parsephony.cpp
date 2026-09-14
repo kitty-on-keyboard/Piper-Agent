@@ -1,7 +1,9 @@
 #include "parsephony/parsephony.hpp"
 #include "parsephony/swar.hpp"
 
+#if __has_include(<xlocale.h>)
 #include <xlocale.h>
+#endif
 
 #include <cerrno>
 #include <charconv>
@@ -329,6 +331,35 @@ parse_key: {
         ++p;
         uint32_t off = 0, len = 0; uint8_t flags = 0;
         if ((err = scan_string(off, len, flags)) != Error::Ok) return err;
+
+        Frame& f = stack_.back();
+        Node& obj_node = tape[f.node];
+        if (!(obj_node.flags & Node::kDuplicateKeys) && f.count > 0) {
+            if (f.count >= 32) {
+                obj_node.flags |= Node::kDuplicateKeys;
+            } else {
+                std::string_view new_key_sv = (flags & Node::kEscaped)
+                    ? std::string_view(doc.decoded_.data() + off, len)
+                    : std::string_view(base + off, len);
+
+                uint32_t prev_k = f.node + 1;
+                for (uint32_t m = 0; m < f.count; ++m) {
+                    const Node& kn = tape[prev_k];
+                    std::string_view kn_sv = kn.escaped()
+                        ? std::string_view(doc.decoded_.data() + kn.off, kn.len)
+                        : std::string_view(base + kn.off, kn.len);
+                    if (kn_sv == new_key_sv) {
+                        obj_node.flags |= Node::kDuplicateKeys;
+                        break;
+                    }
+                    uint32_t val_idx = prev_k + 1;
+                    const Node& vn = tape[val_idx];
+                    prev_k = (vn.type == Type::Array || vn.type == Type::Object)
+                        ? vn.off : val_idx + 1;
+                }
+            }
+        }
+
         tape[n++] = Node{off, len, Type::Key, flags, 0};
         skip_ws();
         if (p == end) return fail(Error::UnexpectedEnd, p);
@@ -516,10 +547,21 @@ Value Value::operator[](std::string_view key) const noexcept {
     if (!doc_) return {};
     const Node& n = doc_->node(idx_);
     if (n.type != Type::Object) return {};
-    // Duplicate keys resolve to the last occurrence, matching nlohmann,
-    // JavaScript and Python. That rules out an early exit on first match, but
-    // tool-call objects are a handful of members, so the scan is short.
+
     uint32_t cur = idx_ + 1;
+    if (!n.has_duplicate_keys()) {
+        for (uint32_t k = 0; k < n.len; ++k) {
+            Value kv(doc_, cur);
+            if (kv.get_string() == key) {
+                return Value(doc_, cur + 1);
+            }
+            cur = next_sibling(doc_, cur + 1);
+        }
+        return Value();
+    }
+
+    // Duplicate keys resolve to the last occurrence, matching nlohmann,
+    // JavaScript and Python.
     uint32_t found = 0;
     bool have = false;
     for (uint32_t k = 0; k < n.len; ++k) {

@@ -9,3 +9,7 @@
 ## 2026-03-31 - Redundant IIFE Closure Allocations in Webview Render Loop
 **Learning:** In `webview.ts`, `renderMd` used a legacy IIFE pattern `((ev) => () => applyMd(ctx, ev))(e)` inside `for (const e of events)`. In ES6, `const` loop variables create per-iteration bindings natively, so the IIFE allocated two closure function instances instead of one on every non-text markdown event during live streaming.
 **Action:** Avoid IIFE wrappers in `for (const x of ...)` loops; pass `() => fn(x)` directly to queue callbacks.
+
+## 2026-08-10 - O(1) Early Exit on Unique Object Property Lookup
+**Learning:** `Value::operator[]` previously scanned all $N$ members of a JSON object to resolve potential duplicate keys to their last occurrence, turning every lookup into an $O(N)$ tape walk. Since duplicate keys are extremely rare in standard JSON and LLM tool call payloads, tracking key uniqueness during object parsing enables immediate early exit on the first key match.
+**Action:** Flag objects containing duplicate keys during parse time (`Node::kDuplicateKeys`). In `Value::operator[]`, break and return on first key match when `kDuplicateKeys` is absent, falling back to full scan only when duplicate keys exist.
