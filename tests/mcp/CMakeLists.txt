@@ -1,3 +1,4 @@
+lmp_add_test(test_mcp_message SOURCES test_mcp_message.cpp LABELS gate LINK lmp_mcp TIMEOUT 60)
 lmp_add_test(test_mcp_framing SOURCES test_mcp_framing.cpp LABELS gate LINK lmp_mcp TIMEOUT 60)
 lmp_add_test(test_mcp_session SOURCES test_mcp_session.cpp LABELS gate LINK lmp_mcp TIMEOUT 120)
 lmp_add_test(test_spawn_env SOURCES test_spawn_env.cpp LABELS gate LINK lmp_mcp TIMEOUT 60)
