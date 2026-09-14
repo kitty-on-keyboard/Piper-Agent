@@ -93,6 +93,13 @@ private:
             throw std::runtime_error("handler exploded");
         });
 
+        Tool throw_invalid_arg;
+        throw_invalid_arg.name = "throw_invalid_arg";
+        throw_invalid_arg.description = "throws std::invalid_argument exception";
+        s.add_tool(std::move(throw_invalid_arg), [](const nlohmann::json&, RequestContext&) -> ToolResult {
+            throw std::invalid_argument("invalid tool argument value");
+        });
+
         Tool slow;
         slow.name = "slow";
         slow.description = "reports progress, honours cancellation";
@@ -173,7 +180,7 @@ TEST(tools_round_trip) {
     static_cast<void>(s.client().initialize());
 
     const std::vector<Tool> tools = s.client().list_tools();
-    CHECK_EQ(tools.size(), std::size_t(5));
+    CHECK_EQ(tools.size(), std::size_t(6));
 
     const ToolResult r = s.client().call_tool("echo", nlohmann::json{{"text", "hi there"}});
     CHECK(!r.is_error);
@@ -197,6 +204,19 @@ TEST(a_throwing_handler_becomes_a_tool_failure_not_a_crash) {
 
     // And the session survives it.
     const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
+    CHECK_EQ(text_of(after), std::string("still alive"));
+}
+
+TEST(tool_throwing_custom_std_exception_captures_message_as_tool_failure) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+    const ToolResult r = s.client().call_tool("throw_invalid_arg", nlohmann::json::object());
+    CHECK(r.is_error);
+    CHECK_EQ(text_of(r), std::string("invalid tool argument value"));
+
+    // Verify session state remains functional after exception.
+    const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
+    CHECK(!after.is_error);
     CHECK_EQ(text_of(after), std::string("still alive"));
 }
 
