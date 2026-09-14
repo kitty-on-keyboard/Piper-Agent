@@ -44,6 +44,8 @@ void StreamParser::reset() {
     done_ = false;
     key_pending_ = false;
     buf_.clear();
+    num_has_dot_ = false;
+    num_has_exp_ = false;
     literal_ = {};
     literal_idx_ = 0;
     uni_ = 0;
@@ -123,6 +125,8 @@ Error StreamParser::begin_value(unsigned char c) {
             if (c == '-' || is_digit(c)) {
                 sub_ = Sub::Number;
                 buf_.clear();
+                num_has_dot_ = false;
+                num_has_exp_ = false;
                 buf_.push_back(char(c));
                 return Error::Ok;
             }
@@ -210,11 +214,11 @@ Error StreamParser::push_byte(unsigned char c) {
                 ok = true;
             } else if (c == '.') {
                 ok = is_digit(static_cast<unsigned char>(last)) &&
-                     buf_.find('.') == std::string::npos &&
-                     buf_.find_first_of("eE") == std::string::npos;
+                     !num_has_dot_ && !num_has_exp_;
+                if (ok) num_has_dot_ = true;
             } else if (c == 'e' || c == 'E') {
-                ok = is_digit(static_cast<unsigned char>(last)) &&
-                     buf_.find_first_of("eE") == std::string::npos;
+                ok = is_digit(static_cast<unsigned char>(last)) && !num_has_exp_;
+                if (ok) num_has_exp_ = true;
             } else if (c == '+' || c == '-') {
                 ok = (last == 'e' || last == 'E');
             }
@@ -328,12 +332,10 @@ ByteSet StreamParser::allowed_bytes() const {
 
         case Sub::Number: {
             char last = buf_.empty() ? '\0' : buf_.back();
-            bool has_dot = buf_.find('.') != std::string::npos;
-            bool has_exp = buf_.find_first_of("eE") != std::string::npos;
             if (!(buf_ == "0" || buf_ == "-0")) s.add_range('0', '9');
             if (is_digit(static_cast<unsigned char>(last))) {
-                if (!has_dot && !has_exp) s.add('.');
-                if (!has_exp) { s.add('e'); s.add('E'); }
+                if (!num_has_dot_ && !num_has_exp_) s.add('.');
+                if (!num_has_exp_) { s.add('e'); s.add('E'); }
             }
             if (last == 'e' || last == 'E') { s.add('+'); s.add('-'); }
             // A number may also simply end here, if it is well-formed so far.
@@ -384,10 +386,8 @@ uint64_t StreamParser::state_signature() const noexcept {
     sig = sig * 31 + uint64_t(stack_.size() > 8 ? 8 : stack_.size());
     // The number sub-machine's legal set depends on the token so far.
     if (sub_ == Sub::Number) {
-        bool has_dot = buf_.find('.') != std::string::npos;
-        bool has_exp = buf_.find_first_of("eE") != std::string::npos;
         char last = buf_.empty() ? '\0' : buf_.back();
-        sig = sig * 31 + uint64_t(has_dot) * 2 + uint64_t(has_exp);
+        sig = sig * 31 + uint64_t(num_has_dot_) * 2 + uint64_t(num_has_exp_);
         sig = sig * 31 + uint64_t(static_cast<unsigned char>(last));
         sig = sig * 31 + uint64_t(buf_ == "0" || buf_ == "-0");
     }
