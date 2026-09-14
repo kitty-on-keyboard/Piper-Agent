@@ -109,6 +109,55 @@ TEST(load_packet_validates_json_and_fields) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+TEST(collect_files_touched_relative_path_fallback_and_normalization) {
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_worker_rel_fallback";
+    std::filesystem::create_directories(tmp_dir);
+    std::string log_file = (tmp_dir / "events.jsonl").string();
+
+    std::filesystem::path cwd_dir = tmp_dir / "workspace";
+    std::filesystem::path outside_dir = tmp_dir / "outside";
+    std::filesystem::create_directories(cwd_dir);
+    std::filesystem::create_directories(outside_dir);
+
+    std::string outside_abs = (outside_dir / "external.txt").string();
+
+    {
+        std::ofstream f(log_file);
+        // 1. Outside absolute path: std::filesystem::relative will produce path starting with ".."
+        // so it falls back to keeping path (with slashes normalized)
+        f << "{\"kind\":\"write\",\"path\":\"" << outside_abs << "\",\"changed\":1}\n";
+        // 2. Windows-style backslashes in relative path
+        f << "{\"kind\":\"write\",\"path\":\"src\\\\win_file.cpp\",\"changed\":1}\n";
+        // 3. Fallback to `normalised` key when `path` key is absent
+        f << "{\"kind\":\"write\",\"normalised\":\"" << (cwd_dir / "norm.txt").string() << "\",\"changed\":1}\n";
+    }
+
+    // Pass cwd_dir as cwd
+    auto touched = collect_files_touched(log_file, cwd_dir.string());
+    std::string expected_outside = outside_abs;
+    std::replace(expected_outside.begin(), expected_outside.end(), '\\', '/');
+
+    CHECK_EQ(touched.size(), std::size_t{3});
+    if (touched.size() == 3) {
+        CHECK_EQ(touched[0], expected_outside);
+        CHECK_EQ(touched[1], "src/win_file.cpp");
+        CHECK_EQ(touched[2], "norm.txt");
+    }
+
+    // Empty cwd test: absolute paths remain absolute, backslashes replaced with slashes
+    auto touched_no_cwd = collect_files_touched(log_file, "");
+    CHECK_EQ(touched_no_cwd.size(), std::size_t{3});
+    if (touched_no_cwd.size() == 3) {
+        CHECK_EQ(touched_no_cwd[0], expected_outside);
+        CHECK_EQ(touched_no_cwd[1], "src/win_file.cpp");
+        std::string expected_norm = (cwd_dir / "norm.txt").string();
+        std::replace(expected_norm.begin(), expected_norm.end(), '\\', '/');
+        CHECK_EQ(touched_no_cwd[2], expected_norm);
+    }
+
+    std::filesystem::remove_all(tmp_dir);
+}
+
 TEST(build_start_message_formats_proper_jsonrpc) {
     TaskPacket packet;
     packet.id = "test-task";
