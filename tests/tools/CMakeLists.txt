@@ -2,6 +2,7 @@ lmp_add_test(test_sandbox  SOURCES test_sandbox.cpp  LABELS gate LINK lmp_tools 
 lmp_add_test(test_registry SOURCES test_registry.cpp LABELS gate LINK lmp_tools TIMEOUT 120)
 lmp_add_test(test_think_blocks SOURCES test_think_blocks.cpp LABELS gate LINK lmp_tools TIMEOUT 60)
 lmp_add_test(test_syntax_check SOURCES test_syntax_check.cpp LABELS gate LINK lmp_tools TIMEOUT 120)
+lmp_add_test(test_mcp_host_probe SOURCES test_mcp_host_probe.cpp LABELS gate LINK lmp_tools TIMEOUT 60)
 
 # The recall tools over a real store. Links lmp_pcc explicitly: lmp_tools keeps it PRIVATE
 # (registry.hpp only forward-declares pcc::Store), so a test that builds its own store has

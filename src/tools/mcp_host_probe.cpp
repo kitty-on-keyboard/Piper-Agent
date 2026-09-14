@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "src/tools/mcp_host.hpp"
+#include "src/tools/mcp_host_probe.hpp"
 #include "src/tools/registry.hpp"
 
 namespace {
@@ -41,36 +42,6 @@ int usage() {
                  "usage: mcp_host_probe [--trusted] [--call TOOL --args JSON] "
                  "-- <command> [args...]\n");
     return 2;
-}
-
-// Returns false on a usage error.
-bool parse_args(int argc, char** argv, tools::McpServerConfig& cfg, std::string& call_tool,
-                std::string& call_args) {
-    int i = 1;
-    for (; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--") {
-            ++i;
-            break;
-        }
-        if (a == "--trusted") {
-            cfg.trusted = true;
-        } else if (a == "--call" && i + 1 < argc) {
-            call_tool = argv[++i];
-        } else if (a == "--args" && i + 1 < argc) {
-            call_args = argv[++i];
-        } else {
-            return false;
-        }
-    }
-    if (i >= argc) {
-        return false;
-    }
-    cfg.command = argv[i++];
-    for (; i < argc; ++i) {
-        cfg.args.emplace_back(argv[i]);
-    }
-    return true;
 }
 
 void print_registered(const tools::Registry& registry) {
@@ -129,7 +100,7 @@ int main(int argc, char** argv) {
     cfg.name = "probe";
     std::string call_tool;
     std::string call_args = "{}";
-    if (!parse_args(argc, argv, cfg, call_tool, call_args)) {
+    if (!tools::parse_mcp_host_probe_args(argc, argv, cfg, call_tool, call_args)) {
         return usage();
     }
 
