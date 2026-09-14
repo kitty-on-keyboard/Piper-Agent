@@ -14,10 +14,19 @@
 // a green build inside the container is a claim about a different machine -- is not solved,
 // is not pretended to be, and the refusal text says so.
 
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "src/tools/sandbox.hpp"
+
+extern char** environ;
 
 namespace lmp::tools {
 namespace {
@@ -43,16 +52,56 @@ std::string shell_quote(const std::string& s) {
     return quoted;
 }
 
+bool run_probe_cmd(const std::string& binary, const std::vector<std::string>& args) {
+    posix_spawn_file_actions_t actions;
+    if (::posix_spawn_file_actions_init(&actions) != 0) {
+        return false;
+    }
+    struct ActionsGuard {
+        posix_spawn_file_actions_t* a;
+        ~ActionsGuard() { ::posix_spawn_file_actions_destroy(a); }
+    } guard{&actions};
+
+    // Redirect stdout and stderr to /dev/null
+    ::posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    ::posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    std::vector<std::string> storage;
+    storage.reserve(1 + args.size());
+    storage.push_back(binary);
+    for (const auto& arg : args) {
+        storage.push_back(arg);
+    }
+
+    std::vector<char*> argv;
+    argv.reserve(storage.size() + 1);
+    for (auto& s : storage) {
+        argv.push_back(s.data());
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = -1;
+    const int rc = ::posix_spawnp(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ);
+    if (rc != 0) {
+        return false;
+    }
+
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 bool probe(const std::string& binary, std::string& detail) {
-    const std::string cmd =
-        "command -v " + binary + " >/dev/null 2>&1 && " + binary + " system info >/dev/null 2>&1";
-    const int rc = std::system(cmd.c_str());
-    if (rc == 0) {
+    if (run_probe_cmd(binary, {"system", "info"})) {
         return true;
     }
-    const std::string alt = "command -v " + binary + " >/dev/null 2>&1 && " + binary +
-                            " info >/dev/null 2>&1";
-    if (std::system(alt.c_str()) == 0) {
+    if (run_probe_cmd(binary, {"info"})) {
         return true;
     }
     detail += detail.empty() ? "" : "; ";
