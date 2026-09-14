@@ -1,3 +1,2 @@
 def clamp_score(value):
-    # Bug: should clamp into [0, 100].
-    return value
+    return max(0, min(100, value))
