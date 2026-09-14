@@ -290,6 +290,20 @@ SpecStep SpeculativeDecoder::decode_one(const TokenMask* mask,
     return out;
 }
 
+SpecStep SpeculativeDecoder::abandon_block(std::size_t prefix, const TokenMask* mask,
+                                           const std::vector<TokenId>& recent, SpecForward& fwd) {
+    // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
+    // not be able to turn a decodable step into a dead one. Undo the verification
+    // forward, tell the drafter nothing survived, pay for the deferred prefix, and
+    // take one token the ordinary way -- which is the reference path and answers for
+    // itself whether there is genuinely nothing legal here.
+    fwd.restore();
+    proposer_->settle(0, {}, prefix, fwd);
+    ++stats_.abandoned;
+    flush(fwd);
+    return decode_one(mask_at(0, mask), recent, fwd);
+}
+
 SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& recent,
                                   std::span<const TokenId> context, bool may_speculate,
                                   const std::function<bool(TokenId)>& is_special,
@@ -370,16 +384,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
     }
     if (dists.empty() || dists.front().empty()) {
-        // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
-        // not be able to turn a decodable step into a dead one. Undo the verification
-        // forward, tell the drafter nothing survived, pay for the deferred prefix, and
-        // take one token the ordinary way -- which is the reference path and answers for
-        // itself whether there is genuinely nothing legal here.
-        fwd.restore();
-        proposer_->settle(0, {}, prefix, fwd);
-        ++stats_.abandoned;
-        flush(fwd);
-        return decode_one(mask_at(0, mask), recent, fwd);
+        return abandon_block(prefix, mask, recent, fwd);
     }
     std::vector<TokenId> recent_i = recent;
     for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
@@ -424,20 +429,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         verifier_.verify(std::span<const TokenId>(draft_idx), std::span<const float>(ones),
                          std::span<const std::span<const float>>(row_spans));
     if (r.accepted.empty()) {
-        // Nothing survived. A stateful drafter still appended to its own cache while
-        // proposing, so it has to be told, or its cache outruns the target's by exactly
-        // the drafts nobody kept -- a drift that never throws and only shows up as
-        // steadily worse proposals.
-        // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
-        // not be able to turn a decodable step into a dead one. Undo the verification
-        // forward, tell the drafter nothing survived, pay for the deferred prefix, and
-        // take one token the ordinary way -- which is the reference path and answers for
-        // itself whether there is genuinely nothing legal here.
-        fwd.restore();
-        proposer_->settle(0, {}, prefix, fwd);
-        ++stats_.abandoned;
-        flush(fwd);
-        return decode_one(mask_at(0, mask), recent, fwd);
+        return abandon_block(prefix, mask, recent, fwd);
     }
 
     const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
@@ -447,16 +439,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     // The final token is an index into the row at position m, not a token id.
     const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
     if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
-        // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
-        // not be able to turn a decodable step into a dead one. Undo the verification
-        // forward, tell the drafter nothing survived, pay for the deferred prefix, and
-        // take one token the ordinary way -- which is the reference path and answers for
-        // itself whether there is genuinely nothing legal here.
-        fwd.restore();
-        proposer_->settle(0, {}, prefix, fwd);
-        ++stats_.abandoned;
-        flush(fwd);
-        return decode_one(mask_at(0, mask), recent, fwd);
+        return abandon_block(prefix, mask, recent, fwd);
     }
     out.committed.push_back(dists[m].ids[tail_idx]);
 

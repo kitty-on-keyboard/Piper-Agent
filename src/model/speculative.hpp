@@ -280,6 +280,12 @@ class SpeculativeDecoder {
     SpecStep decode_one(const TokenMask* mask, const std::vector<TokenId>& recent,
                         SpecForward& fwd);
 
+    // Abandon the current block when speculation cannot produce a usable answer. Undoes the
+    // verification forward, notifies the proposer that nothing survived, flushes the
+    // deferred prefix, and falls back to ordinary single-token decoding.
+    SpecStep abandon_block(std::size_t prefix, const TokenMask* mask,
+                           const std::vector<TokenId>& recent, SpecForward& fwd);
+
     SamplingParams params_;
     SpecConfig config_;
     Sampler sampler_;
