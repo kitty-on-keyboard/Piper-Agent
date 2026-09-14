@@ -1142,6 +1142,74 @@ TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(worker_main_handles_idle_timeout_conversions) {
+    const auto tmp_dir = std::filesystem::temp_directory_path() /
+        ("test_idle_timeout_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(tmp_dir);
+
+    // 1. Invalid non-numeric string "abc"
+    {
+        char prog[] = "piper";
+        char sub[] = "init";
+        char flag[] = "--idle-timeout";
+        char val[] = "abc";
+        char dir_flag[] = "--dir";
+        char dir_val[512];
+        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
+        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
+        int argc = 6;
+        int rc = worker_main(argc, argv);
+        CHECK_EQ(rc, kExitOk);
+    }
+
+    // 2. Empty string value
+    {
+        char prog[] = "piper";
+        char sub[] = "init";
+        char flag[] = "--idle-timeout";
+        char val[] = "";
+        char dir_flag[] = "--dir";
+        char dir_val[512];
+        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
+        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
+        int argc = 6;
+        int rc = worker_main(argc, argv);
+        CHECK_EQ(rc, kExitOk);
+    }
+
+    // 3. Out-of-range value "1e999"
+    {
+        char prog[] = "piper";
+        char sub[] = "init";
+        char flag[] = "--idle-timeout";
+        char val[] = "1e999";
+        char dir_flag[] = "--dir";
+        char dir_val[512];
+        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
+        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
+        int argc = 6;
+        int rc = worker_main(argc, argv);
+        CHECK_EQ(rc, kExitOk);
+    }
+
+    // 4. Valid double string "120.5"
+    {
+        char prog[] = "piper";
+        char sub[] = "init";
+        char flag[] = "--idle-timeout";
+        char val[] = "120.5";
+        char dir_flag[] = "--dir";
+        char dir_val[512];
+        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
+        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
+        int argc = 6;
+        int rc = worker_main(argc, argv);
+        CHECK_EQ(rc, kExitOk);
+    }
+
+    std::filesystem::remove_all(tmp_dir);
+}
+
 TEST(worker_check_timeout_survives_early_output_close) {
     TaskPacket packet;
     packet.cwd = std::filesystem::temp_directory_path().string();
