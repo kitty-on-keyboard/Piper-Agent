@@ -9,3 +9,7 @@
 ## 2026-03-31 - Redundant IIFE Closure Allocations in Webview Render Loop
 **Learning:** In `webview.ts`, `renderMd` used a legacy IIFE pattern `((ev) => () => applyMd(ctx, ev))(e)` inside `for (const e of events)`. In ES6, `const` loop variables create per-iteration bindings natively, so the IIFE allocated two closure function instances instead of one on every non-text markdown event during live streaming.
 **Action:** Avoid IIFE wrappers in `for (const x of ...)` loops; pass `() => fn(x)` directly to queue callbacks.
+
+## 2026-04-05 - O(1) Indexing Fast Path for Flat JSON Arrays in parsephony
+**Learning:** In `parsephony`, `Value::operator[](size_t i)` walked the DOM tree using `next_sibling` for each element index $i$, leading to $O(N^2)$ time complexity when looping over array elements by index. Because flat arrays (where all elements are scalars occupying 1 node on the tape) satisfy `n.off - (idx_ + 1) == n.len`, element $i$ can be retrieved in $O(1)$ time at tape index `idx_ + 1 + i`.
+**Action:** Check `n.off - start == n.len` before walking siblings in tape-based JSON array indexing to achieve $O(1)$ random access for flat arrays.
