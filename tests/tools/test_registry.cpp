@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "src/pcc/recall.hpp"
+#include "src/pcc/store.hpp"
 #include "src/platform/fs.hpp"
 #include "src/tools/edit_diagnostics.hpp"
 #include "src/tools/registry.hpp"
@@ -134,6 +136,45 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
 // `remember` is the only tool whose effect outlives the run, so its file invariants are
 // the thing to test: one fact per line, no duplicates, and a hard byte cap. Break any of
 // them and the damage lands in the STABLE part of every future prompt.
+TEST(remember_fact_store_failure_falls_back_to_file_write_honestly) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string db_path = root + "/db.sqlite";
+    lmp::pcc::Store store(db_path);
+
+    Registry reg = make_registry(root);
+    auto source_fn = [&store, session = std::string("s1")] {
+        Registry::ContextSource src;
+        src.store = &store;
+        src.session = session;
+        return src;
+    };
+    CHECK(reg.declare_context_tools(source_fn, lmp::pcc::estimate_tokens));
+
+    // Corrupt the store database table so store.append() / store.remember() throw SqlError
+    store.db().exec("DROP TABLE item");
+
+    // Execution with key. Store operation throws SqlError, but file write succeeds.
+    const ToolResult r_keyed = reg.execute(
+        "remember", args({{"fact", "keyed fact test"}, {"key", "mykey"}}), 1);
+    CHECK(r_keyed.ok());
+    CHECK(r_keyed.summary.find("noted for later sessions") != std::string::npos);
+
+    // Execution without key.
+    const ToolResult r_unkeyed = reg.execute(
+        "remember", args({{"fact", "unkeyed fact test"}}), 1);
+    CHECK(r_unkeyed.ok());
+    CHECK(r_unkeyed.summary.find("noted for later sessions") != std::string::npos);
+
+    // Verify the file contains both facts despite store exceptions.
+    const std::string mem_path = root + "/" + std::string(kMemoryFileName);
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(mem_path, 1U << 20);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("- [mykey] keyed fact test") != std::string::npos);
+    CHECK(f.bytes.find("- unkeyed fact test") != std::string::npos);
+}
+
 TEST(remember_folds_dedupes_and_stays_under_its_cap) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
