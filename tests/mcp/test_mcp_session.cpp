@@ -132,6 +132,20 @@ private:
             return std::vector<ResourceContents>{ResourceContents::from_text(uri, "body text")};
         });
 
+        Resource r_throwing;
+        r_throwing.uri = "test://throwing_doc";
+        r_throwing.name = "throwing_doc";
+        s.add_resource(std::move(r_throwing), [](const std::string&, RequestContext&) -> std::vector<ResourceContents> {
+            throw std::runtime_error("resource reading failed");
+        });
+
+        Resource r_non_std_throwing;
+        r_non_std_throwing.uri = "test://non_std_doc";
+        r_non_std_throwing.name = "non_std_doc";
+        s.add_resource(std::move(r_non_std_throwing), [](const std::string&, RequestContext&) -> std::vector<ResourceContents> {
+            throw 99;
+        });
+
         Prompt p;
         p.name = "greet";
         p.description = "a greeting";
@@ -214,6 +228,38 @@ TEST(a_throwing_handler_becomes_a_tool_failure_not_a_crash) {
     CHECK_EQ(text_of(after), std::string("still alive"));
 }
 
+TEST(resource_handler_uncaught_exceptions_yield_internal_error) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+
+    // 1. Resource handler throwing std::exception -> kInternalError with e.what()
+    bool threw_std = false;
+    try {
+        static_cast<void>(s.client().read_resource("test://throwing_doc"));
+    } catch (const McpError& e) {
+        threw_std = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kInternalError));
+        CHECK(std::string(e.what()).find("resource reading failed") != std::string::npos);
+    }
+    CHECK(threw_std);
+
+    // 2. Resource handler throwing non-std exception -> kInternalError with "unknown exception in handler"
+    bool threw_non_std = false;
+    try {
+        static_cast<void>(s.client().read_resource("test://non_std_doc"));
+    } catch (const McpError& e) {
+        threw_non_std = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kInternalError));
+        CHECK(std::string(e.what()).find("unknown exception in handler") != std::string::npos);
+    }
+    CHECK(threw_non_std);
+
+    // Verify session survives and still functions normally
+    const std::vector<ResourceContents> body = s.client().read_resource("test://doc");
+    REQUIRE(body.size() == 1);
+    CHECK_EQ(*body[0].text, std::string("body text"));
+}
+
 TEST(tool_throwing_custom_std_exception_captures_message_as_tool_failure) {
     Session s;
     static_cast<void>(s.client().initialize());
@@ -263,7 +309,7 @@ TEST(resources_and_prompts_round_trip) {
     static_cast<void>(s.client().initialize());
 
     const std::vector<Resource> res = s.client().list_resources();
-    REQUIRE(res.size() == 1);
+    REQUIRE(res.size() == 3);
     CHECK_EQ(res[0].uri, std::string("test://doc"));
 
     const std::vector<ResourceContents> body = s.client().read_resource("test://doc");
