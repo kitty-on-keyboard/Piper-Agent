@@ -1275,6 +1275,65 @@ TEST(collect_git_returns_zero_stats_for_non_git_dir) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(collect_git_numstat_string_to_int_fallback) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_collect_git_fallback_" + std::to_string(::getpid()));
+    const auto bin_dir = dir / "bin";
+    std::filesystem::create_directories(bin_dir);
+
+    // Mock git script returning non-numeric, overflow, and partially invalid strings
+    std::filesystem::path mock_git = bin_dir / "git";
+    {
+        std::ofstream f(mock_git.string());
+        f << "#!/bin/sh\n"
+          << "if [ \"$1\" = \"rev-parse\" ]; then\n"
+          << "  echo \"true\"\n"
+          << "  exit 0\n"
+          << "elif [ \"$1\" = \"diff\" ] && [ \"$2\" = \"--numstat\" ]; then\n"
+          << "  echo \"abc def file_invalid_both.txt\"\n"
+          << "  echo \"15 invalid_del file_invalid_del.txt\"\n"
+          << "  echo \"invalid_ins 20 file_invalid_ins.txt\"\n"
+          << "  echo \"9999999999999999999999 5 file_overflow_ins.txt\"\n"
+          << "  echo \"3 9999999999999999999999 file_overflow_del.txt\"\n"
+          << "  echo \"- - binary_file.bin\"\n"
+          << "  echo \"12 8 valid_file.txt\"\n"
+          << "  exit 0\n"
+          << "elif [ \"$1\" = \"diff\" ]; then\n"
+          << "  echo \"diff --git a/valid_file.txt b/valid_file.txt\"\n"
+          << "  exit 0\n"
+          << "elif [ \"$1\" = \"status\" ]; then\n"
+          << "  exit 0\n"
+          << "fi\n"
+          << "exit 1\n";
+    }
+    std::filesystem::permissions(mock_git,
+                                 std::filesystem::perms::owner_read |
+                                 std::filesystem::perms::owner_write |
+                                 std::filesystem::perms::owner_exec);
+
+    const char* old_path = std::getenv("PATH");
+    std::string new_path = bin_dir.string() + ":" + (old_path ? old_path : "");
+    ::setenv("PATH", new_path.c_str(), 1);
+
+    RunResult res;
+    collect_git(dir.string(), dir.string(), res);
+
+    if (old_path) {
+        ::setenv("PATH", old_path, 1);
+    } else {
+        ::unsetenv("PATH");
+    }
+
+    // 7 files in numstat output
+    CHECK_EQ(res.diff_stat.files, 7);
+    // Valid insertions: 15 (file_invalid_del) + 3 (file_overflow_del) + 12 (valid_file) = 30
+    CHECK_EQ(res.diff_stat.insertions, 30);
+    // Valid deletions: 20 (file_invalid_ins) + 5 (file_overflow_ins) + 8 (valid_file) = 33
+    CHECK_EQ(res.diff_stat.deletions, 33);
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST(collect_git_handles_numstat_invalid_integers_and_untracked) {
     const auto dir = std::filesystem::temp_directory_path() /
         ("test_collect_git_mock_" + std::to_string(::getpid()));
