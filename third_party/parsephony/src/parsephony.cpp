@@ -543,10 +543,17 @@ Value Value::operator[](size_t i) const noexcept {
         return Value(doc_, start + uint32_t(i));
     }
     uint32_t cur = start;
-    for (size_t k = 0; k < i; ++k) {
+    size_t start_k = 0;
+    if (last_idx_ != 0 && last_k_ <= i) {
+        cur = last_idx_;
+        start_k = last_k_;
+    }
+    for (size_t k = start_k; k < i; ++k) {
         const Node& cn = doc_->node(cur);
         cur = (cn.type == Type::Array || cn.type == Type::Object) ? cn.off : cur + 1;
     }
+    last_idx_ = cur;
+    last_k_ = static_cast<uint32_t>(i);
     return Value(doc_, cur);
 }
 

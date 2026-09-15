@@ -160,6 +160,8 @@ private:
     friend class Document;
     const Document* doc_ = nullptr;
     uint32_t idx_ = 0;
+    mutable uint32_t last_idx_ = 0;
+    mutable uint32_t last_k_ = 0;
 };
 
 // ---------------------------------------------------------------------------
