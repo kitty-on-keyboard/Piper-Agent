@@ -304,6 +304,52 @@ SpecStep SpeculativeDecoder::abandon_block(std::size_t prefix, const TokenMask* 
     return decode_one(mask_at(0, mask), recent, fwd);
 }
 
+void SpeculativeDecoder::update_cache_and_forward(std::size_t m, std::size_t draft_count,
+                                                  const std::vector<TokenId>& committed,
+                                                  SpecForward& fwd) {
+    // Where the cache is left, and who pays for the next row.
+    //
+    // Full acceptance is the cheap case: the pass consumed the prefix and every draft, so
+    // only the bonus token -- sampled, never forwarded -- is outstanding.
+    //
+    // Partial acceptance cannot simply drop the rejected tail. The full-attention layers
+    // could (their rollback is an index), but the gated-delta layers hold a recurrence
+    // with no per-token history, so the only reachable earlier state is the checkpoint --
+    // which sits BEFORE the prefix as well. Everything that rode in comes back out.
+    //
+    // DEFERRING is the point of all this. The alternative, taken whenever the proposer
+    // cannot draft without the target, is to forward the outstanding tokens now purely to
+    // obtain a row -- and on a dense target that is a full read of the weights for one
+    // row, as expensive as the verification pass it follows. So when the proposer carries
+    // its own seed, nothing is forwarded here at all: the tokens go into `pending_` and
+    // ride in front of the next block's verification, which was going to run regardless.
+    const bool full = (m == draft_count);
+    const bool defer = proposer_->can_draft_deferred() &&
+                       (full || pending_.size() + committed.size() <= max_deferred());
+    if (defer) {
+        if (full) {
+            pending_.assign(1, committed.back());
+        } else {
+            fwd.restore();
+            pending_.insert(pending_.end(), committed.begin(), committed.end());
+        }
+        // No row until the next pass produces one; holding a stale one would let a caller
+        // shape a distribution for a position the target has not reached.
+        row_.clear();
+    } else if (full) {
+        const std::span<const TokenId> tail(&committed.back(), 1);
+        fwd.forward_last(tail, row_);
+        pending_.clear();
+    } else {
+        fwd.restore();
+        // The prefix went back out with the rejected tail, so it is replayed too.
+        std::vector<TokenId> replay = pending_;
+        replay.insert(replay.end(), committed.begin(), committed.end());
+        fwd.forward_last(std::span<const TokenId>(replay), row_);
+        pending_.clear();
+    }
+}
+
 SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& recent,
                                   std::span<const TokenId> context, bool may_speculate,
                                   const std::function<bool(TokenId)>& is_special,
@@ -453,47 +499,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     stats_.accepted_drafts += m;
     stats_.committed += out.committed.size();
 
-    // Where the cache is left, and who pays for the next row.
-    //
-    // Full acceptance is the cheap case: the pass consumed the prefix and every draft, so
-    // only the bonus token -- sampled, never forwarded -- is outstanding.
-    //
-    // Partial acceptance cannot simply drop the rejected tail. The full-attention layers
-    // could (their rollback is an index), but the gated-delta layers hold a recurrence
-    // with no per-token history, so the only reachable earlier state is the checkpoint --
-    // which sits BEFORE the prefix as well. Everything that rode in comes back out.
-    //
-    // DEFERRING is the point of all this. The alternative, taken whenever the proposer
-    // cannot draft without the target, is to forward the outstanding tokens now purely to
-    // obtain a row -- and on a dense target that is a full read of the weights for one
-    // row, as expensive as the verification pass it follows. So when the proposer carries
-    // its own seed, nothing is forwarded here at all: the tokens go into `pending_` and
-    // ride in front of the next block's verification, which was going to run regardless.
-    const bool full = (m == drafted.size());
-    const bool defer = proposer_->can_draft_deferred() &&
-                       (full || pending_.size() + out.committed.size() <= max_deferred());
-    if (defer) {
-        if (full) {
-            pending_.assign(1, out.committed.back());
-        } else {
-            fwd.restore();
-            pending_.insert(pending_.end(), out.committed.begin(), out.committed.end());
-        }
-        // No row until the next pass produces one; holding a stale one would let a caller
-        // shape a distribution for a position the target has not reached.
-        row_.clear();
-    } else if (full) {
-        const std::span<const TokenId> tail(&out.committed.back(), 1);
-        fwd.forward_last(tail, row_);
-        pending_.clear();
-    } else {
-        fwd.restore();
-        // The prefix went back out with the rejected tail, so it is replayed too.
-        std::vector<TokenId> replay = pending_;
-        replay.insert(replay.end(), out.committed.begin(), out.committed.end());
-        fwd.forward_last(std::span<const TokenId>(replay), row_);
-        pending_.clear();
-    }
+    update_cache_and_forward(m, drafted.size(), out.committed, fwd);
     return out;
 }
 

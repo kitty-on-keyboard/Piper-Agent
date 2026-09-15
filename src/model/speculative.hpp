@@ -286,6 +286,11 @@ class SpeculativeDecoder {
     SpecStep abandon_block(std::size_t prefix, const TokenMask* mask,
                            const std::vector<TokenId>& recent, SpecForward& fwd);
 
+    // Update state, pending cache, and forward state after a speculative block's
+    // verification result is settled.
+    void update_cache_and_forward(std::size_t m, std::size_t draft_count,
+                                 const std::vector<TokenId>& committed, SpecForward& fwd);
+
     SamplingParams params_;
     SpecConfig config_;
     Sampler sampler_;
