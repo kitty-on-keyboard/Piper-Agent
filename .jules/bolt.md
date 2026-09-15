@@ -17,3 +17,7 @@
 ## 2026-04-05 - O(1) Indexing Fast Path for Flat JSON Arrays in parsephony
 **Learning:** In `parsephony`, `Value::operator[](size_t i)` walked the DOM tree using `next_sibling` for each element index $i$, leading to $O(N^2)$ time complexity when looping over array elements by index. Because flat arrays (where all elements are scalars occupying 1 node on the tape) satisfy `n.off - (idx_ + 1) == n.len`, element $i$ can be retrieved in $O(1)$ time at tape index `idx_ + 1 + i`.
 **Action:** Check `n.off - start == n.len` before walking siblings in tape-based JSON array indexing to achieve $O(1)$ random access for flat arrays.
+
+## 2026-04-10 - Single-Pass Corpus Token Frequency Map for Static Analysis
+**Learning:** In `scripts/run_ratchets.py`, `gate_dead_code` previously compiled a regex for each declared symbol and searched the entire file corpus $M$ times ($O(M \times N_{files} \times L_{file})$), taking ~57 seconds. By scanning all corpus files in a single pass to build a `collections.Counter` of identifier tokens (`\b[A-Za-z_][A-Za-z0-9_]*\b`), symbol frequencies can be queried in $O(1)$ time per symbol (~0.3 seconds total, ~180x speedup).
+**Action:** Build corpus-wide token frequency maps in a single pass when checking multiple identifier references instead of running repeated full-corpus regex scans per symbol.
