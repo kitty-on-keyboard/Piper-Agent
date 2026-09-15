@@ -291,6 +291,24 @@ class SpeculativeDecoder {
     void update_cache_and_forward(std::size_t m, std::size_t draft_count,
                                  const std::vector<TokenId>& committed, SpecForward& fwd);
 
+    // Shape target distributions for each drafted position in a speculative block.
+    [[nodiscard]] std::vector<TokenDist> shape_distributions(
+        std::size_t prefix, std::span<const std::vector<float>> rows,
+        std::span<const TokenId> drafted, const TokenMask* mask,
+        const std::vector<TokenId>& recent) const;
+
+    // Map drafted token IDs into candidate indices expected by SpecVerifier.
+    [[nodiscard]] std::vector<TokenId> map_draft_indices(
+        std::span<const TokenId> drafted, std::span<const TokenDist> dists) const;
+
+    // Evaluate verification result and extract committed tokens if accepted.
+    // Returns true if verification succeeded and committed tokens were populated;
+    // returns false if the block must be abandoned.
+    bool evaluate_speculative_block(
+        std::span<const TokenId> drafted, std::span<const TokenDist> dists,
+        const std::vector<TokenId>& draft_idx, std::size_t prefix, SpecForward& fwd,
+        SpecStep& out);
+
     SamplingParams params_;
     SpecConfig config_;
     Sampler sampler_;

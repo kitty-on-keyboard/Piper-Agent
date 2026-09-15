@@ -350,6 +350,86 @@ void SpeculativeDecoder::update_cache_and_forward(std::size_t m, std::size_t dra
     }
 }
 
+std::vector<TokenDist> SpeculativeDecoder::shape_distributions(
+    std::size_t prefix, std::span<const std::vector<float>> rows,
+    std::span<const TokenId> drafted, const TokenMask* mask,
+    const std::vector<TokenId>& recent) const {
+    std::vector<TokenDist> dists;
+    dists.reserve(drafted.size() + 1);
+    if (prefix == 0) {
+        dists.push_back(sampler_.distribution(row_, mask_at(0, mask), recent));
+    } else if (prefix - 1 < rows.size()) {
+        dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
+    }
+    if (dists.empty() || dists.front().empty()) {
+        return dists;
+    }
+    std::vector<TokenId> recent_i = recent;
+    for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
+        recent_i.push_back(drafted[i]);
+        if (recent_i.size() > kRecentWindow) {
+            recent_i.erase(recent_i.begin());
+        }
+        dists.push_back(sampler_.distribution(rows[prefix + i], mask_at(i + 1, mask), recent_i));
+    }
+    return dists;
+}
+
+std::vector<TokenId> SpeculativeDecoder::map_draft_indices(
+    std::span<const TokenId> drafted, std::span<const TokenDist> dists) const {
+    std::vector<TokenId> draft_idx;
+    draft_idx.reserve(drafted.size());
+    for (std::size_t i = 0; i < drafted.size() && i + 1 < dists.size(); ++i) {
+        const std::vector<TokenId>& ids = dists[i].ids;
+        const auto it = std::lower_bound(ids.begin(), ids.end(), drafted[i]);
+        draft_idx.push_back((it != ids.end() && *it == drafted[i])
+                                ? static_cast<TokenId>(it - ids.begin())
+                                : static_cast<TokenId>(ids.size()));
+    }
+    return draft_idx;
+}
+
+bool SpeculativeDecoder::evaluate_speculative_block(
+    std::span<const TokenId> drafted, std::span<const TokenDist> dists,
+    const std::vector<TokenId>& draft_idx, std::size_t prefix, SpecForward& fwd,
+    SpecStep& out) {
+    std::vector<std::vector<float>> compact;
+    std::vector<std::span<const float>> row_spans;
+    compact.reserve(dists.size());
+    row_spans.reserve(dists.size());
+    for (const TokenDist& d : dists) {
+        compact.push_back(d.probs);
+        row_spans.emplace_back(compact.back().data(), compact.back().size());
+    }
+
+    const std::vector<float> ones(draft_idx.size(), kDeterministicDrafter);
+    const SpecResult r =
+        verifier_.verify(std::span<const TokenId>(draft_idx), std::span<const float>(ones),
+                         std::span<const std::span<const float>>(row_spans));
+    if (r.accepted.empty()) {
+        return false;
+    }
+
+    const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
+    for (std::size_t i = 0; i < m; ++i) {
+        out.committed.push_back(drafted[i]);
+    }
+    const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
+    if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
+        out.committed.clear();
+        return false;
+    }
+    out.committed.push_back(dists[m].ids[tail_idx]);
+
+    proposer_->settle(m, std::span<const TokenId>(out.committed), prefix, fwd);
+
+    stats_.accepted_drafts += m;
+    stats_.committed += out.committed.size();
+
+    update_cache_and_forward(m, drafted.size(), out.committed, fwd);
+    return true;
+}
+
 SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& recent,
                                   std::span<const TokenId> context, bool may_speculate,
                                   const std::function<bool(TokenId)>& is_special,
@@ -357,50 +437,31 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     SpecStep out;
     probe_n_ = 0;
     const TokenMask* mask = src != nullptr ? &src->mask() : nullptr;
-    // Where the mask moves with every token, the draft has to be checked position by
-    // position rather than all against the current one -- a token legal two positions in
-    // is generally not legal now, and vice versa.
     const bool walking = src != nullptr && !src->mask_is_block_stable() && src->can_checkpoint();
 
-    // A prefix left from the previous block can only ride along under a proposer that
-    // drafts from its own state; anything else needs the target caught up first.
     if (!proposer_->can_draft_deferred() || pending_.size() >= max_deferred()) {
         flush(fwd);
     }
 
-    // Drafted BEFORE the row is shaped, which the deferred path requires: with a prefix
-    // outstanding there is no row yet to shape. Safe to reorder because distribution() is
-    // const and consumes no randomness, and a grafted proposer reads only hidden state.
     std::vector<TokenId> drafted =
         (config_.enabled && may_speculate)
-            // propose() gets no mask when walking: its check is against ONE mask, which
-            // is exactly the assumption that does not hold here. walk_masks() truncates.
             ? propose(context, is_special, walking ? nullptr : mask, fwd)
             : std::vector<TokenId>{};
 
     if (walking && !drafted.empty()) {
         walk_masks(*src, drafted);
-        // Re-point at the CAPTURED copy of the current mask. `mask` was a reference into
-        // the grammar's cache, and inside a tool call that cache holds exactly one mask
-        // and rebuilds it on every mask() call -- so the walk just invalidated it. The
-        // copy at position 0 is the same mask and outlives the block.
         mask = mask_at(0, mask);
     }
 
-    // No block to fold the prefix into, so it has to be paid for on its own.
     if (drafted.empty()) {
         flush(fwd);
         return decode_one(mask, recent, fwd);
     }
 
-    // --- the speculative block ---------------------------------------------------
     ++stats_.blocks;
     stats_.drafted += drafted.size();
     out.speculated = true;
 
-    // The prefix rides in front of the drafts, in ONE pass. Position j-1 of that pass is
-    // the row the first draft is verified against -- the row a trailing forward_last used
-    // to be run to obtain, at the price of a whole extra read of the weights.
     const std::size_t prefix = pending_.size();
     std::vector<TokenId> input;
     input.reserve(prefix + drafted.size());
@@ -411,95 +472,17 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     std::vector<std::vector<float>> rows;
     fwd.forward_all(std::span<const TokenId>(input), rows);
 
-    // One shaped distribution per drafted position, plus the row for the position the
-    // first draft sits at. With no prefix that is the row carried from the last block;
-    // with one it is rows[prefix - 1], produced by the pass above. The repetition penalty
-    // is built from the PROVISIONAL history: verification at position i only happens if
-    // drafted[0..i-1] were accepted, so `recent` extended by exactly that prefix is the
-    // history the sequential path would have had. Anything else would verify against a
-    // row the model would never have produced.
-    //
-    // `recent` already contains the deferred tokens -- the caller pushes every committed
-    // token into its window as it is emitted, whether or not the target has consumed it
-    // yet -- so the shaping here is the same either way.
-    std::vector<TokenDist> dists;
-    dists.reserve(drafted.size() + 1);
-    if (prefix == 0) {
-        dists.push_back(sampler_.distribution(row_, mask_at(0, mask), recent));
-    } else if (prefix - 1 < rows.size()) {
-        dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
-    }
+    const std::vector<TokenDist> dists =
+        shape_distributions(prefix, rows, drafted, mask, recent);
     if (dists.empty() || dists.front().empty()) {
         return abandon_block(prefix, mask, recent, fwd);
     }
-    std::vector<TokenId> recent_i = recent;
-    for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
-        recent_i.push_back(drafted[i]);
-        // The SAME bounded window the sequential loop keeps. The repetition penalty is
-        // applied once per OCCURRENCE in this list, so an unbounded window would penalise
-        // a repeated token geometrically harder than the plain path does -- verifying
-        // against a row the model would never have produced. Caught by the gate test,
-        // which saw a p=1.0 token verify at p=0.515.
-        if (recent_i.size() > kRecentWindow) {
-            recent_i.erase(recent_i.begin());
-        }
-        // Position i + 1 of the block: the mask the grammar would have had after
-        // drafted[0..i]. Identical to `mask` for a block-stable source, and the whole
-        // reason a block can run inside a tool call for one that had to be walked.
-        dists.push_back(sampler_.distribution(rows[prefix + i], mask_at(i + 1, mask), recent_i));
-    }
 
-    // Map into the verifier's index space: each row is dense over that position's
-    // candidate list, and a drafted token that did not survive shaping is given an
-    // out-of-range index, which the verifier reads as p = 0 and rejects with certainty.
-    std::vector<std::vector<float>> compact;
-    std::vector<std::span<const float>> row_spans;
-    compact.reserve(dists.size());
-    row_spans.reserve(dists.size());
-    for (const TokenDist& d : dists) {
-        compact.push_back(d.probs);
-        row_spans.emplace_back(compact.back().data(), compact.back().size());
-    }
-    std::vector<TokenId> draft_idx;
-    draft_idx.reserve(drafted.size());
-    for (std::size_t i = 0; i < drafted.size() && i + 1 < dists.size(); ++i) {
-        const std::vector<TokenId>& ids = dists[i].ids;
-        const auto it = std::lower_bound(ids.begin(), ids.end(), drafted[i]);
-        draft_idx.push_back((it != ids.end() && *it == drafted[i])
-                                ? static_cast<TokenId>(it - ids.begin())
-                                : static_cast<TokenId>(ids.size()));
-    }
-    const std::vector<float> ones(draft_idx.size(), kDeterministicDrafter);
-
-    const SpecResult r =
-        verifier_.verify(std::span<const TokenId>(draft_idx), std::span<const float>(ones),
-                         std::span<const std::span<const float>>(row_spans));
-    if (r.accepted.empty()) {
+    const std::vector<TokenId> draft_idx = map_draft_indices(drafted, dists);
+    if (!evaluate_speculative_block(drafted, dists, draft_idx, prefix, fwd, out)) {
         return abandon_block(prefix, mask, recent, fwd);
     }
 
-    const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
-    for (std::size_t i = 0; i < m; ++i) {
-        out.committed.push_back(drafted[i]);
-    }
-    // The final token is an index into the row at position m, not a token id.
-    const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
-    if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
-        return abandon_block(prefix, mask, recent, fwd);
-    }
-    out.committed.push_back(dists[m].ids[tail_idx]);
-
-    // Settle here, and not a line earlier: a grafted drafter seeds the next round by
-    // forwarding the tokens it did not already hold, and the last of those is the bonus
-    // token, which only exists now. It also reads the hidden rows from the verification
-    // pass above, so this must precede the forward_last / restore below -- those replace
-    // what fwd.last_hidden() reports.
-    proposer_->settle(m, std::span<const TokenId>(out.committed), prefix, fwd);
-
-    stats_.accepted_drafts += m;
-    stats_.committed += out.committed.size();
-
-    update_cache_and_forward(m, drafted.size(), out.committed, fwd);
     return out;
 }
 
