@@ -7,3 +7,8 @@
 **Vulnerability:** `container_command()` in `src/tools/container.cpp` concatenated `rt.image` (and `rt.binary`) directly into a command string without shell quoting. If `LMP_CONTAINER_IMAGE` contained shell metacharacters (e.g., `;`, `$()`, `&&`), arbitrary commands would be executed on the host when constructing container sandboxing invocations.
 **Learning:** Building command line strings for `/bin/sh -c` requires strict shell quoting for every dynamic parameter, including environment variable overrides like image tags/digests.
 **Prevention:** Always wrap dynamic command arguments in POSIX single-quote escaping (`shell_quote()`) before assembling shell command strings.
+
+## 2024-11-23 - Enhance environment variable sanitization
+**Vulnerability:** Subprocesses might inherit sensitive information if parent environment variables contained tokens not previously caught, like "PAT" (Personal Access Token), "AUTH", or "JWT".
+**Learning:** The existing filtering logic was strong but the blocklist of suffixes for denying sensitive environment variables was limited.
+**Prevention:** Expanded the `kSuffix` array in `src/mcp/spawn_env.cpp` to include "PAT", "AUTH", and "JWT" to provide broader coverage against leaking common credential suffixes to child processes.

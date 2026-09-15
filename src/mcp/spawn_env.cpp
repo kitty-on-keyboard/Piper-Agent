@@ -75,7 +75,7 @@ namespace {
     // match TOKEN. CREDENTIALS covers GOOGLE_APPLICATION_CREDENTIALS if the exact
     // list is ever trimmed; CREDENTIAL covers the singular form.
     static constexpr std::string_view kSuffix[] = {
-        "TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS",
+        "TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "PAT", "AUTH", "JWT",
     };
     for (const std::string_view s : kSuffix) {
         if (ascii_ieq(key, s)) {
