@@ -102,10 +102,16 @@ export class SidecarClient extends EventEmitter {
       } catch {
         /* the tail below still works */
       }
-      for (const line of chunk.toString("utf8").split("\n")) {
-        if (line.length === 0) continue;
-        this.stderrTail.push(line);
-        if (this.stderrTail.length > 40) this.stderrTail.shift();
+      const str = chunk.toString("utf8");
+      let start = 0;
+      while (start <= str.length) {
+        let nl = str.indexOf("\n", start);
+        if (nl === -1) nl = str.length;
+        if (nl > start) {
+          this.stderrTail.push(str.slice(start, nl));
+          if (this.stderrTail.length > 40) this.stderrTail.shift();
+        }
+        start = nl + 1;
       }
     });
     proc.on("exit", (code) => {
@@ -141,10 +147,14 @@ export class SidecarClient extends EventEmitter {
     const complete = this.accumulator.slice(0, lastNl);
     this.accumulator = this.accumulator.slice(lastNl + 1);
 
-    const lines = complete.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.length > 0) this.dispatch(line);
+    let start = 0;
+    while (start <= complete.length) {
+      let nl = complete.indexOf("\n", start);
+      if (nl === -1) nl = complete.length;
+      if (nl > start) {
+        this.dispatch(complete.slice(start, nl));
+      }
+      start = nl + 1;
     }
   }
 
