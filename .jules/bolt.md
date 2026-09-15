@@ -21,3 +21,7 @@
 ## 2026-04-10 - Single-Pass Corpus Token Frequency Map for Static Analysis
 **Learning:** In `scripts/run_ratchets.py`, `gate_dead_code` previously compiled a regex for each declared symbol and searched the entire file corpus $M$ times ($O(M \times N_{files} \times L_{file})$), taking ~57 seconds. By scanning all corpus files in a single pass to build a `collections.Counter` of identifier tokens (`\b[A-Za-z_][A-Za-z0-9_]*\b`), symbol frequencies can be queried in $O(1)$ time per symbol (~0.3 seconds total, ~180x speedup).
 **Action:** Build corpus-wide token frequency maps in a single pass when checking multiple identifier references instead of running repeated full-corpus regex scans per symbol.
+
+## 2026-04-15 - Amortized O(1) Sequential Array Indexing via Mutable State Caching in parsephony
+**Learning:** In `parsephony`, indexing non-flat arrays using `Value::operator[](size_t i)` walked the tape from index 0 on every call, causing $O(N^2)$ time complexity when iterating over array elements by index. By storing mutable `last_idx_` and `last_k_` state inside `Value`, sequential accesses resume stepping from the cached tape offset, achieving $O(1)$ amortized per-element access (~2260x speedup on 10,000-element arrays).
+**Action:** Maintain lightweight mutable position cache fields inside cursor objects to optimize sequential index traversal across tree/tape data structures.
