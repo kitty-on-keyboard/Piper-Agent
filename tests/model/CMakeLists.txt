@@ -30,6 +30,7 @@ add_custom_target(lmp_mini_vocab DEPENDS "${LMP_MINI_VOCAB}")
 add_custom_target(lmp_refused_vocabs
                   DEPENDS "${LMP_FOREIGN_VOCAB}" "${LMP_UNMARKED_VOCAB}")
 
+lmp_add_test(test_parsephony_lookup SOURCES test_parsephony_lookup.cpp LABELS gate LINK parsephony)
 lmp_add_test(test_backend_seam SOURCES test_backend_seam.cpp LABELS gate LINK lmp_model)
 # The speculative block algebra runs in the GATE: SpecForward is an interface precisely so
 # that "which positions were committed, what does the cache hold" is testable with no GPU.
