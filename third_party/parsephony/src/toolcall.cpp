@@ -37,9 +37,52 @@ void ToolCallGuard::reset() {
 }
 
 Error ToolCallGuard::feed(std::string_view bytes) {
-    for (unsigned char c : bytes) {
-        Error e = push_byte(c);
-        if (e != Error::Ok) return e;
+    while (!bytes.empty()) {
+        if (ph_ == Ph::ValueText) {
+            if (term_pos_ > 0) {
+                unsigned char c = static_cast<unsigned char>(bytes[0]);
+                if (c == static_cast<unsigned char>(kTerm[term_pos_])) {
+                    bytes.remove_prefix(1);
+                    if (++term_pos_ == kTerm.size()) {
+                        Error e = finish_param();
+                        if (e != Error::Ok) return e;
+                    }
+                    continue;
+                }
+                // The partial terminator match was actually value content.
+                value_append(kTerm.substr(0, term_pos_));
+                term_pos_ = 0;
+            }
+            // Fast path when term_pos_ == 0: scan for next byte that requires
+            // special handling ('\n' or illegal control character).
+            size_t i = 0;
+            while (i < bytes.size()) {
+                unsigned char c = static_cast<unsigned char>(bytes[i]);
+                if (c == static_cast<unsigned char>(kTerm[0]) || (c < 0x20 && c != '\t' && c != '\r')) {
+                    break;
+                }
+                ++i;
+            }
+            if (i > 0) {
+                value_append(bytes.substr(0, i));
+                bytes.remove_prefix(i);
+                if (bytes.empty()) break;
+            }
+            unsigned char c = static_cast<unsigned char>(bytes[0]);
+            bytes.remove_prefix(1);
+            if (c == static_cast<unsigned char>(kTerm[0])) {   // '\n' restarts
+                term_pos_ = 1;
+            } else if (c < 0x20 && c != '\t' && c != '\r') {
+                return Error::ControlChar;
+            } else {
+                value_append(c);
+            }
+        } else {
+            unsigned char c = static_cast<unsigned char>(bytes[0]);
+            bytes.remove_prefix(1);
+            Error e = push_byte(c);
+            if (e != Error::Ok) return e;
+        }
     }
     return Error::Ok;
 }
