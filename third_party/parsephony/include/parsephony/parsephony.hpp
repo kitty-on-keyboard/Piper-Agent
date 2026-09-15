@@ -224,6 +224,7 @@ private:
         uint32_t node;    // tape index of the open container
         uint32_t count;   // elements/members closed so far
         bool is_object;
+        uint64_t seen_key_hashes = 0;
     };
 
     Options opts_;

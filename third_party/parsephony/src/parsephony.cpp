@@ -246,7 +246,7 @@ parse_value:
             if (stack_.size() >= opts_.max_depth) return fail(Error::DepthExceeded, p);
             uint32_t idx = n;
             tape[n++] = Node{0, 0, Type::Object, 0, 0};
-            stack_.push_back(Frame{idx, 0, true});
+            stack_.push_back(Frame{idx, 0, true, 0});
             ++p;
             skip_ws();
             if (p == end) return fail(Error::UnexpectedEnd, p);
@@ -257,7 +257,7 @@ parse_value:
             if (stack_.size() >= opts_.max_depth) return fail(Error::DepthExceeded, p);
             uint32_t idx = n;
             tape[n++] = Node{0, 0, Type::Array, 0, 0};
-            stack_.push_back(Frame{idx, 0, false});
+            stack_.push_back(Frame{idx, 0, false, 0});
             ++p;
             skip_ws();
             if (p == end) return fail(Error::UnexpectedEnd, p);
@@ -335,22 +335,29 @@ parse_key: {
         Frame& f = stack_.back();
         Node& obj_node = tape[f.node];
         if (!(obj_node.flags & Node::kDuplicateKeys) && f.count > 0) {
-            if (f.count >= 32) {
-                obj_node.flags |= Node::kDuplicateKeys;
-            } else {
-                std::string_view new_key_sv = (flags & Node::kEscaped)
-                    ? std::string_view(doc.decoded_.data() + off, len)
-                    : std::string_view(base + off, len);
+            std::string_view new_key_sv = (flags & Node::kEscaped)
+                ? std::string_view(doc.decoded_.data() + off, len)
+                : std::string_view(base + off, len);
 
+            uint64_t h = 14695981039346656037ULL;
+            for (char c : new_key_sv) {
+                h ^= static_cast<uint8_t>(c);
+                h *= 1099511628211ULL;
+            }
+            uint64_t bit = 1ULL << (h & 63);
+
+            if ((f.seen_key_hashes & bit) != 0) {
                 uint32_t prev_k = f.node + 1;
                 for (uint32_t m = 0; m < f.count; ++m) {
                     const Node& kn = tape[prev_k];
-                    std::string_view kn_sv = kn.escaped()
-                        ? std::string_view(doc.decoded_.data() + kn.off, kn.len)
-                        : std::string_view(base + kn.off, kn.len);
-                    if (kn_sv == new_key_sv) {
-                        obj_node.flags |= Node::kDuplicateKeys;
-                        break;
+                    if (kn.len == len) {
+                        std::string_view kn_sv = kn.escaped()
+                            ? std::string_view(doc.decoded_.data() + kn.off, kn.len)
+                            : std::string_view(base + kn.off, kn.len);
+                        if (kn_sv == new_key_sv) {
+                            obj_node.flags |= Node::kDuplicateKeys;
+                            break;
+                        }
                     }
                     uint32_t val_idx = prev_k + 1;
                     const Node& vn = tape[val_idx];
@@ -358,6 +365,7 @@ parse_key: {
                         ? vn.off : val_idx + 1;
                 }
             }
+            f.seen_key_hashes |= bit;
         }
 
         tape[n++] = Node{off, len, Type::Key, flags, 0};
@@ -555,12 +563,16 @@ Value Value::operator[](std::string_view key) const noexcept {
     const Node& n = doc_->node(idx_);
     if (n.type != Type::Object) return {};
 
+    const uint32_t target_len = uint32_t(key.size());
     uint32_t cur = idx_ + 1;
     if (!n.has_duplicate_keys()) {
         for (uint32_t k = 0; k < n.len; ++k) {
-            Value kv(doc_, cur);
-            if (kv.get_string() == key) {
-                return Value(doc_, cur + 1);
+            const Node& kn = doc_->node(cur);
+            if (kn.len == target_len) {
+                Value kv(doc_, cur);
+                if (kv.get_string() == key) {
+                    return Value(doc_, cur + 1);
+                }
             }
             cur = next_sibling(doc_, cur + 1);
         }
@@ -572,8 +584,11 @@ Value Value::operator[](std::string_view key) const noexcept {
     uint32_t found = 0;
     bool have = false;
     for (uint32_t k = 0; k < n.len; ++k) {
-        Value kv(doc_, cur);
-        if (kv.get_string() == key) { found = cur + 1; have = true; }
+        const Node& kn = doc_->node(cur);
+        if (kn.len == target_len) {
+            Value kv(doc_, cur);
+            if (kv.get_string() == key) { found = cur + 1; have = true; }
+        }
         cur = next_sibling(doc_, cur + 1);
     }
     return have ? Value(doc_, found) : Value();
