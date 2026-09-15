@@ -157,7 +157,7 @@ std::string container_command(const ContainerRuntime& rt, const std::string& com
     // path; remapping them would make the container's output describe a filesystem the
     // rest of the run has never heard of.
     std::string argv;
-    argv += rt.binary;
+    argv += shell_quote(rt.binary);
     argv += " run --rm";
     argv += " --network none";                     // egress denial, by the runtime
     argv += " --memory " + std::to_string(limits.memory_bytes);
@@ -166,7 +166,7 @@ std::string container_command(const ContainerRuntime& rt, const std::string& com
     argv += " --volume " + shell_quote(workspace_root + ":" + workspace_root);
     argv += " --env " + shell_quote("TMPDIR=" + workspace_root + "/.lmp_tmp"); // scratch inside the jail,
                                                              // the same fix Seatbelt needed
-    argv += " " + rt.image;
+    argv += " " + shell_quote(rt.image);
     argv += " /bin/sh -c ";
     argv += shell_quote(command);
 
