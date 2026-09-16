@@ -13,8 +13,9 @@
 //
 //   T0  no execution                       plan/explore
 //   T1  macOS Seatbelt (sandbox-exec)      default attended: fs-jail to workspace,
-//                                          deny egress, in the PROFILE, not by
-//                                          inspecting commands
+//                                          loopback-only network (bind/connect),
+//                                          deny non-loopback egress, in the PROFILE,
+//                                          not by inspecting commands
 //   T2  container                          REQUIRED for unattended (S7.2). Wired: the
 //                                          runtime is probed once, and a missing or
 //                                          unusable one REFUSES -- never downgrades.

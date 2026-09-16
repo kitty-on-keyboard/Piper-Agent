@@ -141,7 +141,7 @@
           ],
           "enumDescriptions": [
             "T0 - no execution.",
-            "T1 - macOS Seatbelt: writes jailed to the workspace, egress denied.",
+            "T1 - macOS Seatbelt: writes jailed to the workspace, loopback-only network (no external egress).",
             "T2 - container. REQUIRED for unattended runs (S7.2); refuses until wired.",
             "T3 - UNSANDBOXED. Commands run on the host with no filesystem jail and no egress denial. Wall-clock, memory and output limits still apply. Opt in deliberately."
           ],

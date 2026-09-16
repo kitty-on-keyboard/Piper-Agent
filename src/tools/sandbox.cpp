@@ -108,15 +108,23 @@ std::string seatbelt_profile(const std::string& workspace_root) {
     // workspace", and the break-out test caught it. It still would: that test writes
     // straight into the temp root, which stays denied here.
     //
-    // Network is denied here, in the profile, not by inspecting the command (S7.4).
+    // Network is confined here, in the profile, not by inspecting the command (S7.4).
+    // Non-loopback egress stays denied; loopback bind/connect is allowed so local HTTP
+    // integration tests (ThreadingHTTPServer on 127.0.0.1) work under T1 instead of
+    // thrashing on bind denial. Split by operation: outbound is gated on the REMOTE
+    // address (external connect stays denied), while inbound/bind are gated on the
+    // LOCAL address. A combined `(allow network* (local ip …))` would re-open egress.
     // Reads stay open: toolchains legitimately read /usr and the SDKs, and the assets
-    // protected at T1 are the user's data and the network. Read confinement beyond
-    // that is a T2 property, and S7.2 already requires T2 for unattended runs.
+    // protected at T1 are the user's data and non-loopback network. Read confinement
+    // beyond that is a T2 property, and S7.2 already requires T2 for unattended runs.
     const std::string root = resolve_real(workspace_root);
     std::string p;
     p += "(version 1)\n";
     p += "(allow default)\n";
     p += "(deny network*)\n";
+    p += "(allow network-outbound (remote ip \"localhost:*\"))\n";
+    p += "(allow network-inbound (local ip \"localhost:*\"))\n";
+    p += "(allow network-bind (local ip \"localhost:*\"))\n";
     p += "(deny file-write*)\n";
     allow_subpath(p, root);
 

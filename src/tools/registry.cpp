@@ -2028,7 +2028,8 @@ Registry::Registry(WorkspaceContext ctx)
         ToolDecl d;
         d.name = "shell";
         d.description = "Run a shell command inside the workspace sandbox: writes are "
-                        "jailed to the workspace, the network is unreachable, and "
+                        "jailed to the workspace, only loopback network is reachable "
+                        "(local HTTP servers / 127.0.0.1; no external egress), and "
                         "runaway commands are killed at the wall clock. Output is "
                         "compacted; the full log is spooled to an artifact.";
         d.spec.name = d.name;
@@ -2128,7 +2129,7 @@ Registry::Registry(WorkspaceContext ctx)
             const RiskHint hint = classify_command(*get(p, "command"), ctx_.root, ctx_.root);
             std::string s = "tier=" + std::to_string(approved_tier) +
                             " wall_clock=" + std::to_string(ctx_.shell_wall_clock_seconds) +
-                            "s network=denied writes=workspace-only\n";
+                            "s network=loopback-only writes=workspace-only\n";
             s += "advisory capabilities (do not gate on these -- the sandbox is the "
                  "authority):";
             const auto& c = hint.caps;

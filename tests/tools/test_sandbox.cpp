@@ -69,17 +69,43 @@ TEST(a_write_inside_the_root_succeeds) {
     CHECK_EQ(f.bytes, std::string("ok\n"));
 }
 
-TEST(opening_a_socket_is_stopped) {
+TEST(opening_an_external_socket_is_stopped) {
     const std::string root = temp_dir();
     REQUIRE(!root.empty());
     const ExecutionGrant grant = grant_execution(SandboxTier::T1_Seatbelt);
-    // nc -z probes a port. Under (deny network*) it must fail -- whether or not
-    // anything is listening, which is the point: the denial is in the profile, not in
-    // the observed effect (S7.4).
+    // External connect must fail under (deny network*) + loopback-only allows.
+    // 8.8.8.8 is not localhost; denial is in the profile, not in the observed effect (S7.4).
     const ExecOutcome o = run_sandboxed(
-        grant, "nc -z -G 2 127.0.0.1 22 && echo CONNECTED", root, root, limits(10));
+        grant, "nc -z -G 2 8.8.8.8 53 && echo CONNECTED", root, root, limits(10));
     CHECK(o.status == Status::ToolError);
     CHECK(o.output.find("CONNECTED") == std::string::npos);
+}
+
+TEST(loopback_bind_and_connect_are_allowed) {
+    // MEASURED: ha-002-class agents wrote ThreadingHTTPServer tests, hit bind denial
+    // under blanket (deny network*), and spent ~25 turns inventing mocks. Loopback is
+    // the whole point of those tests; non-loopback egress stays denied above.
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const ExecutionGrant grant = grant_execution(SandboxTier::T1_Seatbelt);
+    const ExecOutcome o = run_sandboxed(
+        grant,
+        "python3 -c \""
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "import threading, urllib.request\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "  def do_GET(self):\n"
+        "    self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "  def log_message(self, *a): pass\n"
+        "s=HTTPServer(('127.0.0.1',0), H)\n"
+        "threading.Thread(target=s.serve_forever, daemon=True).start()\n"
+        "port=s.server_address[1]\n"
+        "print(urllib.request.urlopen(f'http://127.0.0.1:{port}/', timeout=2).read().decode())\n"
+        "s.shutdown()\n"
+        "\"",
+        root, root, limits(15));
+    CHECK(o.status == Status::Ok);
+    CHECK(o.output.find("ok") != std::string::npos);
 }
 
 TEST(a_command_that_spins_forever_is_stopped) {
@@ -248,6 +274,9 @@ TEST(the_classifier_output_cannot_become_a_grant) {
 TEST(the_seatbelt_profile_denies_by_default_where_it_matters) {
     const std::string p = seatbelt_profile("/work/repo");
     CHECK(p.find("(deny network*)") != std::string::npos);
+    CHECK(p.find("(allow network-outbound (remote ip \"localhost:*\"))") != std::string::npos);
+    CHECK(p.find("(allow network-inbound (local ip \"localhost:*\"))") != std::string::npos);
+    CHECK(p.find("(allow network-bind (local ip \"localhost:*\"))") != std::string::npos);
     CHECK(p.find("(deny file-write*)") != std::string::npos);
     CHECK(p.find("(subpath \"/work/repo\")") != std::string::npos);
 }
