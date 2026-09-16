@@ -224,11 +224,20 @@ struct IrreversibleAskParams {
 // Prints confirmation line to stdout. Returns kExitOk.
 [[nodiscard]] int init_project(const std::string& target_dir = ".");
 
+// Parse `--idle-timeout` CLI values. Invalid / empty / out-of-range strings keep
+// `fallback` (default 3600). Pure, so the gate can assert conversion without linking
+// the sidecar executable that owns worker_main.
+[[nodiscard]] double parse_idle_timeout_seconds(const char* text,
+                                                double fallback = 3600.0) noexcept;
+
 // ------------------------------------------------------------------
 // The entry point: called from main() when worker/CLI is requested.
 // ------------------------------------------------------------------
 
 // Parse argv, run one mission (or --serve for keep-warm, or init), return exit code.
+// Defined in sidecar.cpp (needs the daemon / session wiring); declared here so callers
+// and tests name one symbol. Gate tests that only care about argv conversion should use
+// parse_idle_timeout_seconds instead of linking this.
 [[nodiscard]] int worker_main(int argc, char** argv);
 
 } // namespace lmp::surface::worker

@@ -1191,72 +1191,16 @@ TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
     std::filesystem::remove_all(dir);
 }
 
-TEST(worker_main_handles_idle_timeout_conversions) {
-    const auto tmp_dir = std::filesystem::temp_directory_path() /
-        ("test_idle_timeout_" + std::to_string(::getpid()));
-    std::filesystem::create_directories(tmp_dir);
-
-    // 1. Invalid non-numeric string "abc"
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "abc";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    // 2. Empty string value
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    // 3. Out-of-range value "1e999"
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "1e999";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    // 4. Valid double string "120.5"
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "120.5";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    std::filesystem::remove_all(tmp_dir);
+TEST(idle_timeout_cli_conversion_keeps_fallback_on_bad_strings) {
+    // What worker_main used to be linked for: invalid --idle-timeout values must not
+    // throw and must leave the default (or prior) timeout in place. worker_main itself
+    // lives in the sidecar executable, so the gate asserts the pure conversion helper.
+    CHECK_EQ(parse_idle_timeout_seconds("abc", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_seconds("", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_seconds(nullptr, 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_seconds("1e999", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_seconds("-5", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_seconds("120.5", 3600.0), 120.5);
 }
 
 TEST(collect_git_returns_zero_stats_for_non_git_dir) {

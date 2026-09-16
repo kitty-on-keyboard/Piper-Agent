@@ -2277,7 +2277,7 @@ int worker_main(int argc, char** argv) {
         } else if (arg == "--detach" || arg == "--detached") {
             cli_detach = true;
         } else if (arg == "--idle-timeout" && i + 1 < argc) {
-            try { idle_timeout = std::stod(argv[++i]); } catch (...) {}
+            idle_timeout = parse_idle_timeout_seconds(argv[++i], idle_timeout);
         } else if (arg == "--socket" && i + 1 < argc) {
             socket_path = argv[++i];
         } else if (!arg.empty() && arg[0] != '-') {
