@@ -139,11 +139,22 @@ void ensure_registry(Session& session, const std::string& workspace,
             skip.fields.push_back({"path", workspace + "/.mcp.json"});
             skip.fields.push_back({"servers", std::to_string(probe.size())});
             skip.fields.push_back({"trusted_ignored", std::to_string(ignored_probe)});
-            skip.fields.push_back(
-                {"skipped", "1"});
-            skip.fields.push_back(
-                {"why", "allow_workspace_mcp is false; confirm workspace MCP spawn "
-                        "(IDE) or pass allow_workspace_mcp in the start settings"});
+            skip.fields.push_back({"skipped", "1"});
+            // Workers inject named trust_mcp servers as settings mcp_servers while
+            // leaving allow_workspace_mcp false. That is intentional, not a spawn
+            // failure -- say so when settings already named servers, otherwise grepping
+            // events reads as "MCP skipped" right before a successful mcp_trust connect.
+            if (!from_settings.empty()) {
+                skip.fields.push_back(
+                    {"expected", "1"});
+                skip.fields.push_back(
+                    {"why", "workspace .mcp.json not auto-loaded (allow_workspace_mcp "
+                            "false); settings-sourced / trust_mcp servers still connect"});
+            } else {
+                skip.fields.push_back(
+                    {"why", "allow_workspace_mcp is false; confirm workspace MCP spawn "
+                            "(IDE) or pass allow_workspace_mcp in the start settings"});
+            }
             log.append(skip, clock);
         }
     }
@@ -268,6 +279,10 @@ bool looks_like_a_tool_name(std::string_view s) {
 // Within a short reach behind the name, does the prose say this is something to CALL?
 // Without this every snake_case identifier a README happens to quote is a candidate, and
 // the note is only worth its tokens if it is about tools.
+//
+// Word-boundary match only. Substring `use`/`run`/`tool` fires inside `user`, `runtime`,
+// and `tooling`, which is how `probe_args` (a schema field, not a tool) became a phantom
+// conventions_name_absent_tools warn against Godoer briefs.
 bool called_like_a_tool(const std::string& text, std::size_t tick) {
     static constexpr std::string_view kVerbs[] = {"call", "run", "use", "tool", "invoke"};
     const std::size_t reach = 64;
@@ -276,9 +291,22 @@ bool called_like_a_tool(const std::string& text, std::size_t tick) {
     for (char& c : window) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
+    auto is_word_char = [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+    };
     for (const std::string_view v : kVerbs) {
-        if (window.find(v) != std::string::npos) {
-            return true;
+        std::size_t pos = 0;
+        while ((pos = window.find(v, pos)) != std::string::npos) {
+            const bool left_ok =
+                pos == 0 || !is_word_char(static_cast<unsigned char>(window[pos - 1]));
+            const std::size_t end = pos + v.size();
+            const bool right_ok =
+                end >= window.size() ||
+                !is_word_char(static_cast<unsigned char>(window[end]));
+            if (left_ok && right_ok) {
+                return true;
+            }
+            ++pos;
         }
     }
     return false;
