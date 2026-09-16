@@ -230,6 +230,11 @@ struct AgentConfig {
     // `LMP_SHADOW_COMPACT=0|1` overrides when set. Tests set this field; they do not
     // race on setenv.
     bool shadow_compact = true;
+
+    // Phase A1: skip rewriting tools_guidance_ when the allowlist text is unchanged.
+    // Default on. `LMP_A1_NOOP_TOOLS_REFRESH=0|1` overrides when set. Tests set this
+    // field; they do not race on setenv. Mac A/B uses the env kill switch.
+    bool noop_identical_tools_refresh = true;
 };
 
 // How many of `max_new_tokens` stay reserved for the tool call after think ends.

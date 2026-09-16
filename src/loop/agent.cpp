@@ -937,8 +937,9 @@ void Agent::refresh_mode_tools(const char* trigger) {
 
     // Phase A1: freeze tools text when the allowlist is unchanged. Skip the rewrite so
     // we do not reassign tools_guidance_ / mode_specs_ (stable prefix stays byte-identical)
-    // and do not set tools_guidance_changed_pending_.
-    if (!first_paint && !changed) {
+    // and do not set tools_guidance_changed_pending_. LMP_A1_NOOP_TOOLS_REFRESH=0 disables
+    // for the keep/revert A/B.
+    if (config_.noop_identical_tools_refresh && !first_paint && !changed) {
         emit("tools_refresh",
              {{"trigger", trigger_s},
               {"guidance_hash_before", short_or_full(hash_before)},

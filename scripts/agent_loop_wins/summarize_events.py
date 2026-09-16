@@ -6,6 +6,10 @@ Reads tier-A attribution events emitted by PR1 measurement logging:
 
 Usage:
   python3 scripts/agent_loop_wins/summarize_events.py path/to/events.jsonl
+  python3 scripts/agent_loop_wins/summarize_events.py baseline.jsonl treatment.jsonl
+
+A/B pairing (one flag, same model/seed/corpus):
+  A1: unset vs LMP_A1_NOOP_TOOLS_REFRESH=0
 
 Local multi-MB dumps: keep under piper-bench/agent_loop_wins/ (gitignored).
 Enable per-block firehose with LMP_AGENT_LOOP_TRACE=1.
@@ -80,10 +84,10 @@ def print_counter(title: str, c: Counter[str], limit: int = 20) -> None:
         print(f"  {k}: {n}")
 
 
-def summarize(events: list[dict[str, Any]]) -> None:
+def collect(events: list[dict[str, Any]]) -> dict[str, Any]:
     ttfts: list[float] = []
+    decode_tps: list[float] = []
     reused: list[float] = []
-    prompts: list[float] = []
     reuse_pairs: list[tuple[float, float]] = []
     reset_reasons: Counter[str] = Counter()
     modes: Counter[str] = Counter()
@@ -96,10 +100,12 @@ def summarize(events: list[dict[str, Any]]) -> None:
     accept_depth: Counter[int] = Counter()
     draft_lens: Counter[int] = Counter()
     grammar_empty = 0
+    grammar_forced = 0
     grammar_phases: Counter[str] = Counter()
     spec_blocks = 0
     spec_accepted = 0
     spec_drafted = 0
+    spec_abandoned = 0
 
     for ev in events:
         kind = ev.get("kind", "")
@@ -107,6 +113,9 @@ def summarize(events: list[dict[str, Any]]) -> None:
             t = as_float(ev.get("ttft_ms"))
             if t is not None:
                 ttfts.append(t)
+            d = as_float(ev.get("decode_tok_per_s"))
+            if d is not None:
+                decode_tps.append(d)
             r = as_float(ev.get("prefill_reused_tokens"))
             if r is not None:
                 reused.append(r)
@@ -119,15 +128,16 @@ def summarize(events: list[dict[str, Any]]) -> None:
             ge = as_int(ev.get("grammar_empty_mask"))
             if ge:
                 grammar_empty += ge
+            gf = as_int(ev.get("grammar_forced_tokens"))
+            if gf:
+                grammar_forced += gf
             gp = ev.get("grammar_phase_end") or ""
             if gp:
                 grammar_phases[str(gp)] += 1
-            sb = as_int(ev.get("spec_blocks")) or 0
-            sa = as_int(ev.get("spec_accepted")) or 0
-            sd = as_int(ev.get("spec_drafted")) or 0
-            spec_blocks += sb
-            spec_accepted += sa
-            spec_drafted += sd
+            spec_blocks += as_int(ev.get("spec_blocks")) or 0
+            spec_accepted += as_int(ev.get("spec_accepted")) or 0
+            spec_drafted += as_int(ev.get("spec_drafted")) or 0
+            spec_abandoned += as_int(ev.get("spec_abandoned")) or 0
         elif kind == "kv_reuse":
             mode = str(ev.get("mode", ""))
             modes[mode] += 1
@@ -150,47 +160,148 @@ def summarize(events: list[dict[str, Any]]) -> None:
             if ec:
                 error_classes[ec] += 1
 
-    print("=== agent-loop wins summary ===")
-    print(f"events: {len(events)}")
-    print(f"mean ttft_ms: {mean_or_dash(ttfts)} (n={len(ttfts)})")
-    if reuse_pairs:
-        rates = [r / p if p > 0 else 0.0 for r, p in reuse_pairs]
-        print(f"mean reuse rate (reused/prompt): {mean_or_dash(rates)} (n={len(rates)})")
-    print(f"mean prefill_reused_tokens: {mean_or_dash(reused)} (n={len(reused)})")
-    print(f"spec totals: blocks={spec_blocks} drafted={spec_drafted} accepted={spec_accepted}")
-    if spec_drafted:
-        print(f"  accept ratio: {spec_accepted / spec_drafted:.3f}")
-    print(f"grammar_empty_mask sum: {grammar_empty}")
+    reuse_rates = [r / p if p > 0 else 0.0 for r, p in reuse_pairs]
+    return {
+        "n_events": len(events),
+        "ttfts": ttfts,
+        "decode_tps": decode_tps,
+        "reused": reused,
+        "reuse_rates": reuse_rates,
+        "reset_reasons": reset_reasons,
+        "modes": modes,
+        "refresh_total": refresh_total,
+        "refresh_changed": refresh_changed,
+        "refresh_noop": refresh_noop,
+        "refresh_triggers": refresh_triggers,
+        "error_classes": error_classes,
+        "tool_status": tool_status,
+        "accept_depth": accept_depth,
+        "draft_lens": draft_lens,
+        "grammar_empty": grammar_empty,
+        "grammar_forced": grammar_forced,
+        "grammar_phases": grammar_phases,
+        "spec_blocks": spec_blocks,
+        "spec_accepted": spec_accepted,
+        "spec_drafted": spec_drafted,
+        "spec_abandoned": spec_abandoned,
+    }
 
-    print_counter("kv_reuse.mode", modes)
-    print_counter("kv_reuse.reason (Reset only)", reset_reasons)
+
+def mean(xs: list[float]) -> float | None:
+    return statistics.mean(xs) if xs else None
+
+
+def pct_delta(base: float | None, treat: float | None) -> str:
+    if base is None or treat is None or base == 0:
+        return "-"
+    return f"{100.0 * (treat - base) / base:+.2f}%"
+
+
+def summarize(events: list[dict[str, Any]], title: str = "agent-loop wins summary") -> dict[str, Any]:
+    m = collect(events)
+    print(f"=== {title} ===")
+    print(f"events: {m['n_events']}")
+    print(f"mean ttft_ms: {mean_or_dash(m['ttfts'])} (n={len(m['ttfts'])})")
+    print(f"mean decode_tok_per_s: {mean_or_dash(m['decode_tps'])} (n={len(m['decode_tps'])})")
+    if m["reuse_rates"]:
+        print(
+            f"mean reuse rate (reused/prompt): {mean_or_dash(m['reuse_rates'])} "
+            f"(n={len(m['reuse_rates'])})"
+        )
+    print(f"mean prefill_reused_tokens: {mean_or_dash(m['reused'])} (n={len(m['reused'])})")
     print(
-        f"\ntools_refresh: total={refresh_total} changed={refresh_changed} "
-        f"noop={refresh_noop} "
-        f"changed_rate={'(n/a)' if not refresh_total else f'{refresh_changed / refresh_total:.3f}'} "
-        f"noop_rate={'(n/a)' if not refresh_total else f'{refresh_noop / refresh_total:.3f}'}"
+        f"spec totals: blocks={m['spec_blocks']} drafted={m['spec_drafted']} "
+        f"accepted={m['spec_accepted']} abandoned={m['spec_abandoned']}"
     )
-    print_counter("tools_refresh.trigger", refresh_triggers)
-    print_counter("tool_result.status", tool_status)
-    print_counter("tool_result.error_class", error_classes)
-    print_counter("grammar_phase_end", grammar_phases)
+    if m["spec_drafted"]:
+        print(f"  accept ratio: {m['spec_accepted'] / m['spec_drafted']:.3f}")
+    print(f"grammar_empty_mask sum: {m['grammar_empty']}")
+    print(f"grammar_forced_tokens sum: {m['grammar_forced']}")
+
+    print_counter("kv_reuse.mode", m["modes"])
+    print_counter("kv_reuse.reason (Reset only)", m["reset_reasons"])
+    rt = m["refresh_total"]
+    changed_rate = "(n/a)" if not rt else f"{m['refresh_changed'] / rt:.3f}"
+    noop_rate = "(n/a)" if not rt else f"{m['refresh_noop'] / rt:.3f}"
+    print(
+        f"\ntools_refresh: total={rt} changed={m['refresh_changed']} "
+        f"noop={m['refresh_noop']} "
+        f"changed_rate={changed_rate} "
+        f"noop_rate={noop_rate}"
+    )
+    print_counter("tools_refresh.trigger", m["refresh_triggers"])
+    print_counter("tool_result.status", m["tool_status"])
+    print_counter("tool_result.error_class", m["error_classes"])
+    print_counter("grammar_phase_end", m["grammar_phases"])
     print_counter(
         "accept_at_depth (count by depth)",
-        Counter({str(k): v for k, v in sorted(accept_depth.items())}),
+        Counter({str(k): v for k, v in sorted(m["accept_depth"].items())}),
     )
     print_counter(
         "draft_len_hist (count by draft_len)",
-        Counter({str(k): v for k, v in sorted(draft_lens.items())}),
+        Counter({str(k): v for k, v in sorted(m["draft_lens"].items())}),
     )
+    return m
+
+
+def compare(baseline: dict[str, Any], treatment: dict[str, Any]) -> None:
+    print("\n=== A/B delta (treatment vs baseline) ===")
+    print(f"ttft_ms: {pct_delta(mean(baseline['ttfts']), mean(treatment['ttfts']))}")
+    print(
+        f"decode_tok_per_s: {pct_delta(mean(baseline['decode_tps']), mean(treatment['decode_tps']))}"
+    )
+    print(
+        f"prefill_reused_tokens: {pct_delta(mean(baseline['reused']), mean(treatment['reused']))}"
+    )
+    print(
+        f"reuse_rate: {pct_delta(mean(baseline['reuse_rates']), mean(treatment['reuse_rates']))}"
+    )
+    print(
+        f"grammar_empty_mask: {baseline['grammar_empty']} -> {treatment['grammar_empty']}"
+    )
+    print(
+        f"grammar_forced_tokens: {baseline['grammar_forced']} -> {treatment['grammar_forced']}"
+    )
+    print(
+        f"spec_abandoned: {baseline['spec_abandoned']} -> {treatment['spec_abandoned']}"
+    )
+    print(f"tools_refresh.noop: {baseline['refresh_noop']} -> {treatment['refresh_noop']}")
+    print(
+        f"tools_refresh.changed: {baseline['refresh_changed']} -> {treatment['refresh_changed']}"
+    )
+    print("reset_reasons baseline: " + (str(dict(baseline["reset_reasons"])) or "{}"))
+    print("reset_reasons treatment: " + (str(dict(treatment["reset_reasons"])) or "{}"))
+    print("error_class baseline: " + (str(dict(baseline["error_classes"])) or "{}"))
+    print("error_class treatment: " + (str(dict(treatment["error_classes"])) or "{}"))
+    print("tool_status baseline: " + (str(dict(baseline["tool_status"])) or "{}"))
+    print("tool_status treatment: " + (str(dict(treatment["tool_status"])) or "{}"))
+    print(
+        "Worth: primary metric must beat the plan's noise floor. "
+        "Stability: TTFT/ToolError/empty-mask/abandoned/reset-reasons within noise."
+    )
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("events_jsonl", type=Path, help="path to events.jsonl")
+    ap.add_argument("baseline_jsonl", type=Path, help="baseline events.jsonl")
+    ap.add_argument(
+        "treatment_jsonl",
+        nargs="?",
+        type=Path,
+        help="optional treatment events.jsonl for an A/B delta",
+    )
     args = ap.parse_args()
-    if not args.events_jsonl.is_file():
-        print(f"not a file: {args.events_jsonl}", file=sys.stderr)
+    if not args.baseline_jsonl.is_file():
+        print(f"not a file: {args.baseline_jsonl}", file=sys.stderr)
         return 2
-    summarize(load_events(args.events_jsonl))
+    base = summarize(load_events(args.baseline_jsonl), "baseline")
+    if args.treatment_jsonl is None:
+        return 0
+    if not args.treatment_jsonl.is_file():
+        print(f"not a file: {args.treatment_jsonl}", file=sys.stderr)
+        return 2
+    treat = summarize(load_events(args.treatment_jsonl), "treatment")
+    compare(base, treat)
     return 0
 
 

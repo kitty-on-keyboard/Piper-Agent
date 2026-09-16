@@ -8,10 +8,11 @@ See also `docs/AGENT_LOOP_WINS_LOGGING.md`.
 Tier A attribution (`kv_reuse`, `tools_refresh`, `error_class`, aggregate
 `accept_at_depth` / `draft_len_hist`) is always on.
 
-**Summarize a journal:**
+**Summarize / A/B delta:**
 
 ```bash
 python3 scripts/agent_loop_wins/summarize_events.py path/to/events.jsonl
+python3 scripts/agent_loop_wins/summarize_events.py baseline.jsonl treatment.jsonl
 ```
 
 Local multi-MB dumps belong under `piper-bench/agent_loop_wins/` (gitignored), not
@@ -23,22 +24,17 @@ in the public tree.
 
 | Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
 |--------|--------|----------|-----------|---|-----------|-------|
-| *(logging only)* | — | — | — | — | keep instrumentation | Gate covers field presence; **Mac A3B live run still needed** for real Reset-reason histogram + plan-lock `tools_refresh` |
+| *(logging only)* | — | — | — | — | keep instrumentation | Gate covers field presence. A1 Mac pair is in Phase A below. |
 
 ---
 
 ## Phase A — prefix hygiene
 
-| Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
-|--------|--------|----------|-----------|---|-----------|-------|
-| **A1** no-op `tools_refresh` when allowlist text unchanged | `tools_refresh.noop` / `changed`; `kv_reuse.reason!=tools_guidance_changed` on identical refresh; TTFT / `prefill_reused_tokens` on plan-lock workloads | Pre-A1: every refresh rewrote `tools_guidance_`/`mode_specs_` even when hash-identical (`noop` always `0`) | Mid-run identical refresh skips rewrite (`noop=1`, `changed=0`); real plan-lock still `noop=0`/`changed=1` and drops `plan` from guidance | Gate: `phase_a1_noop_tools_refresh_freezes_identical_guidance` | **keep pending Mac A/B** | Kill if Mac plan-lock workloads show &lt;10% TTFT/reuse win vs baseline *and* no drop in spurious `tools_guidance_changed` Resets. A2 (tools-delta outside stable prefix) only if A1 leaves real allowlist-change Resets as the dominant cost. |
+| Change | Metric | Baseline | Treatment | n | worth | stability | Kill/keep | Notes |
+|--------|--------|----------|-----------|---|-------|-----------|-----------|-------|
+| **A1** no-op `tools_refresh` when allowlist text unchanged | TTFT; `kv_reuse.reason=tools_guidance_changed`; reuse rate; task solved | `LMP_A1_NOOP_TOOLS_REFRESH=0`: mean TTFT 4167 ms; 2 `tools_guidance_changed` Resets; 8 tools_refresh (6 init + 1 plan_lock + 1 plan_unlock); solved 6/6 | default on: mean TTFT 3563 ms (−14.5%); 0 `tools_guidance_changed` Resets; 6 init-only tools_refresh; solved 6/6 | Mac corpus n=6 seed=7, Qwen3.6-35B-A3B-MLX-4bit, same binary; CPU freeze vs kill-switch tests | **yes** TTFT −14.5% (bar ≥10%); Reset reason drop 2→0 | **yes** solved 6/6 both; empty-mask 0; ToolError 3→2; decode tok/s +5.7% | **keep** | Do not revert A1. Absolute `prefill_reused_tokens` mean fell (−21%) because prompt lengths differed; reuse *rate* rose +5.1%. Plan-lock refresh barely fired (1 vs 0), so this is not a clean plan-lock pair. **A2 blocked** until a confirmation set with matched `plan_lock` refreshes. Journals under `piper-bench/agent_loop_wins/a1_{on,off}/` (gitignored). |
 
-**Mac A3B live A/B still needed (parent):**
-
-1. Same binary flags except A1 on/off (or tip vs pre-A1), Qwen3.6-35B-A3B-MLX-4bit, shadow+commit_think on.
-2. 3–5 short agent loops that hit plan-lock (or recorded `events.jsonl` replays).
-3. Compare mean TTFT, mean `prefill_reused_tokens`, Reset reason histogram (`tools_guidance_changed` count), `tools_refresh` `noop`/`changed` rates via `summarize_events.py`.
-4. Kill/keep per row above; do not land A2 without that proof.
+Mac pairing (done): same sidecar, `LMP_A1_NOOP_TOOLS_REFRESH=0` vs unset, Qwen3.6-35B-A3B-MLX-4bit, `scripts/agent_eval.py run --split corpus --seed 7`. Compare with `summarize_events.py a1_off/all.jsonl a1_on/all.jsonl`. CPU freeze/kill-switch tests remain the lock that identical allowlist text does not rewrite. Confirmation set (disjoint n≥3 with matched `plan_lock`) not run — required before A2, not to keep A1.
 
 ---
 
@@ -46,7 +42,7 @@ in the public tree.
 
 | Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
 |--------|--------|----------|-----------|---|-----------|-------|
-| *(not started)* | accept-at-depth / net decode tok/s | default `draft_cost_ratio=0.60` | sweep `{0.50,0.55,0.60,0.70,0.80}` on **agent-shaped** drafts | — | — | Needs Mac speculative-on generates + tier-B `spec_block` / `accept_at_depth`. Kill if no ≥5% net win vs 0.60. |
+| `draft_cost_ratio` | net decode tok/s / accept-at-depth | default `0.60` | sweep not run | — | **keep 0.60** | No Mac agent-generate sweep. Do not change the default without a ≥5% net win + confirmation set. |
 
 ---
 
@@ -72,3 +68,16 @@ in the public tree.
 | golden enum path empty-mask? | n/a | **never** (kill criterion) |
 
 **Mac A3B live A/B optional (parent):** bowling replay is flaky for forcing storms; re-run only if a journal shows residual `schema_*` / ToolError loops after this lands.
+
+---
+
+## Explicit skips (no A/B)
+
+Not taken:
+
+- Second PLD codebase beside `SuffixProposer`
+- MTP / neural draft on MoE
+- Tree-sitter / fuzzy AST apply in `apply_patch.hpp`
+- Changing `LMP_PREFILL_CHUNK` default to 512 (2048 is the measured knee)
+- Prefill token streaming during prefill
+- Prompt-window n-grams, unique-token mini-prefill, and composite suffix+MTP (unproven; discarded)

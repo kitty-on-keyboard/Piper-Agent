@@ -755,6 +755,8 @@ class RunInbox {
     }
     surface::overlay_lmp_env_bool("LMP_COMMIT_THINK", &config.commit_think);
     surface::overlay_lmp_env_bool("LMP_SHADOW_COMPACT", &config.shadow_compact);
+    surface::overlay_lmp_env_bool("LMP_A1_NOOP_TOOLS_REFRESH",
+                                  &config.noop_identical_tools_refresh);
 
     return apply_autonomy(id, message, config);
 }

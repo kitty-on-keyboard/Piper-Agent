@@ -863,6 +863,15 @@ def run_one(meta, model_dir, verbose, sampling, sampling_mode="standard"):
         },
         "seconds": state["seconds"],
     }
+    keep = os.environ.get("LMP_KEEP_EVENTS", "").strip()
+    if keep:
+        src = os.path.join(harness_dir, "events.jsonl")
+        if os.path.isfile(src):
+            os.makedirs(keep, exist_ok=True)
+            dest = os.path.join(
+                keep, f"{meta['name']}-seed{sampling['seed']}-events.jsonl"
+            )
+            shutil.copy2(src, dest)
     shutil.rmtree(workspace, ignore_errors=True)
     shutil.rmtree(harness_dir, ignore_errors=True)
     return row
