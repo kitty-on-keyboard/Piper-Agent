@@ -2085,9 +2085,11 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     } else if (final_report.completed || final_report.termination_reason == "plan_ready") {
         result.status = "ok";
         exit_code = kExitOk;
-    } else if (final_report.termination_reason == "max_turns") {
-        result.status = "error";
-        result.error = "agent did not complete (max_turns)";
+    } else if (is_stalled_termination(final_report.termination_reason)) {
+        // Wake contract: result.status agrees with webhook kind=stalled so parents
+        // need not parse error strings for max_turns / no_progress stalls.
+        result.status = "stalled";
+        result.error = "agent did not complete (" + final_report.termination_reason + ")";
         exit_code = kExitError;
     } else if (stopped_on_unanswered_ask) {
         result.status = "error";
@@ -2113,28 +2115,28 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
 
     result.files_touched = collect_files_touched(durable_log, packet.cwd);
     collect_git(packet.cwd, result_dir.string(), result);
-
-    std::string clean_answer = strip_think_leak(
-        finish_summary.empty() ? answer_accum : finish_summary);
-    if (final_report.termination_reason == "plan_ready" && !plan_accum.empty()) {
-        result.message = plan_accum;
-    } else if (!clean_answer.empty()) {
-        result.message = clean_answer;
-    } else if (!result.error.empty()) {
-        result.message = result.error;
-    } else {
-        std::string bits = "status=" + result.status;
-        if (!final_report.termination_reason.empty()) bits += "; reason=" + final_report.termination_reason;
-        if (!result.files_touched.empty()) {
-            bits += "; files: ";
-            for (size_t i = 0; i < std::min<size_t>(result.files_touched.size(), 12); ++i) {
-                if (i > 0) bits += ", ";
-                bits += result.files_touched[i];
-            }
-        }
-        result.message = bits;
+    // MCP / Godoer writes skip the native write ledger (no path param), so
+    // files_touched was [] while git.diff listed the real edits. Union git
+    // paths when the operator trusted MCP servers, or when the log shows a
+    // remote_tool freshness bump and the ledger stayed empty.
+    if (!packet.trust_mcp.empty() ||
+        (result.files_touched.empty() && log_has_remote_tool_write(durable_log))) {
+        merge_files_touched(result.files_touched, collect_git_changed_paths(packet.cwd));
     }
-    if (result.message.size() > 2000) result.message.resize(2000);
+
+    const bool completed_ok =
+        (final_report.completed || final_report.termination_reason == "plan_ready") &&
+        result.status == "ok";
+    result.message = compose_result_message(
+        finish_summary,
+        answer_accum,
+        completed_ok,
+        final_report.termination_reason == "plan_ready",
+        plan_accum,
+        result.status,
+        final_report.termination_reason,
+        result.files_touched,
+        result.error);
 
     run_check(packet, result);
     if (result.test.ran && result.test.exit_code != 0 && exit_code == kExitOk) {
@@ -2277,7 +2279,7 @@ int worker_main(int argc, char** argv) {
         } else if (arg == "--detach" || arg == "--detached") {
             cli_detach = true;
         } else if (arg == "--idle-timeout" && i + 1 < argc) {
-            try { idle_timeout = std::stod(argv[++i]); } catch (...) {}
+            idle_timeout = parse_idle_timeout_arg(argv[++i], idle_timeout);
         } else if (arg == "--socket" && i + 1 < argc) {
             socket_path = argv[++i];
         } else if (!arg.empty() && arg[0] != '-') {
