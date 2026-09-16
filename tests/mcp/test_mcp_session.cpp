@@ -154,6 +154,20 @@ private:
             return std::vector<PromptMessage>{
                 PromptMessage::user_text("hello " + args.value("who", "world"))};
         });
+
+        Prompt p_throwing;
+        p_throwing.name = "throwing_prompt";
+        p_throwing.description = "throws std::exception";
+        s.add_prompt(std::move(p_throwing), [](const nlohmann::json&, RequestContext&) -> std::vector<PromptMessage> {
+            throw std::runtime_error("prompt failed");
+        });
+
+        Prompt p_non_std_throwing;
+        p_non_std_throwing.name = "non_std_throwing_prompt";
+        p_non_std_throwing.description = "throws non-std exception";
+        s.add_prompt(std::move(p_non_std_throwing), [](const nlohmann::json&, RequestContext&) -> std::vector<PromptMessage> {
+            throw 99;
+        });
     }
 
     std::unique_ptr<Server> server_;
@@ -304,6 +318,39 @@ TEST(unknown_tool_is_rejected) {
     CHECK(threw);
 }
 
+TEST(prompt_handler_uncaught_exceptions_yield_internal_error) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+
+    // 1. Prompt handler throwing std::exception -> kInternalError with e.what()
+    bool threw_std = false;
+    try {
+        static_cast<void>(s.client().get_prompt("throwing_prompt", nlohmann::json::object()));
+    } catch (const McpError& e) {
+        threw_std = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kInternalError));
+        CHECK(std::string(e.what()).find("prompt failed") != std::string::npos);
+    }
+    CHECK(threw_std);
+
+    // 2. Prompt handler throwing non-std exception -> kInternalError with "unknown exception in handler"
+    bool threw_non_std = false;
+    try {
+        static_cast<void>(s.client().get_prompt("non_std_throwing_prompt", nlohmann::json::object()));
+    } catch (const McpError& e) {
+        threw_non_std = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kInternalError));
+        CHECK(std::string(e.what()).find("unknown exception in handler") != std::string::npos);
+    }
+    CHECK(threw_non_std);
+
+    // Verify session survives and still functions normally
+    const std::vector<PromptMessage> msgs =
+        s.client().get_prompt("greet", nlohmann::json{{"who", "sean"}});
+    REQUIRE(msgs.size() == 1);
+    CHECK_EQ(msgs[0].content.value("text", ""), std::string("hello sean"));
+}
+
 TEST(resources_and_prompts_round_trip) {
     Session s;
     static_cast<void>(s.client().initialize());
@@ -318,7 +365,7 @@ TEST(resources_and_prompts_round_trip) {
     CHECK_EQ(*body[0].text, std::string("body text"));
 
     const std::vector<Prompt> prompts = s.client().list_prompts();
-    REQUIRE(prompts.size() == 1);
+    REQUIRE(prompts.size() == 3);
     CHECK_EQ(prompts[0].name, std::string("greet"));
 
     const std::vector<PromptMessage> msgs =
