@@ -201,7 +201,7 @@ TEST(tools_round_trip) {
     static_cast<void>(s.client().initialize());
 
     const std::vector<Tool> tools = s.client().list_tools();
-    CHECK_EQ(tools.size(), std::size_t(6));
+    CHECK_EQ(tools.size(), std::size_t(7));
 
     const ToolResult r = s.client().call_tool("echo", nlohmann::json{{"text", "hi there"}});
     CHECK(!r.is_error);

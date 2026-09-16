@@ -1255,15 +1255,18 @@ TEST(collect_git_numstat_string_to_int_fallback) {
                                  std::filesystem::perms::owner_write |
                                  std::filesystem::perms::owner_exec);
 
-    const char* old_path = std::getenv("PATH");
-    std::string new_path = bin_dir.string() + ":" + (old_path ? old_path : "");
+    const char* old_path_c = std::getenv("PATH");
+    // Copy before setenv: setenv may reallocate the environ block and invalidate the
+    // getenv pointer (ASan heap-use-after-free on restore).
+    const std::string old_path = old_path_c != nullptr ? old_path_c : std::string();
+    std::string new_path = bin_dir.string() + ":" + old_path;
     ::setenv("PATH", new_path.c_str(), 1);
 
     RunResult res;
     collect_git(dir.string(), dir.string(), res);
 
-    if (old_path) {
-        ::setenv("PATH", old_path, 1);
+    if (old_path_c != nullptr) {
+        ::setenv("PATH", old_path.c_str(), 1);
     } else {
         ::unsetenv("PATH");
     }
@@ -1312,15 +1315,16 @@ TEST(collect_git_handles_numstat_invalid_integers_and_untracked) {
                                  std::filesystem::perms::owner_exec);
 
     // Set PATH to use mock git first
-    const char* old_path = std::getenv("PATH");
-    std::string new_path = bin_dir.string() + ":" + (old_path ? old_path : "");
+    const char* old_path_c = std::getenv("PATH");
+    const std::string old_path = old_path_c != nullptr ? old_path_c : std::string();
+    std::string new_path = bin_dir.string() + ":" + old_path;
     ::setenv("PATH", new_path.c_str(), 1);
 
     RunResult res;
     collect_git(dir.string(), dir.string(), res);
 
-    if (old_path) {
-        ::setenv("PATH", old_path, 1);
+    if (old_path_c != nullptr) {
+        ::setenv("PATH", old_path.c_str(), 1);
     } else {
         ::unsetenv("PATH");
     }
