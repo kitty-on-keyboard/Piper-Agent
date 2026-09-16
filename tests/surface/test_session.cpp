@@ -192,6 +192,15 @@ TEST(the_check_is_narrow_enough_not_to_spend_prompt_on_prose) {
     // `project.godot` and `godot_*` out of the report.
     CHECK(lmp::surface::unknown_tool_names("Run `godot_*` tools for this.", reg).empty());
     CHECK(lmp::surface::unknown_tool_names("Call `specs/main.json` here.", reg).empty());
+    // Substring verb traps: `use` in "user", `run` in "runtime", `tool` in "tooling".
+    // Godoer briefs that document a schema field as `probe_args` near those words must
+    // not emit conventions_name_absent_tools for a name that was never a tool.
+    CHECK(lmp::surface::unknown_tool_names(
+              "Pass user-supplied `probe_args` when debugging the runtime tooling.", reg)
+              .empty());
+    CHECK(lmp::surface::unknown_tool_names(
+              "The tool schema includes `probe_args` for the host probe.", reg)
+              .empty());
 }
 
 TEST(the_report_is_deduplicated_and_bounded) {
@@ -299,6 +308,9 @@ TEST(ensure_registry_skips_mcp_json_without_allow_flag) {
     REQUIRE(f.ok());
     CHECK(f.bytes.find("\"kind\":\"mcp_config_file\"") != std::string::npos);
     CHECK(f.bytes.find("\"skipped\":\"1\"") != std::string::npos);
+    // No settings servers: keep the confirm-spawn wording (not the trust_mcp expected path).
+    CHECK(f.bytes.find("\"expected\":\"1\"") == std::string::npos);
+    CHECK(f.bytes.find("confirm workspace MCP spawn") != std::string::npos);
     // No connect attempt for the file server.
     CHECK(f.bytes.find("\"kind\":\"mcp_server\"") == std::string::npos);
 }
@@ -340,6 +352,9 @@ TEST(ensure_registry_still_connects_settings_servers_without_allow_flag) {
     REQUIRE(f.ok());
     CHECK(f.bytes.find("\"kind\":\"mcp_config_file\"") != std::string::npos);
     CHECK(f.bytes.find("\"skipped\":\"1\"") != std::string::npos);
+    // Settings trust path: skip is expected, not a spawn failure before mcp_server.
+    CHECK(f.bytes.find("\"expected\":\"1\"") != std::string::npos);
+    CHECK(f.bytes.find("settings-sourced") != std::string::npos);
     CHECK(f.bytes.find("\"kind\":\"mcp_server\"") != std::string::npos);
     CHECK(f.bytes.find("\"name\":\"from_settings\"") != std::string::npos);
     CHECK(f.bytes.find("\"source\":\"settings\"") != std::string::npos);
