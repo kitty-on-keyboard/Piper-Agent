@@ -208,6 +208,10 @@ private:
 struct Options {
     uint32_t max_depth = 512;
     bool validate_utf8 = true;   // reject malformed UTF-8 in the source
+    // When true (default), ToolCallGuard restricts params whose enum_values are
+    // non-empty to those literals. Kill switch for empty-mask regressions: set
+    // false to restore unconstrained Text/JSON value phases for enum params.
+    bool enforce_enum_values = true;
 };
 
 class Parser {

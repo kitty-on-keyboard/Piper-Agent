@@ -29,6 +29,7 @@ enum class ErrorClass : std::uint8_t {
     Conflict,   // e.g. graft Ambiguous: the edit matched more than one site
     Policy,
     Transient,
+    SchemaEnum, // argument not in ParamSpec::enum_values (post-guard / inject)
 };
 
 [[nodiscard]] std::string_view to_string(Status s) noexcept;

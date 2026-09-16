@@ -38,7 +38,9 @@ void ToolCallGuard::reset() {
 
 Error ToolCallGuard::feed(std::string_view bytes) {
     while (!bytes.empty()) {
-        if (ph_ == Ph::ValueText) {
+        // Enum-constrained text must stay byte-at-a-time: a bulk scan would
+        // accept interiors that are not prefixes of any enum_values entry.
+        if (ph_ == Ph::ValueText && !enum_active()) {
             if (term_pos_ > 0) {
                 unsigned char c = static_cast<unsigned char>(bytes[0]);
                 if (c == static_cast<unsigned char>(kTerm[term_pos_])) {
@@ -105,6 +107,24 @@ void ToolCallGuard::value_append(std::string_view bytes) {
 }
 
 Error ToolCallGuard::finish_param() {
+    // Fail closed: a value that somehow left the enum mask still must not
+    // extract as a completed parameter (feed-without-mask / probe drift).
+    if (opts_.enforce_enum_values && tool_ >= 0 && param_ >= 0) {
+        const auto& ev = tools_[size_t(tool_)].params[size_t(param_)].enum_values;
+        if (!ev.empty()) {
+            bool ok = false;
+            bool any_usable = false;
+            for (const auto& e : ev) {
+                if (!enum_value_usable(e)) continue;
+                any_usable = true;
+                if (e == *value_) {
+                    ok = true;
+                    break;
+                }
+            }
+            if (any_usable && !ok) return Error::UnexpectedChar;
+        }
+    }
     if (!probing_) {
         if (params_.use_count() > 1) {
             params_ = std::make_shared<std::vector<Param>>(*params_);
@@ -121,6 +141,61 @@ Error ToolCallGuard::finish_param() {
     lit_pos_ = 0;
     br_param_alive_ = br_close_alive_ = true;
     return Error::Ok;
+}
+
+bool ToolCallGuard::enum_value_usable(std::string_view e) const noexcept {
+    // Newlines are the parameter terminator's first byte; an enum that embeds
+    // one cannot be distinguished from closing the value. Fail open for that
+    // entry rather than risk an empty mask.
+    return e.find('\n') == std::string_view::npos;
+}
+
+bool ToolCallGuard::enum_active() const noexcept {
+    if (!opts_.enforce_enum_values || tool_ < 0 || param_ < 0) return false;
+    const auto& ev = tools_[size_t(tool_)].params[size_t(param_)].enum_values;
+    if (ev.empty()) return false;
+    for (const auto& e : ev) {
+        if (enum_value_usable(e)) return true;
+    }
+    return false;
+}
+
+bool ToolCallGuard::enum_prefix_match(std::string_view cand) const noexcept {
+    const auto& ev = tools_[size_t(tool_)].params[size_t(param_)].enum_values;
+    for (const auto& e : ev) {
+        if (!enum_value_usable(e)) continue;
+        if (e.size() >= cand.size() && e.compare(0, cand.size(), cand) == 0) return true;
+    }
+    return false;
+}
+
+bool ToolCallGuard::enum_exact_match(std::string_view cand) const noexcept {
+    const auto& ev = tools_[size_t(tool_)].params[size_t(param_)].enum_values;
+    for (const auto& e : ev) {
+        if (!enum_value_usable(e)) continue;
+        if (e == cand) return true;
+    }
+    return false;
+}
+
+ByteSet ToolCallGuard::enum_allowed_bytes() const {
+    ByteSet s;
+    if (term_pos_ > 0) {
+        s.add(static_cast<unsigned char>(kTerm[term_pos_]));
+        return s;
+    }
+    const auto& ev = tools_[size_t(tool_)].params[size_t(param_)].enum_values;
+    const std::string_view cur(*value_);
+    for (const auto& e : ev) {
+        if (!enum_value_usable(e)) continue;
+        if (e.size() > cur.size() && e.compare(0, cur.size(), cur) == 0) {
+            s.add(static_cast<unsigned char>(e[cur.size()]));
+        }
+        if (e == cur) {
+            s.add('\n');   // start of "\n</parameter>\n"
+        }
+    }
+    return s;
 }
 
 ByteSet ToolCallGuard::type_start_set(ParamType t) const {
@@ -171,8 +246,11 @@ Error ToolCallGuard::push_byte(unsigned char c) {
 
         case Ph::AfterPName: {
             if (c != '\n') return Error::UnexpectedChar;
-            ParamType t = tools_[size_t(tool_)].params[size_t(param_)].type;
-            if (t == ParamType::Text) {
+            const auto& ps = tools_[size_t(tool_)].params[size_t(param_)];
+            // Enum literals are matched as exact spellings (XML raw text for
+            // strings; JSON number/bool text as stored in enum_values). Route
+            // through ValueText so one automaton covers both forms.
+            if (enum_active() || ps.type == ParamType::Text) {
                 ph_ = Ph::ValueText;
                 term_pos_ = 0;
             } else {
@@ -263,8 +341,38 @@ Error ToolCallGuard::push_byte(unsigned char c) {
             return Error::Ok;
         }
 
-        // ---- raw text value ----------------------------------------------------
+        // ---- raw text value (also enum literals when enum_values set) ----------
         case Ph::ValueText: {
+            if (enum_active()) {
+                if (term_pos_ > 0) {
+                    if (c != static_cast<unsigned char>(kTerm[term_pos_])) {
+                        // Already closed the enum value; do not absorb a bad
+                        // terminator byte back into the value (would empty-mask).
+                        return Error::UnexpectedChar;
+                    }
+                    if (++term_pos_ == kTerm.size()) return finish_param();
+                    return Error::Ok;
+                }
+                if (c == static_cast<unsigned char>(kTerm[0])) {
+                    if (!enum_exact_match(*value_)) return Error::UnexpectedChar;
+                    term_pos_ = 1;
+                    return Error::Ok;
+                }
+                if (c < 0x20 && c != '\t' && c != '\r') return Error::ControlChar;
+                // Tentative append: must remain a prefix of some usable enum.
+                // Always mutate value_ even when probing_ — TokenMask feeds
+                // multi-byte tokens to a muted copy and needs the running prefix
+                // (Name/PName use prefix_ the same way). COW keeps the parent safe.
+                if (value_.use_count() > 1) {
+                    value_ = std::make_shared<std::string>(*value_);
+                }
+                value_->push_back(char(c));
+                if (!enum_prefix_match(*value_)) {
+                    value_->pop_back();
+                    return Error::UnexpectedChar;
+                }
+                return Error::Ok;
+            }
             if (c == static_cast<unsigned char>(kTerm[term_pos_])) {
                 if (++term_pos_ == kTerm.size()) return finish_param();
                 return Error::Ok;
@@ -398,6 +506,7 @@ ByteSet ToolCallGuard::allowed_bytes() const {
         }
 
         case Ph::ValueText:
+            if (enum_active()) return enum_allowed_bytes();
             // Any byte can be value content; the terminator is recognized, not
             // forced. Control bytes other than \t \n \r stay illegal.
             s.add('\t'); s.add('\n'); s.add('\r');
@@ -443,7 +552,9 @@ ByteSet ToolCallGuard::allowed_bytes() const {
 }
 
 MaskClass ToolCallGuard::mask_class() const noexcept {
-    if (ph_ == Ph::ValueText && term_pos_ == 0) return MaskClass::FreeText;
+    // Enum-constrained text is narrow (candidate literals), not FreeText — the
+    // token mask engine's FreeText fast path would admit illegal tokens.
+    if (ph_ == Ph::ValueText && term_pos_ == 0 && !enum_active()) return MaskClass::FreeText;
     if (ph_ == Ph::ValueJson && !json_.complete() &&
         json_.mask_class() == MaskClass::JsonString)
         return MaskClass::JsonString;
@@ -462,6 +573,13 @@ uint64_t ToolCallGuard::state_signature() const noexcept {
     h = mix(h, term_pos_);
     h = mix(h, uint64_t(br_param_alive_) * 2 + uint64_t(br_close_alive_));
     if (ph_ == Ph::ValueJson) h = mix(h, json_.state_signature());
+    // Enum value masks depend on how much of a literal has been emitted.
+    if (ph_ == Ph::ValueText && enum_active()) {
+        uint64_t vh = 1469598103934665603ull;
+        for (unsigned char c : *value_) vh = (vh ^ c) * 1099511628211ull;
+        h = mix(h, vh);
+        h = mix(h, uint64_t(value_->size()));
+    }
     return h;
 }
 

@@ -1,6 +1,7 @@
 #include "src/model/grammar.hpp"
 
 #include <array>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace lmp::model {
@@ -29,8 +30,19 @@ void TurnGrammar::reset() {
     think_.clear();
     text_.clear();
     calls_.clear();
-    guard_ = tools_.empty() ? nullptr
-                            : std::make_unique<parsephony::ToolCallGuard>(tools_);
+    if (tools_.empty()) {
+        guard_.reset();
+        return;
+    }
+    parsephony::Options o;
+    // Kill switch: LMP_ENUM_MASK=0 disables enum value masking if it ever
+    // empty-masks a golden path. Default (unset or any other value) keeps
+    // Options::enforce_enum_values = true.
+    if (const char* s = std::getenv("LMP_ENUM_MASK"); s != nullptr && s[0] == '0' &&
+                                                       s[1] == '\0') {
+        o.enforce_enum_values = false;
+    }
+    guard_ = std::make_unique<parsephony::ToolCallGuard>(tools_, o);
 }
 
 void TurnGrammar::checkpoint() {

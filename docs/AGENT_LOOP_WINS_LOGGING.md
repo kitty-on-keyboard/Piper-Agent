@@ -11,6 +11,19 @@ Every generate / tools refresh / tool_result now emits attribution fields:
 - `generation` — aggregate `draft_len_hist` / `accept_at_depth` / `reject_at_depth`,
   `grammar_empty_mask`, `grammar_phase_end`, …
 - `tool_result` — existing `status` plus `error_class` / optional `error_code`
+  (`error_class` values include `parse_args`, `schema_enum`, `edit_miss`, `exec`,
+  `sandbox`, `unknown`; Phase C maps `ErrorClass::SchemaEnum` → `schema_enum`)
+
+### Phase C grammar kill switch
+
+Enum value masking in `ToolCallGuard` is on by default when `ParamSpec::enum_values`
+is non-empty. To disable (empty-mask kill):
+
+```bash
+export LMP_ENUM_MASK=0   # exact "0" only
+```
+
+Or construct `parsephony::Options{ .enforce_enum_values = false }` for tests.
 
 ## Tier B firehose
 
