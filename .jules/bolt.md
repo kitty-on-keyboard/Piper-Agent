@@ -25,3 +25,7 @@
 ## 2026-04-15 - Slice-Based Fast Path for Raw Text Parameters in parsephony ToolCallGuard
 **Learning:** `ToolCallGuard::feed` previously processed input byte-by-byte via `push_byte(c)` and `value_append(c)` during raw text parameter parsing (`Ph::ValueText`). For multi-line text parameter values, character-at-a-time string appending caused excessive function call overhead and frequent `std::string` reallocations.
 **Action:** In `ToolCallGuard::feed(std::string_view bytes)`, scan for contiguous non-newline, non-control byte ranges in `Ph::ValueText` and bulk-append `std::string_view` slices via `value_append(slice)`.
+
+## 2026-04-18 - Short-Circuiting Workspace Relative Path Resolution for Absolute Path Diagnostics Queries
+**Learning:** `code_intel.ts`'s `diagnostics(path)` previously called `relPath(uri, cache)` (which queries VS Code workspace API `getWorkspaceFolder` and `asRelativePath`) for every URI in `vscode.languages.getDiagnostics()` before checking path filters. When querying diagnostics for an absolute target path, evaluating relative paths for non-matching URIs is redundant because relative paths never match absolute target paths.
+**Action:** In `diagnostics(path)`, check `isAbsPath(path) && uri.fsPath !== path` to short-circuit and skip `relPath()` calls for non-matching URIs across the workspace.
