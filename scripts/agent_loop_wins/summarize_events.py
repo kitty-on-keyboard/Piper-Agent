@@ -88,6 +88,7 @@ def summarize(events: list[dict[str, Any]]) -> None:
     reset_reasons: Counter[str] = Counter()
     modes: Counter[str] = Counter()
     refresh_changed = 0
+    refresh_noop = 0
     refresh_total = 0
     refresh_triggers: Counter[str] = Counter()
     error_classes: Counter[str] = Counter()
@@ -141,6 +142,8 @@ def summarize(events: list[dict[str, Any]]) -> None:
             refresh_triggers[str(ev.get("trigger") or "other")] += 1
             if str(ev.get("changed")) == "1":
                 refresh_changed += 1
+            if str(ev.get("noop")) == "1":
+                refresh_noop += 1
         elif kind == "tool_result":
             tool_status[str(ev.get("status") or "")] += 1
             ec = str(ev.get("error_class") or "")
@@ -163,7 +166,9 @@ def summarize(events: list[dict[str, Any]]) -> None:
     print_counter("kv_reuse.reason (Reset only)", reset_reasons)
     print(
         f"\ntools_refresh: total={refresh_total} changed={refresh_changed} "
-        f"changed_rate={'(n/a)' if not refresh_total else f'{refresh_changed / refresh_total:.3f}'}"
+        f"noop={refresh_noop} "
+        f"changed_rate={'(n/a)' if not refresh_total else f'{refresh_changed / refresh_total:.3f}'} "
+        f"noop_rate={'(n/a)' if not refresh_total else f'{refresh_noop / refresh_total:.3f}'}"
     )
     print_counter("tools_refresh.trigger", refresh_triggers)
     print_counter("tool_result.status", tool_status)

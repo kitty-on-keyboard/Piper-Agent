@@ -900,26 +900,26 @@ Agent::~Agent() {
 void Agent::refresh_mode_tools(const char* trigger) {
     const std::size_t spec_before = mode_specs_.size();
     const std::string hash_before = tools_guidance_hash_;
-    mode_specs_.clear();
+
+    // Build the candidate set / text without mutating yet — A1 needs a byte-identical
+    // check before touching the stable system prefix that KV reuses from token 0.
+    std::vector<parsephony::ToolSpec> next_specs;
+    next_specs.reserve(registry_.guard_specs().size());
     for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
         const tools::ToolDecl* d = registry_.find(s.name);
         if (d != nullptr && !tool_allowed(*d)) {
             continue;
         }
-        mode_specs_.push_back(s);
+        next_specs.push_back(s);
     }
-    tools_guidance_ =
+    std::string next_guidance =
         registry_.tools_json([this](const tools::ToolDecl& d) { return tool_allowed(d); });
-    const std::string hash_after = platform::content_sha256_hex(tools_guidance_);
+    const std::string hash_after = platform::content_sha256_hex(next_guidance);
+
     // First paint (empty before) is not a mid-run rewrite; only a later byte change
     // should attribute a Reset to tools_guidance_changed.
-    const bool changed = !hash_before.empty() && hash_before != hash_after;
     const bool first_paint = hash_before.empty();
-    tools_guidance_changed_pending_ =
-        tools_guidance_changed_pending_ || (changed && !first_paint);
-    // Still report changed=1 on init so baselines see the first materialization.
-    const bool reported_changed = first_paint || changed;
-    tools_guidance_hash_ = hash_after;
+    const bool changed = !first_paint && hash_before != hash_after;
 
     // Tier A: short hash prefix. Tier B (LMP_AGENT_LOOP_TRACE=1): full sha256.
     const auto short_or_full = [](const std::string& h) -> std::string {
@@ -931,14 +931,38 @@ void Agent::refresh_mode_tools(const char* trigger) {
         }
         return h.substr(0, 16);
     };
+    const char* trigger_s = trigger == nullptr ? "other" : trigger;
+
+    // Phase A1: freeze tools text when the allowlist is unchanged. Skip the rewrite so
+    // we do not reassign tools_guidance_ / mode_specs_ (stable prefix stays byte-identical)
+    // and do not set tools_guidance_changed_pending_.
+    if (!first_paint && !changed) {
+        emit("tools_refresh",
+             {{"trigger", trigger_s},
+              {"guidance_hash_before", short_or_full(hash_before)},
+              {"guidance_hash_after", short_or_full(hash_after)},
+              {"changed", "0"},
+              {"spec_count_before", std::to_string(spec_before)},
+              {"spec_count_after", std::to_string(spec_before)},
+              {"noop", "1"}});
+        return;
+    }
+
+    mode_specs_ = std::move(next_specs);
+    tools_guidance_ = std::move(next_guidance);
+    tools_guidance_changed_pending_ =
+        tools_guidance_changed_pending_ || (changed && !first_paint);
+    // Still report changed=1 on init so baselines see the first materialization.
+    const bool reported_changed = first_paint || changed;
+    tools_guidance_hash_ = hash_after;
+
     emit("tools_refresh",
-         {{"trigger", trigger == nullptr ? "other" : trigger},
+         {{"trigger", trigger_s},
           {"guidance_hash_before", short_or_full(hash_before)},
           {"guidance_hash_after", short_or_full(hash_after)},
           {"changed", reported_changed ? "1" : "0"},
           {"spec_count_before", std::to_string(spec_before)},
           {"spec_count_after", std::to_string(mode_specs_.size())},
-          // Always 0 until Phase A1 learns to skip identical rewrites.
           {"noop", "0"}});
 }
 

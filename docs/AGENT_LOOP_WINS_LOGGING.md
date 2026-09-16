@@ -7,6 +7,7 @@ Every generate / tools refresh / tool_result now emits attribution fields:
 - `kv_reuse` — `mode`, `reused_tokens`, `prompt_tokens`, `reason` (required on Reset),
   `stable_prefix_tokens`, `shadow_armed`
 - `tools_refresh` — `trigger`, short guidance hashes, `changed`, spec counts, `noop`
+  (`noop=1` when Phase A1 skips an identical mid-run rewrite)
 - `generation` — aggregate `draft_len_hist` / `accept_at_depth` / `reject_at_depth`,
   `grammar_empty_mask`, `grammar_phase_end`, …
 - `tool_result` — existing `status` plus `error_class` / optional `error_code`
