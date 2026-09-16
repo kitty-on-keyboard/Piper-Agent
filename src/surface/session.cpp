@@ -284,7 +284,7 @@ bool looks_like_a_tool_name(std::string_view s) {
 // and `tooling`, which is how `probe_args` (a schema field, not a tool) became a phantom
 // conventions_name_absent_tools warn against Godoer briefs.
 bool called_like_a_tool(const std::string& text, std::size_t tick) {
-    static constexpr std::string_view kVerbs[] = {"call", "run", "use", "tool", "invoke"};
+    static constexpr std::string_view kVerbs[] = {"call", "run", "use", "invoke"};
     const std::size_t reach = 64;
     const std::size_t from = tick > reach ? tick - reach : 0;
     std::string window = text.substr(from, tick - from);
