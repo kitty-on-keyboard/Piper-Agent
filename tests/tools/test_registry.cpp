@@ -175,6 +175,42 @@ TEST(remember_fact_store_failure_falls_back_to_file_write_honestly) {
     CHECK(f.bytes.find("- unkeyed fact test") != std::string::npos);
 }
 
+TEST(remember_fact_store_readonly_fallback_to_file_write) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    const std::string db_dir = root + "/ro_db";
+    REQUIRE(::mkdir(db_dir.c_str(), 0755) == 0);
+    const std::string db_path = db_dir + "/db.sqlite";
+
+    // Initialize the store so the database file is created
+    lmp::pcc::Store store(db_path);
+
+    // Make the database directory read-only. SQLite requires directory write access
+    // to create journal files during transactions.
+    REQUIRE(::chmod(db_dir.c_str(), 0555) == 0);
+
+    Registry reg = make_registry(root);
+    auto source_fn = [&store, session = std::string("s1")] {
+        Registry::ContextSource src;
+        src.store = &store;
+        src.session = session;
+        return src;
+    };
+    CHECK(reg.declare_context_tools(source_fn, lmp::pcc::estimate_tokens));
+
+    // Execution with key. Store throws SqlError (readonly), but file write succeeds.
+    const ToolResult r_keyed = reg.execute(
+        "remember", args({{"fact", "keyed fact readonly"}, {"key", "mykey"}}), 1);
+
+    // The fallback at line 364 should catch the exception and return ToolResult::okay
+    CHECK(r_keyed.ok());
+    CHECK(r_keyed.summary.find("noted for later sessions") != std::string::npos);
+
+    // Restore permissions so the temp directory can be cleaned up
+    ::chmod(db_dir.c_str(), 0755);
+}
+
 TEST(remember_folds_dedupes_and_stays_under_its_cap) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
