@@ -750,6 +750,8 @@ std::string_view to_string(ErrorClass e) noexcept {
             return "Policy";
         case ErrorClass::Transient:
             return "Transient";
+        case ErrorClass::SchemaEnum:
+            return "SchemaEnum";
     }
     return "None";
 }

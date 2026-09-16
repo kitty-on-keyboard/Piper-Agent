@@ -45,6 +45,9 @@ lmp_add_test(test_kv_reuse SOURCES test_kv_reuse.cpp LABELS gate LINK lmp_model)
 # PR1 optional tease-out: frozen bad tool-call strings through ToolCallGuard only.
 lmp_add_test(test_malformed_call_museum SOURCES test_malformed_call_museum.cpp LABELS gate
              LINK parsephony)
+# Phase C: enum_values masking in ToolCallGuard (invalid token never in mask).
+lmp_add_test(test_toolcall_enum_mask SOURCES test_toolcall_enum_mask.cpp LABELS gate
+             LINK parsephony)
 lmp_add_test(test_mini_vocab SOURCES test_mini_vocab.cpp LABELS gate LINK lmp_model)
 add_dependencies(test_mini_vocab lmp_mini_vocab lmp_refused_vocabs)
 target_compile_definitions(test_mini_vocab PRIVATE

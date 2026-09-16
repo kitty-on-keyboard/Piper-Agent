@@ -24,11 +24,12 @@
 //   - parameter names to the chosen tool's parameters, each used at most once
 //   - `</function>` to appear only once every required parameter is present
 //   - typed parameter values to well-formed JSON of the declared type
+//   - parameter values to ParamSpec::enum_values when that list is non-empty
 //
 // Under a token mask built from this automaton, the model *cannot* call a tool
-// that does not exist, misspell a parameter, omit a required one, or produce a
-// malformed typed value. It also cannot escape the framing: generation is
-// complete exactly at the closing `</tool_call>`.
+// that does not exist, misspell a parameter, omit a required one, emit a value
+// outside an enum, or produce a malformed typed value. It also cannot escape
+// the framing: generation is complete exactly at the closing `</tool_call>`.
 //
 // The guard doubles as the extraction parser: when the automaton reaches
 // complete(), tool_name() and params() hold the parsed call, so LM-Pipe needs
@@ -57,8 +58,10 @@ struct ParamSpec {
     std::string name;
     ParamType type = ParamType::Text;
     bool required = false;
-    // Constraint metadata for host/tools_json fidelity. The ToolCallGuard enforces
-    // `type` (+ required) only; these fields must not be treated as mask constraints.
+    // nullable / items / schema_extras are host/tools_json fidelity. enum_values is
+    // enforced in the value-phase mask when Options::enforce_enum_values is set and
+    // the list is non-empty (XML raw text for ParamType::Text; JSON spelling of the
+    // stored enum string for Number/Boolean/etc.).
     bool nullable = false;
     std::vector<std::string> enum_values;
     bool has_items_type = false;
@@ -126,6 +129,12 @@ private:
     void  value_append(std::string_view bytes);
     ByteSet type_start_set(ParamType t) const;
     bool json_completes_on_newline() const;
+    // True when the current param's enum_values should constrain the value phase.
+    bool enum_active() const noexcept;
+    bool enum_value_usable(std::string_view e) const noexcept;
+    bool enum_prefix_match(std::string_view cand) const noexcept;
+    bool enum_exact_match(std::string_view cand) const noexcept;
+    ByteSet enum_allowed_bytes() const;
 
     const std::vector<ToolSpec>& tools_;
     Options opts_;

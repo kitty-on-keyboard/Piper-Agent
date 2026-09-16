@@ -66,6 +66,8 @@ std::string journal_error_class(const tools::ToolResult& r) {
     switch (r.error_class) {
         case tools::ErrorClass::Malformed:
             return "parse_args";
+        case tools::ErrorClass::SchemaEnum:
+            return "schema_enum";
         case tools::ErrorClass::Conflict:
             return "edit_miss";
         case tools::ErrorClass::NotFound:

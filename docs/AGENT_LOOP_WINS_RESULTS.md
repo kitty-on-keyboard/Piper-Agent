@@ -54,4 +54,21 @@ in the public tree.
 
 | Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
 |--------|--------|----------|-----------|---|-----------|-------|
-| *(not started)* | `error_class=schema_*` / ToolError rate | museum corpus baseline | enforce `enum_values` in ToolCallGuard | — | — | Kill if empty-mask / stuck ToolCall regressions. |
+| **C1** enforce `enum_values` in `ToolCallGuard` value phase | museum reject/accept matrix; empty-mask on golden paths | Pre-C: Text interiors unconstrained; `enum_values` in ToolSpec but not masked — bad enum strings ACCEPT at guard and only fail later as ToolError | Bad enum / missing required / unknown tool / truncated / bare text REJECT; valid enum + golden echo ACCEPT; `allowed_bytes()` non-empty on every golden prefix | Gate: `test_malformed_call_museum` + `test_toolcall_enum_mask` | **keep (CPU lock)** | Kill if enum enforcement empty-masks or sticks a golden good call. Kill switch: `Options::enforce_enum_values=false` or `LMP_ENUM_MASK=0`. Journal: `ErrorClass::SchemaEnum` → `error_class=schema_enum` (for post-guard inject paths). Live A3B ToolError A/B optional later — museum is the regression lock. |
+
+### Museum matrix (before → after)
+
+| Fixture | Pre-C (guard) | Post-C (guard) |
+|---------|---------------|----------------|
+| well-formed `echo` | ACCEPT | ACCEPT |
+| unknown tool | REJECT | REJECT |
+| truncated call | REJECT | REJECT |
+| missing required param | REJECT | REJECT |
+| wrong param name | REJECT | REJECT |
+| **bad enum** (`color=yellow`) | **ACCEPT** (escape) | **REJECT** |
+| valid enum (`color=green`) | ACCEPT | ACCEPT |
+| number enum valid / invalid | valid ACCEPT; invalid **ACCEPT** (escape) | valid ACCEPT; invalid **REJECT** |
+| bare text / non-tool garbage | REJECT | REJECT |
+| golden enum path empty-mask? | n/a | **never** (kill criterion) |
+
+**Mac A3B live A/B optional (parent):** bowling replay is flaky for forcing storms; re-run only if a journal shows residual `schema_*` / ToolError loops after this lands.
