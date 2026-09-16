@@ -166,10 +166,11 @@ void ensure_registry(Session& session, const std::string& workspace,
 //
 // DELIBERATELY NARROW, because a false positive spends prompt on a fact about a word that
 // was never a tool. A candidate must be inside backticks, be lower_snake_case with at
-// least one underscore, and sit within a few words of "call"/"run"/"use"/"tool". A name
-// counts as registered if a tool has it exactly OR carries it after an `mcp__server__`
-// prefix -- otherwise every connected MCP tool would be reported missing, which is the
-// same defect pointed the other way.
+// least one underscore, and sit within a few words of "call"/"run"/"use"/"tool" as a
+// whole word (not a substring of "user"/"runtime"/"tooling"). A name counts as registered
+// if a tool has it exactly OR carries it after an `mcp__server__` prefix -- otherwise
+// every connected MCP tool would be reported missing, which is the same defect pointed
+// the other way.
 [[nodiscard]] std::vector<std::string> unknown_tool_names(const std::string& conventions,
                                                           const tools::Registry& registry);
 
