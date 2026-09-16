@@ -86,8 +86,8 @@ struct TestBlock {
 
 struct RunResult {
     std::string task_id;
-    std::string status;                   // "ok" | "error" | "timeout"
-    std::string message;                  // think-leak stripped
+    std::string status;                   // "ok" | "error" | "timeout" | "stalled"
+    std::string message;                  // think-leak stripped; incomplete runs trimmed
     std::string cwd;
     std::string model_dir;
     double wall_seconds = 0;
@@ -112,13 +112,42 @@ void write_result(const std::string& path, const RunResult& result);
 // "I'll now...") from answer text so the orchestrator reads a clean summary.
 [[nodiscard]] std::string strip_think_leak(const std::string& answer);
 
-// Collect files touched from the event log (kind=write, changed≠0).
+// Collect files touched from the event log: kind=write (changed≠0), plus
+// path-like args on tool_call events (MCP/Godoer often skip the write ledger).
 [[nodiscard]] std::vector<std::string> collect_files_touched(
     const std::string& log_path, const std::string& cwd);
+
+// True when the durable log recorded a remote MCP tool mutating the workspace
+// (workspace_freshness why=remote_tool). Used to decide git-path union.
+[[nodiscard]] bool log_has_remote_tool_write(const std::string& log_path);
+
+// Changed paths from `git diff --name-only` plus untracked regular files.
+[[nodiscard]] std::vector<std::string> collect_git_changed_paths(
+    const std::string& cwd);
+
+// Append unique paths from `extra` onto `dest` (order-preserving).
+void merge_files_touched(std::vector<std::string>& dest,
+                         const std::vector<std::string>& extra);
 
 // Collect git diff + numstat INCLUDING untracked new files in `cwd`.
 void collect_git(const std::string& cwd, const std::string& out_dir,
                  RunResult& result);
+
+// max_turns / stalled / stalled_no_turn → result.status "stalled" (wake contract).
+[[nodiscard]] bool is_stalled_termination(const std::string& termination_reason);
+
+// Prefer last finish summary; else short first/last of assistant text when the
+// run did not complete; never dump a whole mid-turn diary into result.message.
+[[nodiscard]] std::string compose_result_message(
+    const std::string& finish_summary,
+    const std::string& answer_accum,
+    bool completed_ok,
+    bool plan_ready,
+    const std::string& plan_accum,
+    const std::string& status,
+    const std::string& termination_reason,
+    const std::vector<std::string>& files_touched,
+    const std::string& error);
 
 // Run the check command in cwd, populate result.test.
 void run_check(const TaskPacket& packet, RunResult& result);
