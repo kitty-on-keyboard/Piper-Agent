@@ -70,3 +70,9 @@ test_transcript_order
 test_transport
 test_view_script_parses
 test_worker
+
+# Real-model tests are labelled `realmodel` and excluded from the gate (S11.6). They also
+# must never run in parallel: concurrent large model loads exhaust unified memory and take
+# the machine down. Zero until phase 3 lands the MLX backend; the day it does, this pin
+# fails and someone has to state the new number rather than discover it later.
+realmodel_count 10
