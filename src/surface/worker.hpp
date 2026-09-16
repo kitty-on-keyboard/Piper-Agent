@@ -48,8 +48,16 @@ struct TaskPacket {
     std::string task_dir;                 // dirname of task_path
 
     // Build-out 3: optional check command to run after mission completes.
+    // When set, this is both verify_contract (during the loop) and the post-run
+    // operator acceptance in result.test. A green post-run check completes the
+    // slice (status=ok) even if the agent loop hit max_turns without completed=true.
     std::string check_command;
     double check_timeout_s = 60.0;
+
+    // Turn budget for lmp/start. 0 = use resolve_max_iterations() default:
+    // kDefaultMaxIterations (30), or kTrustMcpDefaultMaxIterations (60) when
+    // trust_mcp is non-empty. Packet field overrides either default.
+    int max_iterations = 0;
 
     // Operator-owned MCP trust voucher (operator MCP trust).
     std::vector<std::string> trust_mcp;
@@ -62,6 +70,14 @@ struct TaskPacket {
 // or nullopt with `error` filled. Does NOT touch the model or the sidecar.
 [[nodiscard]] std::optional<TaskPacket> load_packet(const std::string& path,
                                                     std::string& error);
+
+// Default turn budgets when task.json omits max_iterations.
+inline constexpr int kDefaultMaxIterations = 30;
+inline constexpr int kTrustMcpDefaultMaxIterations = 60;
+
+// Resolve the turn budget: explicit packet.max_iterations wins; otherwise 30,
+// or 60 when trust_mcp is set (Godoer-heavy slices need more turns).
+[[nodiscard]] int resolve_max_iterations(const TaskPacket& packet);
 
 // Build the lmp/start JSON-RPC message from a TaskPacket.
 [[nodiscard]] std::string build_start_message(const TaskPacket& packet,
@@ -100,6 +116,11 @@ struct RunResult {
     std::string log_path;
     std::string error;                    // empty on success
 };
+
+// True when result.status/error is an incomplete agent-loop stop (max_turns,
+// stalled, ended without checklist clear, …) that a green operator check may
+// promote to status=ok. Timeouts, start failures, and irreversible denials stay.
+[[nodiscard]] bool is_incomplete_agent_stop(const RunResult& result);
 
 // Write result.json atomically (write .tmp, rename).
 void write_result(const std::string& path, const RunResult& result);

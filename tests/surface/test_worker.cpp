@@ -176,9 +176,47 @@ TEST(build_start_message_formats_proper_jsonrpc) {
     CHECK_EQ(j["params"]["mission"].get<std::string>(), "Test prompt");
     CHECK_EQ(j["params"]["settings"]["mode"].get<std::string>(), "plan");
     CHECK_EQ(j["params"]["settings"]["wall_clock_seconds"].get<int>(), 300);
+    CHECK_EQ(j["params"]["settings"]["max_iterations"].get<int>(), kDefaultMaxIterations);
     CHECK_EQ(j["params"]["settings"]["verify_contract"].get<std::string>(), "npm test");
     CHECK_EQ(j["params"]["settings"]["auto_approve_writes"].get<bool>(), true);
     CHECK_EQ(j["params"]["settings"]["auto_approve_irreversible"].get<bool>(), false);
+}
+
+TEST(resolve_max_iterations_defaults_and_packet_override) {
+    TaskPacket packet;
+    CHECK_EQ(resolve_max_iterations(packet), kDefaultMaxIterations);
+
+    packet.trust_mcp = {"godoer"};
+    CHECK_EQ(resolve_max_iterations(packet), kTrustMcpDefaultMaxIterations);
+
+    packet.max_iterations = 90;
+    CHECK_EQ(resolve_max_iterations(packet), 90);
+
+    packet.trust_mcp.clear();
+    packet.max_iterations = 12;
+    CHECK_EQ(resolve_max_iterations(packet), 12);
+}
+
+TEST(build_start_message_uses_packet_max_iterations_and_trust_mcp_default) {
+    TaskPacket packet;
+    packet.cwd = "/tmp";
+    packet.prompt = "p";
+    packet.model_dir = "/tmp/model";
+
+    auto j_default = nlohmann::json::parse(build_start_message(packet, "1"), nullptr, false);
+    CHECK_EQ(j_default["params"]["settings"]["max_iterations"].get<int>(), 30);
+
+    packet.max_iterations = 75;
+    auto j_override = nlohmann::json::parse(build_start_message(packet, "2"), nullptr, false);
+    CHECK_EQ(j_override["params"]["settings"]["max_iterations"].get<int>(), 75);
+
+    packet.max_iterations = 0;
+    packet.trust_mcp = {"godoer"};
+    // build_start_message only injects mcp_servers when .mcp.json exists; the
+    // turn-budget default does not depend on that file.
+    auto j_trust = nlohmann::json::parse(build_start_message(packet, "3"), nullptr, false);
+    CHECK_EQ(j_trust["params"]["settings"]["max_iterations"].get<int>(),
+             kTrustMcpDefaultMaxIterations);
 }
 
 TEST(collect_files_touched_parses_event_log) {
@@ -1453,6 +1491,117 @@ TEST(worker_check_retains_output_and_exit_status) {
         CHECK_EQ(result.test.output_tail, "check-output");
         CHECK_EQ(result.status, exit_code == 0 ? "ok" : "error");
     }
+}
+
+TEST(is_incomplete_agent_stop_matches_sidecar_error_shape) {
+    RunResult incomplete;
+    incomplete.status = "error";
+    incomplete.error = "agent did not complete (max_turns)";
+    CHECK(is_incomplete_agent_stop(incomplete));
+
+    RunResult stalled;
+    stalled.status = "error";
+    stalled.error = "agent did not complete (stalled)";
+    CHECK(is_incomplete_agent_stop(stalled));
+
+    RunResult timeout;
+    timeout.status = "timeout";
+    timeout.error = "wall clock exceeded (600s)";
+    CHECK(!is_incomplete_agent_stop(timeout));
+
+    RunResult start_fail;
+    start_fail.status = "error";
+    start_fail.error = "mission failed to start (check model_dir or settings)";
+    CHECK(!is_incomplete_agent_stop(start_fail));
+
+    RunResult irr;
+    irr.status = "error";
+    irr.error = "irreversible tool denied (orchestrator must escalate): rm -rf";
+    CHECK(!is_incomplete_agent_stop(irr));
+}
+
+TEST(worker_check_promotes_incomplete_max_turns_when_green) {
+    // lt-004-class: check green + completed=false must not look like a crash.
+    TaskPacket packet;
+    packet.cwd = std::filesystem::temp_directory_path().string();
+    packet.check_command = "printf green; exit 0";
+    packet.check_timeout_s = 2.0;
+
+    RunResult result;
+    result.status = "error";
+    result.error = "agent did not complete (max_turns)";
+    result.message = "agent did not complete (max_turns)";
+    run_check(packet, result);
+
+    CHECK(result.test.ran);
+    CHECK_EQ(result.test.exit_code, 0);
+    CHECK_EQ(result.status, "ok");
+    CHECK(result.error.empty());
+    CHECK_EQ(result.message, "check passed");
+}
+
+TEST(worker_check_does_not_promote_timeout_or_irreversible) {
+    TaskPacket packet;
+    packet.cwd = std::filesystem::temp_directory_path().string();
+    packet.check_command = "exit 0";
+    packet.check_timeout_s = 2.0;
+
+    RunResult timeout;
+    timeout.status = "timeout";
+    timeout.error = "wall clock exceeded (60s)";
+    timeout.message = timeout.error;
+    run_check(packet, timeout);
+    CHECK_EQ(timeout.test.exit_code, 0);
+    CHECK_EQ(timeout.status, "timeout");
+    CHECK_EQ(timeout.error, "wall clock exceeded (60s)");
+
+    RunResult irr;
+    irr.status = "error";
+    irr.error = "irreversible tool denied (orchestrator must escalate): wipe";
+    irr.message = irr.error;
+    run_check(packet, irr);
+    CHECK_EQ(irr.test.exit_code, 0);
+    CHECK_EQ(irr.status, "error");
+    CHECK(!irr.error.empty());
+}
+
+TEST(load_packet_parses_max_iterations) {
+    std::string error;
+    std::filesystem::path tmp_dir =
+        std::filesystem::temp_directory_path() / "test_worker_max_iterations";
+    std::filesystem::create_directories(tmp_dir);
+    std::filesystem::create_directories(tmp_dir / "cwd");
+    std::filesystem::create_directories(tmp_dir / "model");
+
+    {
+        nlohmann::json j = {
+            {"id", "m1"},
+            {"cwd", (tmp_dir / "cwd").string()},
+            {"model_dir", (tmp_dir / "model").string()},
+            {"prompt", "do the thing"},
+            {"max_iterations", 45}
+        };
+        std::ofstream((tmp_dir / "task.json").string()) << j.dump();
+    }
+    auto packet = load_packet((tmp_dir / "task.json").string(), error);
+    CHECK(packet.has_value());
+    CHECK_EQ(error, "");
+    CHECK_EQ(packet->max_iterations, 45);
+
+    {
+        nlohmann::json j = {
+            {"id", "m2"},
+            {"cwd", (tmp_dir / "cwd").string()},
+            {"model_dir", (tmp_dir / "model").string()},
+            {"prompt", "do the thing"},
+            {"max_iterations", 0}
+        };
+        std::ofstream((tmp_dir / "task.json").string()) << j.dump();
+    }
+    CHECK(!load_packet((tmp_dir / "task.json").string(), error).has_value());
+    CHECK(error.find("max_iterations") != std::string::npos);
+
+    std::filesystem::remove_all(tmp_dir);
 }
 
 TEST(busy_daemon_is_not_mistaken_for_absent_worker) {
