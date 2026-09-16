@@ -81,3 +81,25 @@ Not taken:
 - Changing `LMP_PREFILL_CHUNK` default to 512 (2048 is the measured knee)
 - Prefill token streaming during prefill
 - Prompt-window n-grams, unique-token mini-prefill, and composite suffix+MTP (unproven; discarded)
+
+---
+
+## Degenerate-text / no-tool-call recovery
+
+| Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
+|--------|--------|----------|-----------|---|-----------|-------|
+| Bounded recovery on degenerate / length-capped text-instead-of-tool | stall rate; wall; success; `ToolError`; `degenerate_text_count` / `nudged_count` | Tip ~79d4667 bowling seed7: A3B stalls after ~5× `degenerate_text`/(text) while tools Ok | Length-capped think/text joins inert nudge path; degenerate streak → `stalled` after cap; metrics on `run_end` | Gate: detector + nudge-cap + length-capped recovery tests | **pending Mac A/B** | Kill bar below |
+
+**Kill bar (Mac A3B bowling seed7 A/B — do not claim win without it):**
+
+- **Keep** if stall≤0 on same seed **OR** wall↓≥20% with success≥5/6 and `ToolError` not up.
+- **Else** revert recovery behavior; keep metrics / journal fields.
+
+**Enable / disable:**
+
+```bash
+export LMP_DEGENERATE_RECOVERY=0   # disable (default on)
+export LMP_DEGENERATE_NUDGE_CAP=2  # optional hard cap (default = 3 agent / 2 plan)
+```
+
+**Benchbot rebuild for A/B:** tip of this branch vs `main` @ 79d4667 (or pre-merge main), same Qwen3.6-35B-A3B-MLX-4bit, NAX on, bowling seed7. Preserve `events.jsonl` beside `result.json` (auto-archived to `events-<UTC>.jsonl` on retry).
