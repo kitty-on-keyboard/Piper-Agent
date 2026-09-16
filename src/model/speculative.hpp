@@ -291,6 +291,10 @@ class SpeculativeDecoder {
     void update_cache_and_forward(std::size_t m, std::size_t draft_count,
                                  const std::vector<TokenId>& committed, SpecForward& fwd);
 
+    std::vector<TokenDist> shape_distributions(std::size_t prefix, const std::vector<TokenId>& drafted,
+                                               const std::vector<std::vector<float>>& rows,
+                                               const TokenMask* mask, const std::vector<TokenId>& recent);
+
     SamplingParams params_;
     SpecConfig config_;
     Sampler sampler_;

@@ -304,6 +304,30 @@ SpecStep SpeculativeDecoder::abandon_block(std::size_t prefix, const TokenMask* 
     return decode_one(mask_at(0, mask), recent, fwd);
 }
 
+std::vector<TokenDist> SpeculativeDecoder::shape_distributions(
+    std::size_t prefix, const std::vector<TokenId>& drafted, const std::vector<std::vector<float>>& rows,
+    const TokenMask* mask, const std::vector<TokenId>& recent) {
+    std::vector<TokenDist> dists;
+    dists.reserve(drafted.size() + 1);
+    if (prefix == 0) {
+        dists.push_back(sampler_.distribution(row_, mask_at(0, mask), recent));
+    } else if (prefix - 1 < rows.size()) {
+        dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
+    }
+    if (dists.empty() || dists.front().empty()) {
+        return dists;
+    }
+    std::vector<TokenId> recent_i = recent;
+    for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
+        recent_i.push_back(drafted[i]);
+        if (recent_i.size() > kRecentWindow) {
+            recent_i.erase(recent_i.begin());
+        }
+        dists.push_back(sampler_.distribution(rows[prefix + i], mask_at(i + 1, mask), recent_i));
+    }
+    return dists;
+}
+
 void SpeculativeDecoder::update_cache_and_forward(std::size_t m, std::size_t draft_count,
                                                   const std::vector<TokenId>& committed,
                                                   SpecForward& fwd) {
@@ -422,31 +446,9 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     // `recent` already contains the deferred tokens -- the caller pushes every committed
     // token into its window as it is emitted, whether or not the target has consumed it
     // yet -- so the shaping here is the same either way.
-    std::vector<TokenDist> dists;
-    dists.reserve(drafted.size() + 1);
-    if (prefix == 0) {
-        dists.push_back(sampler_.distribution(row_, mask_at(0, mask), recent));
-    } else if (prefix - 1 < rows.size()) {
-        dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
-    }
+    const std::vector<TokenDist> dists = shape_distributions(prefix, drafted, rows, mask, recent);
     if (dists.empty() || dists.front().empty()) {
         return abandon_block(prefix, mask, recent, fwd);
-    }
-    std::vector<TokenId> recent_i = recent;
-    for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
-        recent_i.push_back(drafted[i]);
-        // The SAME bounded window the sequential loop keeps. The repetition penalty is
-        // applied once per OCCURRENCE in this list, so an unbounded window would penalise
-        // a repeated token geometrically harder than the plain path does -- verifying
-        // against a row the model would never have produced. Caught by the gate test,
-        // which saw a p=1.0 token verify at p=0.515.
-        if (recent_i.size() > kRecentWindow) {
-            recent_i.erase(recent_i.begin());
-        }
-        // Position i + 1 of the block: the mask the grammar would have had after
-        // drafted[0..i]. Identical to `mask` for a block-stable source, and the whole
-        // reason a block can run inside a tool call for one that had to be walked.
-        dists.push_back(sampler_.distribution(rows[prefix + i], mask_at(i + 1, mask), recent_i));
     }
 
     // Map into the verifier's index space: each row is dense over that position's
