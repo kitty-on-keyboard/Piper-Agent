@@ -29,6 +29,20 @@ bool Tokenizer::load(const std::string& vocab_path, const LoadOptions& options) 
     return true;
 }
 
+void Tokenizer::append_ordinary(std::string_view text, BPE::Scratch& scratch,
+                                std::vector<std::string_view>& pretokenized,
+                                std::string& nfc_buf, std::vector<int32_t>& out) const {
+    // NFC, then pretokenize, then BPE. Shared by encode() (per special-split piece, matching
+    // the reference pipeline) and encode_ordinary() (the whole string, which is one piece
+    // because that path never splits specials).
+    std::string_view input = text;
+    if (vocab_.wants_nfc() && normalize_nfc(text, nfc_buf)) input = nfc_buf;
+    pretokenizer_->split(input, pretokenized);
+    for (std::string_view chunk : pretokenized) {
+        bpe_->encode_word(chunk, scratch, out);
+    }
+}
+
 std::vector<int32_t> Tokenizer::encode(std::string_view text) const {
     std::vector<int32_t> result;
     if (!special_trie_ || !pretokenizer_ || !bpe_) return result;
@@ -42,8 +56,6 @@ std::vector<int32_t> Tokenizer::encode(std::string_view text) const {
     std::vector<std::string_view> pretokenized;
     std::string nfc_buf;
 
-    const bool wants_nfc = vocab_.wants_nfc();
-
     for (const auto& piece : special_split) {
         if (piece.empty()) continue;
 
@@ -52,22 +64,20 @@ std::vector<int32_t> Tokenizer::encode(std::string_view text) const {
         if (it != vocab_.get_special_token_map().end()) {
             result.push_back(it->second);
         } else {
-            // 2. Normalize, then pre-tokenize. Normalization is per piece, matching the reference
-            // pipeline, which normalizes each segment between special tokens independently. The
-            // views borrow from `piece` or `nfc_buf`, both of which outlive the loop consuming
-            // them (nfc_buf is not rewritten until the next piece).
-            std::string_view input = piece;
-            if (wants_nfc && normalize_nfc(piece, nfc_buf)) input = nfc_buf;
-
-            pretokenizer_->split(input, pretokenized);
-
-            // 3. BPE encode each pre-tokenized chunk, appending straight into the result
-            for (std::string_view chunk : pretokenized) {
-                bpe_->encode_word(chunk, scratch, result);
-            }
+            append_ordinary(piece, scratch, pretokenized, nfc_buf, result);
         }
     }
 
+    return result;
+}
+
+std::vector<int32_t> Tokenizer::encode_ordinary(std::string_view text) const {
+    std::vector<int32_t> result;
+    if (!pretokenizer_ || !bpe_) return result;
+    BPE::Scratch scratch;
+    std::vector<std::string_view> pretokenized;
+    std::string nfc_buf;
+    append_ordinary(text, scratch, pretokenized, nfc_buf, result);
     return result;
 }
 

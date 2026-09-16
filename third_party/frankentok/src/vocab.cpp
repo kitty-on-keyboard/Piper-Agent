@@ -1,6 +1,7 @@
 #include "mlx_qwen_tokenizer/vocab.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -120,7 +121,7 @@ struct CacheHeader {
     uint64_t merge_count;
     uint64_t special_count;
     uint64_t regex_len;
-    uint64_t payload_hash;   // FNV-1a of everything after the header
+    uint64_t payload_hash;   // FNV-1a of blobs, merges, sorted ids, byte table, specials, regex, NFC
     uint8_t wants_nfc;
     uint8_t pad[7];
 };
@@ -150,6 +151,35 @@ uint64_t fnv1a(uint64_t h, const void* data, size_t n) {
     return h;
 }
 constexpr uint64_t kFnvSeed = 0xcbf29ce484222325ull;
+
+// Everything the loader trusts after the header: blobs, merges, sorted index, AND the
+// fields that used to sit outside the checksum (byte table, specials, Split regex, NFC
+// flag). A flipped bit in any of those used to load cleanly and mis-tokenize.
+uint64_t hash_payload(const std::vector<uint32_t>& bl_offsets, const std::string& bl_blob,
+                      const std::vector<uint32_t>& raw_offsets, const std::string& raw_blob,
+                      const std::vector<MergeTable::Slot>& merge_slots,
+                      const std::vector<int32_t>& sorted_ids,
+                      const std::array<int32_t, 256>& byte_token_ids,
+                      const std::vector<std::string>& special_tokens,
+                      const robin_hood::unordered_flat_map<std::string, int32_t>& special_to_id,
+                      const std::string& regex, uint8_t wants_nfc) {
+    uint64_t hash = kFnvSeed;
+    hash = fnv1a(hash, bl_offsets.data(), bl_offsets.size() * sizeof(uint32_t));
+    hash = fnv1a(hash, bl_blob.data(), bl_blob.size());
+    hash = fnv1a(hash, raw_offsets.data(), raw_offsets.size() * sizeof(uint32_t));
+    hash = fnv1a(hash, raw_blob.data(), raw_blob.size());
+    hash = fnv1a(hash, merge_slots.data(), merge_slots.size() * sizeof(MergeTable::Slot));
+    hash = fnv1a(hash, sorted_ids.data(), sorted_ids.size() * sizeof(int32_t));
+    hash = fnv1a(hash, byte_token_ids.data(), byte_token_ids.size() * sizeof(int32_t));
+    for (const std::string& content : special_tokens) {
+        const uint32_t id = uint32_t(special_to_id.at(content));
+        hash = fnv1a(hash, &id, sizeof(id));
+        hash = fnv1a(hash, content.data(), content.size());
+    }
+    hash = fnv1a(hash, regex.data(), regex.size());
+    hash = fnv1a(hash, &wants_nfc, sizeof(wants_nfc));
+    return hash;
+}
 
 template <typename T>
 bool read_vec(std::ifstream& f, std::vector<T>& v, size_t n) {
@@ -213,13 +243,10 @@ bool Vocab::load_cache(const std::string& cache_path, uint64_t src_size, int64_t
     wants_nfc_ = h.wants_nfc != 0;
 
     // Verify the payload before trusting any of it.
-    uint64_t hash = kFnvSeed;
-    hash = fnv1a(hash, bl_offsets_.data(), bl_offsets_.size() * sizeof(uint32_t));
-    hash = fnv1a(hash, bl_blob_.data(), bl_blob_.size());
-    hash = fnv1a(hash, raw_offsets_.data(), raw_offsets_.size() * sizeof(uint32_t));
-    hash = fnv1a(hash, raw_blob_.data(), raw_blob_.size());
-    hash = fnv1a(hash, merges_.slots().data(), merges_.slots().size() * sizeof(MergeTable::Slot));
-    hash = fnv1a(hash, sorted_ids_.data(), sorted_ids_.size() * sizeof(int32_t));
+    const uint64_t hash =
+        hash_payload(bl_offsets_, bl_blob_, raw_offsets_, raw_blob_, merges_.slots(),
+                     sorted_ids_, byte_token_ids_, special_tokens_, special_token_to_id_,
+                     pretokenizer_regex_, wants_nfc_ ? 1 : 0);
     if (hash != h.payload_hash) return false;
 
     initialize_bytes_to_unicode_map();
@@ -249,14 +276,10 @@ void Vocab::write_cache(const std::string& cache_path, uint64_t src_size, int64_
         h.regex_len = pretokenizer_regex_.size();
         h.wants_nfc = wants_nfc_ ? 1 : 0;
 
-        uint64_t hash = kFnvSeed;
-        hash = fnv1a(hash, bl_offsets_.data(), bl_offsets_.size() * sizeof(uint32_t));
-        hash = fnv1a(hash, bl_blob_.data(), bl_blob_.size());
-        hash = fnv1a(hash, raw_offsets_.data(), raw_offsets_.size() * sizeof(uint32_t));
-        hash = fnv1a(hash, raw_blob_.data(), raw_blob_.size());
-        hash = fnv1a(hash, merges_.slots().data(), merges_.slots().size() * sizeof(MergeTable::Slot));
-        hash = fnv1a(hash, sorted_ids_.data(), sorted_ids_.size() * sizeof(int32_t));
-        h.payload_hash = hash;
+        h.payload_hash =
+            hash_payload(bl_offsets_, bl_blob_, raw_offsets_, raw_blob_, merges_.slots(),
+                         sorted_ids_, byte_token_ids_, special_tokens_, special_token_to_id_,
+                         pretokenizer_regex_, h.wants_nfc);
 
         f.write(reinterpret_cast<const char*>(&h), sizeof(h));
 
