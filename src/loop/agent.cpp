@@ -10,7 +10,6 @@
 #include <memory>
 #include <sstream>
 #include <string_view>
-#include <unordered_map>
 
 #include "src/loop/parallel_calls.hpp"
 #include "src/loop/token_stream.hpp"
@@ -250,70 +249,6 @@ std::string working_note_from_reasoning(std::string_view reasoning) {
 
 bool is_blank(std::string_view s) {
     return s.find_first_not_of(" \t\r\n") == std::string_view::npos;
-}
-
-// How repetitive a generation is, measured on the text rather than guessed from its
-// length. Reported ALWAYS, unlike the text itself, because these three numbers are small
-// and a degenerate turn is invisible without them.
-//
-// MEASURED: one turn of a real run emitted "I'll fix all compilation errors
-// systematically. Let me read all source files first." roughly two hundred times and then
-// hit the token cap. In the event log that turn is `generation tokens=4096 status=1` and
-// nothing else -- indistinguishable from a legitimately long write_file. The run had 66
-// turns and several like it; the trace could not tell them apart, so nothing in the
-// harness could either.
-struct TextShape {
-    std::size_t lines = 0;
-    std::size_t distinct = 0;
-    std::size_t worst_line_repeats = 0; // how often the most-repeated non-blank line occurs
-};
-
-TextShape shape_of(const std::string& text) {
-    TextShape s;
-    std::unordered_map<std::string_view, std::size_t> counts;
-    std::size_t at = 0;
-    while (at <= text.size()) {
-        std::size_t nl = text.find('\n', at);
-        if (nl == std::string::npos) {
-            nl = text.size();
-        }
-        const std::string_view line(text.data() + at, nl - at);
-        at = nl + 1;
-        // Blank and near-blank lines repeat in every healthy generation (indentation,
-        // paragraph breaks) and would dominate the count without saying anything.
-        if (line.find_first_not_of(" \t\r") == std::string_view::npos) {
-            continue;
-        }
-        ++s.lines;
-        const std::size_t n = ++counts[line];
-        s.worst_line_repeats = std::max(s.worst_line_repeats, n);
-    }
-    s.distinct = counts.size();
-    return s;
-}
-
-// When a generation is worth flagging as degenerate rather than merely long.
-//
-// The discriminator is HOW MUCH DISTINCT CONTENT there is, not how often the commonest
-// line recurs. That distinction was found by testing rather than reasoning: a repeat-count
-// threshold flags a perfectly good `write_file` of a source file, because real code
-// repeats `    }` a hundred times in two hundred lines. Measured on four inputs --
-//
-//   the real failure  lines=200 distinct=  1 worst=200   <- 0.5% distinct
-//   a source file     lines=244 distinct=125 worst=120   <- 51% distinct
-//   a brace-heavy file lines=200 distinct=101 worst=100  <- 50% distinct
-//   a short answer    lines=  2 distinct=  2 worst=  1
-//
-// -- the repeat counts of the last three are indistinguishable from the first's, and the
-// distinct ratio separates them by an order of magnitude. Both halves still have to hold:
-// the floor keeps short answers out, since two identical lines out of two is 100% repeat
-// and no evidence of anything.
-constexpr std::size_t kRepeatFloor = 8;
-constexpr std::size_t kDistinctCeilingPercent = 25;
-
-bool looks_degenerate(const TextShape& s) {
-    return s.lines >= kRepeatFloor && s.worst_line_repeats >= kRepeatFloor &&
-           s.distinct * 100 <= s.lines * kDistinctCeilingPercent;
 }
 
 // A PER-TURN SEED DERIVED FROM THE RUN'S. SplitMix64's finalizer, which is cheap and
@@ -1491,6 +1426,7 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     {
         const TextShape said = shape_of(turn.reasoning + "\n" + turn.assistant_text);
         const bool degenerate = looks_degenerate(said);
+        turn.degenerate_text = degenerate;
         if (degenerate || sink.looped ||
             turn.generation.status == model::GenStatus::LengthCapped) {
             emit("degenerate_text",
@@ -3078,6 +3014,22 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             inert_turns_ = 0;
             inert_streak_had_tool_call_ = false;
             inert_streak_had_cut_ = false;
+            inert_streak_had_degenerate_ = false;
+        }
+
+        if (turn.degenerate_text) {
+            ++report.degenerate_text_count;
+        }
+        if (turn.outcome == Outcome::TextOnly) {
+            ++report.text_only_turns;
+        }
+        if (turn.outcome == Outcome::ToolCallExecuted && !turn.tool_result.ok()) {
+            ++report.tool_error_count;
+        }
+        for (const TurnResult::ExtraCall& extra : turn.extra_calls) {
+            if (!extra.result.ok()) {
+                ++report.tool_error_count;
+            }
         }
 
         // A turn that called only `plan` is not progress, and a run that keeps doing it
@@ -3248,14 +3200,25 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // `stalled` rather than `ended` -- but it does count, or the budgets are the
         // only backstop.
         //
-        // REFUSED and LENGTH-CAPPED turns leave the count alone rather than incrementing
-        // it. Counting a locked-`plan` refusal as inert is how two restatements plus two
-        // refusals stalled a working run at four turns; `plan` is now dropped from the
-        // grammar, so the model has to pick something else. A tool the human declined is
-        // not the model failing to progress, and a generation cut at the token cap never
-        // got to choose.
-        const bool countable = turn.outcome == Outcome::TextOnly ||
-                               turn.outcome == Outcome::ToolCallExecuted;
+        // REFUSED turns leave the count alone rather than incrementing it. Counting a
+        // locked-`plan` refusal as inert is how two restatements plus two refusals
+        // stalled a working run at four turns; `plan` is now dropped from the grammar,
+        // so the model has to pick something else. A tool the human declined is not the
+        // model failing to progress.
+        //
+        // LENGTH-CAPPED turns used to leave the count alone too -- and that is how a
+        // degenerate text loop that hit the token cap burned bowling seed7: five
+        // `degenerate_text` / (text) turns with tools otherwise Ok, inert counter stuck
+        // at zero, budgets the only backstop. With degenerate_recovery (default on), a
+        // length-capped think/text turn that made no tool call is text-instead-of-tool
+        // and joins this path. Mid-tool caps stay exempt: those are truncated writes,
+        // not babble.
+        const bool text_instead_of_tool =
+            turn.outcome == Outcome::TextOnly ||
+            (config_.degenerate_recovery && turn.outcome == Outcome::LengthCapped &&
+             turn.cap_phase != "tool");
+        const bool countable =
+            text_instead_of_tool || turn.outcome == Outcome::ToolCallExecuted;
         if (!progressed && countable) {
             // Last look at the inbox before anything else. A human watching a run drift
             // toward an ending is exactly the human who types "keep going" -- and ending
@@ -3272,15 +3235,28 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             // The count is of CONSECUTIVE INERT turns -- progress resets it -- so this is
             // not a budget for narration across a run, it is how many times in a row the
             // model may neither write nor learn anything.
-            const std::size_t allowed =
+            const std::size_t mode_default =
                 policy_.conversational ? kPlanNudgesBeforeEnding : kRunNudgesBeforeEnding;
+            std::size_t allowed = mode_default;
+            if (config_.degenerate_nudge_cap > 0) {
+                allowed = config_.degenerate_nudge_cap;
+            }
             ++inert_turns_;
             const bool spun = turn.outcome == Outcome::ToolCallExecuted;
             inert_streak_had_tool_call_ = inert_streak_had_tool_call_ || spun;
             inert_streak_had_cut_ = inert_streak_had_cut_ || turn.cut_for_looping;
+            const bool degenerate_hit =
+                turn.degenerate_text ||
+                (config_.degenerate_recovery && turn.outcome == Outcome::LengthCapped &&
+                 turn.cap_phase != "tool");
+            inert_streak_had_degenerate_ =
+                inert_streak_had_degenerate_ || degenerate_hit;
             const char* const why = spun ? "no_progress"
                                          : (turn.cut_for_looping ? "loop_cut"
-                                                                 : "text_only_turn");
+                                            : turn.degenerate_text ? "degenerate_text"
+                                            : (turn.outcome == Outcome::LengthCapped
+                                                   ? "length_capped_no_tool"
+                                                   : "text_only_turn"));
 
             if (inert_turns_ <= allowed) {
                 // THE NOTE SAYS WHICH FAILURE THIS IS. "Call a tool now" is the wrong
@@ -3305,6 +3281,9 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 // in.
                 const bool loop_cut = !spun && turn.cut_for_looping;
                 const bool think_truncated = !spun && turn.cap_phase == "think_budget";
+                const bool degenerate_babble = !spun && turn.degenerate_text;
+                const bool length_capped_no_tool =
+                    !spun && turn.outcome == Outcome::LengthCapped;
                 // THE FILE NOTE IS FOR FILES. r-18d29b4a83a4a1b0 stalled on four identical
                 // `execute_blender_code` calls; each nudge told it the file was
                 // byte-identical and not to re-read -- advice for a state it was not in,
@@ -3353,6 +3332,16 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "repeated. Nothing ran. Do not resume that loop: call a tool this "
                           "turn -- read, edit, or run the build -- or call 'ask_user' if you "
                           "are blocked. Repeating the same thought ends the run.]"
+                    : degenerate_babble
+                        ? "[Note: That turn repeated the same prose instead of calling a "
+                          "tool. Nothing ran and nothing changed. Stop narrating: call the "
+                          "tool you need NOW (`read_file`, `replace_in_file`, `shell`, or "
+                          "`ask_user` if blocked). Babbling the same sentence ends the run.]"
+                    : length_capped_no_tool
+                        ? "[Note: That turn hit the token cap without making a tool call. "
+                          "Nothing ran. Do not resume the same long thought: pick ONE action "
+                          "and call the tool this turn, or call 'ask_user' if you are "
+                          "blocked. Another capped text turn ends the run.]"
                     : think_truncated
                         ? "[Note: Your reasoning hit its budget and was closed for you, so the "
                           "turn ran out having thought rather than acted -- and what you wrote "
@@ -3377,8 +3366,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "changed and how you know it works. Saying you are finished in text does "
                           "not end the run; `finish` does.]";
                 ctx_.add_turn(std::move(note));
+                ++report.nudged_count;
                 emit("nudged", {{"why", why},
-                                {"consecutive", std::to_string(inert_turns_)}});
+                                {"consecutive", std::to_string(inert_turns_)},
+                                {"cap", std::to_string(allowed)},
+                                {"degenerate", turn.degenerate_text ? "1" : "0"}});
                 continue;
             }
             if (policy_.conversational) {
@@ -3393,13 +3385,20 @@ RunReport Agent::run(const model::CancelToken& cancel) {
             // A run that kept calling tools to no effect is STALLED, and stalled is never
             // completion: it is not a reason the completed=true block below recognises, so
             // it falls through to false without needing to say so twice.
+            // Degenerate / length-capped text-instead-of-tool is also STALLED: babble is
+            // not a final answer, even when no tool ever ran in the streak.
             report.termination_reason =
-                (inert_streak_had_tool_call_ || inert_streak_had_cut_) ? "stalled"
-                                                                      : "ended";
+                (inert_streak_had_tool_call_ || inert_streak_had_cut_ ||
+                 inert_streak_had_degenerate_)
+                    ? "stalled"
+                    : "ended";
             emit(report.termination_reason,
                  {{"why", why},
                   {"consecutive", std::to_string(inert_turns_)},
-                  {"wrote_bytes_in_run", std::to_string(ctx_.workspace_writes())}});
+                  {"wrote_bytes_in_run", std::to_string(ctx_.workspace_writes())},
+                  {"degenerate_text_count",
+                   std::to_string(report.degenerate_text_count)},
+                  {"nudged_count", std::to_string(report.nudged_count)}});
             break;
         }
     }
@@ -3442,7 +3441,12 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                      {"iterations", std::to_string(report.iterations)},
                      {"completed", report.completed ? "true" : "false"},
                      {"unfinished_items", std::to_string(report.unfinished_items)},
-                     {"steers_received", std::to_string(report.steers_received)}});
+                     {"steers_received", std::to_string(report.steers_received)},
+                     {"degenerate_text_count",
+                      std::to_string(report.degenerate_text_count)},
+                     {"text_only_turns", std::to_string(report.text_only_turns)},
+                     {"nudged_count", std::to_string(report.nudged_count)},
+                     {"tool_error_count", std::to_string(report.tool_error_count)}});
     return report;
 }
 

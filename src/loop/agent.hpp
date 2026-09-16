@@ -235,6 +235,18 @@ struct AgentConfig {
     // Default on. `LMP_A1_NOOP_TOOLS_REFRESH=0|1` overrides when set. Tests set this
     // field; they do not race on setenv. Mac A/B uses the env kill switch.
     bool noop_identical_tools_refresh = true;
+
+    // Bounded recovery for degenerate / text-instead-of-tool turns. Default on.
+    // When on, length-capped think/text turns with no tool join the inert nudge/stall
+    // path (they previously left the counter alone and burned turn budget), and a
+    // degenerate streak ends as `stalled` rather than handback `ended`.
+    // `LMP_DEGENERATE_RECOVERY=0|1` overrides when set. Tests set this field.
+    bool degenerate_recovery = true;
+
+    // Hard cap on consecutive recovery nudges before the run stalls. 0 means
+    // use kRunNudgesBeforeEnding (agent) / kPlanNudgesBeforeEnding (plan).
+    // `LMP_DEGENERATE_NUDGE_CAP=N` (positive integer) overrides when set.
+    std::size_t degenerate_nudge_cap = 0;
 };
 
 // How many of `max_new_tokens` stay reserved for the tool call after think ends.
@@ -308,6 +320,11 @@ struct RunReport {
     std::size_t unfinished_items = 0;
     // Instructions that arrived mid-run and were taken up at a turn boundary.
     std::size_t steers_received = 0;
+    // Tier-A loop hygiene (always on). Counts for bowling / bakeoff A/B kill bars.
+    std::size_t degenerate_text_count = 0;
+    std::size_t text_only_turns = 0;
+    std::size_t nudged_count = 0;
+    std::size_t tool_error_count = 0;
 };
 
 class Agent {
@@ -622,6 +639,9 @@ class Agent {
     // the run completed; bowling seed 21/42 burned max_turns because cuts were exempt
     // from the inert counter entirely. This bit forces `stalled` instead.
     bool inert_streak_had_cut_ = false;
+    // Degenerate prose / length-capped text-instead-of-tool is not a handback either.
+    // Forces `stalled` the same way a cut does, once the nudge cap is spent.
+    bool inert_streak_had_degenerate_ = false;
     // Consecutive plan-only turns live on ContextStore (they must survive a follow-up
     // Agent). After two, `plan` is dropped from the grammar until a turn writes or learns.
 

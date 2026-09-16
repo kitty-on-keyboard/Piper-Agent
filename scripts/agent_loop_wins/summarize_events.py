@@ -106,6 +106,9 @@ def collect(events: list[dict[str, Any]]) -> dict[str, Any]:
     spec_accepted = 0
     spec_drafted = 0
     spec_abandoned = 0
+    nudged_why: Counter[str] = Counter()
+    degenerate_events = 0
+    run_end_metrics: dict[str, Any] | None = None
 
     for ev in events:
         kind = ev.get("kind", "")
@@ -159,6 +162,18 @@ def collect(events: list[dict[str, Any]]) -> dict[str, Any]:
             ec = str(ev.get("error_class") or "")
             if ec:
                 error_classes[ec] += 1
+        elif kind == "degenerate_text":
+            degenerate_events += 1
+        elif kind == "nudged":
+            nudged_why[str(ev.get("why") or "")] += 1
+        elif kind == "run_end":
+            run_end_metrics = {
+                "degenerate_text_count": as_int(ev.get("degenerate_text_count")),
+                "text_only_turns": as_int(ev.get("text_only_turns")),
+                "nudged_count": as_int(ev.get("nudged_count")),
+                "tool_error_count": as_int(ev.get("tool_error_count")),
+                "termination_reason": ev.get("termination_reason"),
+            }
 
     reuse_rates = [r / p if p > 0 else 0.0 for r, p in reuse_pairs]
     return {
@@ -184,6 +199,9 @@ def collect(events: list[dict[str, Any]]) -> dict[str, Any]:
         "spec_accepted": spec_accepted,
         "spec_drafted": spec_drafted,
         "spec_abandoned": spec_abandoned,
+        "nudged_why": nudged_why,
+        "degenerate_events": degenerate_events,
+        "run_end_metrics": run_end_metrics,
     }
 
 
@@ -241,6 +259,12 @@ def summarize(events: list[dict[str, Any]], title: str = "agent-loop wins summar
         "draft_len_hist (count by draft_len)",
         Counter({str(k): v for k, v in sorted(m["draft_lens"].items())}),
     )
+    print(f"\ndegenerate_text events: {m['degenerate_events']}")
+    print_counter("nudged.why", m["nudged_why"])
+    if m["run_end_metrics"]:
+        print("\nrun_end loop metrics:")
+        for k, v in m["run_end_metrics"].items():
+            print(f"  {k}: {v}")
     return m
 
 
@@ -269,12 +293,18 @@ def compare(baseline: dict[str, Any], treatment: dict[str, Any]) -> None:
     print(
         f"tools_refresh.changed: {baseline['refresh_changed']} -> {treatment['refresh_changed']}"
     )
+    print(
+        f"degenerate_text events: {baseline['degenerate_events']} -> "
+        f"{treatment['degenerate_events']}"
+    )
     print("reset_reasons baseline: " + (str(dict(baseline["reset_reasons"])) or "{}"))
     print("reset_reasons treatment: " + (str(dict(treatment["reset_reasons"])) or "{}"))
     print("error_class baseline: " + (str(dict(baseline["error_classes"])) or "{}"))
     print("error_class treatment: " + (str(dict(treatment["error_classes"])) or "{}"))
     print("tool_status baseline: " + (str(dict(baseline["tool_status"])) or "{}"))
     print("tool_status treatment: " + (str(dict(treatment["tool_status"])) or "{}"))
+    print("nudged.why baseline: " + (str(dict(baseline["nudged_why"])) or "{}"))
+    print("nudged.why treatment: " + (str(dict(treatment["nudged_why"])) or "{}"))
     print(
         "Worth: primary metric must beat the plan's noise floor. "
         "Stability: TTFT/ToolError/empty-mask/abandoned/reset-reasons within noise."
