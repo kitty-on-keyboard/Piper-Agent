@@ -417,7 +417,7 @@ class Agent {
     // Rebuilds the advertised tool set and the turn grammar. Called from the constructor
     // and again when `plan` locks or unlocks -- leaving `plan` samplable after a lock is
     // how a run kept emitting it until the inert counter stalled (r-18d13efe).
-    void refresh_mode_tools();
+    void refresh_mode_tools(const char* trigger = "other");
     // The registry's spec set minus what this mode withholds. Not a run constant: `plan`
     // drops out after two restatements and returns on progress.
     [[nodiscard]] const std::vector<parsephony::ToolSpec>& mode_specs() const noexcept {
@@ -540,6 +540,12 @@ class Agent {
     // it. A red that was already red is not evidence about the edit.
     std::map<std::string, bool> pre_edit_clean_;
     std::string tools_guidance_;
+    // Hash of tools_guidance_ after the last refresh; used to attribute Reset reasons and
+    // to populate tools_refresh.changed. Empty before the first refresh completes.
+    std::string tools_guidance_hash_;
+    // True when the most recent refresh changed tools_guidance_ bytes. Consumed (and
+    // cleared) when emitting kv_reuse so a tools rewrite can be named as the Reset cause.
+    bool tools_guidance_changed_pending_ = false;
     // Tokens in the prompt step() actually sent this turn. Set during prompt assembly,
     // where the tokenizer has just produced it; read by the duplicate collapse, which pays
     // a full re-prefill and so must know whether the context is short of room first.

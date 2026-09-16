@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <optional>
 #include <span>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -638,6 +639,7 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         r.forward_ms += ms_between(t_s0, clock.mono());
 
         if (st.no_legal_token) {
+            ++r.grammar_empty_mask;
             r.status = GenStatus::BackendError;
             // SELF-DESCRIBING, because three separate theories about this failure were
             // wrong and each cost a run to disprove. The ids are the point: with them the
@@ -709,6 +711,24 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     r.spec_drafted = s.drafted;
     r.spec_accepted = s.accepted_drafts;
     r.spec_abandoned = s.abandoned;
+    {
+        auto join_hist = [](const std::array<std::uint64_t, SpecStats::kHistBins>& h) {
+            std::string out;
+            for (std::size_t i = 0; i < h.size(); ++i) {
+                if (i > 0) {
+                    out += ',';
+                }
+                out += std::to_string(h[i]);
+            }
+            return out;
+        };
+        r.draft_len_hist = join_hist(s.draft_len_hist);
+        r.accept_at_depth = join_hist(s.accept_at_depth);
+        r.reject_at_depth = join_hist(s.reject_at_depth);
+        r.spec_block_traces = s.block_traces;
+    }
+    const SpecPhases& p = fwd.phases();
+    r.spec_verify_ms_sum = p.verify_ms;
     // Printed, not silently accumulated: a speculative run whose acceptance rate is on the
     // floor is slower than not speculating, and that has to be visible without a profiler.
     std::fprintf(stderr,
@@ -722,7 +742,6 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
                  static_cast<unsigned long long>(s.fallbacks));
     // Per BLOCK, not per run: the question a phase breakdown has to answer is "what does
     // one block cost and where", and a run total hides that behind the block count.
-    const SpecPhases& p = fwd.phases();
     const double nb = s.blocks > 0 ? static_cast<double>(s.blocks) : 1.0;
     std::fprintf(stderr,
                  "  [spec] per block: verify=%.1fms forward_last=%.1fms (%.1f pos) "
@@ -1000,6 +1019,13 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     // context and the most-stable-first prompt layout bought nothing.
     const TurnReuse plan = plan_turn_reuse(ledger_, task.prompt, impl_->ckpt.len,
                                            impl_->ckpt.valid, prompt_tags);
+    const ReuseDecision decision = ledger_.plan_reuse(task.prompt, prompt_tags);
+    r.reuse_mode = std::string(reuse_mode_str(plan.mode));
+    r.reuse_reason = std::string(classify_reuse_reason(
+        plan.mode, ledger_.size(), decision.reusable, impl_->ckpt.len, impl_->ckpt.valid,
+        task.prompt.size()));
+    r.prompt_tokens = task.prompt.size();
+    r.stable_prefix_tokens = task.checkpoint_at;
     std::fprintf(stderr,
                  "generate: reuse=%s prefill_from=%zu prompt=%zu chunk=%zu ledger=%zu\n",
                  reuse_mode_name(plan.mode), plan.prefill_from, task.prompt.size(),
@@ -1098,6 +1124,7 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
         const SampleResult pick = sampler.sample(logits_host, mask, recent);
         r.sample_ms += ms_between(t_s0, clock_.mono());
         if (pick.no_legal_token) {
+            ++r.grammar_empty_mask;
             r.status = GenStatus::BackendError;
             r.error = "constrained decode: no legal token -- the grammar and the "
                       "vocabulary disagree, which is a build defect";

@@ -159,4 +159,43 @@ TurnReuse plan_turn_reuse(const KvCacheLedger& ledger, const std::vector<TokenId
     return {ReuseMode::Reset, 0};
 }
 
+std::string_view reuse_mode_str(ReuseMode mode) noexcept {
+    switch (mode) {
+        case ReuseMode::Extend:
+            return "Extend";
+        case ReuseMode::Restore:
+            return "Restore";
+        case ReuseMode::Reset:
+            return "Reset";
+    }
+    return "Reset";
+}
+
+std::string_view classify_reuse_reason(ReuseMode mode, std::size_t ledger_size,
+                                       std::size_t reusable, std::size_t checkpoint_len,
+                                       bool checkpoint_valid,
+                                       std::size_t prompt_size) noexcept {
+    switch (mode) {
+        case ReuseMode::Extend:
+            return "";
+        case ReuseMode::Restore:
+            return "checkpoint_restore";
+        case ReuseMode::Reset:
+            break;
+    }
+    if (ledger_size == 0) {
+        return "first_turn";
+    }
+    if (!checkpoint_valid || checkpoint_len == 0) {
+        return "no_checkpoint";
+    }
+    if (checkpoint_len > prompt_size || checkpoint_len > ledger_size) {
+        return "invalid_checkpoint";
+    }
+    if (checkpoint_len > reusable) {
+        return "ledger_mismatch";
+    }
+    return "unknown";
+}
+
 } // namespace lmp::model
