@@ -136,6 +136,13 @@ struct GenResult {
     // it stays 0 across a multi-turn run, the mechanism is not firing and the complexity
     // is not paying for itself.
     std::size_t prefill_reused_tokens = 0;
+    // Attribution for the reuse decision (agent-loop wins measurement). Mode is
+    // Extend|Restore|Reset; reason is required on Reset (stable string enum). Filled by
+    // the real backend; ScriptedBackend leaves mode empty and the agent falls back.
+    std::string reuse_mode;
+    std::string reuse_reason;
+    std::size_t prompt_tokens = 0;
+    std::size_t stable_prefix_tokens = 0;
     // Speculation, for exactly the same reason. Whether a draft head is loaded and
     // actually firing was, until this existed, unanswerable from a real run: nothing in
     // the log recorded it, and it had to be inferred from the resident-memory plateau in
@@ -150,6 +157,21 @@ struct GenResult {
     // that the dead-end path is real and being hit -- and the only evidence that will
     // confirm or refute why tool-call speculation failed the first time it shipped.
     std::uint64_t spec_abandoned = 0;
+    // Compact depth histograms for the SuffixProposer cost-ratio sweep (tier A). Counts
+    // indexed by draft length / accepted depth; serialized as comma-separated uints on
+    // the generation event. Empty when speculation did not run.
+    std::string draft_len_hist;
+    std::string accept_at_depth;
+    std::string reject_at_depth;
+    double spec_verify_ms_sum = 0.0;
+    // Grammar health (cheap counters per generate). empty_mask counts sample steps with
+    // an empty allow-set; phase_end is Think/Text/ToolCall/Done at turn end.
+    std::uint64_t grammar_empty_mask = 0;
+    std::uint64_t grammar_reject_bonus = 0;
+    std::string grammar_phase_end;
+    // Tier-B firehose: per-block detail lines when LMP_AGENT_LOOP_TRACE=1. Each entry is
+    // a compact "draft_len=N,accepted=M,bonus=0|1,abandoned=0|1,proposer=..." record.
+    std::vector<std::string> spec_block_traces;
     // Allocator cache handed back to the OS on this turn, in bytes. Non-zero only on a
     // full re-prefill, which is the one place the backend reclaims (see the Reset arm of
     // generate()).

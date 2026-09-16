@@ -40,6 +40,56 @@ bool trace_text_enabled() {
     return on;
 }
 
+// Tier-B firehose for agent-loop wins measurement (per-block spec_block, full hashes).
+// Exact `1` only, matching LMP_SHADOW_COMPACT / LMP_COMMIT_THINK discipline.
+bool agent_loop_trace_enabled() {
+    static const bool on = [] {
+        const char* s = std::getenv("LMP_AGENT_LOOP_TRACE");
+        return s != nullptr && s[0] == '1' && s[1] == '\0';
+    }();
+    return on;
+}
+
+// Map ToolResult into the stable error_class taxonomy used by AGENT_LOOP_WINS results.
+// Existing ErrorClass values are coarse; prefer them when present and fall back to status.
+std::string journal_error_class(const tools::ToolResult& r) {
+    if (r.status == tools::Status::Ok) {
+        return {};
+    }
+    if (r.status == tools::Status::Refused || r.status == tools::Status::Denied ||
+        r.error_class == tools::ErrorClass::Policy) {
+        return "sandbox";
+    }
+    if (r.status == tools::Status::Timeout || r.error_class == tools::ErrorClass::Transient) {
+        return "exec";
+    }
+    switch (r.error_class) {
+        case tools::ErrorClass::Malformed:
+            return "parse_args";
+        case tools::ErrorClass::Conflict:
+            return "edit_miss";
+        case tools::ErrorClass::NotFound:
+            return "exec";
+        case tools::ErrorClass::Policy:
+            return "sandbox";
+        case tools::ErrorClass::Transient:
+            return "exec";
+        case tools::ErrorClass::None:
+            break;
+    }
+    if (r.status == tools::Status::ToolError && r.exit_code >= 0) {
+        return "exec";
+    }
+    return "unknown";
+}
+
+std::string journal_error_code(const tools::ToolResult& r) {
+    if (r.ok() || r.exit_code < 0) {
+        return {};
+    }
+    return std::to_string(r.exit_code);
+}
+
 // Long enough to see a whole argument -- a truncated write_file is exactly the case
 // where the interesting part is the end -- and bounded so one traced turn cannot be the
 // whole log.
@@ -769,7 +819,7 @@ Agent::Agent(const model::QwenTokenizer& tok, model::InferenceBackend& backend,
     // from the same inputs still reproduces exactly -- which is the property config_.seed
     // exists for, and the only one being kept.
     turns_generated_ = ctx_.turns_recorded();
-    refresh_mode_tools();
+    refresh_mode_tools("init");
     std::string withheld_by_mode;
     for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
         const tools::ToolDecl* d = registry_.find(s.name);
@@ -847,17 +897,73 @@ Agent::~Agent() {
     }
 }
 
-void Agent::refresh_mode_tools() {
-    mode_specs_.clear();
+void Agent::refresh_mode_tools(const char* trigger) {
+    const std::size_t spec_before = mode_specs_.size();
+    const std::string hash_before = tools_guidance_hash_;
+
+    // Build the candidate set / text without mutating yet — A1 needs a byte-identical
+    // check before touching the stable system prefix that KV reuses from token 0.
+    std::vector<parsephony::ToolSpec> next_specs;
+    next_specs.reserve(registry_.guard_specs().size());
     for (const parsephony::ToolSpec& s : registry_.guard_specs()) {
         const tools::ToolDecl* d = registry_.find(s.name);
         if (d != nullptr && !tool_allowed(*d)) {
             continue;
         }
-        mode_specs_.push_back(s);
+        next_specs.push_back(s);
     }
-    tools_guidance_ =
+    std::string next_guidance =
         registry_.tools_json([this](const tools::ToolDecl& d) { return tool_allowed(d); });
+    const std::string hash_after = platform::content_sha256_hex(next_guidance);
+
+    // First paint (empty before) is not a mid-run rewrite; only a later byte change
+    // should attribute a Reset to tools_guidance_changed.
+    const bool first_paint = hash_before.empty();
+    const bool changed = !first_paint && hash_before != hash_after;
+
+    // Tier A: short hash prefix. Tier B (LMP_AGENT_LOOP_TRACE=1): full sha256.
+    const auto short_or_full = [](const std::string& h) -> std::string {
+        if (h.empty()) {
+            return {};
+        }
+        if (agent_loop_trace_enabled() || h.size() <= 16) {
+            return h;
+        }
+        return h.substr(0, 16);
+    };
+    const char* trigger_s = trigger == nullptr ? "other" : trigger;
+
+    // Phase A1: freeze tools text when the allowlist is unchanged. Skip the rewrite so
+    // we do not reassign tools_guidance_ / mode_specs_ (stable prefix stays byte-identical)
+    // and do not set tools_guidance_changed_pending_.
+    if (!first_paint && !changed) {
+        emit("tools_refresh",
+             {{"trigger", trigger_s},
+              {"guidance_hash_before", short_or_full(hash_before)},
+              {"guidance_hash_after", short_or_full(hash_after)},
+              {"changed", "0"},
+              {"spec_count_before", std::to_string(spec_before)},
+              {"spec_count_after", std::to_string(spec_before)},
+              {"noop", "1"}});
+        return;
+    }
+
+    mode_specs_ = std::move(next_specs);
+    tools_guidance_ = std::move(next_guidance);
+    tools_guidance_changed_pending_ =
+        tools_guidance_changed_pending_ || (changed && !first_paint);
+    // Still report changed=1 on init so baselines see the first materialization.
+    const bool reported_changed = first_paint || changed;
+    tools_guidance_hash_ = hash_after;
+
+    emit("tools_refresh",
+         {{"trigger", trigger_s},
+          {"guidance_hash_before", short_or_full(hash_before)},
+          {"guidance_hash_after", short_or_full(hash_after)},
+          {"changed", reported_changed ? "1" : "0"},
+          {"spec_count_before", std::to_string(spec_before)},
+          {"spec_count_after", std::to_string(mode_specs_.size())},
+          {"noop", "0"}});
 }
 
 // `plan` is declared by the registry but executed HERE: the checklist lives in the
@@ -1211,7 +1317,13 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
                         {"peak", std::to_string(mem.peak)},
                         {"prompt_tokens", std::to_string(task.prompt.size())}});
     }
+    // Capture shadow / tools state BEFORE warm consumes kv_invalidated_by_compact_.
+    const bool pending_compact_invalidation = kv_invalidated_by_compact_;
     maybe_warm_stable_prefix(task, cancel);
+    const bool shadow_armed = warmed_stable_prefix_ ||
+                              (pending_compact_invalidation && config_.shadow_compact);
+    const bool tools_changed = tools_guidance_changed_pending_;
+    tools_guidance_changed_pending_ = false;
     emit("phase", {{"at", "generate_begin"}});
 
     // --- constrained generation --------------------------------------------
@@ -1254,6 +1366,9 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     turn.assistant_text = tok_.decode(grammar.text_ids());
     turn.think_tokens = grammar.think_ids().size();
     turn.text_tokens = grammar.text_ids().size();
+    if (turn.generation.grammar_phase_end.empty()) {
+        turn.generation.grammar_phase_end = phase_name(grammar.phase());
+    }
     const std::size_t generated =
         static_cast<std::size_t>(std::max(0, turn.generation.tokens_generated));
     turn.tool_tokens =
@@ -1298,6 +1413,13 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           {"spec_drafted", std::to_string(turn.generation.spec_drafted)},
           {"spec_accepted", std::to_string(turn.generation.spec_accepted)},
           {"spec_abandoned", std::to_string(turn.generation.spec_abandoned)},
+          {"draft_len_hist", turn.generation.draft_len_hist},
+          {"accept_at_depth", turn.generation.accept_at_depth},
+          {"reject_at_depth", turn.generation.reject_at_depth},
+          {"spec_verify_ms_sum", std::to_string(turn.generation.spec_verify_ms_sum)},
+          {"grammar_empty_mask", std::to_string(turn.generation.grammar_empty_mask)},
+          {"grammar_reject_bonus", std::to_string(turn.generation.grammar_reject_bonus)},
+          {"grammar_phase_end", turn.generation.grammar_phase_end},
           // Beside ttft_ms deliberately: these are the bytes the allocator gave back
           // immediately BEFORE the prefill that ttft_ms times, so the cost of the reclaim
           // and its benefit are on one line of one event. Non-zero only on a full
@@ -1310,6 +1432,48 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
           // runs were spent reading zeros out of the other fields and inferring, when the
           // backend had already written down the answer and nobody was recording it.
           {"error", turn.generation.error}});
+
+    // Prefix / reuse attribution (tier A). Mode+reason on every generate; reason required
+    // on Reset. Agent overlays more specific causes when it knows them.
+    {
+        std::string mode = turn.generation.reuse_mode;
+        if (mode.empty()) {
+            mode = turn.generation.prefill_reused_tokens > 0 ? "Extend" : "Reset";
+        }
+        std::string reason = turn.generation.reuse_reason;
+        if (mode == "Reset") {
+            if (warmed_stable_prefix_ && turn.generation.prefill_reused_tokens == 0 &&
+                turn.generation.cache_reclaimed_bytes > 0) {
+                reason = "shadow_id_mismatch";
+            } else if (tools_changed) {
+                reason = "tools_guidance_changed";
+            } else if (pending_compact_invalidation && !config_.shadow_compact) {
+                reason = "compact_no_shadow";
+            } else if (reason.empty()) {
+                reason = "unknown";
+            }
+        }
+        const std::size_t prompt_tokens = turn.generation.prompt_tokens > 0
+                                              ? turn.generation.prompt_tokens
+                                              : task.prompt.size();
+        const std::size_t stable_prefix = turn.generation.stable_prefix_tokens > 0
+                                              ? turn.generation.stable_prefix_tokens
+                                              : task.checkpoint_at;
+        emit("kv_reuse",
+             {{"mode", mode},
+              {"reused_tokens", std::to_string(turn.generation.prefill_reused_tokens)},
+              {"prompt_tokens", std::to_string(prompt_tokens)},
+              {"reason", reason},
+              {"stable_prefix_tokens", std::to_string(stable_prefix)},
+              {"shadow_armed", shadow_armed ? "1" : "0"}});
+    }
+
+    // Tier B: one event per speculative block when LMP_AGENT_LOOP_TRACE=1.
+    if (agent_loop_trace_enabled()) {
+        for (const std::string& line : turn.generation.spec_block_traces) {
+            emit("spec_block", {{"detail", line}});
+        }
+    }
 
     if (warmed_stable_prefix_ && turn.generation.prefill_reused_tokens == 0 &&
         turn.generation.cache_reclaimed_bytes > 0) {
@@ -1822,6 +1986,8 @@ bool Agent::adopt_readonly_result(const std::string& name,
     }
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
+                         {"error_class", journal_error_class(result)},
+                         {"error_code", journal_error_code(result)},
                          {"read_bytes", std::to_string(result.bytes_read)},
                          {"edit_bytes", std::to_string(result.bytes_changed)},
                          {"summary", result.summary}});
@@ -2353,6 +2519,8 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
 
     emit("tool_result", {{"tool", name},
                          {"status", std::string(tools::to_string(result.status))},
+                         {"error_class", journal_error_class(result)},
+                         {"error_code", journal_error_code(result)},
                          {"read_bytes", std::to_string(result.bytes_read)},
                          {"edit_bytes", std::to_string(result.bytes_changed)},
                          {"summary", result.summary}});
@@ -2932,13 +3100,13 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         if (plan_only_turn) {
             ctx_.note_plan_only_turn();
             if (ctx_.plan_locked() && !policy_.conversational) {
-                refresh_mode_tools();
+                refresh_mode_tools("plan_lock");
             }
         } else if (progressed) {
             const bool was_locked = ctx_.plan_locked();
             ctx_.clear_plan_spin();
             if (was_locked && !policy_.conversational) {
-                refresh_mode_tools();
+                refresh_mode_tools("plan_unlock");
             }
         }
 

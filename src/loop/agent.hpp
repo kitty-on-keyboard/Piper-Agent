@@ -338,6 +338,19 @@ class Agent {
         return tools_guidance_;
     }
 
+    // Rebuilds the advertised tool set (and the turn grammar inputs). Called from the
+    // constructor and again when `plan` locks or unlocks. Phase A1: identical mid-run
+    // rewrites are no-ops (`tools_refresh.noop=1`) so the stable system prefix is not
+    // rewritten and KV is not busted from token 0. Exposed so the gate can force a
+    // second refresh without waiting on a second plan-lock transition.
+    void refresh_mode_tools(const char* trigger = "other");
+
+    // The registry's spec set minus what this mode withholds. Not a run constant: `plan`
+    // drops out after two restatements and returns on progress.
+    [[nodiscard]] const std::vector<parsephony::ToolSpec>& mode_specs() const noexcept {
+        return mode_specs_;
+    }
+
   private:
     // Never trim below this many verbatim turns, whatever the budget says: a run that
     // cannot see its own last few observations cannot make a next move.
@@ -414,15 +427,6 @@ class Agent {
     // Filtering is not defence in depth for its own sake; it is the difference between a
     // mode and a series of accidents.
     [[nodiscard]] bool tool_allowed(const tools::ToolDecl& decl) const;
-    // Rebuilds the advertised tool set and the turn grammar. Called from the constructor
-    // and again when `plan` locks or unlocks -- leaving `plan` samplable after a lock is
-    // how a run kept emitting it until the inert counter stalled (r-18d13efe).
-    void refresh_mode_tools();
-    // The registry's spec set minus what this mode withholds. Not a run constant: `plan`
-    // drops out after two restatements and returns on progress.
-    [[nodiscard]] const std::vector<parsephony::ToolSpec>& mode_specs() const noexcept {
-        return mode_specs_;
-    }
     // Appends the post-edit syntax verdict to `result`'s summary. Empty when there is no
     // contract for the path, when the check could not run, or when it came back clean --
     // silence is the default, because a per-turn "no checker for .md" is prompt noise.
@@ -540,6 +544,12 @@ class Agent {
     // it. A red that was already red is not evidence about the edit.
     std::map<std::string, bool> pre_edit_clean_;
     std::string tools_guidance_;
+    // Hash of tools_guidance_ after the last refresh; used to attribute Reset reasons and
+    // to populate tools_refresh.changed. Empty before the first refresh completes.
+    std::string tools_guidance_hash_;
+    // True when the most recent refresh changed tools_guidance_ bytes. Consumed (and
+    // cleared) when emitting kv_reuse so a tools rewrite can be named as the Reset cause.
+    bool tools_guidance_changed_pending_ = false;
     // Tokens in the prompt step() actually sent this turn. Set during prompt assembly,
     // where the tokenizer has just produced it; read by the duplicate collapse, which pays
     // a full re-prefill and so must know whether the context is short of room first.

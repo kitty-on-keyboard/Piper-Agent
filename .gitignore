@@ -51,8 +51,7 @@ __pycache__/
 # because a tree that predates that change may still have one lying around.
 lmp_events.jsonl
 
-# The context journal (src/pcc), written at the WORKSPACE root -- which is this repo
-# whenever the agent is pointed at itself. The wildcard is load-bearing: SQLite in WAL
-# mode keeps -wal and -shm siblings, and committing those without the database is worse
-# than committing neither.
-.lmp-context.db*
+# Local agent-loop wins benches / multi-MB journals (see docs/AGENT_LOOP_WINS_BRANCH_PLAN.md).
+# Keep summarize_events.py in scripts/; never commit raw dumps.
+/piper-bench/
+

@@ -9,32 +9,29 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 59
-
+count 60
 test_agent_step
 test_arena
-test_corpus_pins
-test_extension_typecheck
-test_transcript_order
-test_inline_code_order
-test_question_options
-test_view_script_parses
-test_checkpoint
-test_remember_allowlist
-test_backend_seam
-test_speculative
-test_mtp_proposer
 test_assertions_enabled
+test_backend_seam
 test_check_framework
+test_checkpoint
 test_clock
+test_context_journal
+test_context_tools
 test_corpus_loads
+test_corpus_pins
 test_event_log
+test_extension_typecheck
 test_fs
 test_gate_manifest
 test_grammar
-test_token_stream_gate
+test_image_preprocess
+test_inline_code_order
 test_kv_reuse
 test_log_triage_engine
+test_loop
+test_malformed_call_museum
 test_mcp_framing
 test_mcp_host
 test_mcp_host_probe
@@ -44,31 +41,34 @@ test_mcp_settings
 test_mcp_stdio
 test_mini_vocab
 test_model_bounds
-test_image_preprocess
-test_loop
+test_mtp_proposer
 test_parallel_calls
 test_parsephony_lookup
-test_context_journal
-test_context_tools
-test_resume
 test_pcc_cas
 test_pcc_context
 test_pcc_recall
 test_pcc_store
 test_pin_attribution
 test_piper_worker
+test_question_options
 test_ratchets
+test_ratchets_falsifiable
 test_registry
+test_remember_allowlist
+test_resume
+test_run_id
 test_sandbox
 test_session
 test_spawn_env
+test_speculative
+test_spsc_channel
 test_syntax_check
 test_think_blocks
-test_ratchets_falsifiable
-test_spsc_channel
-test_run_id
+test_token_stream_gate
 test_transcript
+test_transcript_order
 test_transport
+test_view_script_parses
 test_worker
 
 # Real-model tests are labelled `realmodel` and excluded from the gate (S11.6). They also
