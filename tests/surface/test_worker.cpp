@@ -1327,6 +1327,19 @@ TEST(parse_idle_timeout_arg_handles_invalid_conversions) {
     CHECK_EQ(parse_idle_timeout_arg("0", 3600.0), 0.0);
 }
 
+TEST(worker_main_invalid_idle_timeout_does_not_crash) {
+    char* argv[] = {
+        const_cast<char*>("piper"),
+        const_cast<char*>("--idle-timeout"),
+        const_cast<char*>("abc"),
+        const_cast<char*>("--help")
+    };
+    int argc = 4;
+    // Calling worker_main with invalid idle-timeout should not crash.
+    // It should parse the help command and return kExitOk.
+    CHECK_EQ(worker_main(argc, argv), kExitOk);
+}
+
 TEST(collect_git_returns_zero_stats_for_non_git_dir) {
     const auto dir = std::filesystem::temp_directory_path() /
         ("test_collect_git_nongit_" + std::to_string(::getpid()));
