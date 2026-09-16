@@ -2218,10 +2218,13 @@ static constexpr const char* kWorkerHelpText =
     "Flags for serve:\n"
     "  --socket <path>                 Unix domain socket path\n"
     "  --idle-timeout <seconds>        Idle timeout in seconds (default: 3600)\n\n"
-    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
-    "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
-    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, or LMP_ORCH_WEBHOOK). "
-    "A run that writes result.json POSTs done if completed, stalled if stopped/failed. Process exit with no result.json POSTs died. "
+    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; "
+    "pass --orch-webhook or stay attached. "
+    "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) "
+    "or detach (screen, nohup, background, requiring a wake URL via --orch-webhook, "
+    "task.json orch_webhook, or LMP_ORCH_WEBHOOK). "
+    "A run that writes result.json POSTs done if completed, stalled if stopped/failed. "
+    "Process exit with no result.json POSTs died. "
     "Silent detached workers are refused.\n";
 } // namespace
 
