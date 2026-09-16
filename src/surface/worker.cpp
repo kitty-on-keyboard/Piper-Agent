@@ -344,6 +344,19 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
         packet.check_timeout_s = j["check_timeout_s"].get<double>();
     }
 
+    if (j.contains("max_iterations")) {
+        if (j["max_iterations"].is_boolean() || !j["max_iterations"].is_number()) {
+            error = "max_iterations must be a positive integer";
+            return std::nullopt;
+        }
+        const double raw = j["max_iterations"].get<double>();
+        if (raw < 1.0 || raw != std::floor(raw) || raw > 1000000.0) {
+            error = "max_iterations must be a positive integer";
+            return std::nullopt;
+        }
+        packet.max_iterations = static_cast<int>(raw);
+    }
+
     if (j.contains("trust_mcp")) {
         if (!j["trust_mcp"].is_array()) {
             error = "trust_mcp must be an array of server names";
@@ -402,12 +415,26 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
     return packet;
 }
 
+int resolve_max_iterations(const TaskPacket& packet) {
+    if (packet.max_iterations > 0) return packet.max_iterations;
+    return packet.trust_mcp.empty() ? kDefaultMaxIterations
+                                    : kTrustMcpDefaultMaxIterations;
+}
+
+bool is_incomplete_agent_stop(const RunResult& result) {
+    // Sidecar labels harness incompleteness this way; hard failures (timeout,
+    // start failure, irreversible deny) use different error strings and must
+    // not be promoted by a green check.
+    return result.status == "error" &&
+           result.error.rfind("agent did not complete", 0) == 0;
+}
+
 std::string build_start_message(const TaskPacket& packet, const std::string& request_id) {
     nlohmann::json settings = {
         {"model_dir", packet.model_dir},
         {"workspace_root", packet.cwd},
         {"mode", packet.mode},
-        {"max_iterations", 30},
+        {"max_iterations", resolve_max_iterations(packet)},
         {"wall_clock_seconds", static_cast<int>(packet.timeout_s)},
         {"auto_approve_exec", packet.auto_approve_exec},
         {"auto_approve_writes", packet.auto_approve_writes},
@@ -981,11 +1008,21 @@ void run_check(const TaskPacket& packet, RunResult& result) {
     }
     result.test.output_tail = out;
 
-    if (code != 0) {
-        if (result.status == "ok") {
-            result.status = "error";
-            result.error = "check command failed (exit code " + std::to_string(code) + ")";
+    if (code == 0) {
+        // Operator acceptance wins. A green check means the workspace met the
+        // packet criteria — max_turns / unfinished checklist without a finish
+        // call is not a crash when the check already says the slice is good.
+        if (is_incomplete_agent_stop(result)) {
+            result.status = "ok";
+            if (result.message.empty() ||
+                result.message.rfind("agent did not complete", 0) == 0) {
+                result.message = "check passed";
+            }
+            result.error.clear();
         }
+    } else if (result.status == "ok") {
+        result.status = "error";
+        result.error = "check command failed (exit code " + std::to_string(code) + ")";
     }
 }
 
@@ -1508,9 +1545,13 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
      "auto_approve_writes": true,
      "auto_approve_irreversible": true,
      "timeout_s": 600,
+     "max_iterations": 30,
+     "check": "ctest -R test_validator",
      "result_path": "/absolute/path/to/result.json"
    }
    ```
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise in the packet for long slices — no rebuild.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
 
 4. **Dispatch Piper**
    Run the CLI command:
@@ -1545,10 +1586,10 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    ```
 
    **Review Rubric (Keep it cheap):**
-   - **Status**: Is `status == "ok"`? If `"error"` or `"stalled"`, inspect the message.
+   - **Status**: Is `status == "ok"`? If `"error"` or `"stalled"`, inspect the message. Green `test.exit_code=0` with incomplete loop is still `ok` when `check` was set.
    - **Files Touched**: Are changes confined to expected paths? Reject drive-by edits.
    - **Diff**: Skim git diff for regressions or unnecessary churn.
-   - **Acceptance**: Run verification commands or tests to validate the slice.
+   - **Acceptance**: Prefer `result.test` from the packet `check`; re-run only if you need a second reading.
 
 6. **Iterate or Complete**
    - **Pass**: If acceptance criteria for the slice pass, dispatch the next slice.
@@ -1641,8 +1682,9 @@ agent copies.
 
 - `--help` names this standard in one paragraph.
 - A detached launch with no URL exits before the sidecar starts.
-- A run that writes `result.json` POSTs `done` if it completed, `stalled`
-  if it did not.
+- A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
+  `plan_ready`, or a green packet `check` after an incomplete loop stop such as
+  `max_turns`), `stalled` if it did not.
 - The launch parent POSTs `died` if the sidecar exits with no result.
 - An irreversible call and `ask_user` both POST `ask` and wait.
 )";

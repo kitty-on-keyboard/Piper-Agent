@@ -2139,7 +2139,11 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         result.error);
 
     run_check(packet, result);
-    if (result.test.ran && result.test.exit_code != 0 && exit_code == kExitOk) {
+    // Green check can promote incomplete → ok; failed check demotes ok → error.
+    // Keep process exit aligned with the reconciled status.
+    if (result.status == "ok") {
+        exit_code = kExitOk;
+    } else if (result.test.ran && result.test.exit_code != 0 && exit_code == kExitOk) {
         exit_code = kExitError;
     }
 
@@ -2148,7 +2152,9 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
 
     if (!packet.orch_webhook.empty()) {
         WebhookPayload hook_payload;
-        const bool is_completed = (final_report.completed || final_report.termination_reason == "plan_ready") && (result.status == "ok");
+        // status=ok means the operator contract passed (model completed, or a
+        // green check promoted an incomplete loop stop). That is done, not stalled.
+        const bool is_completed = (result.status == "ok");
         hook_payload.kind = is_completed ? "done" : "stalled";
         hook_payload.task_id = packet.id;
         hook_payload.run_id = session.run_id;
