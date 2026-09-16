@@ -314,17 +314,25 @@ TEST(a_server_that_fails_handshake_reports_error_and_does_not_crash_host) {
     // connection setup. The host must catch the exception, mark status.connected = false,
     // record status.error, and allow execution to continue.
     Registry registry(workspace());
+    const std::size_t native = registry.decls().size();
+
     McpServerConfig failing;
     failing.name = "aborter";
     failing.command = "true"; // binary exits zero without speaking MCP stdio protocol
 
     McpHost host;
-    const auto report = host.connect_and_register({failing}, registry);
+    const auto report = host.connect_and_register({failing, demo("demo", true)}, registry);
 
-    REQUIRE(report.size() == 1);
+    REQUIRE(report.size() == 2);
     CHECK(!report[0].connected);
     CHECK(!report[0].error.empty());
     CHECK_EQ(report[0].registered, static_cast<std::size_t>(0));
+
+    // The second server still registers successfully, proving the host didn't stall or abort
+    CHECK(report[1].connected);
+    CHECK(report[1].error.empty());
+    CHECK_EQ(report[1].registered, static_cast<std::size_t>(5));
+    CHECK(registry.decls().size() == native + 5);
 }
 
 TEST(a_server_that_dies_mid_run_fails_its_calls_without_stalling_the_turn) {
