@@ -5373,3 +5373,97 @@ TEST(shadow_compact_emits_on_the_turn_after_compact) {
     CHECK(trace.find("\"kind\":\"shadow_compact\"") != std::string::npos);
     CHECK(trace.find("shadow_compact_fallback") == std::string::npos);
 }
+
+// PR1 agent-loop wins measurement: tier-A journal fields with no behavior change.
+TEST(agent_loop_wins_measurement_emits_kv_reuse_and_tools_refresh) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string log_path = root + "/events.jsonl";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(tok, "thinking", "Here is the answer."));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("say hello");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    (void)agent.step(cancel);
+    log.flush();
+
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    const std::string& trace = f.bytes;
+
+    CHECK(trace.find("\"kind\":\"tools_refresh\"") != std::string::npos);
+    CHECK(trace.find("\"trigger\":\"init\"") != std::string::npos);
+    CHECK(trace.find("\"guidance_hash_after\"") != std::string::npos);
+    CHECK(trace.find("\"noop\":\"0\"") != std::string::npos);
+
+    CHECK(trace.find("\"kind\":\"kv_reuse\"") != std::string::npos);
+    CHECK(trace.find("\"mode\":\"Reset\"") != std::string::npos);
+    CHECK(trace.find("\"reason\":\"") != std::string::npos);
+    CHECK(trace.find("\"reused_tokens\"") != std::string::npos);
+    CHECK(trace.find("\"prompt_tokens\"") != std::string::npos);
+    CHECK(trace.find("\"shadow_armed\"") != std::string::npos);
+
+    CHECK(trace.find("\"kind\":\"generation\"") != std::string::npos);
+    CHECK(trace.find("\"grammar_phase_end\"") != std::string::npos);
+    CHECK(trace.find("\"grammar_empty_mask\"") != std::string::npos);
+    CHECK(trace.find("\"accept_at_depth\"") != std::string::npos);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+TEST(agent_loop_wins_tool_result_carries_error_class) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string log_path = root + "/events.jsonl";
+
+    const std::string body =
+        "<function=read_file>\n<parameter=path>\nno_such_file_xyz.txt\n"
+        "</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "missing"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("read a missing file");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    CHECK(!turn.tool_result.ok());
+    log.flush();
+
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"kind\":\"tool_result\"") != std::string::npos);
+    CHECK(f.bytes.find("\"error_class\":\"") != std::string::npos);
+    CHECK(f.bytes.find("\"status\":\"ToolError\"") != std::string::npos ||
+          f.bytes.find("\"status\":\"") != std::string::npos);
+
+    (void)::system(("rm -rf " + root).c_str());
+}

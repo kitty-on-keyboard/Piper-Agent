@@ -42,6 +42,9 @@ lmp_add_test(test_mtp_proposer SOURCES test_mtp_proposer.cpp LABELS gate LINK lm
 # The cross-turn cache decision, for the same reason: an off-by-one there decodes fluent
 # wrong text rather than crashing, so the algebra is pure and asserted with no GPU.
 lmp_add_test(test_kv_reuse SOURCES test_kv_reuse.cpp LABELS gate LINK lmp_model)
+# PR1 optional tease-out: frozen bad tool-call strings through ToolCallGuard only.
+lmp_add_test(test_malformed_call_museum SOURCES test_malformed_call_museum.cpp LABELS gate
+             LINK parsephony)
 lmp_add_test(test_mini_vocab SOURCES test_mini_vocab.cpp LABELS gate LINK lmp_model)
 add_dependencies(test_mini_vocab lmp_mini_vocab lmp_refused_vocabs)
 target_compile_definitions(test_mini_vocab PRIVATE

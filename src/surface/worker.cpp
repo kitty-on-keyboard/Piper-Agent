@@ -1476,4 +1476,19 @@ int init_project(const std::string& target_dir_in) {
     return kExitOk;
 }
 
+double parse_idle_timeout_seconds(const char* text, double fallback) noexcept {
+    if (text == nullptr || text[0] == '\0') {
+        return fallback;
+    }
+    try {
+        const double v = std::stod(text);
+        if (!std::isfinite(v) || v < 0.0) {
+            return fallback;
+        }
+        return v;
+    } catch (...) {
+        return fallback;
+    }
+}
+
 } // namespace lmp::surface::worker

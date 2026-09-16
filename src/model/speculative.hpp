@@ -43,11 +43,13 @@
 // state-dependent per token -- fall back to ordinary decoding. That is not much of a loss:
 // tool-call bodies are short and the bulk of a turn is Think and Text.
 //
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "src/model/backend.hpp"
@@ -88,6 +90,18 @@ struct SpecStats {
     // this used to END THE RUN with "the grammar and the vocabulary disagree", and if it
     // starts climbing again that is the same defect back, not a slow drafter.
     std::uint64_t abandoned = 0;
+
+    // Depth histograms for the cost-ratio sweep. Index = draft length or accepted count;
+    // capped at kHistBins-1. Cheap fixed arrays -- tier A forever.
+    static constexpr std::size_t kHistBins = 17;
+    std::array<std::uint64_t, kHistBins> draft_len_hist{};
+    std::array<std::uint64_t, kHistBins> accept_at_depth{};
+    std::array<std::uint64_t, kHistBins> reject_at_depth{};
+    double verify_ms_sum = 0.0;
+
+    // Tier B: per-block records when LMP_AGENT_LOOP_TRACE=1. Compact strings so the
+    // journal can emit them without another struct crossing the backend/agent seam.
+    std::vector<std::string> block_traces;
 
     [[nodiscard]] double acceptance_rate() const noexcept {
         return drafted > 0 ? static_cast<double>(accepted_drafts) / static_cast<double>(drafted)
@@ -284,7 +298,8 @@ class SpeculativeDecoder {
     // verification forward, notifies the proposer that nothing survived, flushes the
     // deferred prefix, and falls back to ordinary single-token decoding.
     SpecStep abandon_block(std::size_t prefix, const TokenMask* mask,
-                           const std::vector<TokenId>& recent, SpecForward& fwd);
+                           const std::vector<TokenId>& recent, SpecForward& fwd,
+                           std::size_t draft_len = 0);
 
     // Update state, pending cache, and forward state after a speculative block's
     // verification result is settled.

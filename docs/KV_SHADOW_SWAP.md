@@ -1,7 +1,16 @@
 # KV shadow-swap (v1)
 
-Flag: `LMP_SHADOW_COMPACT` unset/`0` = off. `=1` warms the live cache after
-compaction rewrites the prompt. Compact policy stays **75 / 35 summarize**.
+Flag: `LMP_SHADOW_COMPACT`. Precedence matches `session.hpp` /
+`AgentConfig::shadow_compact`:
+
+1. env exactly `0` or `1` wins (headless / eval)
+2. else the start-message / RunSettings field if present
+3. else the C++ struct default (**true** — on)
+
+Unset env + omitted field → **on**. `=0` turns it off. When on, the live cache is
+warmed after compaction rewrites the prompt. Compact policy stays **75 / 35 summarize**.
+
+`LMP_COMMIT_THINK` uses the same precedence; its C++ default is also **true**.
 
 v1 is **not** a second GPU cache. Dual KV on 48 GB is unsafe. After
 `compact_to_budget` applies collapses **or** drops turns, the live ledger no
@@ -42,7 +51,7 @@ Reset-at-generate:
 - `checkpoint_at == 0` (no stable prefix)
 - backend error / MLX throw
 - `generate` still reports `prefill_reused_tokens == 0` after a successful warm
-  (id mismatch — S5.10)
+  (id mismatch — S5.10); journal `kv_reuse.reason=shadow_id_mismatch`
 - images that fail `prepare_images`
 - any doubt
 
@@ -56,4 +65,5 @@ No second `generate`/prefill on the same MLX model. Tool-idle dual-cache is v2.
 
 ## GO
 
-Cannot reuse against a wrong prefix. Flag off is zero behavior change.
+Cannot reuse against a wrong prefix. Flag off (`LMP_SHADOW_COMPACT=0`) is zero
+behavior change relative to pre-shadow Reset-every-compact.

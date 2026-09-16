@@ -38,9 +38,21 @@ GenResult ScriptedBackend::generate(const InferenceTask& task, TokenSink& sink,
         r.status = GenStatus::BackendError;
         r.error = "ScriptedBackend: no response scripted for call " +
                   std::to_string(received_.size());
+        r.prompt_tokens = task.prompt.size();
+        r.stable_prefix_tokens = task.checkpoint_at;
+        r.reuse_mode = "Reset";
+        r.reuse_reason = "unknown";
         return r;
     }
-    return play(script_[next_++], sink, cancel, task.max_new_tokens);
+    GenResult r = play(script_[next_++], sink, cancel, task.max_new_tokens);
+    // Gate tests have no real KV; still emit attribution fields so the agent journal
+    // path is exercised without inventing Extend/Restore behavior.
+    r.prompt_tokens = task.prompt.size();
+    r.stable_prefix_tokens = task.checkpoint_at;
+    r.reuse_mode = "Reset";
+    r.reuse_reason = "first_turn";
+    r.prefill_reused_tokens = 0;
+    return r;
 }
 
 GenResult ReplayBackend::generate(const InferenceTask& task, TokenSink& sink,
