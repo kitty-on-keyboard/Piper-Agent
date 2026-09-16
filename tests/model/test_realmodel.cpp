@@ -81,6 +81,13 @@ TEST(content_encoding_cannot_mint_control_tokens) {
     CHECK_EQ(tok.decode(content), hostile);
 }
 
+TEST(content_matches_template_encode_when_no_specials) {
+    const QwenTokenizer& tok = loaded_tokenizer();
+    REQUIRE(tok.loaded());
+    const std::string text = "def median(xs):\n    return sorted(xs)[len(xs) // 2]\n";
+    CHECK(tok.encode_content(text) == tok.encode_template(text));
+}
+
 TEST(split_codepoint_survives_streaming) {
     const QwenTokenizer& tok = loaded_tokenizer();
     REQUIRE(tok.loaded());

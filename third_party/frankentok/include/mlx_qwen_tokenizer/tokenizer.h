@@ -25,11 +25,19 @@ public:
     bool load(const std::string& vocab_path, const LoadOptions& options = {});
 
     std::vector<int32_t> encode(std::string_view text) const;
+    // NFC + pretokenize + BPE using the Pretokenizer compiled at load. Special-token
+    // literals stay ordinary bytes — they are not split out as single ids. This is the
+    // untrusted-content path; encode() is the template path that mints specials.
+    std::vector<int32_t> encode_ordinary(std::string_view text) const;
     std::string decode(const std::vector<int32_t>& ids) const;
 
     const Vocab& get_vocab() const { return vocab_; }
 
 private:
+    void append_ordinary(std::string_view text, BPE::Scratch& scratch,
+                         std::vector<std::string_view>& pretokenized, std::string& nfc_buf,
+                         std::vector<int32_t>& out) const;
+
     Vocab vocab_;
     std::unique_ptr<SpecialTokenTrie> special_trie_;
     std::unique_ptr<Pretokenizer> pretokenizer_;

@@ -1,10 +1,5 @@
 #include "src/model/qwen_tokenizer.hpp"
 
-#include <array>
-
-#include "mlx_qwen_tokenizer/bpe.h"
-#include "mlx_qwen_tokenizer/normalizer.h"
-#include "mlx_qwen_tokenizer/pretokenizer.h"
 #include "mlx_qwen_tokenizer/streaming_decoder.h"
 #include "mlx_qwen_tokenizer/tokenizer.h"
 
@@ -95,26 +90,8 @@ std::vector<TokenId> QwenTokenizer::encode_content(std::string_view text) const 
     // the special-token trie. Content cannot mint control ids: "<|im_end|>" in a user
     // message tokenizes as ordinary text (S5.4). This is the token layer's entire
     // prompt-injection defence, so it is structural, not a flag someone can forget.
-    const ft::Vocab& vocab = tok_->get_vocab();
-    const ft::Pretokenizer pre = vocab.pretokenizer_regex().empty()
-                                     ? ft::Pretokenizer()
-                                     : ft::Pretokenizer(vocab.pretokenizer_regex());
-    const ft::BPE bpe(vocab);
-
-    std::string nfc;
-    std::string_view input = text;
-    if (vocab.wants_nfc() && ft::normalize_nfc(text, nfc)) {
-        input = nfc;
-    }
-
-    std::vector<TokenId> out;
-    std::vector<std::string_view> chunks;
-    pre.split(input, chunks);
-    ft::BPE::Scratch scratch;
-    for (std::string_view chunk : chunks) {
-        bpe.encode_word(chunk, scratch, out);
-    }
-    return out;
+    // Uses the Pretokenizer compiled at load rather than compiling it again per call.
+    return tok_->encode_ordinary(text);
 }
 
 std::string QwenTokenizer::decode(const std::vector<TokenId>& ids) const {

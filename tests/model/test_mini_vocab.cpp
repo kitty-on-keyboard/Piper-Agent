@@ -80,6 +80,16 @@ TEST(content_round_trips) {
     CHECK_EQ(tok.decode(ids), text);
 }
 
+// encode_content is encode() without the special-token trie. On text that contains no
+// specials the two paths must agree id-for-id — that is the pin that encode_ordinary
+// (the loaded Pretokenizer, not a per-call compile) did not change segmentation.
+TEST(content_matches_template_encode_when_no_specials) {
+    QwenTokenizer tok;
+    REQUIRE(tok.load(fixture_path(), Family::Qwen3).ok);
+    const std::string text = "def median(xs):\n    return sorted(xs)[len(xs) // 2]\n";
+    CHECK(tok.encode_content(text) == tok.encode_template(text));
+}
+
 // S5.4: a user message containing the literal "<|im_end|>" must tokenize as TEXT. The
 // specials are added_tokens so BPE cannot reach them, and encode() strips the power to
 // mint one from ordinary content.
