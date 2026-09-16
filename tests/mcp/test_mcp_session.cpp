@@ -107,6 +107,13 @@ private:
             throw 42;
         });
 
+        Tool protocol_failer;
+        protocol_failer.name = "protocol_failer";
+        protocol_failer.description = "throws Server::Failure by calling fail()";
+        s.add_tool(std::move(protocol_failer), [](const nlohmann::json&, RequestContext&) -> ToolResult {
+            Server::fail(ErrorCode::kInvalidParams, "explicit protocol error");
+        });
+
         Tool slow;
         slow.name = "slow";
         slow.description = "reports progress, honours cancellation";
@@ -215,7 +222,7 @@ TEST(tools_round_trip) {
     static_cast<void>(s.client().initialize());
 
     const std::vector<Tool> tools = s.client().list_tools();
-    CHECK_EQ(tools.size(), std::size_t(7));
+    CHECK_EQ(tools.size(), std::size_t(8));
 
     const ToolResult r = s.client().call_tool("echo", nlohmann::json{{"text", "hi there"}});
     CHECK(!r.is_error);
@@ -280,6 +287,25 @@ TEST(tool_throwing_custom_std_exception_captures_message_as_tool_failure) {
     const ToolResult r = s.client().call_tool("throw_invalid_arg", nlohmann::json::object());
     CHECK(r.is_error);
     CHECK_EQ(text_of(r), std::string("invalid tool argument value"));
+
+    // Verify session state remains functional after exception.
+    const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
+    CHECK(!after.is_error);
+    CHECK_EQ(text_of(after), std::string("still alive"));
+}
+
+TEST(a_tool_throwing_failure_yields_protocol_error) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+    bool threw = false;
+    try {
+        static_cast<void>(s.client().call_tool("protocol_failer", nlohmann::json::object()));
+    } catch (const McpError& e) {
+        threw = true;
+        CHECK_EQ(e.code(), to_int(ErrorCode::kInvalidParams));
+        CHECK(std::string(e.what()).find("explicit protocol error") != std::string::npos);
+    }
+    CHECK(threw);
 
     // Verify session state remains functional after exception.
     const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
