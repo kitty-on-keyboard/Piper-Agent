@@ -88,7 +88,7 @@ Not taken:
 
 | Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
 |--------|--------|----------|-----------|---|-----------|-------|
-| Bounded recovery on degenerate / length-capped text-instead-of-tool | stall rate; wall; success; `ToolError`; `degenerate_text_count` / `nudged_count` | Tip ~79d4667 bowling seed7: A3B stalls after ~5× `degenerate_text`/(text) while tools Ok | Length-capped think/text joins inert nudge path; degenerate streak → `stalled` after cap; metrics on `run_end` | Gate: detector + nudge-cap + length-capped recovery tests | **pending Mac A/B** | Kill bar below |
+| Bounded recovery on degenerate / length-capped text-instead-of-tool | stall rate; wall; success; `ToolError`; `degenerate_text_count` / `nudged_by_why` | Tip ~79d4667 bowling seed7: A3B stalls after ~5× `degenerate_text`/(text) while tools Ok | Length-capped think/text joins inert nudge path; degenerate streak → `stalled` after cap; metrics on `run_end` | Gate: detector + nudge-cap + length-capped recovery tests | **pending Mac A/B** | Kill bar below |
 
 **Kill bar (Mac A3B bowling seed7 A/B — do not claim win without it):**
 

@@ -5095,19 +5095,45 @@ TEST(a_tool_then_repeated_loop_cuts_still_stalls) {
 // Bowling seed7 class: model emits degenerate prose / text instead of tool calls while
 // tools are otherwise healthy. Recovery nudges toward a tool call; after the cap the
 // run stalls cleanly (not an infinite babble, not a false `ended` handback).
+//
+// Fixture uses SHORT repeated lines so LoopBreaker (32-token window × 3) does not cut
+// before looks_degenerate's 8-line floor can fire -- a long identical sentence is cut
+// first and leaves degenerate_text_count at 0.
 TEST(degenerate_text_turns_nudge_then_stall_with_bounded_cap) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
 
     std::string babble;
-    for (int i = 0; i < 12; ++i) {
-        babble += "I'll fix all compilation errors systematically.\n";
+    // Ten one-char lines: looks_degenerate (floor 8) but well under LoopBreaker::kWindow
+    // (32 tokens), so the turn is scored degenerate rather than cut_for_looping.
+    for (int i = 0; i < 10; ++i) {
+        babble += "x\n";
+    }
+    REQUIRE(looks_degenerate(shape_of(babble)));
+
+    // Probe: ScriptedBackend decode must still look degenerate (not only the raw string).
+    {
+        model::ScriptedBackend probe_backend;
+        probe_backend.enqueue_response(text_turn(tok, "x", babble));
+        tools::Registry probe_registry(workspace("/tmp"));
+        context::ContextStore probe_ctx("probe");
+        platform::EventLogWriter probe_log;
+        platform::SystemClock probe_clock;
+        loop::AgentConfig probe_config;
+        probe_config.auto_syntax_check = false;
+        loop::Agent probe(tok, probe_backend, probe_registry, probe_ctx, probe_log,
+                          probe_clock, probe_config);
+        const model::CancelToken probe_cancel;
+        const loop::TurnResult first = probe.step(probe_cancel);
+        CHECK(first.outcome == loop::Outcome::TextOnly);
+        CHECK(first.degenerate_text);
+        CHECK(!first.cut_for_looping);
     }
 
     model::ScriptedBackend backend;
     // Cap is 2: two nudges, third turn stalls. Extra scripts prove we stop.
     for (int i = 0; i < 8; ++i) {
-        backend.enqueue_response(text_turn(tok, "thinking", babble));
+        backend.enqueue_response(text_turn(tok, "x", babble));
     }
 
     tools::Registry registry(workspace("/tmp"));
@@ -5126,7 +5152,9 @@ TEST(degenerate_text_turns_nudge_then_stall_with_bounded_cap) {
     CHECK_EQ(report.termination_reason, std::string("stalled"));
     CHECK(!report.completed);
     // Never exceeds cap: 2 nudges + 1 ending turn = 3 iterations.
-    CHECK_EQ(report.nudged_count, std::size_t{2});
+    CHECK_EQ(report.nudged_count(), std::size_t{2});
+    CHECK_EQ(report.nudged_no_tool_recovery, std::size_t{2});
+    CHECK_EQ(report.nudged_loop_cut, std::size_t{0});
     CHECK(report.iterations <= 3);
     CHECK(report.degenerate_text_count >= 1);
     CHECK(report.text_only_turns >= 1);
@@ -5169,7 +5197,8 @@ TEST(length_capped_no_tool_turns_join_recovery_when_enabled) {
     const loop::RunReport report = agent.run(cancel);
 
     CHECK_EQ(report.termination_reason, std::string("stalled"));
-    CHECK_EQ(report.nudged_count, std::size_t{2});
+    CHECK_EQ(report.nudged_count(), std::size_t{2});
+    CHECK_EQ(report.nudged_no_tool_recovery, std::size_t{2});
     CHECK(report.iterations <= 3);
     CHECK(!report.completed);
 }
@@ -5205,7 +5234,7 @@ TEST(degenerate_recovery_off_leaves_length_capped_out_of_inert_count) {
     const loop::RunReport report = agent.run(cancel);
 
     CHECK_EQ(report.termination_reason, std::string("max_turns"));
-    CHECK_EQ(report.nudged_count, std::size_t{0});
+    CHECK_EQ(report.nudged_count(), std::size_t{0});
 }
 
 TEST(nudge_count_never_exceeds_configured_cap) {
@@ -5229,7 +5258,7 @@ TEST(nudge_count_never_exceeds_configured_cap) {
     const model::CancelToken cancel;
     const loop::RunReport report = agent.run(cancel);
 
-    CHECK(report.nudged_count <= 1);
+    CHECK(report.nudged_count() <= 1);
     CHECK(report.iterations <= 2);
 }
 

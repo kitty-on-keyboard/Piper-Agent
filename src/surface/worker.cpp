@@ -1065,8 +1065,13 @@ void write_result(const std::string& path, const RunResult& result) {
         {"loop_metrics",
          {{"degenerate_text_count", result.degenerate_text_count},
           {"text_only_turns", result.text_only_turns},
-          {"nudged_count", result.nudged_count},
-          {"tool_error_count", result.tool_error_count}}}
+          {"tool_error_count", result.tool_error_count},
+          {"nudged_count", result.nudged_loop_cut + result.nudged_no_progress +
+                               result.nudged_no_tool_recovery},
+          {"nudged_by_why",
+           {{"loop_cut", result.nudged_loop_cut},
+            {"no_progress", result.nudged_no_progress},
+            {"no_tool_recovery", result.nudged_no_tool_recovery}}}}}
     };
 
     std::string tmp_path = path + ".tmp";

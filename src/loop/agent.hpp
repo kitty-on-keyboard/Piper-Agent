@@ -323,8 +323,15 @@ struct RunReport {
     // Tier-A loop hygiene (always on). Counts for bowling / bakeoff A/B kill bars.
     std::size_t degenerate_text_count = 0;
     std::size_t text_only_turns = 0;
-    std::size_t nudged_count = 0;
     std::size_t tool_error_count = 0;
+    // Nudge breakdown by Research why-bucket (flat total loses A/B signal).
+    // Total nudged_count is derived: loop_cut + no_progress + no_tool_recovery.
+    std::size_t nudged_loop_cut = 0;
+    std::size_t nudged_no_progress = 0;
+    std::size_t nudged_no_tool_recovery = 0;
+    [[nodiscard]] std::size_t nudged_count() const noexcept {
+        return nudged_loop_cut + nudged_no_progress + nudged_no_tool_recovery;
+    }
 };
 
 class Agent {

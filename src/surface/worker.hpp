@@ -118,8 +118,10 @@ struct RunResult {
     // Tier-A loop hygiene copied from RunReport when the worker path has one.
     std::size_t degenerate_text_count = 0;
     std::size_t text_only_turns = 0;
-    std::size_t nudged_count = 0;
     std::size_t tool_error_count = 0;
+    std::size_t nudged_loop_cut = 0;
+    std::size_t nudged_no_progress = 0;
+    std::size_t nudged_no_tool_recovery = 0;
 };
 
 // True when result.status/error is an incomplete agent-loop stop (max_turns,

@@ -14,9 +14,11 @@ Every generate / tools refresh / tool_result now emits attribution fields:
   (`error_class` values include `parse_args`, `schema_enum`, `edit_miss`, `exec`,
   `sandbox`, `unknown`; Phase C maps `ErrorClass::SchemaEnum` → `schema_enum`)
 - `run_end` — plus loop hygiene counts: `degenerate_text_count`, `text_only_turns`,
-  `nudged_count`, `tool_error_count`
-- `nudged` / `stalled` — `why` (`degenerate_text` | `length_capped_no_tool` |
-  `text_only_turn` | `loop_cut` | `no_progress`), `consecutive`, `cap`
+  `tool_error_count`, and `nudged_by_why.{loop_cut,no_progress,no_tool_recovery}`
+  (flat `nudged_count` is the sum, kept as a derived field)
+- `nudged` / `stalled` — `why` is the Research bucket (`loop_cut` | `no_progress` |
+  `no_tool_recovery`); `why_detail` keeps the finer reason (`degenerate_text` |
+  `length_capped_no_tool` | `text_only_turn` | …); plus `consecutive` / `cap`
 
 ### Degenerate-text / no-tool-call recovery
 

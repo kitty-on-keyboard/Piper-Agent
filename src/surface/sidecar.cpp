@@ -2082,8 +2082,10 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     result.log_path = durable_log;
     result.degenerate_text_count = final_report.degenerate_text_count;
     result.text_only_turns = final_report.text_only_turns;
-    result.nudged_count = final_report.nudged_count;
     result.tool_error_count = final_report.tool_error_count;
+    result.nudged_loop_cut = final_report.nudged_loop_cut;
+    result.nudged_no_progress = final_report.nudged_no_progress;
+    result.nudged_no_tool_recovery = final_report.nudged_no_tool_recovery;
     // Compatibility alias for older bakeoff paths that still look for events.ndjson.
     {
         std::error_code copy_ec;

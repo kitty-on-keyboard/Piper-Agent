@@ -3251,12 +3251,16 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                  turn.cap_phase != "tool");
             inert_streak_had_degenerate_ =
                 inert_streak_had_degenerate_ || degenerate_hit;
-            const char* const why = spun ? "no_progress"
+            const char* const why_detail = spun ? "no_progress"
                                          : (turn.cut_for_looping ? "loop_cut"
                                             : turn.degenerate_text ? "degenerate_text"
                                             : (turn.outcome == Outcome::LengthCapped
                                                    ? "length_capped_no_tool"
                                                    : "text_only_turn"));
+            // Research why-buckets for A/B (flat nudged_count alone loses signal).
+            const char* const why = spun ? "no_progress"
+                                         : (turn.cut_for_looping ? "loop_cut"
+                                                                 : "no_tool_recovery");
 
             if (inert_turns_ <= allowed) {
                 // THE NOTE SAYS WHICH FAILURE THIS IS. "Call a tool now" is the wrong
@@ -3366,8 +3370,15 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                           "changed and how you know it works. Saying you are finished in text does "
                           "not end the run; `finish` does.]";
                 ctx_.add_turn(std::move(note));
-                ++report.nudged_count;
+                if (spun) {
+                    ++report.nudged_no_progress;
+                } else if (turn.cut_for_looping) {
+                    ++report.nudged_loop_cut;
+                } else {
+                    ++report.nudged_no_tool_recovery;
+                }
                 emit("nudged", {{"why", why},
+                                {"why_detail", why_detail},
                                 {"consecutive", std::to_string(inert_turns_)},
                                 {"cap", std::to_string(allowed)},
                                 {"degenerate", turn.degenerate_text ? "1" : "0"}});
@@ -3394,11 +3405,17 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                     : "ended";
             emit(report.termination_reason,
                  {{"why", why},
+                  {"why_detail", why_detail},
                   {"consecutive", std::to_string(inert_turns_)},
                   {"wrote_bytes_in_run", std::to_string(ctx_.workspace_writes())},
                   {"degenerate_text_count",
                    std::to_string(report.degenerate_text_count)},
-                  {"nudged_count", std::to_string(report.nudged_count)}});
+                  {"nudged_count", std::to_string(report.nudged_count())},
+                  {"nudged_by_why.loop_cut", std::to_string(report.nudged_loop_cut)},
+                  {"nudged_by_why.no_progress",
+                   std::to_string(report.nudged_no_progress)},
+                  {"nudged_by_why.no_tool_recovery",
+                   std::to_string(report.nudged_no_tool_recovery)}});
             break;
         }
     }
@@ -3445,8 +3462,13 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                      {"degenerate_text_count",
                       std::to_string(report.degenerate_text_count)},
                      {"text_only_turns", std::to_string(report.text_only_turns)},
-                     {"nudged_count", std::to_string(report.nudged_count)},
-                     {"tool_error_count", std::to_string(report.tool_error_count)}});
+                     {"tool_error_count", std::to_string(report.tool_error_count)},
+                     {"nudged_count", std::to_string(report.nudged_count())},
+                     {"nudged_by_why.loop_cut", std::to_string(report.nudged_loop_cut)},
+                     {"nudged_by_why.no_progress",
+                      std::to_string(report.nudged_no_progress)},
+                     {"nudged_by_why.no_tool_recovery",
+                      std::to_string(report.nudged_no_tool_recovery)}});
     return report;
 }
 

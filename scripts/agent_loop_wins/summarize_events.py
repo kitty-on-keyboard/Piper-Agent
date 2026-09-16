@@ -170,8 +170,13 @@ def collect(events: list[dict[str, Any]]) -> dict[str, Any]:
             run_end_metrics = {
                 "degenerate_text_count": as_int(ev.get("degenerate_text_count")),
                 "text_only_turns": as_int(ev.get("text_only_turns")),
-                "nudged_count": as_int(ev.get("nudged_count")),
                 "tool_error_count": as_int(ev.get("tool_error_count")),
+                "nudged_count": as_int(ev.get("nudged_count")),
+                "nudged_by_why.loop_cut": as_int(ev.get("nudged_by_why.loop_cut")),
+                "nudged_by_why.no_progress": as_int(ev.get("nudged_by_why.no_progress")),
+                "nudged_by_why.no_tool_recovery": as_int(
+                    ev.get("nudged_by_why.no_tool_recovery")
+                ),
                 "termination_reason": ev.get("termination_reason"),
             }
 
