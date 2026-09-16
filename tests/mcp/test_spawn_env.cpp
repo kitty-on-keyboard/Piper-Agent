@@ -65,6 +65,9 @@ TEST(parent_secrets_are_dropped) {
         "LMP_EVENT_LOG=/tmp/events.jsonl",
         "GITHUB_TOKEN=ghp_xxx",
         "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib",
+        "GITHUB_PAT=pat_123",
+        "BEARER_AUTH=bearer_xyz",
+        "SESSION_JWT=jwt_abc",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -74,6 +77,9 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "LMP_EVENT_LOG"));
     CHECK(!has_key(env, "GITHUB_TOKEN"));
     CHECK(!has_key(env, "DYLD_INSERT_LIBRARIES"));
+    CHECK(!has_key(env, "GITHUB_PAT"));
+    CHECK(!has_key(env, "BEARER_AUTH"));
+    CHECK(!has_key(env, "SESSION_JWT"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
