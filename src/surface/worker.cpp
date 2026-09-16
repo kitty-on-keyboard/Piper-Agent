@@ -349,12 +349,12 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
             error = "max_iterations must be a positive integer";
             return std::nullopt;
         }
-        const double raw = j["max_iterations"].get<double>();
-        if (raw < 1.0 || raw != std::floor(raw) || raw > 1000000.0) {
+        const double mi_raw = j["max_iterations"].get<double>();
+        if (mi_raw < 1.0 || mi_raw != std::floor(mi_raw) || mi_raw > 1000000.0) {
             error = "max_iterations must be a positive integer";
             return std::nullopt;
         }
-        packet.max_iterations = static_cast<int>(raw);
+        packet.max_iterations = static_cast<int>(mi_raw);
     }
 
     if (j.contains("trust_mcp")) {
