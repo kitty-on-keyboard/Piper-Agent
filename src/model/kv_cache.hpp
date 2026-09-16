@@ -41,6 +41,7 @@
 //
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "src/model/qwen_tokenizer.hpp"
@@ -166,5 +167,18 @@ class KvCacheLedger {
                                         const std::vector<TokenId>& prompt,
                                         std::size_t checkpoint_len, bool checkpoint_valid,
                                         std::span<const ContentTag> prompt_tags = {});
+
+// Stable names for journal / diag. Capitalized to match the ReuseMode enumerators
+// (stderr diagnostics keep a lowercase helper in mlx_backend.cpp).
+[[nodiscard]] std::string_view reuse_mode_str(ReuseMode mode) noexcept;
+
+// Classify why a turn took Extend / Restore / Reset. Reason is required on Reset; empty
+// on Extend. Measurement only -- does not change the decision.
+[[nodiscard]] std::string_view classify_reuse_reason(ReuseMode mode,
+                                                     std::size_t ledger_size,
+                                                     std::size_t reusable,
+                                                     std::size_t checkpoint_len,
+                                                     bool checkpoint_valid,
+                                                     std::size_t prompt_size) noexcept;
 
 } // namespace lmp::model

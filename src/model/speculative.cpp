@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <string>
 
 #include "src/model/draft_proposer/suffix_proposer.hpp"
 #include "src/model/mtp_proposer.hpp"
@@ -101,6 +102,44 @@ std::size_t max_deferred() {
         return n > 0 ? static_cast<std::size_t>(n) : kMaxDeferredDefault;
     }();
     return v;
+}
+
+bool agent_loop_trace_enabled() noexcept {
+    static const bool on = [] {
+        const char* s = std::getenv("LMP_AGENT_LOOP_TRACE");
+        return s != nullptr && s[0] == '1' && s[1] == '\0';
+    }();
+    return on;
+}
+
+void note_hist(std::array<std::uint64_t, SpecStats::kHistBins>& hist, std::size_t n) noexcept {
+    const std::size_t i = n < SpecStats::kHistBins ? n : SpecStats::kHistBins - 1;
+    ++hist[i];
+}
+
+void note_block(SpecStats& stats, std::size_t draft_len, std::size_t accepted, bool abandoned,
+                bool has_mtp) {
+    note_hist(stats.draft_len_hist, draft_len);
+    note_hist(stats.accept_at_depth, accepted);
+    if (accepted < draft_len) {
+        note_hist(stats.reject_at_depth, accepted);
+    }
+    if (!agent_loop_trace_enabled()) {
+        return;
+    }
+    std::string line;
+    line.reserve(80);
+    line += "draft_len=";
+    line += std::to_string(draft_len);
+    line += ",accepted=";
+    line += std::to_string(accepted);
+    line += ",bonus=";
+    line += abandoned ? "0" : "1";
+    line += ",abandoned=";
+    line += abandoned ? "1" : "0";
+    line += ",proposer=";
+    line += has_mtp ? "mtp" : "suffix";
+    stats.block_traces.push_back(std::move(line));
 }
 
 // The history-matching proposer, behind DraftProposer. It is stateless across a block --
@@ -291,7 +330,8 @@ SpecStep SpeculativeDecoder::decode_one(const TokenMask* mask,
 }
 
 SpecStep SpeculativeDecoder::abandon_block(std::size_t prefix, const TokenMask* mask,
-                                           const std::vector<TokenId>& recent, SpecForward& fwd) {
+                                           const std::vector<TokenId>& recent, SpecForward& fwd,
+                                           std::size_t draft_len) {
     // ABANDON THE BLOCK, do not fail the run. Speculation is an optimisation; it must
     // not be able to turn a decodable step into a dead one. Undo the verification
     // forward, tell the drafter nothing survived, pay for the deferred prefix, and
@@ -300,6 +340,7 @@ SpecStep SpeculativeDecoder::abandon_block(std::size_t prefix, const TokenMask* 
     fwd.restore();
     proposer_->settle(0, {}, prefix, fwd);
     ++stats_.abandoned;
+    note_block(stats_, draft_len, /*accepted=*/0, /*abandoned=*/true, fwd.has_mtp());
     flush(fwd);
     return decode_one(mask_at(0, mask), recent, fwd);
 }
@@ -395,7 +436,8 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
 
     // --- the speculative block ---------------------------------------------------
     ++stats_.blocks;
-    stats_.drafted += drafted.size();
+    const std::size_t draft_count = drafted.size();
+    stats_.drafted += draft_count;
     out.speculated = true;
 
     // The prefix rides in front of the drafts, in ONE pass. Position j-1 of that pass is
@@ -430,7 +472,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         dists.push_back(sampler_.distribution(rows[prefix - 1], mask_at(0, mask), recent));
     }
     if (dists.empty() || dists.front().empty()) {
-        return abandon_block(prefix, mask, recent, fwd);
+        return abandon_block(prefix, mask, recent, fwd, draft_count);
     }
     std::vector<TokenId> recent_i = recent;
     for (std::size_t i = 0; i < drafted.size() && prefix + i < rows.size(); ++i) {
@@ -475,7 +517,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
         verifier_.verify(std::span<const TokenId>(draft_idx), std::span<const float>(ones),
                          std::span<const std::span<const float>>(row_spans));
     if (r.accepted.empty()) {
-        return abandon_block(prefix, mask, recent, fwd);
+        return abandon_block(prefix, mask, recent, fwd, draft_count);
     }
 
     const std::size_t m = std::min(r.accepted_drafts, draft_idx.size());
@@ -485,7 +527,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     // The final token is an index into the row at position m, not a token id.
     const auto tail_idx = static_cast<std::size_t>(r.accepted.back());
     if (m >= dists.size() || tail_idx >= dists[m].ids.size()) {
-        return abandon_block(prefix, mask, recent, fwd);
+        return abandon_block(prefix, mask, recent, fwd, draft_count);
     }
     out.committed.push_back(dists[m].ids[tail_idx]);
 
@@ -498,8 +540,9 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
 
     stats_.accepted_drafts += m;
     stats_.committed += out.committed.size();
+    note_block(stats_, draft_count, m, /*abandoned=*/false, fwd.has_mtp());
 
-    update_cache_and_forward(m, drafted.size(), out.committed, fwd);
+    update_cache_and_forward(m, draft_count, out.committed, fwd);
     return out;
 }
 

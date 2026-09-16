@@ -4,6 +4,7 @@
 // against a prefix that is one token out and the text stays fluent. So the algebra is a
 // pure function and every branch is asserted here rather than discovered on the model.
 
+#include <string>
 #include <vector>
 
 #include "src/model/kv_cache.hpp"
@@ -176,4 +177,23 @@ TEST(truncation_keeps_ids_and_tags_the_same_length) {
     CHECK_EQ(l.tags().size(), l.ids().size());
     l.clear();
     CHECK(l.tags().empty());
+}
+
+TEST(reuse_mode_str_matches_enumerators) {
+    CHECK_EQ(std::string(reuse_mode_str(ReuseMode::Extend)), std::string("Extend"));
+    CHECK_EQ(std::string(reuse_mode_str(ReuseMode::Restore)), std::string("Restore"));
+    CHECK_EQ(std::string(reuse_mode_str(ReuseMode::Reset)), std::string("Reset"));
+}
+
+TEST(classify_reuse_reason_names_reset_causes) {
+    CHECK_EQ(std::string(classify_reuse_reason(ReuseMode::Extend, 3, 3, 2, true, 5)),
+             std::string(""));
+    CHECK_EQ(std::string(classify_reuse_reason(ReuseMode::Restore, 5, 3, 3, true, 6)),
+             std::string("checkpoint_restore"));
+    CHECK_EQ(std::string(classify_reuse_reason(ReuseMode::Reset, 0, 0, 0, false, 4)),
+             std::string("first_turn"));
+    CHECK_EQ(std::string(classify_reuse_reason(ReuseMode::Reset, 4, 0, 0, true, 4)),
+             std::string("no_checkpoint"));
+    CHECK_EQ(std::string(classify_reuse_reason(ReuseMode::Reset, 5, 1, 4, true, 6)),
+             std::string("ledger_mismatch"));
 }
