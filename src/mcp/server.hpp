@@ -184,8 +184,10 @@ private:
         ErrorCode code;
         std::string message;
     };
+public:
     [[noreturn]] static void fail(ErrorCode code, std::string message);
 
+private:
     // --- worker pool -------------------------------------------------------
     void start_workers();
     void stop_workers();
