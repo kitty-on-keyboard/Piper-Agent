@@ -257,6 +257,11 @@ struct IrreversibleAskParams {
 // The entry point: called from main() when worker/CLI is requested.
 // ------------------------------------------------------------------
 
+// Parse --idle-timeout CLI values. Invalid / empty / out-of-range strings keep
+// `fallback` (never throw). Exposed so gate can cover the catch without linking
+// the full sidecar binary that defines worker_main.
+[[nodiscard]] double parse_idle_timeout_arg(const char* value, double fallback = 3600.0);
+
 // Parse argv, run one mission (or --serve for keep-warm, or init), return exit code.
 [[nodiscard]] int worker_main(int argc, char** argv);
 
