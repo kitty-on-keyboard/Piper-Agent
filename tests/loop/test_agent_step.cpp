@@ -5498,6 +5498,44 @@ TEST(phase_a1_noop_tools_refresh_freezes_identical_guidance) {
     (void)::system(("rm -rf " + root).c_str());
 }
 
+TEST(phase_a1_kill_switch_rewrites_identical_guidance) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string log_path = root + "/events.jsonl";
+
+    model::ScriptedBackend backend;
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("finish the checklist");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = log_path;
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.noop_identical_tools_refresh = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const std::string guidance_after_init = agent.tools_guidance();
+    REQUIRE(!guidance_after_init.empty());
+    agent.refresh_mode_tools("other");
+    CHECK_EQ(agent.tools_guidance(), guidance_after_init);
+
+    log.flush();
+    const platform::FileContents f = platform::read_file_whole(log_path, 1U << 22);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("\"trigger\":\"other\"") != std::string::npos);
+    CHECK(f.bytes.find("\"noop\":\"1\"") == std::string::npos);
+    CHECK(f.bytes.find("\"noop\":\"0\"") != std::string::npos);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
 TEST(agent_loop_wins_tool_result_carries_error_class) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());

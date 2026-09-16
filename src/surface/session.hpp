@@ -34,7 +34,7 @@
 
 namespace lmp::surface {
 
-// Precedence for commit_think / shadow_compact:
+// Precedence for commit_think / shadow_compact / noop_identical_tools_refresh:
 //   1. env exactly `0` or `1` wins (headless / eval)
 //   2. else the start-message / RunSettings field if present
 //   3. else the C++ struct default (true)

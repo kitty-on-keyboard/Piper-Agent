@@ -111,6 +111,82 @@ def synthetic_journal() -> list[dict]:
     ]
 
 
+def write_jsonl(path: Path, rows: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+
+def a1_baseline_journal() -> list[dict]:
+    """Kill-switch off: identical plan-lock refresh still rewrites (noop=0)."""
+    return [
+        {
+            "kind": "tools_refresh",
+            "trigger": "plan_lock",
+            "guidance_hash_before": "aaa",
+            "guidance_hash_after": "aaa",
+            "changed": "0",
+            "spec_count_before": "3",
+            "spec_count_after": "3",
+            "noop": "0",
+        },
+        {
+            "kind": "kv_reuse",
+            "mode": "Reset",
+            "reused_tokens": "0",
+            "prompt_tokens": "1000",
+            "reason": "tools_guidance_changed",
+            "stable_prefix_tokens": "800",
+            "shadow_armed": "0",
+        },
+        {
+            "kind": "generation",
+            "ttft_ms": "120.0",
+            "decode_tok_per_s": "40.0",
+            "prefill_reused_tokens": "0",
+            "spec_abandoned": "0",
+            "grammar_empty_mask": "0",
+            "grammar_forced_tokens": "0",
+        },
+        {"kind": "tool_result", "tool": "read_file", "status": "Ok", "error_class": ""},
+    ]
+
+
+def a1_treatment_journal() -> list[dict]:
+    """A1 on: identical refresh no-ops; prefix extends."""
+    return [
+        {
+            "kind": "tools_refresh",
+            "trigger": "plan_lock",
+            "guidance_hash_before": "aaa",
+            "guidance_hash_after": "aaa",
+            "changed": "0",
+            "spec_count_before": "3",
+            "spec_count_after": "3",
+            "noop": "1",
+        },
+        {
+            "kind": "kv_reuse",
+            "mode": "Extend",
+            "reused_tokens": "900",
+            "prompt_tokens": "1000",
+            "reason": "prefix_match",
+            "stable_prefix_tokens": "800",
+            "shadow_armed": "0",
+        },
+        {
+            "kind": "generation",
+            "ttft_ms": "80.0",
+            "decode_tok_per_s": "40.0",
+            "prefill_reused_tokens": "900",
+            "spec_abandoned": "0",
+            "grammar_empty_mask": "0",
+            "grammar_forced_tokens": "0",
+        },
+        {"kind": "tool_result", "tool": "read_file", "status": "Ok", "error_class": ""},
+    ]
+
+
 def main() -> int:
     script = Path(__file__).resolve().parents[2] / "scripts" / "agent_loop_wins" / "summarize_events.py"
     if not script.is_file():
@@ -125,10 +201,9 @@ def main() -> int:
         )
 
     with tempfile.TemporaryDirectory() as td:
-        journal = Path(td) / "events.jsonl"
-        with journal.open("w", encoding="utf-8") as f:
-            for row in synthetic_journal():
-                f.write(json.dumps(row) + "\n")
+        td_path = Path(td)
+        journal = td_path / "events.jsonl"
+        write_jsonl(journal, synthetic_journal())
         proc = subprocess.run(
             [sys.executable, str(script), str(journal)],
             check=False,
@@ -139,6 +214,27 @@ def main() -> int:
         if proc.returncode != 0:
             print(proc.stderr, file=sys.stderr)
             return proc.returncode
+
+        base = td_path / "a1_baseline.jsonl"
+        treat = td_path / "a1_treatment.jsonl"
+        write_jsonl(base, a1_baseline_journal())
+        write_jsonl(treat, a1_treatment_journal())
+        ab = subprocess.run(
+            [sys.executable, str(script), str(base), str(treat)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        print(ab.stdout)
+        if ab.returncode != 0:
+            print(ab.stderr, file=sys.stderr)
+            return ab.returncode
+        if "tools_refresh.noop: 0 -> 1" not in ab.stdout:
+            print("A/B compare did not show A1 noop 0 -> 1", file=sys.stderr)
+            return 1
+        if "tools_guidance_changed" not in ab.stdout:
+            print("A/B compare missing reset_reasons", file=sys.stderr)
+            return 1
     return 0
 
 
