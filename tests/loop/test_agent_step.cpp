@@ -5109,7 +5109,7 @@ TEST(degenerate_text_turns_nudge_then_stall_with_bounded_cap) {
     for (int i = 0; i < 10; ++i) {
         babble += "x\n";
     }
-    REQUIRE(looks_degenerate(shape_of(babble)));
+    REQUIRE(loop::looks_degenerate(loop::shape_of(babble)));
 
     // Probe: ScriptedBackend decode must still look degenerate (not only the raw string).
     {
