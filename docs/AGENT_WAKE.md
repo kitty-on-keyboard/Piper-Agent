@@ -150,7 +150,8 @@ mission. No URL means no POST.
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
-standard exists to kill.
+standard exists to kill. `result.json` uses the same `status: "stalled"` for
+`max_turns` / no-progress stalls so parents need not parse error strings.
 
 Body:
 
@@ -162,12 +163,13 @@ Body:
   "cwd": "/absolute/path",
   "result_path": "/absolute/path/result.json",
   "seq": 0,
-  "status": "error",
+  "status": "stalled",
   "question": ""
 }
 ```
 
-`ask` fills `question` and `seq`. `done` and `stalled` fill `status`.
+`ask` fills `question` and `seq`. `done` and `stalled` fill `status`
+(`ok` / `error` / `timeout` / `stalled`).
 `died` fills `cwd` and `task_id`.
 
 Do not POST every turn. Do not POST tool output.

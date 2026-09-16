@@ -205,6 +205,94 @@ TEST(collect_files_touched_parses_event_log) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+TEST(collect_files_touched_includes_mcp_tool_call_paths) {
+    // P1: MCP/Godoer writes often skip kind=write; harvest path-like tool_call args.
+    std::filesystem::path tmp_dir =
+        std::filesystem::temp_directory_path() / "test_worker_mcp_paths";
+    std::filesystem::create_directories(tmp_dir);
+    std::string log_file = (tmp_dir / "events.jsonl").string();
+
+    {
+        std::ofstream f(log_file);
+        f << "{\"kind\":\"tool_call\",\"tool\":\"godot_world\",\"arg.file\":\"scenes/Main.tscn\"}\n";
+        f << "{\"kind\":\"workspace_freshness\",\"why\":\"remote_tool\",\"tool\":\"godot_world\",\"writes\":\"1\"}\n";
+        f << "{\"kind\":\"tool_result\",\"tool\":\"godot_world\",\"status\":\"ok\",\"path\":\"world/player.gd\"}\n";
+        f << "{\"kind\":\"tool_call\",\"tool\":\"read_file\",\"arg.path\":\"scenes/Main.tscn\"}\n"; // dup
+    }
+
+    auto touched = collect_files_touched(log_file, tmp_dir.string());
+    CHECK_EQ(touched.size(), std::size_t{2});
+    if (touched.size() >= 1) {
+        CHECK_EQ(touched[0], "scenes/Main.tscn");
+    }
+    if (touched.size() >= 2) {
+        CHECK_EQ(touched[1], "world/player.gd");
+    }
+    CHECK(log_has_remote_tool_write(log_file));
+
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(merge_files_touched_unions_git_paths_for_mcp) {
+    // P1: when the write ledger is empty, union with git changed paths.
+    std::vector<std::string> touched;
+    merge_files_touched(touched, {"a.tscn", "b.gd", "a.tscn"});
+    CHECK_EQ(touched.size(), std::size_t{2});
+    CHECK_EQ(touched[0], "a.tscn");
+    CHECK_EQ(touched[1], "b.gd");
+    merge_files_touched(touched, {"b.gd", "c.json"});
+    CHECK_EQ(touched.size(), std::size_t{3});
+    CHECK_EQ(touched[2], "c.json");
+}
+
+TEST(is_stalled_termination_covers_max_turns_and_no_progress) {
+    // P2: result.status must be "stalled" for these reasons.
+    CHECK(is_stalled_termination("max_turns"));
+    CHECK(is_stalled_termination("stalled"));
+    CHECK(is_stalled_termination("stalled_no_turn"));
+    CHECK(!is_stalled_termination("ended"));
+    CHECK(!is_stalled_termination("wall_clock"));
+    CHECK(!is_stalled_termination("backend_error"));
+    CHECK(!is_stalled_termination(""));
+}
+
+TEST(compose_result_message_prefers_finish_and_trims_incomplete) {
+    // P3: finish summary wins; incomplete runs get short first/last, not a diary.
+    const std::string finish = "Shipped the validator and its unit test.";
+    std::string diary;
+    for (int i = 0; i < 16; ++i) {
+        diary += "Turn narration line " + std::to_string(i) +
+                 ": still poking at the scene and re-reading world JSON.\n";
+    }
+    diary += "Final narration before the turn budget expires.";
+    CHECK(diary.size() > std::size_t{480});
+    CHECK(diary.size() < std::size_t{2000});
+
+    std::string with_finish = compose_result_message(
+        finish, diary, /*completed_ok=*/false, /*plan_ready=*/false, "",
+        "stalled", "max_turns", {"a.tscn"}, "agent did not complete (max_turns)");
+    CHECK_EQ(with_finish, finish);
+
+    std::string incomplete = compose_result_message(
+        "", diary, /*completed_ok=*/false, /*plan_ready=*/false, "",
+        "stalled", "max_turns", {"a.tscn"}, "agent did not complete (max_turns)");
+    CHECK(incomplete.size() < diary.size());
+    CHECK(incomplete.size() <= std::size_t{480});
+    CHECK(incomplete.find("Turn narration line 0") != std::string::npos);
+    CHECK(incomplete.find("Final narration") != std::string::npos);
+    CHECK(incomplete.find(" … ") != std::string::npos);
+
+    std::string complete = compose_result_message(
+        "", "Done. All checks green.", /*completed_ok=*/true, /*plan_ready=*/false, "",
+        "ok", "ended", {"a.tscn"}, "");
+    CHECK_EQ(complete, "Done. All checks green.");
+
+    std::string plan = compose_result_message(
+        "", diary, false, /*plan_ready=*/true, "# Plan\n- do the thing",
+        "ok", "plan_ready", {}, "");
+    CHECK_EQ(plan, "# Plan\n- do the thing");
+}
+
 TEST(write_result_writes_atomic_json) {
     std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_worker_result";
     std::filesystem::create_directories(tmp_dir);
@@ -652,7 +740,7 @@ TEST(post_orch_webhook_network_and_schema) {
     stalled_p.cwd = "/tmp/test";
     stalled_p.result_path = "/tmp/test/result.json";
     stalled_p.seq = 0;
-    stalled_p.status = "error";
+    stalled_p.status = "stalled";
     stalled_p.question = "";
     CHECK(post_orch_webhook(url, stalled_p, 5.0));
 
@@ -686,7 +774,7 @@ TEST(post_orch_webhook_network_and_schema) {
 
         auto j2 = nlohmann::json::parse(received_bodies[2], nullptr, false);
         CHECK_EQ(j2["kind"].get<std::string>(), "stalled");
-        CHECK_EQ(j2["status"].get<std::string>(), "error");
+        CHECK_EQ(j2["status"].get<std::string>(), "stalled");
         CHECK_EQ(j2["seq"].get<uint64_t>(), uint64_t{0});
         CHECK_EQ(j2["question"].get<std::string>(), "");
 
@@ -1191,72 +1279,14 @@ TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
     std::filesystem::remove_all(dir);
 }
 
-TEST(worker_main_handles_idle_timeout_conversions) {
-    const auto tmp_dir = std::filesystem::temp_directory_path() /
-        ("test_idle_timeout_" + std::to_string(::getpid()));
-    std::filesystem::create_directories(tmp_dir);
-
-    // 1. Invalid non-numeric string "abc"
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "abc";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    // 2. Empty string value
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    // 3. Out-of-range value "1e999"
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "1e999";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    // 4. Valid double string "120.5"
-    {
-        char prog[] = "piper";
-        char sub[] = "init";
-        char flag[] = "--idle-timeout";
-        char val[] = "120.5";
-        char dir_flag[] = "--dir";
-        char dir_val[512];
-        std::snprintf(dir_val, sizeof(dir_val), "%s", tmp_dir.c_str());
-        char* argv[] = {prog, sub, flag, val, dir_flag, dir_val};
-        int argc = 6;
-        int rc = worker_main(argc, argv);
-        CHECK_EQ(rc, kExitOk);
-    }
-
-    std::filesystem::remove_all(tmp_dir);
+TEST(parse_idle_timeout_arg_handles_invalid_conversions) {
+    // Gate covers the catch without linking sidecar's worker_main.
+    CHECK_EQ(parse_idle_timeout_arg("abc", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_arg("", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_arg(nullptr, 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_arg("1e999", 3600.0), 3600.0);
+    CHECK_EQ(parse_idle_timeout_arg("120.5", 3600.0), 120.5);
+    CHECK_EQ(parse_idle_timeout_arg("0", 3600.0), 0.0);
 }
 
 TEST(collect_git_returns_zero_stats_for_non_git_dir) {
@@ -1311,15 +1341,17 @@ TEST(collect_git_numstat_string_to_int_fallback) {
                                  std::filesystem::perms::owner_write |
                                  std::filesystem::perms::owner_exec);
 
-    const char* old_path = std::getenv("PATH");
-    std::string new_path = bin_dir.string() + ":" + (old_path ? old_path : "");
+    const char* old_path_cstr = std::getenv("PATH");
+    // Copy before setenv: setenv may realloc the environ block and invalidate getenv.
+    const std::string old_path = old_path_cstr ? old_path_cstr : "";
+    std::string new_path = bin_dir.string() + ":" + old_path;
     ::setenv("PATH", new_path.c_str(), 1);
 
     RunResult res;
     collect_git(dir.string(), dir.string(), res);
 
-    if (old_path) {
-        ::setenv("PATH", old_path, 1);
+    if (!old_path.empty()) {
+        ::setenv("PATH", old_path.c_str(), 1);
     } else {
         ::unsetenv("PATH");
     }
@@ -1368,15 +1400,16 @@ TEST(collect_git_handles_numstat_invalid_integers_and_untracked) {
                                  std::filesystem::perms::owner_exec);
 
     // Set PATH to use mock git first
-    const char* old_path = std::getenv("PATH");
-    std::string new_path = bin_dir.string() + ":" + (old_path ? old_path : "");
+    const char* old_path_cstr = std::getenv("PATH");
+    const std::string old_path = old_path_cstr ? old_path_cstr : "";
+    std::string new_path = bin_dir.string() + ":" + old_path;
     ::setenv("PATH", new_path.c_str(), 1);
 
     RunResult res;
     collect_git(dir.string(), dir.string(), res);
 
-    if (old_path) {
-        ::setenv("PATH", old_path, 1);
+    if (!old_path.empty()) {
+        ::setenv("PATH", old_path.c_str(), 1);
     } else {
         ::unsetenv("PATH");
     }

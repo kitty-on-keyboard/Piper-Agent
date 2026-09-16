@@ -539,6 +539,102 @@ std::string strip_think_leak(const std::string& answer) {
     return out;
 }
 
+namespace {
+
+[[nodiscard]] std::string relativize_touched_path(std::string path, const std::string& cwd) {
+    if (path.empty()) return path;
+    std::string rel = path;
+    if (!cwd.empty() && std::filesystem::path(path).is_absolute()) {
+        try {
+            auto r = std::filesystem::relative(path, cwd);
+            std::string r_str = r.string();
+            if (r_str.rfind("..", 0) != 0) {
+                rel = r_str;
+            }
+        } catch (...) {}
+    }
+    std::replace(rel.begin(), rel.end(), '\\', '/');
+    return rel;
+}
+
+[[nodiscard]] bool is_path_like_arg_key(const std::string& key) {
+    // tool_call events may carry arg.path / arg.file when LMP_TRACE_TEXT is on.
+    // MCP servers (Godoer, filesystem) use these names; native writes use `path`.
+    static const char* kKeys[] = {
+        "path", "file", "filepath", "file_path", "target", "uri", "resource", "scene"
+    };
+    std::string bare = key;
+    if (bare.rfind("arg.", 0) == 0) {
+        bare = bare.substr(4);
+    }
+    for (const char* k : kKeys) {
+        if (bare == k) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool looks_like_workspace_path(const std::string& value) {
+    if (value.empty() || value.size() > 512) return false;
+    if (value.find('\n') != std::string::npos) return false;
+    // Reject obvious non-paths (JSON blobs, shell scripts, URLs without file shape).
+    if (value.front() == '{' || value.front() == '[') return false;
+    if (value.find("://") != std::string::npos && value.rfind("file://", 0) != 0) {
+        return false;
+    }
+    return true;
+}
+
+void push_touched_path(std::vector<std::string>& ordered,
+                       std::unordered_set<std::string>& seen,
+                       const std::string& path,
+                       const std::string& cwd) {
+    std::string rel = relativize_touched_path(path, cwd);
+    if (rel.empty()) return;
+    if (seen.insert(rel).second) {
+        ordered.push_back(rel);
+    }
+}
+
+// First/last slice of assistant narration for incomplete runs. Prefer paragraph
+// boundaries when present so the orchestrator gets readable bookends, not a diary.
+[[nodiscard]] std::string first_last_slice(const std::string& text, std::size_t budget) {
+    if (text.size() <= budget) return text;
+    if (budget < 32) return text.substr(0, budget);
+
+    const std::size_t ellipsis = 5; // " … "
+    const std::size_t head_budget = (budget - ellipsis) / 2;
+    const std::size_t tail_budget = budget - ellipsis - head_budget;
+
+    std::size_t head_end = head_budget;
+    const std::size_t nl = text.rfind('\n', head_budget);
+    if (nl != std::string::npos && nl >= head_budget / 3) {
+        head_end = nl;
+    }
+
+    std::size_t tail_start = text.size() - tail_budget;
+    const std::size_t tnl = text.find('\n', tail_start);
+    if (tnl != std::string::npos && tnl + 1 < text.size() &&
+        (text.size() - (tnl + 1)) >= tail_budget / 3) {
+        tail_start = tnl + 1;
+    }
+
+    std::string out = text.substr(0, head_end);
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\t' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    out += " … ";
+    std::string tail = text.substr(tail_start);
+    while (!tail.empty() && (tail.front() == ' ' || tail.front() == '\t' ||
+                             tail.front() == '\r' || tail.front() == '\n')) {
+        tail.erase(tail.begin());
+    }
+    out += tail;
+    if (out.size() > budget) out.resize(budget);
+    return out;
+}
+
+} // namespace
+
 std::vector<std::string> collect_files_touched(const std::string& log_path, const std::string& cwd) {
     std::vector<std::string> ordered;
     std::unordered_set<std::string> seen;
@@ -554,36 +650,214 @@ std::vector<std::string> collect_files_touched(const std::string& log_path, cons
         if (line.empty()) continue;
         auto j = nlohmann::json::parse(line, nullptr, false);
         if (j.is_discarded() || !j.is_object()) continue;
-        if (!j.contains("kind") || j["kind"] != "write") continue;
-        if (j.contains("changed")) {
-            auto& ch = j["changed"];
-            if (ch.is_string() && ch.get<std::string>() == "0") continue;
-            if (ch.is_number() && ch.get<int64_t>() == 0) continue;
-        }
-        std::string path;
-        if (j.contains("path") && j["path"].is_string()) {
-            path = j["path"].get<std::string>();
-        } else if (j.contains("normalised") && j["normalised"].is_string()) {
-            path = j["normalised"].get<std::string>();
-        }
-        if (path.empty()) continue;
+        if (!j.contains("kind") || !j["kind"].is_string()) continue;
+        const std::string kind = j["kind"].get<std::string>();
 
-        std::string rel = path;
-        if (!cwd.empty() && std::filesystem::path(path).is_absolute()) {
-            try {
-                auto r = std::filesystem::relative(path, cwd);
-                std::string r_str = r.string();
-                if (r_str.rfind("..", 0) != 0) {
-                    rel = r_str;
-                }
-            } catch (...) {}
+        if (kind == "write") {
+            if (j.contains("changed")) {
+                auto& ch = j["changed"];
+                if (ch.is_string() && ch.get<std::string>() == "0") continue;
+                if (ch.is_number() && ch.get<int64_t>() == 0) continue;
+            }
+            std::string path;
+            if (j.contains("path") && j["path"].is_string()) {
+                path = j["path"].get<std::string>();
+            } else if (j.contains("normalised") && j["normalised"].is_string()) {
+                path = j["normalised"].get<std::string>();
+            }
+            if (path.empty()) continue;
+            push_touched_path(ordered, seen, path, cwd);
+            continue;
         }
-        std::replace(rel.begin(), rel.end(), '\\', '/');
-        if (seen.insert(rel).second) {
-            ordered.push_back(rel);
+
+        // MCP / Godoer: remote tools rarely emit kind=write (no `path` param on the
+        // ledger). When LMP_TRACE_TEXT logged arg.path-like fields, harvest them.
+        if (kind == "tool_call") {
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                if (!it.value().is_string()) continue;
+                if (!is_path_like_arg_key(it.key())) continue;
+                const std::string value = it.value().get<std::string>();
+                if (!looks_like_workspace_path(value)) continue;
+                std::string path = value;
+                if (path.rfind("file://", 0) == 0) {
+                    path = path.substr(7);
+                }
+                push_touched_path(ordered, seen, path, cwd);
+            }
+            continue;
+        }
+
+        // tool_result summaries sometimes name a written path ("wrote world.tscn").
+        // Prefer explicit `path` / `normalised` when present (forward-compatible).
+        if (kind == "tool_result") {
+            std::string path;
+            if (j.contains("path") && j["path"].is_string()) {
+                path = j["path"].get<std::string>();
+            } else if (j.contains("normalised") && j["normalised"].is_string()) {
+                path = j["normalised"].get<std::string>();
+            }
+            if (!path.empty() && looks_like_workspace_path(path)) {
+                push_touched_path(ordered, seen, path, cwd);
+            }
         }
     }
     return ordered;
+}
+
+bool log_has_remote_tool_write(const std::string& log_path) {
+    if (log_path.empty() || !std::filesystem::exists(log_path)) {
+        return false;
+    }
+    std::ifstream file(log_path);
+    if (!file.is_open()) {
+        return false;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        auto j = nlohmann::json::parse(line, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) continue;
+        if (!j.contains("kind") || j["kind"] != "workspace_freshness") continue;
+        if (j.contains("why") && j["why"].is_string() &&
+            j["why"].get<std::string>() == "remote_tool") {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> collect_git_changed_paths(const std::string& cwd) {
+    std::vector<std::string> ordered;
+    std::unordered_set<std::string> seen;
+    if (cwd.empty()) return ordered;
+
+    int code = -1;
+    std::string probe_out;
+    if (!run_cmd("git rev-parse --is-inside-work-tree", cwd, 10.0, code, probe_out)) {
+        return ordered;
+    }
+    while (!probe_out.empty() &&
+           (probe_out.back() == '\n' || probe_out.back() == '\r' || probe_out.back() == ' ')) {
+        probe_out.pop_back();
+    }
+    if (code != 0 || probe_out != "true") {
+        return ordered;
+    }
+
+    std::string names_out;
+    if (run_cmd("git diff --name-only", cwd, 30.0, code, names_out) && code == 0) {
+        std::stringstream ss(names_out);
+        std::string line;
+        while (std::getline(ss, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+                line.pop_back();
+            }
+            if (line.size() >= 2 && line.front() == '"' && line.back() == '"') {
+                line = line.substr(1, line.size() - 2);
+            }
+            if (line.empty()) continue;
+            std::replace(line.begin(), line.end(), '\\', '/');
+            if (seen.insert(line).second) {
+                ordered.push_back(line);
+            }
+        }
+    }
+
+    std::string status_out;
+    if (run_cmd("git status --porcelain", cwd, 30.0, code, status_out) && code == 0) {
+        std::stringstream ss(status_out);
+        std::string line;
+        while (std::getline(ss, line)) {
+            if (line.size() > 3 && line[0] == '?' && line[1] == '?') {
+                std::string rel_file = line.substr(3);
+                while (!rel_file.empty() &&
+                       (rel_file.back() == '\r' || rel_file.back() == '\n')) {
+                    rel_file.pop_back();
+                }
+                if (rel_file.size() >= 2 && rel_file.front() == '"' && rel_file.back() == '"') {
+                    rel_file = rel_file.substr(1, rel_file.size() - 2);
+                }
+                if (rel_file.empty()) continue;
+                std::replace(rel_file.begin(), rel_file.end(), '\\', '/');
+                std::error_code ec;
+                std::filesystem::path full = std::filesystem::path(cwd) / rel_file;
+                if (!std::filesystem::is_regular_file(full, ec)) continue;
+                if (seen.insert(rel_file).second) {
+                    ordered.push_back(rel_file);
+                }
+            }
+        }
+    }
+    return ordered;
+}
+
+void merge_files_touched(std::vector<std::string>& dest,
+                         const std::vector<std::string>& extra) {
+    std::unordered_set<std::string> seen(dest.begin(), dest.end());
+    for (const std::string& p : extra) {
+        if (p.empty()) continue;
+        if (seen.insert(p).second) {
+            dest.push_back(p);
+        }
+    }
+}
+
+bool is_stalled_termination(const std::string& termination_reason) {
+    return termination_reason == "max_turns" ||
+           termination_reason == "stalled" ||
+           termination_reason == "stalled_no_turn";
+}
+
+std::string compose_result_message(
+    const std::string& finish_summary,
+    const std::string& answer_accum,
+    bool completed_ok,
+    bool plan_ready,
+    const std::string& plan_accum,
+    const std::string& status,
+    const std::string& termination_reason,
+    const std::vector<std::string>& files_touched,
+    const std::string& error) {
+    constexpr std::size_t kMessageCap = 2000;
+    constexpr std::size_t kIncompleteBudget = 480;
+
+    if (plan_ready && !plan_accum.empty()) {
+        std::string out = plan_accum;
+        if (out.size() > kMessageCap) out.resize(kMessageCap);
+        return out;
+    }
+
+    const std::string clean_finish = strip_think_leak(finish_summary);
+    if (!clean_finish.empty()) {
+        return clean_finish; // already capped by strip_think_leak
+    }
+
+    const std::string clean_answer = strip_think_leak(answer_accum);
+    if (!clean_answer.empty()) {
+        if (completed_ok) {
+            return clean_answer;
+        }
+        // Incomplete / stalled: bookends only — not the whole turn diary.
+        return first_last_slice(clean_answer, kIncompleteBudget);
+    }
+
+    if (!error.empty()) {
+        std::string out = error;
+        if (out.size() > kMessageCap) out.resize(kMessageCap);
+        return out;
+    }
+
+    std::string bits = "status=" + status;
+    if (!termination_reason.empty()) bits += "; reason=" + termination_reason;
+    if (!files_touched.empty()) {
+        bits += "; files: ";
+        for (size_t i = 0; i < std::min<size_t>(files_touched.size(), 12); ++i) {
+            if (i > 0) bits += ", ";
+            bits += files_touched[i];
+        }
+    }
+    if (bits.size() > kMessageCap) bits.resize(kMessageCap);
+    return bits;
 }
 
 void collect_git(const std::string& cwd, const std::string& out_dir, RunResult& result) {
@@ -1328,7 +1602,8 @@ mission. No URL means no POST.
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
-standard exists to kill.
+standard exists to kill. `result.json` uses the same `status: "stalled"` for
+`max_turns` / no-progress stalls so parents need not parse error strings.
 
 Body:
 
@@ -1340,12 +1615,13 @@ Body:
   "cwd": "/absolute/path",
   "result_path": "/absolute/path/result.json",
   "seq": 0,
-  "status": "error",
+  "status": "stalled",
   "question": ""
 }
 ```
 
-`ask` fills `question` and `seq`. `done` and `stalled` fill `status`.
+`ask` fills `question` and `seq`. `done` and `stalled` fill `status`
+(`ok` / `error` / `timeout` / `stalled`).
 `died` fills `cwd` and `task_id`.
 
 Do not POST every turn. Do not POST tool output.
@@ -1474,6 +1750,17 @@ int init_project(const std::string& target_dir_in) {
                  "Godoer briefs left alone. Stay attached, or pass --orch-webhook.\n");
     std::fflush(stdout);
     return kExitOk;
+}
+
+double parse_idle_timeout_arg(const char* value, double fallback) {
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    try {
+        return std::stod(value);
+    } catch (...) {
+        return fallback;
+    }
 }
 
 } // namespace lmp::surface::worker

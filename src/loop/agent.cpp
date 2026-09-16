@@ -2270,6 +2270,25 @@ tools::ToolResult Agent::dispatch_call(const std::string& name,
             if (write_paths.empty()) {
                 write_paths = apply_patch::paths_in_patch(param_value(params, "patch"));
             }
+        } else if (decl->remote) {
+            // MCP tools (Godoer, filesystem servers) often name the target with
+            // file/filepath/scene rather than `path`. Without this, kind=write never
+            // fires and files_touched stays empty even when the call succeeded.
+            static const char* kPathKeys[] = {
+                "file", "filepath", "file_path", "target", "uri", "resource", "scene"
+            };
+            for (const char* key : kPathKeys) {
+                const std::string v = param_value(params, key);
+                if (v.empty() || v.size() > 512 || v.find('\n') != std::string::npos) {
+                    continue;
+                }
+                if (v.front() == '{' || v.front() == '[') continue;
+                std::string path = v;
+                if (path.rfind("file://", 0) == 0) {
+                    path = path.substr(7);
+                }
+                write_paths.push_back(std::move(path));
+            }
         }
         for (const std::string& path : write_paths) {
             if (path.empty()) {

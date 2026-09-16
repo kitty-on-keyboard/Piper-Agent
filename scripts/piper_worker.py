@@ -145,6 +145,11 @@ def load_packet(task_arg):
     if orch_webhook is not None and not isinstance(orch_webhook, str):
         orch_webhook = None
 
+    trust_mcp = data.get("trust_mcp") or []
+    if not isinstance(trust_mcp, list):
+        raise PacketError("trust_mcp must be an array of server names")
+    trust_mcp = [str(x) for x in trust_mcp if isinstance(x, str) and x.strip()]
+
     return {
         "id": task_id.strip(),
         "cwd": os.path.abspath(cwd),
@@ -157,6 +162,7 @@ def load_packet(task_arg):
         "timeout_s": timeout_s,
         "result_path": result_path,
         "orch_webhook": (orch_webhook or "").strip(),
+        "trust_mcp": trust_mcp,
         "commit_think": as_bool(data.get("commit_think"), True),
         "shadow_compact": as_bool(data.get("shadow_compact"), True),
         "task_path": task_path,
@@ -185,29 +191,121 @@ def collect_files_touched(log_path, cwd):
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if ev.get("kind") != "write":
-                    continue
-                if ev.get("changed") == "0":
-                    continue
-                path = ev.get("path") or ev.get("normalised") or ""
-                if not path:
-                    continue
-                rel = path
-                if os.path.isabs(path) and cwd:
-                    try:
-                        cand = os.path.relpath(path, cwd)
-                    except ValueError:
-                        cand = path
-                    else:
-                        if not cand.startswith(".."):
-                            rel = cand
-                rel = rel.replace("\\", "/")
-                if rel not in seen:
-                    seen.add(rel)
-                    ordered.append(rel)
+                kind = ev.get("kind")
+                candidates = []
+                if kind == "write":
+                    if ev.get("changed") == "0" or ev.get("changed") == 0:
+                        continue
+                    path = ev.get("path") or ev.get("normalised") or ""
+                    if path:
+                        candidates.append(path)
+                elif kind == "tool_call":
+                    for key, value in ev.items():
+                        if not isinstance(value, str):
+                            continue
+                        bare = key[4:] if key.startswith("arg.") else key
+                        if bare not in {
+                            "path", "file", "filepath", "file_path", "target",
+                            "uri", "resource", "scene",
+                        }:
+                            continue
+                        if not value or len(value) > 512 or "\n" in value:
+                            continue
+                        if value[:1] in "{[":
+                            continue
+                        if "://" in value and not value.startswith("file://"):
+                            continue
+                        candidates.append(
+                            value[7:] if value.startswith("file://") else value
+                        )
+                elif kind == "tool_result":
+                    path = ev.get("path") or ev.get("normalised") or ""
+                    if path:
+                        candidates.append(path)
+                for path in candidates:
+                    if not path:
+                        continue
+                    rel = path
+                    if os.path.isabs(path) and cwd:
+                        try:
+                            cand = os.path.relpath(path, cwd)
+                        except ValueError:
+                            cand = path
+                        else:
+                            if not cand.startswith(".."):
+                                rel = cand
+                    rel = rel.replace("\\", "/")
+                    if rel not in seen:
+                        seen.add(rel)
+                        ordered.append(rel)
     except Exception as exc:
         print(f"piper: failed to parse event log: {exc}", file=sys.stderr)
         return []
+    return ordered
+
+
+def log_has_remote_tool_write(log_path):
+    if not log_path or not os.path.isfile(log_path):
+        return False
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("kind") == "workspace_freshness" and ev.get("why") == "remote_tool":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def collect_git_changed_paths(cwd):
+    ordered = []
+    seen = set()
+    if not cwd:
+        return ordered
+    try:
+        probe = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ordered
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        return ordered
+    try:
+        names = subprocess.run(
+            ["git", "-C", cwd, "diff", "--name-only"],
+            capture_output=True, text=True, timeout=30,
+        )
+        status = subprocess.run(
+            ["git", "-C", cwd, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ordered
+    if names.returncode == 0:
+        for line in names.stdout.splitlines():
+            rel = line.strip().strip('"')
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            ordered.append(rel.replace("\\", "/"))
+    if status.returncode == 0:
+        for line in status.stdout.splitlines():
+            if len(line) > 3 and line.startswith("??"):
+                rel = line[3:].strip().strip('"').replace("\\", "/")
+                if not rel or rel in seen:
+                    continue
+                full = os.path.join(cwd, rel)
+                if os.path.isfile(full):
+                    seen.add(rel)
+                    ordered.append(rel)
     return ordered
 
 
@@ -258,10 +356,47 @@ def collect_git(cwd, out_dir):
     return diff_stat, git_diff_path
 
 
-def compose_message(answer, status, reason, files, error):
+def merge_files_touched(dest, extra):
+    seen = set(dest)
+    for path in extra:
+        if path and path not in seen:
+            seen.add(path)
+            dest.append(path)
+    return dest
+
+
+def is_stalled_termination(reason):
+    return reason in ("max_turns", "stalled", "stalled_no_turn")
+
+
+def _first_last_slice(text, budget=480):
+    if len(text) <= budget:
+        return text
+    if budget < 32:
+        return text[:budget]
+    ellipsis = " … "
+    head_budget = (budget - len(ellipsis)) // 2
+    tail_budget = budget - len(ellipsis) - head_budget
+    head_end = head_budget
+    nl = text.rfind("\n", 0, head_budget)
+    if nl >= head_budget // 3:
+        head_end = nl
+    tail_start = len(text) - tail_budget
+    tnl = text.find("\n", tail_start)
+    if tnl != -1 and tnl + 1 < len(text) and (len(text) - (tnl + 1)) >= tail_budget // 3:
+        tail_start = tnl + 1
+    out = text[:head_end].rstrip(" \t\r") + ellipsis + text[tail_start:].lstrip(" \t\r\n")
+    return out[:budget]
+
+
+def compose_message(answer, status, reason, files, error, *, finish_summary="", completed=False):
+    if finish_summary and str(finish_summary).strip():
+        return str(finish_summary).strip()[:MESSAGE_CAP]
     text = (answer or "").strip()
     if text:
-        return text[:MESSAGE_CAP]
+        if completed and status == "ok":
+            return text[:MESSAGE_CAP]
+        return _first_last_slice(text, min(480, MESSAGE_CAP))
     if error:
         return str(error)[:MESSAGE_CAP]
     bits = [f"status={status}"]
@@ -431,6 +566,10 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
 
     files_touched = collect_files_touched(durable_log, packet["cwd"])
     diff_stat, git_diff_path = collect_git(packet["cwd"], result_dir)
+    if packet.get("trust_mcp") or (
+        not files_touched and log_has_remote_tool_write(durable_log)
+    ):
+        merge_files_touched(files_touched, collect_git_changed_paths(packet["cwd"]))
     answer = "".join(answer_parts)
     deadline = bool(state.get("deadline_killed"))
     denied_irr = bool(state.get("denied_irreversible"))
@@ -449,6 +588,9 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
     elif state.get("completed"):
         status, exit_code = "ok", EXIT_OK
         error = None
+    elif is_stalled_termination(reason):
+        status, exit_code = "stalled", EXIT_ERROR
+        error = f"agent did not complete ({reason})"
     else:
         status, exit_code = "error", EXIT_ERROR
         sig = state.get("sidecar_signal_name")
@@ -457,7 +599,10 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
             error += f", {sig}"
         error += ")"
 
-    message = compose_message(answer, status, reason, files_touched, error)
+    message = compose_message(
+        answer, status, reason, files_touched, error,
+        completed=bool(state.get("completed")) and status == "ok",
+    )
     write_result(result_path, result_shell(
         task_id=packet["id"], cwd=packet["cwd"], model_dir=packet["model_dir"],
         status=status, message=message,
@@ -658,7 +803,8 @@ mission. No URL means no POST.
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
-standard exists to kill.
+standard exists to kill. `result.json` uses the same `status: "stalled"` for
+`max_turns` / no-progress stalls so parents need not parse error strings.
 
 Body:
 
@@ -670,12 +816,13 @@ Body:
   "cwd": "/absolute/path",
   "result_path": "/absolute/path/result.json",
   "seq": 0,
-  "status": "error",
+  "status": "stalled",
   "question": ""
 }
 ```
 
-`ask` fills `question` and `seq`. `done` and `stalled` fill `status`.
+`ask` fills `question` and `seq`. `done` and `stalled` fill `status`
+(`ok` / `error` / `timeout` / `stalled`).
 `died` fills `cwd` and `task_id`.
 
 Do not POST every turn. Do not POST tool output.
@@ -1390,11 +1537,52 @@ def self_test():
         check("piper: failed to parse event log:" in stderr_buf.getvalue(),
               f"expected 'piper: failed to parse event log:' in stderr, got {stderr_buf.getvalue()!r}")
 
+        # 12. PR-S1: MCP path harvest, stalled status helper, incomplete message trim
+        mcp_log = os.path.join(tmp, "mcp_events.ndjson")
+        with open(mcp_log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "kind": "tool_call", "tool": "godot_world",
+                "arg.file": "scenes/Main.tscn",
+            }) + "\n")
+            fh.write(json.dumps({
+                "kind": "workspace_freshness", "why": "remote_tool",
+                "tool": "godot_world", "writes": "1",
+            }) + "\n")
+            fh.write(json.dumps({
+                "kind": "tool_result", "tool": "godot_world",
+                "status": "ok", "path": "world/player.gd",
+            }) + "\n")
+        mcp_touched = collect_files_touched(mcp_log, tmp)
+        check(mcp_touched == ["scenes/Main.tscn", "world/player.gd"],
+              f"MCP paths must be harvested, got {mcp_touched!r}")
+        check(log_has_remote_tool_write(mcp_log),
+              "remote_tool freshness must be detected")
+        check(is_stalled_termination("max_turns"), "max_turns is stalled")
+        check(is_stalled_termination("stalled"), "stalled is stalled")
+        check(not is_stalled_termination("ended"), "ended is not stalled")
+        diary = ("Turn narration line: still poking at the scene.\n" * 20)
+        diary += "Final narration before the turn budget expires."
+        trimmed = compose_message(
+            diary, "stalled", "max_turns", ["a.tscn"], "agent did not complete (max_turns)",
+            completed=False,
+        )
+        check(len(trimmed) <= 480, f"incomplete message must be short, got {len(trimmed)}")
+        check(" … " in trimmed, f"incomplete message must use first/last ellipsis, got {trimmed!r}")
+        check("Final narration" in trimmed, f"incomplete message must keep last text, got {trimmed!r}")
+        finished = compose_message(
+            diary, "stalled", "max_turns", [], "err",
+            finish_summary="Shipped the scene edit.", completed=False,
+        )
+        check(finished == "Shipped the scene edit.",
+              f"finish summary must win, got {finished!r}")
+        merged = merge_files_touched(["a.tscn"], ["a.tscn", "b.gd"])
+        check(merged == ["a.tscn", "b.gd"], f"merge_files_touched unique union, got {merged!r}")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 11 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 12 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
