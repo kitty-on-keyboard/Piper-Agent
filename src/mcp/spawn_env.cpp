@@ -76,6 +76,7 @@ namespace {
     // list is ever trimmed; CREDENTIAL covers the singular form.
     static constexpr std::string_view kSuffix[] = {
         "TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "PAT", "AUTH", "JWT",
+        "APIKEY", "PASSPHRASE", "PRIVATEKEY", "COOKIE", "SESSID", "SESSION",
     };
     for (const std::string_view s : kSuffix) {
         if (ascii_ieq(key, s)) {
