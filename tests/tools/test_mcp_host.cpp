@@ -481,3 +481,21 @@ TEST(a_non_string_parameter_is_still_parsed) {
     CHECK(sum.ok());
     CHECK(sum.summary.find('5') != std::string::npos);
 }
+
+// A Cancelled error from the transport means the model or host asked the call to stop,
+// rather than a transient failure. It must be mapped to Status::Cancelled rather than
+// Status::ToolError so the loop can abort cleanly rather than recording the cancellation
+// as a failure for the model to see.
+TEST(a_cancelled_mcp_call_returns_cancelled_status) {
+    Registry registry(workspace());
+    McpHost host;
+    (void)host.connect_and_register({demo("demo", true)}, registry);
+
+    lmp::model::CancelToken cancel;
+    cancel.cancel(); // Pre-cancel so the call aborts immediately
+
+    const ToolResult r = registry.execute("echo", {{"text", "hello"}}, 0, &cancel);
+    CHECK(!r.ok());
+    CHECK(r.status == Status::Cancelled);
+    CHECK(r.summary.find("cancelled") != std::string::npos);
+}
