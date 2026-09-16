@@ -564,9 +564,13 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
      "auto_approve_writes": true,
      "auto_approve_irreversible": true,
      "timeout_s": 600,
+     "max_iterations": 30,
+     "check": "ctest -R test_validator",
      "result_path": "/absolute/path/to/result.json"
    }
    ```
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise in the packet for long slices — no rebuild.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
 
 4. **Dispatch Piper**
    Run the CLI command:
@@ -601,10 +605,10 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    ```
 
    **Review Rubric (Keep it cheap):**
-   - **Status**: Is `status == "ok"`? If `"error"` or `"stalled"`, inspect the message.
+   - **Status**: Is `status == "ok"`? If `"error"` or `"stalled"`, inspect the message. Green `test.exit_code=0` with incomplete loop is still `ok` when `check` was set.
    - **Files Touched**: Are changes confined to expected paths? Reject drive-by edits.
    - **Diff**: Skim git diff for regressions or unnecessary churn.
-   - **Acceptance**: Run verification commands or tests to validate the slice.
+   - **Acceptance**: Prefer `result.test` from the packet `check`; re-run only if you need a second reading.
 
 6. **Iterate or Complete**
    - **Pass**: If acceptance criteria for the slice pass, dispatch the next slice.
@@ -695,8 +699,9 @@ agent copies.
 
 - `--help` names this standard in one paragraph.
 - A detached launch with no URL exits before the sidecar starts.
-- A run that writes `result.json` POSTs `done` if it completed, `stalled`
-  if it did not.
+- A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
+  `plan_ready`, or a green packet `check` after an incomplete loop stop such as
+  `max_turns`), `stalled` if it did not.
 - The launch parent POSTs `died` if the sidecar exits with no result.
 - An irreversible call and `ask_user` both POST `ask` and wait.
 """
