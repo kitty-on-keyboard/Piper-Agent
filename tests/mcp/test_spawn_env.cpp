@@ -120,6 +120,10 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "LC_PRIVATEKEY=secret",
         "XDG_COOKIE=secret",
         "LC_SESSID=secret",
+        "LC_BEARER=secret",
+        "XDG_CERT=secret",
+        "LC_CERTIFICATE=secret",
+        "XDG_SIGNATURE=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -131,6 +135,10 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "LC_PRIVATEKEY"));
     CHECK(!has_key(env, "XDG_COOKIE"));
     CHECK(!has_key(env, "LC_SESSID"));
+    CHECK(!has_key(env, "LC_BEARER"));
+    CHECK(!has_key(env, "XDG_CERT"));
+    CHECK(!has_key(env, "LC_CERTIFICATE"));
+    CHECK(!has_key(env, "XDG_SIGNATURE"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
