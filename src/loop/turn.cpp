@@ -4,12 +4,49 @@
 #include <regex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 // For lexically_normal: a repeat is the same call, not the same bytes. See
 // RepeatDetector::key.
 #include "src/platform/fs.hpp"
 
 namespace lmp::loop {
+
+namespace {
+
+constexpr std::size_t kRepeatFloor = 8;
+constexpr std::size_t kDistinctCeilingPercent = 25;
+
+} // namespace
+
+TextShape shape_of(const std::string& text) {
+    TextShape s;
+    std::unordered_map<std::string_view, std::size_t> counts;
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        std::size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) {
+            nl = text.size();
+        }
+        const std::string_view line(text.data() + at, nl - at);
+        at = nl + 1;
+        // Blank and near-blank lines repeat in every healthy generation (indentation,
+        // paragraph breaks) and would dominate the count without saying anything.
+        if (line.find_first_not_of(" \t\r") == std::string_view::npos) {
+            continue;
+        }
+        ++s.lines;
+        const std::size_t n = ++counts[line];
+        s.worst_line_repeats = std::max(s.worst_line_repeats, n);
+    }
+    s.distinct = counts.size();
+    return s;
+}
+
+bool looks_degenerate(const TextShape& s) noexcept {
+    return s.lines >= kRepeatFloor && s.worst_line_repeats >= kRepeatFloor &&
+           s.distinct * 100 <= s.lines * kDistinctCeilingPercent;
+}
 
 std::string_view to_string(Outcome o) noexcept {
     switch (o) {

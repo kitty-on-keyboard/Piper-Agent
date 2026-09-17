@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
@@ -1060,7 +1061,17 @@ void write_result(const std::string& path, const RunResult& result) {
         {"git_diff_path", result.git_diff_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(result.git_diff_path)},
         {"test", test},
         {"log_path", result.log_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(result.log_path)},
-        {"error", result.error.empty() ? nlohmann::json(nullptr) : nlohmann::json(result.error)}
+        {"error", result.error.empty() ? nlohmann::json(nullptr) : nlohmann::json(result.error)},
+        {"loop_metrics",
+         {{"degenerate_text_count", result.degenerate_text_count},
+          {"text_only_turns", result.text_only_turns},
+          {"tool_error_count", result.tool_error_count},
+          {"nudged_count", result.nudged_loop_cut + result.nudged_no_progress +
+                               result.nudged_no_tool_recovery},
+          {"nudged_by_why",
+           {{"loop_cut", result.nudged_loop_cut},
+            {"no_progress", result.nudged_no_progress},
+            {"no_tool_recovery", result.nudged_no_tool_recovery}}}}}
     };
 
     std::string tmp_path = path + ".tmp";
@@ -1075,6 +1086,50 @@ void write_result(const std::string& path, const RunResult& result) {
         std::filesystem::copy_file(tmp_path, path, std::filesystem::copy_options::overwrite_existing, ec);
         std::filesystem::remove(tmp_path, ec);
     }
+}
+
+void archive_prior_events(const std::string& result_dir) {
+    if (result_dir.empty()) {
+        return;
+    }
+    namespace fs = std::filesystem;
+    const fs::path dir(result_dir);
+    const fs::path jsonl = dir / "events.jsonl";
+    const fs::path ndjson = dir / "events.ndjson";
+    fs::path src;
+    if (fs::is_regular_file(jsonl)) {
+        src = jsonl;
+    } else if (fs::is_regular_file(ndjson)) {
+        src = ndjson;
+    } else {
+        return;
+    }
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &t);
+#else
+    gmtime_r(&t, &utc);
+#endif
+    char stamp[32];
+    if (std::strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", &utc) == 0) {
+        return;
+    }
+    fs::path dest = dir / (std::string("events-") + stamp + ".jsonl");
+    std::error_code ec;
+    if (fs::exists(dest, ec)) {
+        dest = dir / (std::string("events-") + stamp + "-1.jsonl");
+    }
+    fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+    // Fresh run: truncate the live names so EventLogWriter O_APPEND does not grow a
+    // prior try's journal.
+    fs::remove(jsonl, ec);
+    fs::remove(ndjson, ec);
+}
+
+std::string durable_events_path(const std::string& result_dir) {
+    return (std::filesystem::path(result_dir) / "events.jsonl").string();
 }
 
 std::optional<AwaitingUserInfo> find_last_ask_user(const std::string& log_path, const std::string& run_id) {

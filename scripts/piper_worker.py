@@ -369,6 +369,30 @@ def is_stalled_termination(reason):
     return reason in ("max_turns", "stalled", "stalled_no_turn")
 
 
+def archive_prior_events(result_dir):
+    """Copy existing events.jsonl/ndjson to a timestamped immutable file, then remove live names."""
+    jsonl = os.path.join(result_dir, "events.jsonl")
+    ndjson = os.path.join(result_dir, "events.ndjson")
+    src = jsonl if os.path.isfile(jsonl) else (ndjson if os.path.isfile(ndjson) else None)
+    if src is None:
+        return None
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    dest = os.path.join(result_dir, f"events-{stamp}.jsonl")
+    if os.path.exists(dest):
+        dest = os.path.join(result_dir, f"events-{stamp}-1.jsonl")
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        return None
+    for path in (jsonl, ndjson):
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+    return dest
+
+
 def _first_last_slice(text, budget=480):
     if len(text) <= budget:
         return text
@@ -508,9 +532,10 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
     apply_feature_flags(packet)
     result_dir = os.path.dirname(os.path.abspath(result_path))
     os.makedirs(result_dir, exist_ok=True)
+    archive_prior_events(result_dir)
     harness_dir = tempfile.mkdtemp(prefix=f"piper-worker-{packet['id']}-")
     event_log = os.path.join(harness_dir, "events.jsonl")
-    durable_log = os.path.join(result_dir, "events.ndjson")
+    durable_log = os.path.join(result_dir, "events.jsonl")
     answer_parts = []
 
     def on_notification(method, params):
@@ -549,6 +574,11 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
         if os.path.isfile(event_log):
             try:
                 shutil.copy2(event_log, durable_log)
+                # Compatibility alias for older bakeoff paths.
+                try:
+                    shutil.copy2(event_log, os.path.join(result_dir, "events.ndjson"))
+                except OSError:
+                    pass
             except OSError:
                 durable_log = None
         else:
@@ -1578,6 +1608,19 @@ def self_test():
             diary, "stalled", "max_turns", [], "err",
             finish_summary="Shipped the scene edit.", completed=False,
         )
+
+        # 13. Bakeoff journal hygiene: archive prior events.jsonl before overwrite
+        bake_dir = os.path.join(tmp, "bakeoff_try")
+        os.makedirs(bake_dir)
+        live = os.path.join(bake_dir, "events.jsonl")
+        with open(live, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "run_end", "seq": 1}) + "\n")
+        archived = archive_prior_events(bake_dir)
+        check(archived is not None and os.path.isfile(archived),
+              f"archive_prior_events must write a timestamped copy, got {archived!r}")
+        check(not os.path.isfile(live), "live events.jsonl must be cleared after archive")
+        check(os.path.basename(archived).startswith("events-") and archived.endswith(".jsonl"),
+              f"archive name must be events-<UTC>.jsonl, got {archived!r}")
         check(finished == "Shipped the scene edit.",
               f"finish summary must win, got {finished!r}")
         merged = merge_files_touched(["a.tscn"], ["a.tscn", "b.gd"])

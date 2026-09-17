@@ -5092,6 +5092,176 @@ TEST(a_tool_then_repeated_loop_cuts_still_stalls) {
     CHECK(!report.completed);
 }
 
+// Bowling seed7 class: model emits degenerate prose / text instead of tool calls while
+// tools are otherwise healthy. Recovery nudges toward a tool call; after the cap the
+// run stalls cleanly (not an infinite babble, not a false `ended` handback).
+//
+// Fixture uses SHORT repeated lines so LoopBreaker (32-token window × 3) does not cut
+// before looks_degenerate's 8-line floor can fire -- a long identical sentence is cut
+// first and leaves degenerate_text_count at 0.
+TEST(degenerate_text_turns_nudge_then_stall_with_bounded_cap) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::string babble;
+    // Ten one-char lines: looks_degenerate (floor 8) but well under LoopBreaker::kWindow
+    // (32 tokens), so the turn is scored degenerate rather than cut_for_looping.
+    for (int i = 0; i < 10; ++i) {
+        babble += "x\n";
+    }
+    REQUIRE(loop::looks_degenerate(loop::shape_of(babble)));
+
+    // Probe: ScriptedBackend decode must still look degenerate (not only the raw string).
+    {
+        model::ScriptedBackend probe_backend;
+        probe_backend.enqueue_response(text_turn(tok, "x", babble));
+        tools::Registry probe_registry(workspace("/tmp"));
+        context::ContextStore probe_ctx("probe");
+        platform::EventLogWriter probe_log;
+        platform::SystemClock probe_clock;
+        loop::AgentConfig probe_config;
+        probe_config.auto_syntax_check = false;
+        loop::Agent probe(tok, probe_backend, probe_registry, probe_ctx, probe_log,
+                          probe_clock, probe_config);
+        const model::CancelToken probe_cancel;
+        const loop::TurnResult first = probe.step(probe_cancel);
+        CHECK(first.outcome == loop::Outcome::TextOnly);
+        CHECK(first.degenerate_text);
+        CHECK(!first.cut_for_looping);
+    }
+
+    model::ScriptedBackend backend;
+    // Cap is 2: two nudges, third turn stalls. Extra scripts prove we stop.
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(text_turn(tok, "x", babble));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_recovery = true;
+    config.degenerate_nudge_cap = 2;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK(!report.completed);
+    // Never exceeds cap: 2 nudges + 1 ending turn = 3 iterations.
+    CHECK_EQ(report.nudged_count(), std::size_t{2});
+    CHECK_EQ(report.nudged_no_tool_recovery, std::size_t{2});
+    CHECK_EQ(report.nudged_loop_cut, std::size_t{0});
+    CHECK(report.iterations <= 3);
+    CHECK(report.degenerate_text_count >= 1);
+    CHECK(report.text_only_turns >= 1);
+
+    std::size_t noted = 0;
+    for (const context::TurnRecord& r : ctx.recent()) {
+        if (r.observation.find("repeated the same prose") != std::string::npos) {
+            ++noted;
+        }
+    }
+    CHECK_EQ(noted, std::size_t{2});
+}
+
+TEST(length_capped_no_tool_turns_join_recovery_when_enabled) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::vector<model::TokenId> truncated;
+    for (model::TokenId id : tok.encode_content("thinking and thinking and more thinking")) {
+        truncated.push_back(id);
+    }
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(truncated);
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("keep going");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_recovery = true;
+    config.degenerate_nudge_cap = 2;
+    config.max_new_tokens = static_cast<std::int32_t>(truncated.size());
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK_EQ(report.nudged_count(), std::size_t{2});
+    CHECK_EQ(report.nudged_no_tool_recovery, std::size_t{2});
+    CHECK(report.iterations <= 3);
+    CHECK(!report.completed);
+}
+
+TEST(degenerate_recovery_off_leaves_length_capped_out_of_inert_count) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::vector<model::TokenId> truncated;
+    for (model::TokenId id : tok.encode_content("thinking and thinking and")) {
+        truncated.push_back(id);
+    }
+
+    model::ScriptedBackend backend;
+    // With recovery off, length-capped turns do not consume the inert budget; the run
+    // hits max_iterations instead of stalling on the nudge path.
+    for (int i = 0; i < 5; ++i) {
+        backend.enqueue_response(truncated);
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("keep going");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_recovery = false;
+    config.budget.max_iterations = 4;
+    config.max_new_tokens = static_cast<std::int32_t>(truncated.size());
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("max_turns"));
+    CHECK_EQ(report.nudged_count(), std::size_t{0});
+}
+
+TEST(nudge_count_never_exceeds_configured_cap) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 20; ++i) {
+        backend.enqueue_response(text_turn(tok, "t", "still working on it"));
+    }
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("finish the mission");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_nudge_cap = 1;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK(report.nudged_count() <= 1);
+    CHECK(report.iterations <= 2);
+}
+
 // A capped CREATE must name append_file and the path. The old observation only offered
 // replace_in_file, which cannot create a file, and a plant-clicker run spent four turns
 // retrying a whole-file write of game.js.

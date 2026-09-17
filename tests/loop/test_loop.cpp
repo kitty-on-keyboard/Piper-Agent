@@ -88,6 +88,41 @@ TEST(length_capped_is_never_completion) {
     CHECK(o != Outcome::TextOnly);
 }
 
+// --- degenerate text shape (bowling seed7 class) -----------------------------
+//
+// Measured: one real turn repeated "I'll fix all compilation errors systematically..."
+// ~200 times to the token cap. Distinct-ratio separates that from brace-heavy source.
+
+TEST(looks_degenerate_flags_a_single_line_repeated_to_the_floor) {
+    std::string babble;
+    for (int i = 0; i < 20; ++i) {
+        babble += "I'll fix all compilation errors systematically.\n";
+    }
+    const TextShape said = shape_of(babble);
+    CHECK(said.lines >= 8);
+    CHECK_EQ(said.distinct, std::size_t{1});
+    CHECK(looks_degenerate(said));
+}
+
+TEST(looks_degenerate_rejects_diverse_source_like_text) {
+    std::string source;
+    for (int i = 0; i < 40; ++i) {
+        source += "    let value" + std::to_string(i) + " = compute(input, " +
+                  std::to_string(i) + ")\n";
+        if (i % 3 == 0) {
+            source += "    }\n";
+        }
+    }
+    const TextShape said = shape_of(source);
+    CHECK(said.lines >= 8);
+    CHECK(!looks_degenerate(said));
+}
+
+TEST(looks_degenerate_rejects_short_answers) {
+    const TextShape said = shape_of("done\ndone\n");
+    CHECK(!looks_degenerate(said));
+}
+
 // --- mode policy in one place (S9.3) ----------------------------------------
 
 TEST(plan_mode_cannot_execute_or_write) {

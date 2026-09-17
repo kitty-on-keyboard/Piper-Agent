@@ -115,6 +115,13 @@ struct RunResult {
     TestBlock test;
     std::string log_path;
     std::string error;                    // empty on success
+    // Tier-A loop hygiene copied from RunReport when the worker path has one.
+    std::size_t degenerate_text_count = 0;
+    std::size_t text_only_turns = 0;
+    std::size_t tool_error_count = 0;
+    std::size_t nudged_loop_cut = 0;
+    std::size_t nudged_no_progress = 0;
+    std::size_t nudged_no_tool_recovery = 0;
 };
 
 // True when result.status/error is an incomplete agent-loop stop (max_turns,
@@ -124,6 +131,14 @@ struct RunResult {
 
 // Write result.json atomically (write .tmp, rename).
 void write_result(const std::string& path, const RunResult& result);
+
+// Before a new worker run opens the event log beside result.json, copy any existing
+// events.jsonl / events.ndjson to events-<UTC>.jsonl so bakeoff retries keep an
+// immutable try artifact (e.g. bowling seed7 A/B). No-op when neither file exists.
+void archive_prior_events(const std::string& result_dir);
+
+// Prefer events.jsonl beside result.json; keep events.ndjson as a compatibility name.
+[[nodiscard]] std::string durable_events_path(const std::string& result_dir);
 
 // ------------------------------------------------------------------
 // Helpers that build-outs 2 and 3 need.
@@ -184,7 +199,8 @@ struct AwaitingUserInfo {
     uint64_t seq = 0;
 };
 
-// Find the last ask_user event in events.ndjson, populating question, options, seq.
+// Find the last ask_user event in the durable events log (events.jsonl beside
+// result.json; older runs may still use events.ndjson), populating question, options, seq.
 [[nodiscard]] std::optional<AwaitingUserInfo> find_last_ask_user(
     const std::string& log_path, const std::string& run_id);
 

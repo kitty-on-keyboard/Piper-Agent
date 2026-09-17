@@ -369,6 +369,37 @@ TEST(write_result_writes_atomic_json) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+TEST(archive_prior_events_copies_then_clears_live_journal) {
+    std::filesystem::path tmp_dir =
+        std::filesystem::temp_directory_path() / "test_worker_archive_events";
+    std::filesystem::remove_all(tmp_dir);
+    std::filesystem::create_directories(tmp_dir);
+    const std::string dir = tmp_dir.string();
+    const auto live = tmp_dir / "events.jsonl";
+    {
+        std::ofstream f(live);
+        f << "{\"kind\":\"run_end\",\"seq\":1}\n";
+    }
+    archive_prior_events(dir);
+    CHECK(!std::filesystem::exists(live));
+    CHECK(!std::filesystem::exists(tmp_dir / "events.ndjson"));
+    std::size_t archives = 0;
+    for (const auto& e : std::filesystem::directory_iterator(tmp_dir)) {
+        const auto name = e.path().filename().string();
+        if (name.rfind("events-", 0) == 0 && name.size() > 12 &&
+            name.find(".jsonl") != std::string::npos) {
+            ++archives;
+            std::ifstream in(e.path());
+            std::string line;
+            REQUIRE(static_cast<bool>(std::getline(in, line)));
+            CHECK(line.find("run_end") != std::string::npos);
+        }
+    }
+    CHECK_EQ(archives, std::size_t{1});
+    CHECK_EQ(durable_events_path(dir), (tmp_dir / "events.jsonl").string());
+    std::filesystem::remove_all(tmp_dir);
+}
+
 TEST(find_last_ask_user_finds_event_and_populates_fields) {
     std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_worker_ask_user";
     std::filesystem::create_directories(tmp_dir);

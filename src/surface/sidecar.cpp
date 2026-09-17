@@ -757,6 +757,15 @@ class RunInbox {
     surface::overlay_lmp_env_bool("LMP_SHADOW_COMPACT", &config.shadow_compact);
     surface::overlay_lmp_env_bool("LMP_A1_NOOP_TOOLS_REFRESH",
                                   &config.noop_identical_tools_refresh);
+    surface::overlay_lmp_env_bool("LMP_DEGENERATE_RECOVERY", &config.degenerate_recovery);
+    if (const char* cap = std::getenv("LMP_DEGENERATE_NUDGE_CAP");
+        cap != nullptr && cap[0] != '\0') {
+        char* end = nullptr;
+        const long v = std::strtol(cap, &end, 10);
+        if (end != cap && *end == '\0' && v > 0) {
+            config.degenerate_nudge_cap = static_cast<std::size_t>(v);
+        }
+    }
 
     return apply_autonomy(id, message, config);
 }
@@ -1774,7 +1783,8 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     std::error_code ec;
     std::filesystem::path result_dir = std::filesystem::path(packet.result_path).parent_path();
     std::filesystem::create_directories(result_dir, ec);
-    std::string durable_log = (result_dir / "events.ndjson").string();
+    archive_prior_events(result_dir.string());
+    std::string durable_log = durable_events_path(result_dir.string());
 
     platform::EventLogWriter log;
     const platform::OpenResult opened = log.open({durable_log, 32U * 1024 * 1024, 4});
@@ -2070,6 +2080,22 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     result.turns = total_iterations;
     result.generated_tokens = generated_tokens;
     result.log_path = durable_log;
+    result.degenerate_text_count = final_report.degenerate_text_count;
+    result.text_only_turns = final_report.text_only_turns;
+    result.tool_error_count = final_report.tool_error_count;
+    result.nudged_loop_cut = final_report.nudged_loop_cut;
+    result.nudged_no_progress = final_report.nudged_no_progress;
+    result.nudged_no_tool_recovery = final_report.nudged_no_tool_recovery;
+    // Compatibility alias for older bakeoff paths that still look for events.ndjson.
+    {
+        std::error_code copy_ec;
+        const auto ndjson = result_dir / "events.ndjson";
+        if (std::filesystem::is_regular_file(durable_log)) {
+            std::filesystem::copy_file(
+                durable_log, ndjson,
+                std::filesystem::copy_options::overwrite_existing, copy_ec);
+        }
+    }
 
     int exit_code = kExitOk;
     if (!mission_ran && final_report.iterations == 0 && final_report.termination_reason.empty()) {

@@ -97,7 +97,27 @@ struct TurnResult {
     // Decoded tool-channel tokens when generation capped mid-call. Scanned for
     // write_file/append_file and a path; never treated as a parsed call.
     std::string truncated_tool_xml;
+    // True when the harness scored the turn's prose as a degenerate loop
+    // (low distinct-line ratio past a floor). Distinct from cut_for_looping:
+    // the breaker may or may not have cut; this is the post-hoc text shape.
+    bool degenerate_text = false;
 };
+
+// How repetitive a generation is, measured on the text rather than guessed from its
+// length. Three small integers that separate a long legitimate write from a model stuck
+// emitting one sentence until the cap.
+struct TextShape {
+    std::size_t lines = 0;
+    std::size_t distinct = 0;
+    std::size_t worst_line_repeats = 0; // how often the most-repeated non-blank line occurs
+};
+
+[[nodiscard]] TextShape shape_of(const std::string& text);
+
+// When a generation is worth flagging as degenerate rather than merely long.
+// Distinct ratio separates real source (≈50% distinct) from a single sentence
+// repeated to the cap (≈0.5% distinct). Floor keeps short answers out.
+[[nodiscard]] bool looks_degenerate(const TextShape& s) noexcept;
 
 // Value of a named param, or empty. The grammar guarantees required params are present,
 // so an empty return means "not supplied" rather than "lost".

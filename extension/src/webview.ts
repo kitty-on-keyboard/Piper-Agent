@@ -2399,7 +2399,8 @@ function stripEmphasis(s) {
 // without allocating intermediate array chains (.map / .filter / .shift / .join).
 // Saves ~35% processing overhead during question card rendering.
 function questionBlockToOption(block) {
-  const rawLines = block.split(/\n/);
+  // Template-literal safe: double-backslash so the pane gets a newline regex.
+  const rawLines = block.split(/\\n/);
   let label = '';
   let detail = '';
   let hasLabel = false;
