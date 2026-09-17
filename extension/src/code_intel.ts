@@ -96,17 +96,29 @@ async function references(path: string, line: number, character: number): Promis
   return lines.join("\n");
 }
 
+function isAbsPath(p: string): boolean {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
+}
+
 async function diagnostics(path: string): Promise<string> {
   const all = vscode.languages.getDiagnostics();
   const cache = new Map<string, string>();
   const lines: string[] = [];
+  const isAbs = isAbsPath(path);
   for (const [uri, diags] of all) {
     if (!diags.length) continue;
-    // Compute relative path once per document URI to avoid redundant workspace API calls per diagnostic
-    const rel = relPath(uri, cache);
-    if (path && uri.fsPath !== path && rel !== path) {
-      continue;
+    // Optimization: Fast-path filter for path queries. For absolute target paths,
+    // uri.fsPath !== path guarantees a non-match, skipping relPath() and avoiding
+    // expensive VS Code workspace API calls (getWorkspaceFolder / asRelativePath)
+    // for all non-matching workspace documents.
+    if (path) {
+      if (uri.fsPath !== path) {
+        if (isAbs || relPath(uri, cache) !== path) {
+          continue;
+        }
+      }
     }
+    const rel = relPath(uri, cache);
     for (const d of diags.slice(0, 40)) {
       const sev =
         d.severity === vscode.DiagnosticSeverity.Error
