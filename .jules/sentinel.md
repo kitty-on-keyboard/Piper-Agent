@@ -12,3 +12,8 @@
 **Vulnerability:** Subprocesses might inherit sensitive information if parent environment variables contained tokens not previously caught, like "PAT" (Personal Access Token), "AUTH", or "JWT".
 **Learning:** The existing filtering logic was strong but the blocklist of suffixes for denying sensitive environment variables was limited.
 **Prevention:** Expanded the `kSuffix` array in `src/mcp/spawn_env.cpp` to include "PAT", "AUTH", and "JWT" to provide broader coverage against leaking common credential suffixes to child processes.
+
+## 2026-03-31 - Expand environment variable suffix filtering for credentials
+**Vulnerability:** Parent environment variables prefixed with inherited prefixes (such as `LC_` or `XDG_`) containing credentials with suffixes like `APIKEY`, `PASSPHRASE`, `PRIVATEKEY`, `COOKIE`, `SESSID`, or `SESSION` (e.g. `LC_APIKEY`) bypassed `denied_parent_key` and leaked into child MCP process environments.
+**Learning:** Suffix filtering must include all common secret and session identifier patterns to prevent credentials using allowlisted prefix namespaces from being inherited.
+**Prevention:** Added `APIKEY`, `PASSPHRASE`, `PRIVATEKEY`, `COOKIE`, `SESSID`, and `SESSION` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.

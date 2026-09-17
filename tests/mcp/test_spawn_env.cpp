@@ -110,12 +110,27 @@ TEST(config_may_set_a_secret_the_parent_held) {
 }
 
 TEST(deny_beats_a_coincidental_allow_prefix) {
-    // LC_* is inherited; LC_TOKEN looks like a secret sitting under that prefix.
-    const char* parent[] = {"LC_ALL=C", "LC_TOKEN=nope", "XDG_SECRET=nope", nullptr};
+    // LC_* and XDG_* are inherited; secrets with those prefixes must still be denied.
+    const char* parent[] = {
+        "LC_ALL=C",
+        "LC_TOKEN=nope",
+        "XDG_SECRET=nope",
+        "LC_APIKEY=secret",
+        "XDG_PASSPHRASE=secret",
+        "LC_PRIVATEKEY=secret",
+        "XDG_COOKIE=secret",
+        "LC_SESSID=secret",
+        nullptr,
+    };
     const auto env = build_child_environ(parent, {});
     CHECK_EQ(find_key(env, "LC_ALL").value, std::string("C"));
     CHECK(!has_key(env, "LC_TOKEN"));
     CHECK(!has_key(env, "XDG_SECRET"));
+    CHECK(!has_key(env, "LC_APIKEY"));
+    CHECK(!has_key(env, "XDG_PASSPHRASE"));
+    CHECK(!has_key(env, "LC_PRIVATEKEY"));
+    CHECK(!has_key(env, "XDG_COOKIE"));
+    CHECK(!has_key(env, "LC_SESSID"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
