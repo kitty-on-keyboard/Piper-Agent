@@ -16,6 +16,8 @@
 #include <vector>
 #include <optional>
 #include <utility>
+#include <mutex>
+#include <memory>
 
 namespace parsephony {
 
@@ -160,8 +162,6 @@ private:
     friend class Document;
     const Document* doc_ = nullptr;
     uint32_t idx_ = 0;
-    mutable uint32_t last_idx_ = 0;
-    mutable uint32_t last_k_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -172,8 +172,8 @@ class Document {
 public:
     Document() = default;
 
-    Document(Document&&) noexcept = default;
-    Document& operator=(Document&&) noexcept = default;
+    Document(Document&& o) noexcept;
+    Document& operator=(Document&& o) noexcept;
     Document(const Document&) = delete;
     Document& operator=(const Document&) = delete;
 
@@ -188,17 +188,36 @@ public:
     // Reuse across parses: the tape stays allocated at its high-water mark and
     // only the logical count resets, so a stream of tool calls does no
     // per-payload allocation at all.
-    void clear() noexcept { tape_count_ = 0; decoded_.clear(); }
+    void clear() noexcept { tape_count_ = 0; decoded_.clear(); array_cache_.clear(); }
 
 private:
     friend class Parser;
     friend class Value;
+
+    struct ArrayCacheEntry {
+        uint32_t array_idx = UINT32_MAX;
+        uint32_t last_used = 0;
+        std::vector<uint32_t> offsets;
+    };
+
+    struct ArrayCache {
+        static constexpr size_t kCap = 16;
+        ArrayCacheEntry entries[kCap];
+        uint32_t clock = 0;
+
+        void clear() noexcept {
+            for (auto& e : entries) e.array_idx = UINT32_MAX;
+            clock = 0;
+        }
+    };
 
     // Physically sized to the high-water mark; tape_count_ is the logical size.
     std::vector<Node> tape_;
     uint32_t tape_count_ = 0;
     std::string decoded_;      // unescaped string bodies, appended at parse time
     std::string_view src_;
+    mutable std::unique_ptr<std::mutex> cache_mutex_ = std::make_unique<std::mutex>();
+    mutable ArrayCache array_cache_;
 };
 
 // ---------------------------------------------------------------------------

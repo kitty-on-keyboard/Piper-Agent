@@ -550,19 +550,57 @@ Value Value::operator[](size_t i) const noexcept {
     if (n.off - start == n.len) {
         return Value(doc_, start + uint32_t(i));
     }
-    uint32_t cur = start;
-    size_t start_k = 0;
-    if (last_idx_ != 0 && last_k_ <= i) {
-        cur = last_idx_;
-        start_k = last_k_;
+
+    if (!doc_->cache_mutex_) {
+        doc_->cache_mutex_ = std::make_unique<std::mutex>();
     }
-    for (size_t k = start_k; k < i; ++k) {
-        const Node& cn = doc_->node(cur);
-        cur = (cn.type == Type::Array || cn.type == Type::Object) ? cn.off : cur + 1;
+    std::lock_guard<std::mutex> lock(*doc_->cache_mutex_);
+    auto& cache = doc_->array_cache_;
+    uint32_t found_slot = UINT32_MAX;
+    uint32_t lru_slot = 0;
+    uint32_t min_used = UINT32_MAX;
+
+    for (size_t s = 0; s < Document::ArrayCache::kCap; ++s) {
+        if (cache.entries[s].array_idx == idx_) {
+            found_slot = uint32_t(s);
+            break;
+        }
+        if (cache.entries[s].array_idx == UINT32_MAX) {
+            lru_slot = uint32_t(s);
+            min_used = 0;
+        } else if (cache.entries[s].last_used < min_used) {
+            min_used = cache.entries[s].last_used;
+            lru_slot = uint32_t(s);
+        }
     }
-    last_idx_ = cur;
-    last_k_ = static_cast<uint32_t>(i);
-    return Value(doc_, cur);
+
+    try {
+        if (found_slot == UINT32_MAX) {
+            found_slot = lru_slot;
+            auto& entry = cache.entries[found_slot];
+            entry.offsets.resize(n.len);
+            uint32_t cur = start;
+            for (size_t k = 0; k < n.len; ++k) {
+                entry.offsets[k] = cur;
+                const Node& cn = doc_->node(cur);
+                cur = (cn.type == Type::Array || cn.type == Type::Object) ? cn.off : cur + 1;
+            }
+            entry.array_idx = idx_;
+        }
+
+        cache.entries[found_slot].last_used = ++cache.clock;
+        return Value(doc_, cache.entries[found_slot].offsets[i]);
+    } catch (...) {
+        if (found_slot != UINT32_MAX) {
+            cache.entries[found_slot].array_idx = UINT32_MAX;
+        }
+        uint32_t cur = start;
+        for (size_t k = 0; k < i; ++k) {
+            const Node& cn = doc_->node(cur);
+            cur = (cn.type == Type::Array || cn.type == Type::Object) ? cn.off : cur + 1;
+        }
+        return Value(doc_, cur);
+    }
 }
 
 Value Value::operator[](std::string_view key) const noexcept {
@@ -626,6 +664,31 @@ Value Value::at(std::string_view path) const noexcept {
         pos = dot + 1;
     }
     return cur;
+}
+
+Document::Document(Document&& o) noexcept
+    : tape_(std::move(o.tape_)),
+      tape_count_(o.tape_count_),
+      decoded_(std::move(o.decoded_)),
+      src_(o.src_),
+      cache_mutex_(std::move(o.cache_mutex_)),
+      array_cache_(std::move(o.array_cache_)) {
+    o.tape_count_ = 0;
+    if (!cache_mutex_) cache_mutex_ = std::make_unique<std::mutex>();
+}
+
+Document& Document::operator=(Document&& o) noexcept {
+    if (this != &o) {
+        tape_ = std::move(o.tape_);
+        tape_count_ = o.tape_count_;
+        decoded_ = std::move(o.decoded_);
+        src_ = o.src_;
+        cache_mutex_ = std::move(o.cache_mutex_);
+        array_cache_ = std::move(o.array_cache_);
+        o.tape_count_ = 0;
+        if (!cache_mutex_) cache_mutex_ = std::make_unique<std::mutex>();
+    }
+    return *this;
 }
 
 } // namespace parsephony
