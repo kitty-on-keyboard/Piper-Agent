@@ -199,3 +199,14 @@ TEST(museum_golden_echo_path_never_empty_mask) {
         "</function>\n</tool_call>";
     CHECK(golden_path_never_empty_mask(raw, specs));
 }
+
+TEST(museum_partial_terminator_match_with_newline) {
+    const std::vector<parsephony::ToolSpec> specs{echo_spec()};
+    const std::string raw =
+        "<tool_call>\n<function=echo>\n<parameter=msg>\nline1\n</param\nline2\n</parameter>\n"
+        "</function>\n</tool_call>";
+    parsephony::ToolCallGuard g(specs);
+    CHECK(g.feed(raw) == parsephony::Error::Ok);
+    CHECK(g.complete());
+    CHECK_EQ(g.params()[0].value, "line1\n</param\nline2");
+}
