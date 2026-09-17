@@ -1,3 +1,3 @@
 def clamp_score(value):
-    # Bug: should clamp into [0, 100].
-    return value
+    """Clamps a numeric score into the range [0, 100]."""
+    return max(0, min(100, value))
