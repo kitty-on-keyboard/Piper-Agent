@@ -29,3 +29,7 @@
 ## 2026-04-18 - Short-Circuiting Workspace Relative Path Resolution for Absolute Path Diagnostics Queries
 **Learning:** `code_intel.ts`'s `diagnostics(path)` previously called `relPath(uri, cache)` (which queries VS Code workspace API `getWorkspaceFolder` and `asRelativePath`) for every URI in `vscode.languages.getDiagnostics()` before checking path filters. When querying diagnostics for an absolute target path, evaluating relative paths for non-matching URIs is redundant because relative paths never match absolute target paths.
 **Action:** In `diagnostics(path)`, check `isAbsPath(path) && uri.fsPath !== path` to short-circuit and skip `relPath()` calls for non-matching URIs across the workspace.
+
+## 2026-04-20 - Document-Level Array Index Offset Caching in parsephony
+**Learning:** `Value::operator[](size_t i)` walked non-flat array DOM subtrees using `next_sibling` for each element index $i$. When indexing temporary `Value` instances (such as `doc.root()[i]`) or performing random/non-sequential access, per-`Value` iteration state was lost, causing $O(N^2)$ time complexity.
+**Action:** Store a fixed-capacity LRU array offset cache on `Document` to populate and cache element node indices for non-flat arrays on first lookup, ensuring $O(1)$ random access across all `Value` instances and access patterns.
