@@ -88,12 +88,18 @@ Not taken:
 
 | Change | Metric | Baseline | Treatment | n | Kill/keep | Notes |
 |--------|--------|----------|-----------|---|-----------|-------|
-| Bounded recovery on degenerate / length-capped text-instead-of-tool | stall rate; wall; success; `ToolError`; `degenerate_text_count` / `nudged_by_why` | Tip ~79d4667 bowling seed7: A3B stalls after ~5× `degenerate_text`/(text) while tools Ok | Length-capped think/text joins inert nudge path; degenerate streak → `stalled` after cap; metrics on `run_end` | Gate: detector + nudge-cap + length-capped recovery tests | **pending Mac A/B** | Kill bar below |
+| Bounded recovery on degenerate / length-capped text-instead-of-tool (#150) | stall rate; wall; success; `ToolError` | `79d4667` Aider Python bowling seed7: **31/34**, wall **6981.6**s, stalls **8** | `23c6867` (main+#150): **33/34**, wall **5786.6**s, stalls **2** (~17% faster); ToolError not up | Mac A3B bowling seed7 A/B | **keep** (Sean override) | Auto Research bar would kill (stall≠0; wall↓&lt;20%); Sean: thresholds arbitrary; keep recovery + metrics |
 
-**Kill bar (Mac A3B bowling seed7 A/B — do not claim win without it):**
+**Mac A/B (2026-09-17):**
 
-- **Keep** if stall≤0 on same seed **OR** wall↓≥20% with success≥5/6 and `ToolError` not up.
-- **Else** revert recovery behavior; keep metrics / journal fields.
+| Arm | SHA | solved/34 | wall_s | stalls |
+|-----|-----|-----------|--------|--------|
+| baseline (pre-#150) | `79d4667` | 31/34 | 6981.6 | 8 |
+| treatment (#150) | `23c6867` | 33/34 | 5786.6 | 2 |
+
+**Kill bar (Research, for reference):** keep if stall≤0 on same seed **OR** wall↓≥20% with success≥5/6 and `ToolError` not up; else revert recovery, keep metrics.
+
+**Final verdict: keep** — Sean override of the arbitrary Research bar. Treatment improved solved (31→33), stalls (8→2), and wall (~17% faster). Recovery behavior stays on main; metrics stay. Mini-6 after this A/B was cancelled (not part of the decision).
 
 **Enable / disable:**
 
@@ -101,5 +107,3 @@ Not taken:
 export LMP_DEGENERATE_RECOVERY=0   # disable (default on)
 export LMP_DEGENERATE_NUDGE_CAP=2  # optional hard cap (default = 3 agent / 2 plan)
 ```
-
-**Benchbot rebuild for A/B:** tip of this branch vs `main` @ 79d4667 (or pre-merge main), same Qwen3.6-35B-A3B-MLX-4bit, NAX on, bowling seed7. Preserve `events.jsonl` beside `result.json` (auto-archived to `events-<UTC>.jsonl` on retry).
