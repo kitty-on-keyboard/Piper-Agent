@@ -1,5 +1,8 @@
 #include "parsephony/toolcall.hpp"
 
+#include <algorithm>
+#include <cstring>
+
 namespace parsephony {
 
 namespace {
@@ -17,7 +20,9 @@ inline uint64_t mix(uint64_t h, uint64_t v) noexcept {
 } // namespace
 
 ToolCallGuard::ToolCallGuard(const std::vector<ToolSpec>& tools, Options o)
-    : tools_(tools), opts_(o), json_(nullptr, o) {}
+    : tools_(tools), opts_(o), json_(nullptr, o) {
+    value_->reserve(128);
+}
 
 void ToolCallGuard::reset() {
     ph_ = Ph::Open;
@@ -33,6 +38,7 @@ void ToolCallGuard::reset() {
     name_.clear();
     params_ = std::make_shared<std::vector<Param>>();
     value_ = std::make_shared<std::string>();
+    value_->reserve(128);
     probing_ = false;
 }
 
@@ -52,8 +58,38 @@ Error ToolCallGuard::feed(std::string_view bytes) {
                     continue;
                 }
                 // The partial terminator match was actually value content.
-                value_append(kTerm.substr(0, term_pos_));
+                if (c == static_cast<unsigned char>(kTerm[0])) {   // '\n' restarts
+                    value_append(kTerm.substr(0, term_pos_));
+                    term_pos_ = 1;
+                    bytes.remove_prefix(1);
+                    continue;
+                }
+                if (c < 0x20 && c != '\t' && c != '\r') {
+                    value_append(kTerm.substr(0, term_pos_));
+                    term_pos_ = 0;
+                    bytes.remove_prefix(1);
+                    return Error::ControlChar;
+                }
+                size_t i = 0;
+                while (i < bytes.size()) {
+                    unsigned char bc = static_cast<unsigned char>(bytes[i]);
+                    if (bc == static_cast<unsigned char>(kTerm[0]) || (bc < 0x20 && bc != '\t' && bc != '\r')) {
+                        break;
+                    }
+                    ++i;
+                }
+                if (i <= 64 - term_pos_) {
+                    char buf[64];
+                    std::memcpy(buf, kTerm.data(), term_pos_);
+                    std::memcpy(buf + term_pos_, bytes.data(), i);
+                    value_append(std::string_view(buf, term_pos_ + i));
+                } else {
+                    value_append(kTerm.substr(0, term_pos_));
+                    value_append(bytes.substr(0, i));
+                }
+                bytes.remove_prefix(i);
                 term_pos_ = 0;
+                continue;
             }
             // Fast path when term_pos_ == 0: scan for next byte that requires
             // special handling ('\n' or illegal control character).
@@ -93,7 +129,10 @@ void ToolCallGuard::value_append(unsigned char c) {
     if (probing_) return;   // probe copies never need extraction fidelity
     if (value_.use_count() > 1) {
         // A probe copy still shares the buffer; write to a private one.
-        value_ = std::make_shared<std::string>(*value_);
+        auto new_val = std::make_shared<std::string>();
+        new_val->reserve(std::max(value_->capacity(), size_t(128)));
+        new_val->assign(*value_);
+        value_ = std::move(new_val);
     }
     value_->push_back(char(c));
 }
@@ -101,7 +140,10 @@ void ToolCallGuard::value_append(unsigned char c) {
 void ToolCallGuard::value_append(std::string_view bytes) {
     if (probing_ || bytes.empty()) return;
     if (value_.use_count() > 1) {
-        value_ = std::make_shared<std::string>(*value_);
+        auto new_val = std::make_shared<std::string>();
+        new_val->reserve(std::max(value_->capacity(), value_->size() + bytes.size() + 64));
+        new_val->assign(*value_);
+        value_ = std::move(new_val);
     }
     value_->append(bytes);
 }
@@ -133,6 +175,7 @@ Error ToolCallGuard::finish_param() {
                                  *value_,
                                  tools_[size_t(tool_)].params[size_t(param_)].type});
         value_ = std::make_shared<std::string>();
+        value_->reserve(128);
     }
     seen_ |= (1ull << param_);
     param_ = -1;
@@ -364,7 +407,10 @@ Error ToolCallGuard::push_byte(unsigned char c) {
                 // multi-byte tokens to a muted copy and needs the running prefix
                 // (Name/PName use prefix_ the same way). COW keeps the parent safe.
                 if (value_.use_count() > 1) {
-                    value_ = std::make_shared<std::string>(*value_);
+                    auto new_val = std::make_shared<std::string>();
+                    new_val->reserve(std::max(value_->capacity(), size_t(128)));
+                    new_val->assign(*value_);
+                    value_ = std::move(new_val);
                 }
                 value_->push_back(char(c));
                 if (!enum_prefix_match(*value_)) {
@@ -378,15 +424,28 @@ Error ToolCallGuard::push_byte(unsigned char c) {
                 return Error::Ok;
             }
             // The partial terminator match was actually value content.
-            if (term_pos_ > 0) {
-                value_append(kTerm.substr(0, term_pos_));
-                term_pos_ = 0;
-            }
             if (c == static_cast<unsigned char>(kTerm[0])) {   // '\n' restarts
+                if (term_pos_ > 0) {
+                    value_append(kTerm.substr(0, term_pos_));
+                }
                 term_pos_ = 1;
                 return Error::Ok;
             }
-            if (c < 0x20 && c != '\t' && c != '\r') return Error::ControlChar;
+            if (c < 0x20 && c != '\t' && c != '\r') {
+                if (term_pos_ > 0) {
+                    value_append(kTerm.substr(0, term_pos_));
+                    term_pos_ = 0;
+                }
+                return Error::ControlChar;
+            }
+            if (term_pos_ > 0) {
+                char buf[16];
+                std::memcpy(buf, kTerm.data(), term_pos_);
+                buf[term_pos_] = static_cast<char>(c);
+                value_append(std::string_view(buf, term_pos_ + 1));
+                term_pos_ = 0;
+                return Error::Ok;
+            }
             value_append(c);
             return Error::Ok;
         }
