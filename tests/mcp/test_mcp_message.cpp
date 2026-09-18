@@ -46,6 +46,10 @@ TEST(id_from_json_parsing) {
     CHECK(id_num.is_number());
     CHECK_EQ(id_num.as_number(), std::int64_t(123));
 
+    const Id id_uint = Id::from_json(nlohmann::json(456u));
+    CHECK(id_uint.is_number());
+    CHECK_EQ(id_uint.as_number(), std::int64_t(456));
+
     const Id id_str = Id::from_json(nlohmann::json("hello"));
     CHECK(id_str.is_string());
     CHECK_EQ(id_str.as_string(), std::string("hello"));
@@ -123,18 +127,33 @@ TEST(classify_valid_and_invalid_messages) {
     CHECK_EQ(resp_res.result["status"].get<std::string>(), std::string("ok"));
     CHECK(!resp_res.error.has_value());
 
-    // Response with error
-    const auto resp_err = classify(nlohmann::json::parse(R"({"jsonrpc":"2.0","id":5,"error":{"code":-32601,"message":"Method not found"}})" ));
+    // Response with error (including data)
+    const auto resp_err = classify(nlohmann::json::parse(R"({"jsonrpc":"2.0","id":5,"error":{"code":-32601,"message":"Method not found","data":{"info":"more"}}})" ));
     CHECK(resp_err.is_response());
     CHECK(resp_err.error.has_value());
     CHECK_EQ(resp_err.error->code, -32601);
     CHECK_EQ(resp_err.error->message, std::string("Method not found"));
+    CHECK(resp_err.error->data.has_value());
+    CHECK_EQ((*resp_err.error->data)["info"].get<std::string>(), std::string("more"));
+
+    // Response with partial error object missing code or message
+    const auto resp_partial_err = classify(nlohmann::json::parse(R"({"jsonrpc":"2.0","id":6,"error":{}})" ));
+    CHECK(resp_partial_err.is_response());
+    CHECK(resp_partial_err.error.has_value());
+    CHECK_EQ(resp_partial_err.error->code, -32603); // default kInternalError
+    CHECK(resp_partial_err.error->message.empty());
 
     // Response with non-object error
     const auto resp_bad_err = classify(nlohmann::json::parse(R"({"jsonrpc":"2.0","id":5,"error":"bad_error_fmt"})" ));
     CHECK(resp_bad_err.is_response());
     CHECK(resp_bad_err.error.has_value());
     CHECK_EQ(resp_bad_err.error->message, std::string("malformed error object"));
+
+    // Missing jsonrpc key is accepted (for servers/peers that omit it)
+    const auto req_no_jsonrpc = classify(nlohmann::json::parse(R"({"id":"req-1","method":"ping"})"));
+    CHECK(req_no_jsonrpc.is_request());
+    CHECK_EQ(req_no_jsonrpc.id.as_string(), std::string("req-1"));
+    CHECK(req_no_jsonrpc.params.is_null());
 
     // Invalid message: non-object
     const auto inv_array = classify(nlohmann::json::parse(R"([1, 2, 3])"));
@@ -174,6 +193,11 @@ TEST(outbound_message_helpers) {
     CHECK(!notif.contains("params"));
     CHECK_EQ(notif["method"].get<std::string>(), std::string("notifications/cancelled"));
 
+    const auto notif_with_params = make_notification("notifications/progress", nlohmann::json{{"progress", 50}});
+    CHECK(!notif_with_params.contains("id"));
+    CHECK(notif_with_params.contains("params"));
+    CHECK_EQ(notif_with_params["params"]["progress"].get<int>(), 50);
+
     // make_response
     const auto resp = make_response(Id::number(1), nlohmann::json{{"value", 42}});
     CHECK_EQ(resp["id"].get<std::int64_t>(), std::int64_t(1));
@@ -186,6 +210,10 @@ TEST(outbound_message_helpers) {
     const auto err_msg1 = make_error(Id::number(3), ErrorCode::kMethodNotFound, "Not found");
     CHECK_EQ(err_msg1["error"]["code"].get<int>(), to_int(ErrorCode::kMethodNotFound));
     CHECK_EQ(err_msg1["error"]["message"].get<std::string>(), std::string("Not found"));
+
+    const auto err_msg_data = make_error(Id::number(4), ErrorCode::kInvalidParams, "Invalid", nlohmann::json{{"field", "id"}});
+    CHECK_EQ(err_msg_data["error"]["code"].get<int>(), to_int(ErrorCode::kInvalidParams));
+    CHECK_EQ(err_msg_data["error"]["data"]["field"].get<std::string>(), std::string("id"));
 
     // make_error (by Error struct)
     Error custom_err;
