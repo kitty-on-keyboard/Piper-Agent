@@ -55,28 +55,39 @@ FenceHarvest extract_fenced_blocks(std::string_view text) {
     FenceHarvest out;
     std::size_t i = 0;
     while (i < text.size()) {
-        if (!line_start(text, i) || i + 3 > text.size() || text[i] != '`' ||
-            text[i + 1] != '`' || text[i + 2] != '`') {
-            ++i;
+        // Fast path: find candidate opening "```" using string view find rather than
+        // checking character by character.
+        const std::size_t fence = text.find("```", i);
+        if (fence == std::string_view::npos) {
+            break;
+        }
+        if (!line_start(text, fence)) {
+            i = fence + 3;
             continue;
         }
-        std::size_t nl = text.find('\n', i + 3);
+        std::size_t nl = text.find('\n', fence + 3);
         if (nl == std::string_view::npos) {
             break; // opener with no body line: unclosed
         }
-        const std::string_view lang = trim_view(text.substr(i + 3, nl - (i + 3)));
+        const std::string_view lang = trim_view(text.substr(fence + 3, nl - (fence + 3)));
         const std::size_t body_begin = nl + 1;
         std::size_t j = body_begin;
         bool closed = false;
         std::size_t close_at = 0;
         std::size_t after_close = 0;
+        // Fast path: skip block body line-by-line using find('\n') instead of stepping
+        // character by character. Every `j` is guaranteed to be a line start.
         while (j < text.size()) {
-            if (line_start(text, j) && closing_fence(text, j, after_close)) {
+            if (closing_fence(text, j, after_close)) {
                 close_at = j;
                 closed = true;
                 break;
             }
-            ++j;
+            const std::size_t next_nl = text.find('\n', j);
+            if (next_nl == std::string_view::npos) {
+                break;
+            }
+            j = next_nl + 1;
         }
         if (!closed) {
             break; // unclosed: drop, do not repair
