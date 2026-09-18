@@ -68,6 +68,9 @@ TEST(parent_secrets_are_dropped) {
         "GITHUB_PAT=pat_123",
         "BEARER_AUTH=bearer_xyz",
         "SESSION_JWT=jwt_abc",
+        "PRIVKEY_SECRET=priv_123",
+        "AUTH_PASSCODE=code_456",
+        "SERVICE_TICKET=tkt_789",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -80,6 +83,9 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "GITHUB_PAT"));
     CHECK(!has_key(env, "BEARER_AUTH"));
     CHECK(!has_key(env, "SESSION_JWT"));
+    CHECK(!has_key(env, "PRIVKEY_SECRET"));
+    CHECK(!has_key(env, "AUTH_PASSCODE"));
+    CHECK(!has_key(env, "SERVICE_TICKET"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -124,6 +130,9 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_CERT=secret",
         "LC_CERTIFICATE=secret",
         "XDG_SIGNATURE=secret",
+        "LC_PRIVKEY=secret",
+        "XDG_PASSCODE=secret",
+        "LC_TICKET=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -139,6 +148,9 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_CERT"));
     CHECK(!has_key(env, "LC_CERTIFICATE"));
     CHECK(!has_key(env, "XDG_SIGNATURE"));
+    CHECK(!has_key(env, "LC_PRIVKEY"));
+    CHECK(!has_key(env, "XDG_PASSCODE"));
+    CHECK(!has_key(env, "LC_TICKET"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
