@@ -103,6 +103,71 @@ TEST(parse_args_missing_double_dash) {
     CHECK(!ok);
 }
 
+TEST(parse_args_call_without_args) {
+    lmp::tools::McpServerConfig cfg;
+    std::string call_tool;
+    std::string call_args = "{}";
+
+    const std::vector<std::string> args = {
+        "mcp_host_probe", "--call", "tool_only", "--", "node", "server.js"};
+    const bool ok = run_parse_args(args, cfg, call_tool, call_args);
+
+    CHECK(ok);
+    CHECK_EQ(call_tool, std::string("tool_only"));
+    CHECK_EQ(call_args, std::string("{}"));
+    CHECK_EQ(cfg.command, std::string("node"));
+}
+
+TEST(parse_args_args_without_call) {
+    lmp::tools::McpServerConfig cfg;
+    std::string call_tool;
+    std::string call_args = "{}";
+
+    const std::vector<std::string> args = {
+        "mcp_host_probe", "--args", "{\"foo\":\"bar\"}", "--", "node", "server.js"};
+    const bool ok = run_parse_args(args, cfg, call_tool, call_args);
+
+    CHECK(ok);
+    CHECK(call_tool.empty());
+    CHECK_EQ(call_args, std::string("{\"foo\":\"bar\"}"));
+    CHECK_EQ(cfg.command, std::string("node"));
+}
+
+TEST(parse_args_flag_order) {
+    lmp::tools::McpServerConfig cfg;
+    std::string call_tool;
+    std::string call_args = "{}";
+
+    const std::vector<std::string> args = {
+        "mcp_host_probe", "--args", "{\"x\":1}", "--call", "tool_x", "--trusted", "--", "python", "app.py"};
+    const bool ok = run_parse_args(args, cfg, call_tool, call_args);
+
+    CHECK(ok);
+    CHECK(cfg.trusted);
+    CHECK_EQ(call_tool, std::string("tool_x"));
+    CHECK_EQ(call_args, std::string("{\"x\":1}"));
+    CHECK_EQ(cfg.command, std::string("python"));
+}
+
+TEST(parse_args_multiple_command_args) {
+    lmp::tools::McpServerConfig cfg;
+    std::string call_tool;
+    std::string call_args = "{}";
+
+    const std::vector<std::string> args = {
+        "mcp_host_probe", "--", "node", "server.js", "--opt1", "val1", "--opt2", "val2"};
+    const bool ok = run_parse_args(args, cfg, call_tool, call_args);
+
+    CHECK(ok);
+    CHECK_EQ(cfg.command, std::string("node"));
+    REQUIRE(cfg.args.size() == 5);
+    CHECK_EQ(cfg.args[0], std::string("server.js"));
+    CHECK_EQ(cfg.args[1], std::string("--opt1"));
+    CHECK_EQ(cfg.args[2], std::string("val1"));
+    CHECK_EQ(cfg.args[3], std::string("--opt2"));
+    CHECK_EQ(cfg.args[4], std::string("val2"));
+}
+
 TEST(parse_args_missing_command_after_double_dash) {
     lmp::tools::McpServerConfig cfg;
     std::string call_tool;
