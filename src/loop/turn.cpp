@@ -72,27 +72,25 @@ int enumerated_choice_lines(std::string_view text) {
         R"(^(?:option\s+[0-9a-z]+\s*[:.)]|[0-9]{1,2}\s*[.)]\s|[a-z]\s*[.)]\s))",
         std::regex::icase);
     int n = 0;
-    std::string line;
-    const auto count_if_marker = [&](std::string s) {
-        const auto a = s.find_first_not_of(" \t\r");
-        if (a == std::string::npos) {
-            return;
+    std::size_t at = 0;
+    // Fast-path: scan line-by-line via std::string_view without allocating std::string
+    while (at <= text.size()) {
+        std::size_t nl = text.find('\n', at);
+        if (nl == std::string_view::npos) {
+            nl = text.size();
         }
-        const auto b = s.find_last_not_of(" \t\r");
-        s = s.substr(a, b - a + 1);
-        if (std::regex_search(s, kEnumLine)) {
+        const std::string_view line(text.data() + at, nl - at);
+        at = nl + 1;
+        const std::size_t a = line.find_first_not_of(" \t\r");
+        if (a == std::string_view::npos) {
+            continue;
+        }
+        const std::size_t b = line.find_last_not_of(" \t\r");
+        const std::string_view trimmed = line.substr(a, b - a + 1);
+        if (std::regex_search(trimmed.begin(), trimmed.end(), kEnumLine)) {
             ++n;
         }
-    };
-    for (const char c : text) {
-        if (c == '\n') {
-            count_if_marker(std::move(line));
-            line.clear();
-        } else {
-            line += c;
-        }
     }
-    count_if_marker(std::move(line));
     return n;
 }
 
