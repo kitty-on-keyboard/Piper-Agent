@@ -335,6 +335,96 @@ TEST(a_server_that_fails_handshake_reports_error_and_does_not_crash_host) {
     CHECK(registry.decls().size() == native + 5);
 }
 
+TEST(a_server_emitting_invalid_json_during_handshake_reports_error) {
+    Registry registry(workspace());
+    const std::size_t native = registry.decls().size();
+
+    McpServerConfig failing;
+    failing.name = "garbage_emitter";
+    failing.command = "sh";
+    failing.args = {"-c", "echo 'not valid json protocol'"};
+
+    McpHost host;
+    const auto report = host.connect_and_register({failing}, registry);
+
+    REQUIRE(report.size() == 1);
+    CHECK(!report[0].connected);
+    CHECK(!report[0].error.empty());
+    CHECK_EQ(report[0].registered, static_cast<std::size_t>(0));
+    CHECK(registry.decls().size() == native);
+}
+
+TEST(a_server_exiting_nonzero_during_handshake_reports_error) {
+    Registry registry(workspace());
+    const std::size_t native = registry.decls().size();
+
+    McpServerConfig failing;
+    failing.name = "failing_exit";
+    failing.command = "sh";
+    failing.args = {"-c", "exit 1"};
+
+    McpHost host;
+    const auto report = host.connect_and_register({failing}, registry);
+
+    REQUIRE(report.size() == 1);
+    CHECK(!report[0].connected);
+    CHECK(!report[0].error.empty());
+    CHECK_EQ(report[0].registered, static_cast<std::size_t>(0));
+    CHECK(registry.decls().size() == native);
+}
+
+TEST(multiple_failing_and_working_servers_are_isolated) {
+    Registry registry(workspace());
+    const std::size_t native = registry.decls().size();
+
+    McpServerConfig missing;
+    missing.name = "missing_server";
+    missing.command = "/nonexistent/path/to/binary";
+
+    McpServerConfig garbage;
+    garbage.name = "garbage_server";
+    garbage.command = "sh";
+    garbage.args = {"-c", "echo 'invalid json'"};
+
+    McpServerConfig exiting;
+    exiting.name = "exiting_server";
+    exiting.command = "sh";
+    exiting.args = {"-c", "exit 2"};
+
+    McpHost host;
+    const auto report = host.connect_and_register(
+        {missing, garbage, demo("demo", true), exiting}, registry);
+
+    REQUIRE(report.size() == 4);
+
+    // Missing server
+    CHECK_EQ(report[0].name, std::string("missing_server"));
+    CHECK(!report[0].connected);
+    CHECK(!report[0].error.empty());
+    CHECK_EQ(report[0].registered, static_cast<std::size_t>(0));
+
+    // Garbage server
+    CHECK_EQ(report[1].name, std::string("garbage_server"));
+    CHECK(!report[1].connected);
+    CHECK(!report[1].error.empty());
+    CHECK_EQ(report[1].registered, static_cast<std::size_t>(0));
+
+    // Valid server
+    CHECK_EQ(report[2].name, std::string("demo"));
+    CHECK(report[2].connected);
+    CHECK(report[2].error.empty());
+    CHECK_EQ(report[2].registered, static_cast<std::size_t>(5));
+
+    // Exiting server
+    CHECK_EQ(report[3].name, std::string("exiting_server"));
+    CHECK(!report[3].connected);
+    CHECK(!report[3].error.empty());
+    CHECK_EQ(report[3].registered, static_cast<std::size_t>(0));
+
+    CHECK(registry.decls().size() == native + 5);
+    CHECK(registry.execute("echo", {{"text", "healthy"}}, 0).ok());
+}
+
 TEST(a_server_that_dies_mid_run_fails_its_calls_without_stalling_the_turn) {
     Registry registry(workspace());
     McpHost host;
