@@ -175,6 +175,70 @@ TEST(remember_fact_store_failure_falls_back_to_file_write_honestly) {
     CHECK(f.bytes.find("- unkeyed fact test") != std::string::npos);
 }
 
+TEST(remember_fact_store_failure_on_supersede_and_file_write_error) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string db_path = root + "/db.sqlite";
+    lmp::pcc::Store store(db_path);
+
+    Registry reg = make_registry(root);
+    auto source_fn = [&store, session = std::string("s1")] {
+        Registry::ContextSource src;
+        src.store = &store;
+        src.session = session;
+        return src;
+    };
+    CHECK(reg.declare_context_tools(source_fn, lmp::pcc::estimate_tokens));
+
+    // First, write an initial keyed note when store is working.
+    const ToolResult r_initial = reg.execute(
+        "remember", args({{"fact", "initial keyed note"}, {"key", "test-key"}}), 1);
+    CHECK(r_initial.ok());
+    CHECK(r_initial.summary.find("noted for later sessions") != std::string::npos);
+
+    // Corrupt the store database table so store.remember() throws an exception.
+    store.db().exec("DROP TABLE item");
+
+    // Execution with key to replace/supersede the existing note.
+    // store.remember() throws, but file write succeeds and note is replaced.
+    const ToolResult r_supersede = reg.execute(
+        "remember", args({{"fact", "updated keyed note"}, {"key", "test-key"}}), 1);
+    CHECK(r_supersede.ok());
+    CHECK(r_supersede.summary.find("replaced the earlier note under 'test-key'") != std::string::npos);
+
+    // Verify the file was updated with superseded note and stale note was removed.
+    const std::string mem_path = root + "/" + std::string(kMemoryFileName);
+    const lmp::platform::FileContents f =
+        lmp::platform::read_file_whole(mem_path, 1U << 20);
+    REQUIRE(f.ok());
+    CHECK(f.bytes.find("- [test-key] updated keyed note") != std::string::npos);
+    CHECK_EQ(f.bytes.find("initial keyed note"), std::string::npos);
+
+    // Next, test file write failure (e.g. when memory file path is an unwritable directory).
+    const std::string fail_root = temp_dir();
+    REQUIRE(!fail_root.empty());
+    const std::string mem_dir_path = fail_root + "/" + std::string(kMemoryFileName);
+    REQUIRE(::mkdir(mem_dir_path.c_str(), 0755) == 0);
+
+    const std::string fail_db_path = fail_root + "/db.sqlite";
+    lmp::pcc::Store fail_store(fail_db_path);
+
+    Registry fail_reg = make_registry(fail_root);
+    auto fail_source_fn = [&fail_store, session = std::string("s2")] {
+        Registry::ContextSource src;
+        src.store = &fail_store;
+        src.session = session;
+        return src;
+    };
+    CHECK(fail_reg.declare_context_tools(fail_source_fn, lmp::pcc::estimate_tokens));
+
+    // Executing remember when memory file write fails should return a ToolError.
+    const ToolResult r_file_err = fail_reg.execute(
+        "remember", args({{"fact", "this write will fail"}}), 1);
+    CHECK(!r_file_err.ok());
+    CHECK(r_file_err.status == Status::ToolError);
+}
+
 TEST(remember_folds_dedupes_and_stays_under_its_cap) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
