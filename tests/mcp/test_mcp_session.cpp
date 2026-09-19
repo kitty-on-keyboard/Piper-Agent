@@ -100,6 +100,13 @@ private:
             throw std::invalid_argument("invalid tool argument value");
         });
 
+        Tool throw_out_of_range;
+        throw_out_of_range.name = "throw_out_of_range";
+        throw_out_of_range.description = "throws std::out_of_range exception";
+        s.add_tool(std::move(throw_out_of_range), [](const nlohmann::json&, RequestContext&) -> ToolResult {
+            throw std::out_of_range("array index out of bounds");
+        });
+
         Tool non_std_thrower;
         non_std_thrower.name = "non_std_thrower";
         non_std_thrower.description = "throws a non-std C++ exception";
@@ -222,7 +229,7 @@ TEST(tools_round_trip) {
     static_cast<void>(s.client().initialize());
 
     const std::vector<Tool> tools = s.client().list_tools();
-    CHECK_EQ(tools.size(), std::size_t(8));
+    CHECK_EQ(tools.size(), std::size_t(9));
 
     const ToolResult r = s.client().call_tool("echo", nlohmann::json{{"text", "hi there"}});
     CHECK(!r.is_error);
@@ -287,6 +294,19 @@ TEST(tool_throwing_custom_std_exception_captures_message_as_tool_failure) {
     const ToolResult r = s.client().call_tool("throw_invalid_arg", nlohmann::json::object());
     CHECK(r.is_error);
     CHECK_EQ(text_of(r), std::string("invalid tool argument value"));
+
+    // Verify session state remains functional after exception.
+    const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
+    CHECK(!after.is_error);
+    CHECK_EQ(text_of(after), std::string("still alive"));
+}
+
+TEST(tool_throwing_std_out_of_range_returns_tool_failure_with_exception_message) {
+    Session s;
+    static_cast<void>(s.client().initialize());
+    const ToolResult r = s.client().call_tool("throw_out_of_range", nlohmann::json::object());
+    CHECK(r.is_error);
+    CHECK_EQ(text_of(r), std::string("array index out of bounds"));
 
     // Verify session state remains functional after exception.
     const ToolResult after = s.client().call_tool("echo", nlohmann::json{{"text", "still alive"}});
