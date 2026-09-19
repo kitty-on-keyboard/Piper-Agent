@@ -22,3 +22,8 @@
 **Vulnerability:** Parent environment variables carrying bearer tokens, client certificates, or digital signatures with allowlisted prefixes (such as `LC_BEARER`, `XDG_CERT`, `LC_CERTIFICATE`, `XDG_SIGNATURE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Common credential type terms like `BEARER`, `CERT`, `CERTIFICATE`, and `SIGNATURE` must be explicitly listed in suffix filtering rules to prevent sensitive authentication tokens and keys in allowlisted namespaces from being inherited across process boundaries.
 **Prevention:** Added `BEARER`, `CERT`, `CERTIFICATE`, and `SIGNATURE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+
+## 2026-03-31 - Include private keys, passcodes, and tickets in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying private keys, passcodes, or kerberos/auth tickets with allowlisted prefixes (such as `LC_PRIVKEY`, `XDG_PASSCODE`, `LC_TICKET`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Shorthand and alternative credential terms like `PRIVKEY`, `PASSCODE`, and `TICKET` must be explicitly listed in suffix filtering rules to prevent sensitive secrets using allowlisted namespace prefixes from being inherited.
+**Prevention:** Added `PRIVKEY`, `PASSCODE`, and `TICKET` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
