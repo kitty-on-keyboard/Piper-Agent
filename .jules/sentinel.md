@@ -27,3 +27,8 @@
 **Vulnerability:** Parent environment variables carrying private keys, passcodes, or kerberos/auth tickets with allowlisted prefixes (such as `LC_PRIVKEY`, `XDG_PASSCODE`, `LC_TICKET`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Shorthand and alternative credential terms like `PRIVKEY`, `PASSCODE`, and `TICKET` must be explicitly listed in suffix filtering rules to prevent sensitive secrets using allowlisted namespace prefixes from being inherited.
 **Prevention:** Added `PRIVKEY`, `PASSCODE`, and `TICKET` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+
+## 2026-03-31 - Expand environment variable suffix filtering for token IDs and auth credentials
+**Vulnerability:** Parent environment variables carrying auth credentials, token IDs, or secret keys under allowlisted prefixes (such as `LC_CRED`, `XDG_CREDS`, `LC_TOKEN_ID`, `XDG_SECRET_KEY`, `LC_AUTH_TOKEN`, `XDG_ACCESS_TOKEN`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Token identifier and access credential suffixes like `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` must be explicitly included in suffix filtering rules to prevent sensitive authentication tokens and key pairs from being inherited.
+**Prevention:** Added `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.

@@ -77,7 +77,7 @@ namespace {
     static constexpr std::string_view kSuffix[] = {
         "TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "PAT", "AUTH", "JWT",
         "APIKEY", "PASSPHRASE", "PRIVATEKEY", "PRIVKEY", "PASSCODE", "TICKET", "COOKIE", "SESSID", "SESSION",
-        "BEARER", "CERT", "CERTIFICATE", "SIGNATURE",
+        "BEARER", "CERT", "CERTIFICATE", "SIGNATURE", "CRED", "CREDS", "TOKEN_ID", "SECRET_KEY", "AUTH_TOKEN", "ACCESS_TOKEN",
     };
     for (const std::string_view s : kSuffix) {
         if (ascii_ieq(key, s)) {
