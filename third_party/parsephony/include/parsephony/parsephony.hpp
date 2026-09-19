@@ -204,10 +204,12 @@ private:
         static constexpr size_t kCap = 16;
         ArrayCacheEntry entries[kCap];
         uint32_t clock = 0;
+        uint32_t last_hit = UINT32_MAX;
 
         void clear() noexcept {
             for (auto& e : entries) e.array_idx = UINT32_MAX;
             clock = 0;
+            last_hit = UINT32_MAX;
         }
     };
 

@@ -560,17 +560,21 @@ Value Value::operator[](size_t i) const noexcept {
     uint32_t lru_slot = 0;
     uint32_t min_used = UINT32_MAX;
 
-    for (size_t s = 0; s < Document::ArrayCache::kCap; ++s) {
-        if (cache.entries[s].array_idx == idx_) {
-            found_slot = uint32_t(s);
-            break;
-        }
-        if (cache.entries[s].array_idx == UINT32_MAX) {
-            lru_slot = uint32_t(s);
-            min_used = 0;
-        } else if (cache.entries[s].last_used < min_used) {
-            min_used = cache.entries[s].last_used;
-            lru_slot = uint32_t(s);
+    if (cache.last_hit < Document::ArrayCache::kCap && cache.entries[cache.last_hit].array_idx == idx_) {
+        found_slot = cache.last_hit;
+    } else {
+        for (size_t s = 0; s < Document::ArrayCache::kCap; ++s) {
+            if (cache.entries[s].array_idx == idx_) {
+                found_slot = uint32_t(s);
+                break;
+            }
+            if (cache.entries[s].array_idx == UINT32_MAX) {
+                lru_slot = uint32_t(s);
+                min_used = 0;
+            } else if (cache.entries[s].last_used < min_used) {
+                min_used = cache.entries[s].last_used;
+                lru_slot = uint32_t(s);
+            }
         }
     }
 
@@ -589,6 +593,7 @@ Value Value::operator[](size_t i) const noexcept {
         }
 
         cache.entries[found_slot].last_used = ++cache.clock;
+        cache.last_hit = found_slot;
         return Value(doc_, cache.entries[found_slot].offsets[i]);
     } catch (...) {
         if (found_slot != UINT32_MAX) {

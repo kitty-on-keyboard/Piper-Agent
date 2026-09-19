@@ -37,4 +37,3 @@
 ## 2026-04-20 - Document-Level Array Index Offset Caching in parsephony
 **Learning:** `Value::operator[](size_t i)` walked non-flat array DOM subtrees using `next_sibling` for each element index $i$. When indexing temporary `Value` instances (such as `doc.root()[i]`) or performing random/non-sequential access, per-`Value` iteration state was lost, causing $O(N^2)$ time complexity.
 **Action:** Store a fixed-capacity LRU array offset cache on `Document` to populate and cache element node indices for non-flat arrays on first lookup, ensuring $O(1)$ random access across all `Value` instances and access patterns.
-
