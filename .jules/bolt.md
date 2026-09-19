@@ -37,3 +37,7 @@
 ## 2026-04-20 - Document-Level Array Index Offset Caching in parsephony
 **Learning:** `Value::operator[](size_t i)` walked non-flat array DOM subtrees using `next_sibling` for each element index $i$. When indexing temporary `Value` instances (such as `doc.root()[i]`) or performing random/non-sequential access, per-`Value` iteration state was lost, causing $O(N^2)$ time complexity.
 **Action:** Store a fixed-capacity LRU array offset cache on `Document` to populate and cache element node indices for non-flat arrays on first lookup, ensuring $O(1)$ random access across all `Value` instances and access patterns.
+
+## 2026-05-20 - Fast-Path String Searching in Fenced Block Parsing
+**Learning:** `extract_fenced_blocks` stepped character-by-character (`++i` and `++j`) through response texts and block bodies to check `line_start` and fence conditions on every byte. For large code blocks, this turned line scanning into an expensive byte-by-byte loop.
+**Action:** Use `text.find("```", i)` to jump directly to candidate opening backticks and `text.find('\n', j)` to skip block body lines directly to the next line start.
