@@ -4,6 +4,7 @@ add_library(lmp_tools
   think_blocks.cpp
   concurrent_calls.cpp
   context_tools.cpp
+  skills.cpp
   sandbox.cpp
   container.cpp
   syntax_check.cpp

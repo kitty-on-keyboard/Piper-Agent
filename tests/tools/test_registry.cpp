@@ -2,6 +2,7 @@
 // the graft-backed replace tool's refusal semantics.
 
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <cctype>
 #include <cstdlib>
