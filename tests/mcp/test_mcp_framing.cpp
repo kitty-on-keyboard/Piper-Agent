@@ -81,6 +81,29 @@ TEST(framer_drops_oversized_message_instead_of_growing) {
     CHECK_EQ(f.buffered(), std::size_t(0));
 }
 
+TEST(framer_handles_chunked_json_with_crlf_and_blank_lines) {
+    LineFramer f;
+    std::vector<std::string> lines;
+
+    // Simulate reading chunked JSON that includes CRLF and blank lines.
+    // It should chunk appropriately, strip the '\r', and skip the blanks.
+    const std::vector<std::string> chunks = {
+        "{\"a\"",
+        ":1}\r",
+        "\n\r\n",
+        "\n{\"b\":2}\r\n"
+    };
+
+    for (const auto& chunk : chunks) {
+        f.feed(chunk, [&](std::string_view l) { lines.emplace_back(l); });
+    }
+
+    REQUIRE(lines.size() == 2);
+    CHECK_EQ(lines[0], std::string("{\"a\":1}"));
+    CHECK_EQ(lines[1], std::string("{\"b\":2}"));
+    CHECK_EQ(f.buffered(), std::size_t(0));
+}
+
 TEST(encode_line_emits_exactly_one_trailing_newline) {
     const std::string s = encode_line(nlohmann::json{{"a", 1}});
     CHECK_EQ(s.back(), '\n');
