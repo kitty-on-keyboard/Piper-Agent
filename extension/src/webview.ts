@@ -2552,23 +2552,29 @@ function questionFromText(text) {
   // between it and the list is presentation, not content.
   const head = lines.slice(0, firstMarker).join(' ').trim();
 
-  // A marker line opens an option; anything after it that is not a marker is its detail,
-  // which is how a model writes a choice that needs a sentence of justification.
-  const groups = [];
+  // Single-pass option block extraction: converts line blocks directly into options
+  // without allocating 2D group arrays or chaining map/filter.
+  const options = [];
+  let currentBlock = '';
   for (let i = firstMarker; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (!trimmed) {
       continue;
     }
-    if (Q_ENUM_LINE.test(trimmed) || groups.length === 0) {
-      groups.push([trimmed]);
+    if (Q_ENUM_LINE.test(trimmed) || !currentBlock) {
+      if (currentBlock) {
+        const opt = questionBlockToOption(currentBlock);
+        if (opt.label) options.push(opt);
+      }
+      currentBlock = trimmed;
     } else {
-      groups[groups.length - 1].push(trimmed);
+      currentBlock += '\\n' + trimmed;
     }
   }
-  const options = groups
-    .map((g) => questionBlockToOption(g.join('\\n')))
-    .filter((o) => o.label);
+  if (currentBlock) {
+    const opt = questionBlockToOption(currentBlock);
+    if (opt.label) options.push(opt);
+  }
   if (options.length < 2) {
     return empty;
   }
