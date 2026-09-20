@@ -22,6 +22,17 @@ add_custom_command(TARGET lmp_sidecar POST_BUILD
   COMMENT "Creating piper symlink to lmp_sidecar"
   VERBATIM)
 
+# Opt-in: refresh /opt/homebrew/bin/piper -> this build's piper (realpath). Renaming
+# the checkout otherwise leaves a dead Homebrew symlink and bare `piper` disappears
+# for orchestrators. No-op off Darwin or when Homebrew's bin dir is absent; never
+# part of `all` so Linux/CI builds that never ask for it stay untouched.
+add_custom_target(install-piper-link
+  DEPENDS lmp_sidecar
+  COMMAND "${PROJECT_SOURCE_DIR}/scripts/install_piper_link.sh"
+          "${CMAKE_CURRENT_BINARY_DIR}/piper"
+  COMMENT "Refreshing /opt/homebrew/bin/piper -> this build's piper"
+  VERBATIM)
+
 # `cmake --build build --target vsix` produces extension/lm-pipe.vsix with THIS binary
 # inside it, verified by hash. Not part of `all`: packaging is a deliberate act, and a
 # packaging step nobody asked for is a slow build for everyone who is not shipping.

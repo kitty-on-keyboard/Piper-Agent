@@ -9,6 +9,14 @@ cmake --preset dev && cmake --build --preset dev -j8
 ctest --preset gate
 ```
 
+After building the sidecar, refresh the Homebrew `piper` on PATH (Apple Silicon /
+writable `/opt/homebrew/bin` only; no-op elsewhere):
+
+```bash
+cmake --build --preset dev --target install-piper-link
+# or: ./scripts/install_piper_link.sh
+```
+
 The gate (`ctest -L gate`) must stay green. It uses no model, no network, and no
 workspace. Real-model tests are labelled `realmodel` and must not run in parallel.
 
