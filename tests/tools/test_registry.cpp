@@ -1,6 +1,7 @@
 // The tool registry over a real temp workspace: containment, honesty of results, and
 // the graft-backed replace tool's refusal semantics.
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cctype>
