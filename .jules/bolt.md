@@ -41,3 +41,7 @@
 ## 2026-05-20 - Fast-Path String Searching in Fenced Block Parsing
 **Learning:** `extract_fenced_blocks` stepped character-by-character (`++i` and `++j`) through response texts and block bodies to check `line_start` and fence conditions on every byte. For large code blocks, this turned line scanning into an expensive byte-by-byte loop.
 **Action:** Use `text.find("```", i)` to jump directly to candidate opening backticks and `text.find('\n', j)` to skip block body lines directly to the next line start.
+
+## 2026-05-25 - Avoid spreading querySelectorAll in Webview Hot Paths
+**Learning:** Constructing arrays from `querySelectorAll` results using the spread operator (`[...feed.querySelectorAll('.msg')]`) requires allocating a full list in memory and evaluating an $O(N)$ query over the entire subtree. In frequently-called loops such as message stream management or finding the last `.msg.assistant`, this creates unnecessary DOM lookups and array allocations.
+**Action:** Replace `querySelectorAll` array spreading with direct DOM traversals (e.g., using `while (feed.firstChild && feed.firstChild !== live) { feed.firstChild.remove(); }` or walking backwards via `live.previousElementSibling`) to achieve $O(1)$ and $O(K)$ performance without allocations.
