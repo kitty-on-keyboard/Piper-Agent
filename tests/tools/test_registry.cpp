@@ -108,11 +108,13 @@ TEST(the_registry_declares_the_spec_set_and_no_more) {
     // no clickable card. Fewer tools is the point -- every one is a decision the model can
     // get wrong, and a smaller model gets it wrong more often. This pin going DOWN is the
     // rare direction and is meant to be as deliberate as growing it.
-    CHECK_EQ(reg.decls().size(), std::size_t{24});
+    CHECK_EQ(reg.decls().size(), std::size_t{26});
     CHECK(reg.find("view_image") != nullptr);
     CHECK(reg.find("finish") != nullptr);
     CHECK(reg.find("find_files") != nullptr);
     CHECK(reg.find("ask_user") != nullptr);
+    CHECK(reg.find("list_skills") != nullptr);
+    CHECK(reg.find("load_skill") != nullptr);
     // Not declared, deliberately. The loop still ANSWERS to it (agent.cpp) so a model
     // emitting it from habit is not met with an unknown-tool error, but it must not be
     // back on the prompt surface -- which is the whole of what the removal bought.
@@ -1825,12 +1827,30 @@ TEST(commit_think_block_is_declared_only_when_flag_on) {
     off_ctx.commit_think = false;
     Registry off(std::move(off_ctx));
     CHECK(off.find("commit_think_block") == nullptr);
-    CHECK_EQ(off.decls().size(), std::size_t{23});
+    CHECK_EQ(off.decls().size(), std::size_t{25});
 
     Registry on = make_commit_think_registry(root);
     REQUIRE(on.find("commit_think_block") != nullptr);
-    CHECK_EQ(on.decls().size(), std::size_t{24});
+    CHECK_EQ(on.decls().size(), std::size_t{26});
     CHECK(on.find("commit_think_block")->mutates_workspace);
+}
+
+TEST(registry_skill_tools_execution) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+
+    // list_skills empty
+    const ToolResult empty_list = reg.execute("list_skills", {}, 1);
+    CHECK(empty_list.ok());
+    CHECK(empty_list.summary.find("No skills found") != std::string::npos);
+
+    // load_skill missing parameter
+    const ToolResult missing_param = reg.execute("load_skill", {}, 1);
+    CHECK(!missing_param.ok());
+
+    // load_skill nonexistent
+    const ToolResult missing = reg.execute("load_skill", args({{"id", "nonexistent"}}), 1);
+    CHECK(!missing.ok());
 }
 
 TEST(commit_think_block_writes_exact_harvested_bytes) {

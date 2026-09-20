@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "src/context/context.hpp"
 #include "src/context/resume.hpp"
 #include "src/platform/clock.hpp"
 #include "src/platform/event_log.hpp"
@@ -245,4 +246,17 @@ TEST(a_run_end_that_says_completed_as_a_bare_one_is_read_as_completed) {
     const std::vector<RunSummary> runs = list_runs(events);
     REQUIRE(runs.size() == 1);
     CHECK(runs[0].completed);
+}
+
+TEST(context_store_renders_skills_catalog_and_loaded_skills) {
+    ContextStore ctx("test mission");
+    ctx.set_workspace_root("/tmp/ws");
+    ctx.set_skills_catalog("- godoer: Godot skill\n- swift: Swift skill");
+    ctx.add_loaded_skill({"godoer", "Godoer", "Step 1: Check scene"});
+
+    const auto msgs = ctx.render("");
+    REQUIRE(!msgs.empty());
+    const std::string& system_prompt = msgs[0].content;
+    CHECK(system_prompt.find("# Available skills\n\n- godoer: Godot skill\n- swift: Swift skill") != std::string::npos);
+    CHECK(system_prompt.find("# Loaded skills\n\n## Skill: Godoer\n\nStep 1: Check scene\n") != std::string::npos);
 }

@@ -162,6 +162,26 @@ class ContextStore {
         return project_instructions_;
     }
 
+    struct LoadedSkill {
+        std::string id;
+        std::string name;
+        std::string body;
+    };
+
+    void set_skills_catalog(std::string text) { skills_catalog_ = std::move(text); }
+    [[nodiscard]] const std::string& skills_catalog() const noexcept { return skills_catalog_; }
+
+    void add_loaded_skill(LoadedSkill skill) {
+        for (auto& s : loaded_skills_) {
+            if (s.id == skill.id) {
+                s = std::move(skill);
+                return;
+            }
+        }
+        loaded_skills_.push_back(std::move(skill));
+    }
+    [[nodiscard]] const std::vector<LoadedSkill>& loaded_skills() const noexcept { return loaded_skills_; }
+
     // Replaces the built-in persona. The editor keeps one of these per mode, so `plan`
     // can be told to think out loud where `agent` is told to be terse. Empty keeps the
     // built-in -- which is why this can be a plain string rather than an optional.
@@ -569,6 +589,8 @@ class ContextStore {
     std::string workspace_root_;
     std::string project_instructions_;
     std::string project_memory_;
+    std::string skills_catalog_;
+    std::vector<LoadedSkill> loaded_skills_;
     std::vector<ChecklistItem> checklist_;
     std::optional<CheckResult> last_check_;
     std::vector<std::string> deliverables_;

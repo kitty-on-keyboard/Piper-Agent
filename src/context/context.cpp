@@ -210,6 +210,15 @@ std::vector<Message> ContextStore::render(std::string_view tool_guidance) const 
     if (!project_instructions_.empty()) {
         system += "\n\n# Project conventions\n\n" + project_instructions_;
     }
+    if (!skills_catalog_.empty()) {
+        system += "\n\n# Available skills\n\n" + skills_catalog_;
+    }
+    if (!loaded_skills_.empty()) {
+        system += "\n\n# Loaded skills\n";
+        for (const auto& s : loaded_skills_) {
+            system += "\n## Skill: " + s.name + "\n\n" + s.body + "\n";
+        }
+    }
     // AFTER the operator's conventions and clearly attributed, because these are the
     // model's OWN notes coming back into its own prompt. Presented as recollection to
     // check rather than as instruction: a wrong note written last week would otherwise

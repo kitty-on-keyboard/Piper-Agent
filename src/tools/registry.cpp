@@ -897,6 +897,54 @@ Registry::Registry(WorkspaceContext ctx)
         });
     }
 
+    // --- list_skills --------------------------------------------------------
+    {
+        ToolDecl d;
+        d.name = "list_skills";
+        d.description =
+            "List available skill recipes discovered in the workspace or user library. "
+            "Returns each skill's id, name, description, and source root. Use load_skill "
+            "with an id to load a skill's full instructions into the session.";
+        d.spec.name = d.name;
+        declare(d, [this](const std::vector<ToolParamValue>&, int) {
+            const auto skills = discover_skills(ctx_.root);
+            if (skills.empty()) {
+                return ToolResult::okay("No skills found in workspace or user library.");
+            }
+            std::string out = "Available skills (" + std::to_string(skills.size()) + "):\n";
+            for (const auto& s : skills) {
+                out += "- " + s.id + " (" + s.name + ") [" + s.source_root + "]: " + s.description + "\n";
+            }
+            return ToolResult::okay(std::move(out));
+        });
+    }
+    // --- load_skill ---------------------------------------------------------
+    {
+        ToolDecl d;
+        d.name = "load_skill";
+        d.description =
+            "Load a skill recipe by id into the session context. Reads its SKILL.md, "
+            "returns the recipe body, and marks it loaded for the run so you can follow its "
+            "instructions. Call list_skills to see available skill ids.";
+        d.spec.name = d.name;
+        d.spec.params = {param("id", ParamType::Text, true)};
+        declare(d, [this](const std::vector<ToolParamValue>& p, int) {
+            const std::string* id_ptr = get(p, "id");
+            if (!id_ptr || id_ptr->empty()) {
+                return ToolResult::error(ErrorClass::Malformed, false, "id parameter is required");
+            }
+            std::string err;
+            auto detail = load_skill(ctx_.root, *id_ptr, "", &err);
+            if (!detail) {
+                return ToolResult::error(ErrorClass::NotFound, false, err);
+            }
+            if (skill_loaded_sink_) {
+                skill_loaded_sink_(*detail);
+            }
+            std::string out = "Loaded skill '" + *id_ptr + "' (" + detail->summary.name + "):\n\n" + detail->body;
+            return ToolResult::okay(std::move(out));
+        });
+    }
     // --- read_file ---------------------------------------------------------
     {
         ToolDecl d;

@@ -43,6 +43,7 @@
 
 #include "src/model/backend.hpp"
 #include "src/platform/fs.hpp"
+#include "src/tools/skills.hpp"
 #include "src/tools/think_blocks.hpp"
 #include "src/tools/tool_result.hpp"
 
@@ -267,6 +268,9 @@ class Registry {
   public:
     explicit Registry(WorkspaceContext ctx);
 
+    using SkillLoadedSink = std::function<void(const SkillDetail&)>;
+    void set_skill_loaded_sink(SkillLoadedSink sink) { skill_loaded_sink_ = std::move(sink); }
+
     void set_edit_sink(EditSink sink) { edit_sink_ = std::move(sink); }
     void set_code_intel_sink(CodeIntelSink sink) { code_intel_sink_ = std::move(sink); }
     [[nodiscard]] bool has_code_intel_sink() const noexcept {
@@ -439,6 +443,7 @@ class Registry {
     platform::WorkspaceFs workspace_fs_;
     EditSink edit_sink_;
     CodeIntelSink code_intel_sink_;
+    SkillLoadedSink skill_loaded_sink_;
     const model::CancelToken* cancel_token_ = nullptr;
     // Set by declare_context_tools. Read by remember_fact() too, which mirrors each note
     // into the store -- see memory_file.cpp.
