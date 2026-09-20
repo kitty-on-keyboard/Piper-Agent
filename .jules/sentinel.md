@@ -32,3 +32,7 @@
 **Vulnerability:** Parent environment variables carrying auth credentials, token IDs, or secret keys under allowlisted prefixes (such as `LC_CRED`, `XDG_CREDS`, `LC_TOKEN_ID`, `XDG_SECRET_KEY`, `LC_AUTH_TOKEN`, `XDG_ACCESS_TOKEN`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Token identifier and access credential suffixes like `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` must be explicitly included in suffix filtering rules to prevent sensitive authentication tokens and key pairs from being inherited.
 **Prevention:** Added `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+## 2024-05-24 - Socket Path Truncation Vulnerability
+**Vulnerability:** Socket Path Truncation via strncpy
+**Learning:** `strncpy` into `sockaddr_un::sun_path` without bounds checking causes silent path truncation, enabling binds or connections to unintended socket paths.
+**Prevention:** Always verify `path.length() < sizeof(sockaddr_un::sun_path)` before calling `strncpy` or use a safe string copy mechanism.
