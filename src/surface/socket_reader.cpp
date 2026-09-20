@@ -48,6 +48,11 @@ bool is_daemon_alive(const std::string& socket_path) {
     if (fd < 0) return false;
 
     struct sockaddr_un addr{};
+    if (socket_path.length() >= sizeof(addr.sun_path)) {
+        ::close(fd);
+        return false;
+    }
+
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
@@ -103,6 +108,11 @@ std::optional<int> forward_to_daemon(
     if (fd < 0) return std::nullopt;
 
     struct sockaddr_un addr{};
+    if (socket_path.length() >= sizeof(addr.sun_path)) {
+        ::close(fd);
+        return std::nullopt;
+    }
+
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
@@ -218,6 +228,12 @@ bool DaemonListener::start() {
     ::fcntl(listen_fd_, F_SETFD, FD_CLOEXEC);
 
     struct sockaddr_un addr{};
+    if (config_.socket_path.length() >= sizeof(addr.sun_path)) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        return false;
+    }
+
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, config_.socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
