@@ -71,6 +71,12 @@ TEST(parent_secrets_are_dropped) {
         "PRIVKEY_SECRET=priv_123",
         "AUTH_PASSCODE=code_456",
         "SERVICE_TICKET=tkt_789",
+        "LC_CRED=secret_cred",
+        "XDG_CREDS=secret_creds",
+        "LC_TOKEN_ID=secret_id",
+        "XDG_SECRET_KEY=secret_key",
+        "LC_AUTH_TOKEN=secret_token",
+        "XDG_ACCESS_TOKEN=secret_access",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -86,6 +92,12 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "PRIVKEY_SECRET"));
     CHECK(!has_key(env, "AUTH_PASSCODE"));
     CHECK(!has_key(env, "SERVICE_TICKET"));
+    CHECK(!has_key(env, "LC_CRED"));
+    CHECK(!has_key(env, "XDG_CREDS"));
+    CHECK(!has_key(env, "LC_TOKEN_ID"));
+    CHECK(!has_key(env, "XDG_SECRET_KEY"));
+    CHECK(!has_key(env, "LC_AUTH_TOKEN"));
+    CHECK(!has_key(env, "XDG_ACCESS_TOKEN"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -133,6 +145,12 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "LC_PRIVKEY=secret",
         "XDG_PASSCODE=secret",
         "LC_TICKET=secret",
+        "LC_CRED=secret",
+        "XDG_CREDS=secret",
+        "LC_TOKEN_ID=secret",
+        "XDG_SECRET_KEY=secret",
+        "LC_AUTH_TOKEN=secret",
+        "XDG_ACCESS_TOKEN=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -151,6 +169,12 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "LC_PRIVKEY"));
     CHECK(!has_key(env, "XDG_PASSCODE"));
     CHECK(!has_key(env, "LC_TICKET"));
+    CHECK(!has_key(env, "LC_CRED"));
+    CHECK(!has_key(env, "XDG_CREDS"));
+    CHECK(!has_key(env, "LC_TOKEN_ID"));
+    CHECK(!has_key(env, "XDG_SECRET_KEY"));
+    CHECK(!has_key(env, "LC_AUTH_TOKEN"));
+    CHECK(!has_key(env, "XDG_ACCESS_TOKEN"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
