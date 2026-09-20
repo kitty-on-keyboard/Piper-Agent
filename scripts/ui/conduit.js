@@ -1,4 +1,4 @@
-// Conduit Animation Bus
+// Conduit Animation Bus — Mission Instrument palette
 // Visualizes packet transfer and pulse interactions between Piper and Orchestrator.
 
 export class ConduitBus {
@@ -30,16 +30,24 @@ export class ConduitBus {
   spawnAmbient() {
     if (this.particles.length > 30) return;
     const fromLeft = Math.random() > 0.5;
+    // Warm ember tones
+    const colors = fromLeft
+      ? ['#E8A849', '#D4845A', '#C46B4A']
+      : ['#8B9FCC', '#A78BBF', '#C4A0D0'];
+    const color = colors[Math.floor(Math.random() * colors.length)];
+
     this.particles.push({
       x: fromLeft ? 0 : this.width,
       y: 80 + Math.random() * (this.height - 160),
       targetX: fromLeft ? this.width : 0,
       targetY: 80 + Math.random() * (this.height - 160),
+      prevX: fromLeft ? 0 : this.width,
+      prevY: 80 + Math.random() * (this.height - 160),
       progress: 0,
       speed: 0.003 + Math.random() * 0.005,
       size: 1.5 + Math.random() * 2,
-      color: fromLeft ? '#14B8A6' : '#3B82F6',
-      alpha: 0.2 + Math.random() * 0.4
+      color: color,
+      alpha: 0.15 + Math.random() * 0.35
     });
   }
 
@@ -57,6 +65,10 @@ export class ConduitBus {
         continue;
       }
 
+      // Save previous position for trail
+      const prevX = p.prevX;
+      const prevY = p.prevY;
+
       // Bezier curve across the bridge
       const cx = this.width / 2;
       const cy = (p.y + p.targetY) / 2 + Math.sin(p.progress * Math.PI) * 40;
@@ -64,15 +76,32 @@ export class ConduitBus {
       const curX = (1 - t) * (1 - t) * p.x + 2 * (1 - t) * t * cx + t * t * p.targetX;
       const curY = (1 - t) * (1 - t) * p.y + 2 * (1 - t) * t * cy + t * t * p.targetY;
 
+      const alphaVal = p.alpha * Math.sin(t * Math.PI);
+
+      // Draw subtle trail
+      if (p.progress > 0.02) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(prevX, prevY);
+        this.ctx.lineTo(curX, curY);
+        this.ctx.strokeStyle = p.color;
+        this.ctx.globalAlpha = alphaVal * 0.3;
+        this.ctx.lineWidth = p.size * 0.6;
+        this.ctx.stroke();
+      }
+
+      // Draw particle
       this.ctx.beginPath();
       this.ctx.arc(curX, curY, p.size, 0, Math.PI * 2);
       this.ctx.fillStyle = p.color;
-      this.ctx.globalAlpha = p.alpha * Math.sin(t * Math.PI);
+      this.ctx.globalAlpha = alphaVal;
       this.ctx.shadowBlur = 8;
       this.ctx.shadowColor = p.color;
       this.ctx.fill();
       this.ctx.globalAlpha = 1.0;
       this.ctx.shadowBlur = 0;
+
+      p.prevX = curX;
+      p.prevY = curY;
     }
 
     requestAnimationFrame(this.loop);
@@ -102,7 +131,8 @@ export class ConduitBus {
 
   triggerBurst(x, y, type) {
     if (!this.ctx) return;
-    const color = type === 'task' ? '#3B82F6' : type === 'result' ? '#14B8A6' : '#F59E0B';
+    // Warm burst colors matching the palette
+    const color = type === 'task' ? '#8B9FCC' : type === 'result' ? '#E8A849' : '#D4845A';
     for (let i = 0; i < 16; i++) {
       const angle = (i / 16) * Math.PI * 2;
       const dist = 30 + Math.random() * 40;
@@ -111,6 +141,8 @@ export class ConduitBus {
         y: y,
         targetX: x + Math.cos(angle) * dist,
         targetY: y + Math.sin(angle) * dist,
+        prevX: x,
+        prevY: y,
         progress: 0,
         speed: 0.02 + Math.random() * 0.03,
         size: 2 + Math.random() * 2.5,

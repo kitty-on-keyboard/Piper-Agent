@@ -1,4 +1,4 @@
-// Piper Soundwave & Ribbon Logo Engine
+// Piper Soundwave & Ribbon Logo Engine — Mission Instrument palette
 // Ported from extension/src/orb.ts for standalone browser execution.
 
 export function initOrb(containerEl) {
@@ -9,10 +9,10 @@ export function initOrb(containerEl) {
       <svg class="sw-svg svg-layer-ribbon" viewBox="0 0 100 100" fill="none">
         <defs>
           <linearGradient id="pGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="#14B8A6"/>
-            <stop offset="40%" stop-color="#06B6D4"/>
-            <stop offset="80%" stop-color="#3B82F6"/>
-            <stop offset="100%" stop-color="#8B5CF6"/>
+            <stop offset="0%" stop-color="#E8A849"/>
+            <stop offset="40%" stop-color="#D4845A"/>
+            <stop offset="80%" stop-color="#C46B4A"/>
+            <stop offset="100%" stop-color="#E8A849"/>
           </linearGradient>
           <filter id="pGlow">
             <feGaussianBlur stdDeviation="3" result="blur"/>
@@ -21,15 +21,15 @@ export function initOrb(containerEl) {
         </defs>
         <path d="M 32 82 V 26 C 32 26, 32 18, 48 18 C 68 18, 76 30, 68 46 C 60 60, 32 54, 32 54 L 62 54"
               stroke="url(#pGrad)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" filter="url(#pGlow)"/>
-        <circle cx="62" cy="54" r="4" fill="#06B6D4"/>
+        <circle cx="62" cy="54" r="4" fill="#D4845A"/>
       </svg>
       <svg class="sw-svg svg-layer-bars" viewBox="0 0 120 120" fill="none">
         <defs>
           <linearGradient id="tbGrad" x1="0%" y1="100%" x2="0%" y2="0%">
-            <stop offset="0%" stop-color="#14B8A6"/>
-            <stop offset="40%" stop-color="#06B6D4"/>
-            <stop offset="75%" stop-color="#3B82F6"/>
-            <stop offset="100%" stop-color="#8B5CF6"/>
+            <stop offset="0%" stop-color="#E8A849"/>
+            <stop offset="40%" stop-color="#D4845A"/>
+            <stop offset="75%" stop-color="#C46B4A"/>
+            <stop offset="100%" stop-color="#E8A849"/>
           </linearGradient>
           <filter id="swGlow">
             <feGaussianBlur stdDeviation="3" result="blur"/>
