@@ -106,6 +106,30 @@ TEST(load_packet_validates_json_and_fields) {
     CHECK(!load_packet((tmp_dir / "task.json").string(), error).has_value());
     CHECK(error.find("mode") != std::string::npos);
 
+    // 5. Skills array
+    {
+        nlohmann::json j = {
+            {"id", "slice-01"},
+            {"cwd", tmp_dir.string()},
+            {"model_dir", tmp_dir.string()},
+            {"prompt", "hello"},
+            {"skills", {"godoer", "swift"}}
+        };
+        std::ofstream f((tmp_dir / "task.json").string());
+        f << j.dump();
+    }
+    auto packet_skills = load_packet((tmp_dir / "task.json").string(), error);
+    REQUIRE(packet_skills.has_value());
+    REQUIRE(packet_skills->preload_skills.size() == std::size_t{2});
+    CHECK_EQ(packet_skills->preload_skills[0], "godoer");
+    CHECK_EQ(packet_skills->preload_skills[1], "swift");
+
+    std::string start_msg = build_start_message(*packet_skills, "1");
+    auto j_msg = nlohmann::json::parse(start_msg, nullptr, false);
+    REQUIRE(!j_msg.is_discarded());
+    REQUIRE(j_msg["params"]["settings"].contains("preload_skills"));
+    CHECK_EQ(j_msg["params"]["settings"]["preload_skills"].size(), std::size_t{2});
+
     std::filesystem::remove_all(tmp_dir);
 }
 

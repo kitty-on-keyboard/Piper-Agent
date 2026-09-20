@@ -39,6 +39,7 @@
 #include "src/platform/fs.hpp"
 #include "src/surface/protocol_generated.hpp"
 #include "src/surface/mcp_settings.hpp"
+#include "src/tools/skills.hpp"
 #include "src/context/resume.hpp"
 #include "src/surface/run_id.hpp"
 #include "src/surface/transcript.hpp"
@@ -1239,6 +1240,55 @@ bool start_mission(const std::string& id, const std::string& message,
     session.ctx->set_project_memory(
         surface::load_project_memory(session.registry->filesystem()));
     session.ctx->set_workspace_root(canonical_workspace);
+
+    // Available skills catalog
+    const auto available_skills = tools::discover_skills(canonical_workspace);
+    if (!available_skills.empty()) {
+        std::string catalog;
+        for (const auto& s : available_skills) {
+            catalog += "- " + s.id + " (" + s.name + ") [" + s.source_root + "]: " + s.description + "\n";
+        }
+        session.ctx->set_skills_catalog(std::move(catalog));
+        platform::Event ev;
+        ev.kind = "skills_catalog";
+        ev.fields = {{"count", std::to_string(available_skills.size())}};
+        log.append(ev, clock);
+    }
+
+    session.registry->set_skill_loaded_sink([&session, &log, &clock](const tools::SkillDetail& detail) {
+        session.ctx->add_loaded_skill({detail.summary.id, detail.summary.name, detail.body});
+        platform::Event ev;
+        ev.kind = "skill_loaded";
+        ev.fields = {{"id", detail.summary.id},
+                     {"name", detail.summary.name},
+                     {"source_root", detail.summary.source_root}};
+        log.append(ev, clock);
+    });
+
+    std::vector<std::string> preload_skills = surface::parse_string_array(message, "preload_skills");
+    if (preload_skills.empty()) {
+        preload_skills = surface::parse_string_array(message, "skills");
+    }
+    for (const std::string& skill_id : preload_skills) {
+        std::string err;
+        auto detail = tools::load_skill(canonical_workspace, skill_id, "", &err);
+        if (detail) {
+            session.ctx->add_loaded_skill({detail->summary.id, detail->summary.name, detail->body});
+            platform::Event ev;
+            ev.kind = "skill_loaded";
+            ev.fields = {{"id", detail->summary.id},
+                         {"name", detail->summary.name},
+                         {"source_root", detail->summary.source_root},
+                         {"preload", "1"}};
+            log.append(ev, clock);
+        } else {
+            platform::Event ev;
+            ev.kind = "skill_preload_failed";
+            ev.fields = {{"id", skill_id}, {"error", err}};
+            log.append(ev, clock);
+        }
+    }
+
     // Empty keeps the built-in persona; the editor sends the one it holds for this mode.
     session.ctx->set_persona(surface::string_field(message, "system_prompt"));
 
@@ -1328,7 +1378,9 @@ bool start_mission(const std::string& id, const std::string& message,
         log.append(begin, clock);
     }
 
-    return run_loop(run_id, session, inbox, cancel, log, clock, hooks);
+    const bool res = run_loop(run_id, session, inbox, cancel, log, clock, hooks);
+    session.registry->set_skill_loaded_sink(nullptr);
+    return res;
 }
 
 // Load the weights, as its own act (S12.2). Answers when the load is over; the surface
