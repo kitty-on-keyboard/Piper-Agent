@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Piper Orchestration Visualizer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Top Navigation & Slice Pipeline Rail -->
+  <header id="topBar">
+    <div class="brand">
+      <div id="brandOrb"></div>
+      <div class="brand-name">
+        Piper<span class="brand-agent">Orchestrator</span>
+      </div>
+      <span class="badge-live" id="connStatus">
+        <span class="pulse-dot"></span> <span id="connLabel">Live</span>
+      </span>
+    </div>
+
+    <!-- Active Slice Timeline Breadcrumbs -->
+    <div id="sliceRail">
+      <div class="slice-pill active" id="currentSlicePill">
+        <span class="slice-dot"></span> <span id="currentSliceLabel">Idle</span>
+      </div>
+    </div>
+
+    <!-- Token Metrics -->
+    <div id="tokenBar">
+      <div class="token-stat">
+        <span class="token-lbl">Local</span>
+        <strong class="token-val val-piper" id="piperTokensTotal">0</strong>
+      </div>
+      <div class="token-divider"></div>
+      <div class="token-stat">
+        <span class="token-lbl">Cloud</span>
+        <strong class="token-val val-orch" id="orchTokensTotal">0</strong>
+      </div>
+      <div class="token-divider"></div>
+      <div class="token-stat">
+        <span class="token-lbl">Offloaded</span>
+        <strong class="token-val val-piper" id="offloadPct">—</strong>
+      </div>
+    </div>
+
+    <div class="top-actions">
+      <div class="status-tag">
+        <span id="cwdLabel">—</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Workspace: Left (Piper) | Center (Conduit Bus) | Right (Orchestrator) -->
+  <main id="workspace">
+    <!-- Background Canvas for Real-Time Particle Conduit -->
+    <canvas id="conduitCanvas"></canvas>
+    <div id="packetOverlay"></div>
+
+    <!-- Left Pane: Piper Local Worker -->
+    <section class="pane" id="panePiper">
+      <div class="pane-head">
+        <div class="pane-identity">
+          <div id="piperOrbMount"></div>
+          <div>
+            <div class="pane-title">Piper Local Worker</div>
+            <div class="pane-subtitle" id="piperSub">Apple Silicon · MLX</div>
+          </div>
+        </div>
+        <div class="pane-metrics">
+          <span class="metric-badge mono" id="piperTokensPaneBadge">0 tokens</span>
+          <span class="metric-badge" id="piperStatusBadge">Idle</span>
+          <span class="metric-badge mono" id="piperTurnBadge">turn 0</span>
+        </div>
+      </div>
+      <div class="feed" id="piperFeed"></div>
+    </section>
+
+    <!-- Center Divider & Motion Bus -->
+    <div id="centerSpine">
+      <div class="spine-track">
+        <div class="spine-node" id="spineNode"></div>
+      </div>
+    </div>
+
+    <!-- Right Pane: Cloud Orchestrator -->
+    <section class="pane" id="paneOrchestrator">
+      <div class="pane-head">
+        <div class="pane-identity">
+          <div class="pane-avatar orch">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" fill="currentColor" opacity="0.6"/><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1" opacity="0.35"/><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.2"/></svg>
+          </div>
+          <div>
+            <div class="pane-title">Cloud Orchestrator</div>
+            <div class="pane-subtitle" id="orchSub">Cursor · Claude · Antigravity</div>
+          </div>
+        </div>
+        <div class="pane-metrics">
+          <span class="metric-badge mono" id="orchTokensPaneBadge">0 tokens</span>
+          <span class="metric-badge" id="orchMissionBadge">Ready</span>
+        </div>
+      </div>
+      <div class="feed" id="orchFeed"></div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

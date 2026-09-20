@@ -1,0 +1,7 @@
+{
+  "id": "slice-001",
+  "cwd": "/Users/dev/Desktop/seans_projects_local/Piper",
+  "prompt": "## Horizon Context\nImplement secure input validator and integration test harness.\n\n## This Slice Only\nAdd validator in src/validator.cpp and test in tests/test_validator.cpp.\n\n## Files\n- EDIT: src/validator.cpp\n- CREATE: tests/test_validator.cpp\n- DO NOT TOUCH: src/core.cpp\n\n## Done When\n- Unit test passes with `ctest -R test_validator`",
+  "check": "ctest -R test_validator",
+  "max_iterations": 30
+}
