@@ -4,9 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Piper Orchestration Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="thinking-collapsed" data-theme="mission">
 
   <!-- Top Navigation & Slice Pipeline Rail -->
   <header id="topBar">
@@ -36,7 +39,7 @@
       <div class="token-divider"></div>
       <div class="token-stat">
         <span class="token-lbl">Cloud</span>
-        <strong class="token-val val-orch" id="orchTokensTotal">0</strong>
+        <strong class="token-val val-orch" id="orchTokensTotal">—</strong>
       </div>
       <div class="token-divider"></div>
       <div class="token-stat">
@@ -46,6 +49,10 @@
     </div>
 
     <div class="top-actions">
+      <button class="thinking-toggle" id="thinkingToggle" data-mode="collapsed" title="Cycle thinking text visibility: Collapsed → Expanded → Hidden">
+        <span class="toggle-icon">◇</span>
+        <span class="toggle-label">◇ Collapsed</span>
+      </button>
       <div class="status-tag">
         <span id="cwdLabel">—</span>
       </div>
@@ -66,10 +73,13 @@
           <div>
             <div class="pane-title">Piper Local Worker</div>
             <div class="pane-subtitle" id="piperSub">Apple Silicon · MLX</div>
+            <div class="pane-activity" id="piperActivity"></div>
           </div>
         </div>
         <div class="pane-metrics">
+          <span class="elapsed-timer" id="elapsedTimer">0:00</span>
           <span class="metric-badge mono" id="piperTokensPaneBadge">0 tokens</span>
+          <span class="metric-badge mono" id="filesTouchedBadge">0 files</span>
           <span class="metric-badge" id="piperStatusBadge">Idle</span>
           <span class="metric-badge mono" id="piperTurnBadge">turn 0</span>
         </div>
@@ -97,7 +107,7 @@
           </div>
         </div>
         <div class="pane-metrics">
-          <span class="metric-badge mono" id="orchTokensPaneBadge">0 tokens</span>
+          <span class="metric-badge mono" id="orchTokensPaneBadge">— tokens</span>
           <span class="metric-badge" id="orchMissionBadge">Ready</span>
         </div>
       </div>

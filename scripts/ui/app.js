@@ -30,6 +30,15 @@ class PiperVisualizerApp {
 
     this.piperTokens = 0;
     this.orchTokens = 0;
+    this.orchTokensKnown = false; // true when we have real cloud token data
+
+    // Activity & progress tracking
+    this.activityEl = document.getElementById('piperActivity');
+    this.elapsedEl = document.getElementById('elapsedTimer');
+    this.filesTouchedBadge = document.getElementById('filesTouchedBadge');
+    this.taskStartTime = null;
+    this.elapsedInterval = null;
+    this.filesTouched = new Set();
 
     this.slices = new Map();
     this.currentSliceId = null;
@@ -40,8 +49,98 @@ class PiperVisualizerApp {
     this.lastResultHash = null;
     this.seenSeqs = new Set();
 
+    // Thinking mode: collapsed | expanded | hidden
+    this.thinkingMode = localStorage.getItem('piperThinkingMode') || 'collapsed';
+    this.thinkingToggleEl = document.getElementById('thinkingToggle');
+    this.applyThinkingMode();
+    if (this.thinkingToggleEl) {
+      this.thinkingToggleEl.addEventListener('click', () => this.cycleThinkingMode());
+    }
+
     this.initSSE();
   }
+
+  // ---------------------------------------------------------------------------
+  // Thinking Mode
+  // ---------------------------------------------------------------------------
+
+  cycleThinkingMode() {
+    const order = ['collapsed', 'expanded', 'hidden'];
+    const idx = order.indexOf(this.thinkingMode);
+    this.thinkingMode = order[(idx + 1) % order.length];
+    localStorage.setItem('piperThinkingMode', this.thinkingMode);
+    this.applyThinkingMode();
+  }
+
+  applyThinkingMode() {
+    document.body.classList.remove('thinking-collapsed', 'thinking-expanded', 'thinking-hidden');
+    document.body.classList.add(`thinking-${this.thinkingMode}`);
+
+    // Update toggle button
+    if (this.thinkingToggleEl) {
+      const labels = { collapsed: '◇ Collapsed', expanded: '◆ Expanded', hidden: '○ Hidden' };
+      this.thinkingToggleEl.querySelector('.toggle-label').textContent = labels[this.thinkingMode];
+      this.thinkingToggleEl.setAttribute('data-mode', this.thinkingMode);
+    }
+
+    // Apply open/close state to all existing thought blocks
+    const blocks = document.querySelectorAll('.thought-block');
+    blocks.forEach(b => {
+      if (this.thinkingMode === 'expanded') b.open = true;
+      else if (this.thinkingMode === 'collapsed') b.open = false;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Activity & Elapsed
+  // ---------------------------------------------------------------------------
+
+  setActivity(text) {
+    if (this.activityEl) {
+      this.activityEl.textContent = text || '';
+      this.activityEl.classList.toggle('active', !!text);
+    }
+  }
+
+  startElapsed() {
+    this.taskStartTime = Date.now();
+    this.stopElapsed();
+    this.updateElapsed();
+    this.elapsedInterval = setInterval(() => this.updateElapsed(), 1000);
+    if (this.elapsedEl) this.elapsedEl.classList.add('running');
+  }
+
+  stopElapsed() {
+    if (this.elapsedInterval) {
+      clearInterval(this.elapsedInterval);
+      this.elapsedInterval = null;
+    }
+    if (this.elapsedEl) this.elapsedEl.classList.remove('running');
+  }
+
+  updateElapsed() {
+    if (!this.taskStartTime || !this.elapsedEl) return;
+    const secs = Math.floor((Date.now() - this.taskStartTime) / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    this.elapsedEl.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  trackFile(path) {
+    if (!path) return;
+    // Normalize to basename for display count
+    const base = path.split('/').pop();
+    if (base && !this.filesTouched.has(path)) {
+      this.filesTouched.add(path);
+      if (this.filesTouchedBadge) {
+        this.filesTouchedBadge.textContent = `${this.filesTouched.size} files`;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // SSE
+  // ---------------------------------------------------------------------------
 
   initSSE() {
     const evtSource = new EventSource('/api/events');
@@ -121,9 +220,14 @@ class PiperVisualizerApp {
     this.slices.set(task.id, { task, status: 'running' });
     this.updateSliceRail();
 
-    // Track orchestrator dispatch tokens (estimate ~3.8 chars/token)
-    const promptLen = (task.prompt || '').length + (task.check ? task.check.length : 0);
-    this.orchTokens += Math.max(1, Math.ceil(promptLen / 3.8));
+    // Reset progress tracking for new task
+    this.filesTouched.clear();
+    if (this.filesTouchedBadge) this.filesTouchedBadge.textContent = '0 files';
+    this.startElapsed();
+    this.setActivity('Preparing environment...');
+
+    // No heuristic token counting for orchestrator.
+    // Cloud tokens only populated when real data arrives.
     this.updateTokenMetrics();
 
     if (animate) {
@@ -185,6 +289,18 @@ class PiperVisualizerApp {
     slice.status = result.status === 'ok' ? 'passed' : 'stalled';
     this.slices.set(result.task_id, slice);
     this.updateSliceRail();
+
+    // Stop elapsed timer
+    this.stopElapsed();
+    this.setActivity('');
+
+    // If result contains metrics, use authoritative token data
+    if (result.metrics) {
+      const m = result.metrics;
+      const genTok = (m.generated_tokens || m.think_tokens + m.text_tokens + m.tool_tokens) || 0;
+      if (genTok > 0) this.piperTokens = genTok;
+    }
+    this.updateTokenMetrics();
 
     if (animate) {
       this.conduit.flyPacket('left-to-right', 'result', result.task_id, result.diff_stat || result.status);
@@ -293,8 +409,7 @@ class PiperVisualizerApp {
     this.piperFeed.appendChild(card);
     this.scrollBottom(this.piperFeed);
 
-    const ansLen = JSON.stringify(ans).length;
-    this.orchTokens += Math.max(1, Math.ceil(ansLen / 3.8));
+    // No heuristic token counting for orchestrator
     this.updateTokenMetrics();
   }
 
@@ -323,9 +438,11 @@ class PiperVisualizerApp {
       if (at === 'render_begin') {
         this.piperStatusBadge.textContent = 'Rendering';
         this.piperOrb.setState('running');
+        this.setActivity('Rendering context...');
       } else if (at === 'generate_begin') {
         this.piperStatusBadge.textContent = 'Generating';
         this.piperOrb.setState('running');
+        this.setActivity('Generating response...');
       }
     }
 
@@ -333,6 +450,7 @@ class PiperVisualizerApp {
       const pTok = parseInt(this.getEventField(ev, 'tokens') || 0, 10);
       if (pTok > 0) {
         this.piperStatusBadge.textContent = `Prefill ${pTok.toLocaleString()} tok`;
+        this.setActivity(`Loading ${pTok.toLocaleString()} prompt tokens...`);
         const tile = document.createElement('div');
         tile.className = 'tool-tile';
         tile.innerHTML = `
@@ -353,14 +471,13 @@ class PiperVisualizerApp {
       const speed = this.getEventField(ev, 'decode_tok_per_s');
       const ttft = this.getEventField(ev, 'ttft_ms');
 
-      if (genTok > 0) {
-        this.piperTokens += genTok;
-        this.updateTokenMetrics();
-      }
+      // Do NOT add genTok to piperTokens here — turn event is authoritative.
+      // Only update the display speed badge.
 
       const speedStr = speed ? ` · ${parseFloat(speed).toFixed(1)} tok/s` : '';
       const ttftStr = ttft ? ` · TTFT ${(parseFloat(ttft) / 1000).toFixed(1)}s` : '';
       this.piperStatusBadge.textContent = speed ? `${parseFloat(speed).toFixed(1)} tok/s` : 'Working';
+      this.setActivity(speed ? `Generating at ${parseFloat(speed).toFixed(1)} tok/s` : 'Generating...');
 
       const tile = document.createElement('div');
       tile.className = 'tool-tile';
@@ -379,11 +496,14 @@ class PiperVisualizerApp {
       const turnNum = this.getEventField(ev, 'n', ['turn', 'step']);
       if (turnNum) this.piperTurnBadge.textContent = `turn ${turnNum}`;
 
+      // Authoritative token count: REPLACE, don't add.
       const tokVal = parseInt(this.getEventField(ev, 'tokens', ['tokens_generated']) || 0, 10);
-      if (tokVal > this.piperTokens) {
+      if (tokVal > 0) {
         this.piperTokens = tokVal;
         this.updateTokenMetrics();
       }
+
+      this.setActivity(`Turn ${turnNum || '?'} complete`);
     }
 
     if (ev.kind === 'tool_call' || ev.kind === 'tool' || ev.kind === 'exec') {
@@ -391,6 +511,11 @@ class PiperVisualizerApp {
       const toolName = this.getEventField(ev, 'tool', ['name']) || ev.kind;
       const cmd = this.getEventField(ev, 'command', ['path', 'cmd']) || '';
       this.piperStatusBadge.textContent = `Exec ${toolName}`;
+      this.setActivity(`Executing ${toolName}${cmd ? ': ' + cmd.split('/').pop() : ''}...`);
+
+      // Track files
+      const path = this.getEventField(ev, 'path', ['file']) || cmd;
+      if (path && !path.startsWith('-')) this.trackFile(path);
 
       const tile = document.createElement('div');
       tile.className = 'tool-tile';
@@ -410,6 +535,9 @@ class PiperVisualizerApp {
       const path = this.getEventField(ev, 'path', ['file', 'normalised']) || '';
       const tool = this.getEventField(ev, 'tool') || 'write';
       const bytes = this.getEventField(ev, 'edit_bytes') || '';
+
+      if (path) this.trackFile(path);
+      this.setActivity(`Writing ${path.split('/').pop() || path}...`);
 
       const tile = document.createElement('div');
       tile.className = 'tool-tile';
@@ -453,7 +581,7 @@ class PiperVisualizerApp {
       tile.innerHTML = `
         <div class="tool-tile-head">
           <span class="tool-chip check">Contract Verification</span>
-          <span style="font-size: 10px; font-weight: 600; color: ${passed ? 'var(--ok)' : 'var(--warn)'};">
+          <span style="font-size: 10px; font-weight: 700; color: ${passed ? 'var(--ok)' : 'var(--warn)'};">
             ${passed ? 'PASS ✓' : 'VERIFYING'}
           </span>
           <span class="tag-time">${this.ts()}</span>
@@ -494,12 +622,15 @@ class PiperVisualizerApp {
 
     if (ev.kind === 'token') {
       const valField = this.getEventField(ev, 'token', ['text']);
+      // Do NOT increment piperTokens here — turn event is authoritative.
       if (valField) this.appendToken(valField);
     }
 
     if (ev.kind === 'run_end') {
       const reason = this.getEventField(ev, 'termination_reason') || 'done';
       this.piperStatusBadge.textContent = reason === 'wall_clock' ? 'Timed Out' : 'Finished';
+      this.stopElapsed();
+      this.setActivity('');
     }
   }
 
@@ -516,8 +647,7 @@ class PiperVisualizerApp {
   // ---------------------------------------------------------------------------
 
   appendToken(text) {
-    this.piperTokens += 1;
-    this.updateTokenMetrics();
+    // No token counter increment here — turn events are authoritative.
 
     if (!this.currentAssistantMsg) {
       this.currentAssistantMsg = document.createElement('div');
@@ -537,7 +667,8 @@ class PiperVisualizerApp {
     if (text.includes('<think>')) {
       this.activeThoughtBlock = document.createElement('details');
       this.activeThoughtBlock.className = 'thought-block';
-      this.activeThoughtBlock.open = true;
+      // Respect thinking mode for new blocks
+      this.activeThoughtBlock.open = this.thinkingMode === 'expanded';
       this.activeThoughtBlock.innerHTML = `
         <summary>Reasoning</summary>
         <div class="thought-content"></div>
@@ -545,6 +676,7 @@ class PiperVisualizerApp {
       streamBody.appendChild(this.activeThoughtBlock);
       this.activeThoughtContent = this.activeThoughtBlock.querySelector('.thought-content');
       text = text.replace('<think>', '');
+      this.setActivity('Thinking...');
     }
 
     if (text.includes('</think>')) {
@@ -553,6 +685,7 @@ class PiperVisualizerApp {
       this.activeThoughtBlock = null;
       this.activeThoughtContent = null;
       text = parts[1] || '';
+      this.setActivity('Responding...');
     }
 
     if (this.activeThoughtContent) {
@@ -575,18 +708,37 @@ class PiperVisualizerApp {
 
   updateTokenMetrics() {
     const fmtP = this.piperTokens.toLocaleString();
-    const fmtO = this.orchTokens.toLocaleString();
 
-    if (this.piperTokensTotal) this.piperTokensTotal.textContent = fmtP;
-    if (this.orchTokensTotal) this.orchTokensTotal.textContent = fmtO;
+    if (this.piperTokensTotal) {
+      this.piperTokensTotal.textContent = fmtP;
+      this.piperTokensTotal.classList.add('counter-bump');
+      setTimeout(() => this.piperTokensTotal.classList.remove('counter-bump'), 300);
+    }
     if (this.piperTokensPaneBadge) this.piperTokensPaneBadge.textContent = `${fmtP} tokens`;
-    if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = `${fmtO} tokens`;
 
-    const total = this.piperTokens + this.orchTokens;
+    // Orchestrator tokens: only show real data, not heuristics
+    if (this.orchTokensKnown) {
+      const fmtO = this.orchTokens.toLocaleString();
+      if (this.orchTokensTotal) this.orchTokensTotal.textContent = fmtO;
+      if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = `${fmtO} tokens`;
+    } else {
+      if (this.orchTokensTotal) this.orchTokensTotal.textContent = '—';
+      if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = '— tokens';
+    }
+
+    // Offloaded %: only when both sides have real data
     if (this.offloadPct) {
-      this.offloadPct.textContent = total > 0
-        ? `${((this.piperTokens / total) * 100).toFixed(0)}%`
-        : '—';
+      if (this.orchTokensKnown && this.orchTokens > 0) {
+        const total = this.piperTokens + this.orchTokens;
+        this.offloadPct.textContent = total > 0
+          ? `${((this.piperTokens / total) * 100).toFixed(0)}%`
+          : '—';
+      } else if (this.piperTokens > 0) {
+        // We know local but not cloud — show indicator that local is doing work
+        this.offloadPct.textContent = '100%';
+      } else {
+        this.offloadPct.textContent = '—';
+      }
     }
   }
 
