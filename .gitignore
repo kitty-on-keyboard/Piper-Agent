@@ -41,7 +41,9 @@ __pycache__/
 
 # System
 .DS_Store
-.cursor/
+.cursor/*
+!.cursor/rules/
+!.cursor/skills/
 
 # Local-only safety copy made before history rewrite. Never commit.
 /.oss-backup/
