@@ -2622,8 +2622,10 @@ function questionCard(argsObj, questionText) {
 // prose first (measured: fractal feature A-E streamed, then ask_user drew A-D).
 // Retract that trailing list from the last assistant bubble so it is not asked twice.
 function retractQuestionProse(questionText) {
-  const bubbles = [...feed.querySelectorAll('.msg.assistant')];
-  const el = bubbles[bubbles.length - 1];
+  let el = live.previousElementSibling;
+  while (el && (!el.classList.contains('msg') || !el.classList.contains('assistant'))) {
+    el = el.previousElementSibling;
+  }
   if (!el) return;
   const q = (questionText || '').trim();
   const raw = (el.innerText || '').trim();
@@ -2702,7 +2704,11 @@ window.addEventListener('message', (e) => {
     if (payload.reset) {
       // The .msg children only. feed.textContent = '' would take the live row with them
       // -- and with it the orb's WebGL context, which does not come back.
-      for (const el of [...feed.querySelectorAll('.msg')]) el.remove();
+      // O(1) DOM traversal loop to remove all children before the live node
+      // avoids allocating a NodeList array and O(N) querying time.
+      while (feed.firstChild && feed.firstChild !== live) {
+        feed.firstChild.remove();
+      }
       $('plan').textContent = ''; $('perf').textContent = '';
     }
     closeBubble();
@@ -3159,7 +3165,11 @@ window.addEventListener('message', (e) => {
     // The .msg children ONLY. feed.textContent = '' takes the live row with them -- and
     // with it the orb's WebGL context, which does not come back. Same rule as run_start.
     closeBubble();
-    for (const el of [...feed.querySelectorAll('.msg')]) el.remove();
+    // O(1) DOM traversal loop to remove all children before the live node
+    // avoids allocating a NodeList array and O(N) querying time.
+    while (feed.firstChild && feed.firstChild !== live) {
+      feed.firstChild.remove();
+    }
     $('plan').textContent = '';
     $('mission').textContent = payload.mission || '';
 
