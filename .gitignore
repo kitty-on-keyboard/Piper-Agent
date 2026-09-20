@@ -56,4 +56,5 @@ lmp_events.jsonl
 # Local agent-loop wins benches / multi-MB journals (see docs/AGENT_LOOP_WINS_BRANCH_PLAN.md).
 # Keep summarize_events.py in scripts/; never commit raw dumps.
 /piper-bench/
+.piper/slices/
 

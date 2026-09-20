@@ -6,6 +6,8 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -1851,6 +1853,27 @@ TEST(registry_skill_tools_execution) {
     // load_skill nonexistent
     const ToolResult missing = reg.execute("load_skill", args({{"id", "nonexistent"}}), 1);
     CHECK(!missing.ok());
+
+    // Write a skill and test listing, loading, and sink notification
+    std::filesystem::create_directories(std::filesystem::path(root) / ".piper" / "skills" / "demo");
+    {
+        std::ofstream sf(std::filesystem::path(root) / ".piper" / "skills" / "demo" / "SKILL.md");
+        sf << "---\nname: Demo Skill\ndescription: A demo skill for testing\n---\n# Demo Body\nInstructions here.";
+    }
+
+    const ToolResult found_list = reg.execute("list_skills", {}, 1);
+    CHECK(found_list.ok());
+    CHECK(found_list.summary.find("demo (Demo Skill)") != std::string::npos);
+
+    std::string loaded_name;
+    reg.set_skill_loaded_sink([&](const SkillDetail& d) {
+        loaded_name = d.summary.name;
+    });
+
+    const ToolResult loaded = reg.execute("load_skill", args({{"id", "demo"}}), 1);
+    CHECK(loaded.ok());
+    CHECK(loaded.summary.find("Instructions here.") != std::string::npos);
+    CHECK_EQ(loaded_name, "Demo Skill");
 }
 
 TEST(commit_think_block_writes_exact_harvested_bytes) {
