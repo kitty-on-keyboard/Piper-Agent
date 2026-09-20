@@ -32,3 +32,8 @@
 **Vulnerability:** Parent environment variables carrying auth credentials, token IDs, or secret keys under allowlisted prefixes (such as `LC_CRED`, `XDG_CREDS`, `LC_TOKEN_ID`, `XDG_SECRET_KEY`, `LC_AUTH_TOKEN`, `XDG_ACCESS_TOKEN`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Token identifier and access credential suffixes like `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` must be explicitly included in suffix filtering rules to prevent sensitive authentication tokens and key pairs from being inherited.
 **Prevention:** Added `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+
+## 2026-03-31 - Include secret and session IDs in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying secret identifiers or session IDs under allowlisted prefixes (such as `LC_SECRET_ID`, `XDG_SECRET_ID`, `LC_SESSION_ID`, `XDG_SESSION_ID`, `LC_SESS_ID`, `XDG_SESS_ID`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Secret and session identifier suffixes like `SECRET_ID`, `SESSION_ID`, and `SESS_ID` must be explicitly included in suffix filtering rules to prevent sensitive session IDs and secret identifiers using allowlisted namespace prefixes from being inherited across process boundaries.
+**Prevention:** Added `SECRET_ID`, `SESSION_ID`, and `SESS_ID` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
