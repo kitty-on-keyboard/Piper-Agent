@@ -41,7 +41,7 @@ MLX process at a time — do not load the sidebar and the worker together.
 
 ```bash
 cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
-ln -s "$(pwd)/scripts/piper_worker.py" /usr/local/bin/piper   # once
+cmake --build --preset dev --target install-piper-link   # or: ./scripts/install_piper_link.sh
 piper --help
 
 # One-shot headless dispatch:
@@ -51,6 +51,11 @@ piper worker run --task /path/to/task.json   # blocks; then read result.json
 piper worker serve                           # listens on ~/.piper/worker.sock
 piper worker run --task /path/to/task.json   # automatically forwards to warm daemon!
 ```
+
+`install-piper-link` refreshes `/opt/homebrew/bin/piper` to the absolute path of
+`build/src/surface/piper` in this checkout (so a rename of the tree cannot leave a
+dead symlink). It no-ops cleanly when Homebrew's bin dir is missing. Re-run it after
+each build (or after moving the checkout) if orchestrators call bare `piper`.
 
 Direct binary invocation is also supported: `lmp_sidecar --worker --task <path>` or `lmp_sidecar --worker --serve`.
 Override the binary with `LMP_SIDECAR`; the model with `model_dir` in the packet or `LMP_QWEN_DIR`.

@@ -6,7 +6,8 @@
   piper --help
   python3 scripts/piper_worker.py self-test
 
-Install: ln -s "$(pwd)/build/src/surface/piper" /usr/local/bin/piper
+Install (Homebrew PATH link): ./scripts/install_piper_link.sh
+  or: cmake --build --preset dev --target install-piper-link
 """
 
 from __future__ import annotations
