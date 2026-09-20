@@ -67,10 +67,17 @@ std::vector<std::string> parse_string_array(const std::string& message,
     const nlohmann::json& params =
         root.contains("params") && root.at("params").is_object() ? root.at("params") : root;
     const std::string k(key);
-    if (!params.contains(k) || !params.at(k).is_array()) {
+    const nlohmann::json* holder = nullptr;
+    if (params.contains("settings") && params.at("settings").is_object() &&
+        params.at("settings").contains(k) && params.at("settings").at(k).is_array()) {
+        holder = &params.at("settings");
+    } else if (params.contains(k) && params.at(k).is_array()) {
+        holder = &params;
+    }
+    if (!holder) {
         return out;
     }
-    for (const nlohmann::json& e : params.at(k)) {
+    for (const nlohmann::json& e : holder->at(k)) {
         // Non-strings and empties are DROPPED rather than turned into an empty path: an
         // empty entry would reach the prompt builder as an unreadable image and cost the
         // turn a "could not be read" note about a file nobody asked for.

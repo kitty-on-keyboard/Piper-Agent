@@ -206,6 +206,15 @@ TEST(a_repeated_string_field_is_parsed_from_params_or_the_root) {
     // requests arrive.
     const std::string flat = R"({"image_paths":["only.png"]})";
     CHECK_EQ(lmp::surface::parse_string_array(flat, "image_paths").size(), std::size_t{1});
+
+    // Nested under params.settings (e.g. preload_skills on lmp/start)
+    const std::string in_settings =
+        R"({"method":"lmp/start","params":{"settings":{"preload_skills":["godoer","swift"]}}})";
+    const std::vector<std::string> got_settings =
+        lmp::surface::parse_string_array(in_settings, "preload_skills");
+    REQUIRE(got_settings.size() == std::size_t{2});
+    CHECK_EQ(got_settings[0], std::string("godoer"));
+    CHECK_EQ(got_settings[1], std::string("swift"));
 }
 
 TEST(a_missing_or_malformed_repeated_field_is_empty_rather_than_wrong) {

@@ -413,6 +413,29 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
         }
     }
 
+    auto parse_skills = [&](const std::string& key) {
+        if (j.contains(key)) {
+            if (!j[key].is_array()) {
+                error = key + " must be an array of skill IDs";
+                return false;
+            }
+            for (const auto& item : j[key]) {
+                if (!item.is_string()) {
+                    error = key + " elements must be strings";
+                    return false;
+                }
+                const std::string s = item.get<std::string>();
+                if (!s.empty()) {
+                    packet.preload_skills.push_back(s);
+                }
+            }
+        }
+        return true;
+    };
+    if (!parse_skills("skills") || !parse_skills("preload_skills")) {
+        return std::nullopt;
+    }
+
     return packet;
 }
 
@@ -505,6 +528,10 @@ std::string build_start_message(const TaskPacket& packet, const std::string& req
                 settings["mcp_servers"] = mcp_servers_list;
             }
         }
+    }
+
+    if (!packet.preload_skills.empty()) {
+        settings["preload_skills"] = packet.preload_skills;
     }
 
     nlohmann::json msg = {

@@ -64,6 +64,9 @@ struct TaskPacket {
 
     // Cloud orchestrator webhook URL (orchestrator wake).
     std::string orch_webhook;
+
+    // Skills to preload into the context store on start (by id).
+    std::vector<std::string> preload_skills;
 };
 
 // Parse task.json (+ optional sibling prompt.md). Returns the packet on success
