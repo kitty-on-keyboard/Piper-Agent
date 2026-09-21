@@ -56,7 +56,7 @@ TEST(pulse_decode_from_logits_argmax_and_softmax) {
     auto logits = logits_favoring(16, /*winner=*/8, /*win=*/4.0F, /*other=*/0.0F);
     const PulseMicroResult r = pulse_decode_from_logits(logits, opts, /*latency_ms=*/12.5);
     CHECK(r.ok);
-    CHECK_EQ(r.choice, PulseChoice::Stall);
+    CHECK(r.choice == PulseChoice::Stall);
     CHECK_EQ(r.choice_name, std::string("stall"));
     CHECK(r.p_vec.size() == 4);
     CHECK(r.p > 0.5F);
@@ -83,9 +83,9 @@ TEST(pulse_policy_falls_back_below_p_min) {
     r.choice_name = "force_tool";
     r.p = 0.40F;
     r.p_vec = {0.40F, 0.30F, 0.20F, 0.10F};
-    CHECK_EQ(apply_pulse_policy(r, 0.55F), PulsePolicy::Fallback);
+    CHECK(apply_pulse_policy(r, 0.55F) == PulsePolicy::Fallback);
     r.p = 0.60F;
-    CHECK_EQ(apply_pulse_policy(r, 0.55F), PulsePolicy::ForceTool);
+    CHECK(apply_pulse_policy(r, 0.55F) == PulsePolicy::ForceTool);
 }
 
 TEST(pulse_policy_maps_each_choice) {
@@ -93,13 +93,13 @@ TEST(pulse_policy_maps_each_choice) {
     r.ok = true;
     r.p = 0.9F;
     r.choice = PulseChoice::Nudge;
-    CHECK_EQ(apply_pulse_policy(r), PulsePolicy::Nudge);
+    CHECK(apply_pulse_policy(r) == PulsePolicy::Nudge);
     r.choice = PulseChoice::Stall;
-    CHECK_EQ(apply_pulse_policy(r), PulsePolicy::Stall);
+    CHECK(apply_pulse_policy(r) == PulsePolicy::Stall);
     r.choice = PulseChoice::Compact;
-    CHECK_EQ(apply_pulse_policy(r), PulsePolicy::Compact);
+    CHECK(apply_pulse_policy(r) == PulsePolicy::Compact);
     r.ok = false;
-    CHECK_EQ(apply_pulse_policy(r), PulsePolicy::Fallback);
+    CHECK(apply_pulse_policy(r) == PulsePolicy::Fallback);
 }
 
 TEST(pulse_enum_mask_source_is_block_stable) {
