@@ -45,3 +45,7 @@
 ## 2026-05-25 - Avoid spreading querySelectorAll in Webview Hot Paths
 **Learning:** Constructing arrays from `querySelectorAll` results using the spread operator (`[...feed.querySelectorAll('.msg')]`) requires allocating a full list in memory and evaluating an $O(N)$ query over the entire subtree. In frequently-called loops such as message stream management or finding the last `.msg.assistant`, this creates unnecessary DOM lookups and array allocations.
 **Action:** Replace `querySelectorAll` array spreading with direct DOM traversals (e.g., using `while (feed.firstChild && feed.firstChild !== live) { feed.firstChild.remove(); }` or walking backwards via `live.previousElementSibling`) to achieve $O(1)$ and $O(K)$ performance without allocations.
+
+## 2026-05-25 - Avoid spreading querySelectorAll in Webview Hot Paths
+**Learning:** Constructing arrays from `querySelectorAll` results using the spread operator (`[...feed.querySelectorAll('.msg')]`) requires allocating a full list in memory. In frequently-called loops such as message stream management or finding the last `.msg.assistant`, this creates unnecessary array allocations.
+**Action:** Replace `querySelectorAll` array spreading with direct iteration over the returned `NodeList` using standard `for` loops to achieve better performance without unnecessary allocations.
