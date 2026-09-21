@@ -59,10 +59,20 @@ class FakeMtp final : public SpecForward {
 
     void mtp_trim(std::size_t n) override { trims.push_back(n); }
 
+    void mtp_reset() override {
+        ++resets;
+        // A real MTP cache drops here. The fake has no GPU cache; counting the call is
+        // what lets the restore/prefill handoff regression assert that decode started
+        // from a cleared head rather than from draft positions the target rewound past.
+        steps.clear();
+        trims.clear();
+    }
+
     // What last_hidden() should report on the next call.
     std::vector<std::vector<float>> report;
     std::vector<StepCall> steps;
     std::vector<std::size_t> trims;
+    int resets = 0;
     int next_pred = 3; // first drafted token id is 3, then 4, ...
 };
 
@@ -293,4 +303,45 @@ TEST(a_deferred_prefix_pairs_a_partially_accepted_draft_against_its_own_row) {
     REQUIRE(fwd.steps.size() == 1);
     CHECK_EQ(fwd.steps[0].tok, TokenId{99});
     CHECK(fwd.steps[0].hidden_tag == 61.0F);
+}
+
+// ---------------------------------------------------------------------------
+// Restore + large suffix prefill hang (2026-09-21 bakeoff A0)
+//
+// Sidecar stderr: prefill_done on reuse=restore prefill_from=6411 prompt=10613, then
+// NO [spec] line until harness SIGKILL at 900s. Root cause: (1) last_hidden left as a
+// lazy full-chunk graph across the prefill-chunk clear_cache, so MTP's first propose
+// eval hung on Metal; (2) MTP KV not reset on Restore, so the head still held draft
+// positions the restored target had rewound past. The MLX pin + mtp_reset live in
+// mlx_backend / qwen35_moe_model; this gate test locks the SpecForward contract those
+// call sites rely on -- after a "restore" the next propose must see a cleared head.
+TEST(after_a_restore_mtp_reset_the_next_propose_starts_cold) {
+    FakeMtp fwd;
+    fwd.report = {tag(7.0F)};
+    MtpProposer p(3);
+
+    const std::vector<TokenId> context{42};
+    const std::vector<TokenId> first = p.propose(context, 8, fwd);
+    REQUIRE(first.size() == 2);
+    REQUIRE(fwd.steps.size() == 2);
+    CHECK_EQ(fwd.resets, 0);
+
+    // Simulate the backend handoff on Restore (and decode_begin): drop the head's
+    // cache, and drop the proposer's host-side seed so the next round cannot open on
+    // a continuation the rewound target never kept.
+    fwd.mtp_reset();
+    p.reset();
+    CHECK_EQ(fwd.resets, 1);
+    CHECK(fwd.steps.empty());
+    CHECK(!p.can_draft_deferred());
+
+    // Cold propose again -- same pairing rules as a first round, not a seeded one.
+    fwd.report = {tag(9.0F)};
+    const std::vector<TokenId> second = p.propose(context, 8, fwd);
+    REQUIRE(second.size() == 2);
+    REQUIRE(fwd.steps.size() == 2);
+    CHECK_EQ(fwd.steps[0].tok, TokenId{42});
+    CHECK(fwd.steps[0].hidden_tag == 9.0F);
+    // Two GPU steps: no seed was carried across the reset.
+    CHECK_EQ(fwd.steps.size(), std::size_t{2});
 }
