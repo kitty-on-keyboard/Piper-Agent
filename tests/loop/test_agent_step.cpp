@@ -5430,7 +5430,8 @@ TEST(pulse_binary_force_probe_emits_force_note) {
     REQUIRE(tf.ok());
     CHECK(tf.bytes.find("\"kind\":\"pulse\"") != std::string::npos);
     CHECK(tf.bytes.find("\"policy\":\"force_tool\"") != std::string::npos);
-    CHECK(tf.bytes.find("Pulse selected force_tool") != std::string::npos);
+    // Observation prose is context-only; journal records the policy on pulse + nudged.
+    CHECK(tf.bytes.find("\"pulse_policy\":\"force_tool\"") != std::string::npos);
     (void)::system(("rm -rf " + root).c_str());
 }
 
