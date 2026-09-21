@@ -77,6 +77,10 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_KEY=secret_key",
         "LC_AUTH_TOKEN=secret_token",
         "XDG_ACCESS_TOKEN=secret_access",
+        "LC_ID_TOKEN=secret_id_token",
+        "XDG_USER_TOKEN=secret_user_token",
+        "LC_REFRESH_TOKEN=secret_refresh_token",
+        "XDG_API_SECRET=secret_api_secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -98,6 +102,10 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_KEY"));
     CHECK(!has_key(env, "LC_AUTH_TOKEN"));
     CHECK(!has_key(env, "XDG_ACCESS_TOKEN"));
+    CHECK(!has_key(env, "LC_ID_TOKEN"));
+    CHECK(!has_key(env, "XDG_USER_TOKEN"));
+    CHECK(!has_key(env, "LC_REFRESH_TOKEN"));
+    CHECK(!has_key(env, "XDG_API_SECRET"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -151,6 +159,10 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_KEY=secret",
         "LC_AUTH_TOKEN=secret",
         "XDG_ACCESS_TOKEN=secret",
+        "LC_ID_TOKEN=secret",
+        "XDG_USER_TOKEN=secret",
+        "LC_REFRESH_TOKEN=secret",
+        "XDG_API_SECRET=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -175,6 +187,10 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_KEY"));
     CHECK(!has_key(env, "LC_AUTH_TOKEN"));
     CHECK(!has_key(env, "XDG_ACCESS_TOKEN"));
+    CHECK(!has_key(env, "LC_ID_TOKEN"));
+    CHECK(!has_key(env, "XDG_USER_TOKEN"));
+    CHECK(!has_key(env, "LC_REFRESH_TOKEN"));
+    CHECK(!has_key(env, "XDG_API_SECRET"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
