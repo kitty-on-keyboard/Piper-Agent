@@ -43,10 +43,11 @@ inline constexpr std::size_t kPulseT1OptionCount = 4;
     return "nudge";
 }
 
+inline constexpr const char* kPulseT1OptionNames[kPulseT1OptionCount] = {
+    "force_tool", "nudge", "stall", "compact"};
+
 [[nodiscard]] constexpr const char* const* pulse_t1_option_names() noexcept {
-    static constexpr const char* kNames[kPulseT1OptionCount] = {
-        "force_tool", "nudge", "stall", "compact"};
-    return kNames;
+    return kPulseT1OptionNames;
 }
 
 // Forced prefix closed over the four T1 options. Appended as a Pulse suffix; prefer
