@@ -91,6 +91,24 @@ still not actionable for drafting.
 
 ---
 
+## 3b. G1 kill switch: activated-expert wrapping (`LMP_MOE_K1` / `LMP_MOE_K2`)
+
+Training-free wrap (arXiv 2609.04575): **k1** experts actually run (matmul), **k2 ≥ k1**
+experts’ scores enter renormalization. Product default is unchanged: both unset →
+`k1 = k2 = num_experts_per_tok` (8), which takes the historical single-k `moe_topk` path
+bit-for-bit.
+
+| env | meaning | default |
+|---|---|---|
+| `LMP_MOE_K1` | activated expert count | unset (= cfg) |
+| `LMP_MOE_K2` | renormalization expert count | unset (= cfg) |
+
+Prove-it arm after land (Benchbot/Research owns Mac A/B — not this PR): `LMP_MOE_K1=4`
+`LMP_MOE_K2=16`. Invalid values are rejected or clamped; see `moe_topk_wrap.hpp` and
+`tests/model/test_moe_topk_wrap.cpp`.
+
+---
+
 ## 4. The decision-grade result: naive speculative decoding LOSES on this model
 
 Expert-bandwidth speedup, where one sequentially decoded token costs 320 expert loads

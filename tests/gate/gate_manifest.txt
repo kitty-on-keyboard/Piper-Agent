@@ -9,7 +9,7 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 62
+count 63
 test_agent_step
 test_arena
 test_assertions_enabled
@@ -41,6 +41,7 @@ test_mcp_settings
 test_mcp_stdio
 test_mini_vocab
 test_model_bounds
+test_moe_topk_wrap
 test_mtp_proposer
 test_parallel_calls
 test_parsephony_lookup

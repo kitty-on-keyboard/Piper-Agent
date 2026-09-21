@@ -4,8 +4,8 @@
 #if LMP_HAVE_MLX
 
 #include "activations.hpp"
+#include "moe_topk_wrap.hpp"
 #include "weight_store.hpp"
-
 
 #include <vector>
 
@@ -126,6 +126,9 @@ inline mx::array switch_glu(const mx::array& x,
     return switch_glu_impl(x, ws, gate_base, up_base, down_base, indices, gate_up_base);
 }
 
+// Single-k path (product default). Keep this body untouched: when G1 wrap resolves to
+// k1==k2==cfg.num_experts_per_tok, callers must take THIS overload so the graph stays
+// bit-for-bit with main.
 inline std::pair<mx::array, mx::array> moe_topk(const mx::array& gate_logits, int top_k, bool norm_topk) {
     // precise=true accumulates in float32, which is what mlx-lm's SparseMoeBlock passes.
     // Left at the bf16 default, 256 router logits land close enough together that the
@@ -138,6 +141,43 @@ inline std::pair<mx::array, mx::array> moe_topk(const mx::array& gate_logits, in
     if (norm_topk) {
         scores = mx::divide(scores, mx::sum(scores, -1, /*keepdims=*/true));
     }
+    return {inds, scores};
+}
+
+// G1 wrap: activate k1 experts, renormalize over top-k2 mass (k2 >= k1).
+// k1==k2 delegates to the single-k overload above — do not reimplement that path here.
+inline std::pair<mx::array, mx::array> moe_topk(const mx::array& gate_logits,
+                                               int k1,
+                                               int k2,
+                                               bool norm_topk) {
+    if (k1 == k2) {
+        return moe_topk(gate_logits, k1, norm_topk);
+    }
+    if (k2 < k1) {
+        k2 = k1;
+    }
+    const mx::array gates = mx::softmax(gate_logits, -1, /*precise=*/true);
+    const int experts = static_cast<int>(gates.shape()[2]);
+    if (k2 > experts) {
+        k2 = experts;
+    }
+    if (k1 > k2) {
+        k1 = k2;
+    }
+    mx::array part_k2 = mx::argpartition(gates, experts - k2, 2);
+    mx::array inds_k2 =
+        mx::slice(part_k2, {0, 0, experts - k2}, {gates.shape()[0], gates.shape()[1], experts});
+    mx::array scores_k2 = mx::take_along_axis(gates, inds_k2, 2);
+    if (norm_topk) {
+        scores_k2 = mx::divide(scores_k2, mx::sum(scores_k2, -1, /*keepdims=*/true));
+    }
+    // Top-k1 among the k2 by (k2-normalized) score; scores keep k2 mass, so they need
+    // not sum to 1 — that is the wrap.
+    mx::array part_k1 = mx::argpartition(scores_k2, k2 - k1, -1);
+    mx::array local =
+        mx::slice(part_k1, {0, 0, k2 - k1}, {scores_k2.shape()[0], scores_k2.shape()[1], k2});
+    mx::array inds = mx::take_along_axis(inds_k2, local, 2);
+    mx::array scores = mx::take_along_axis(scores_k2, local, 2);
     return {inds, scores};
 }
 

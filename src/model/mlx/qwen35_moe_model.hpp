@@ -279,7 +279,18 @@ public:
             return mx::zeros_like(x);
         }
         const mx::array gate_logits = weights_.linear(x, p + "gate");
-        auto [inds, scores] = lmp::model::mlxl::moe_topk(gate_logits, cfg_.num_experts_per_tok, cfg_.norm_topk_prob);
+        // G1 kill switch: LMP_MOE_K1 / LMP_MOE_K2 (default unset → k1=k2=num_experts_per_tok).
+        // When k1==k2 the 3-arg moe_topk path runs bit-for-bit with main.
+        const MoeTopkPair wrap = moe_topk_wrap_from_env(cfg_.num_experts_per_tok, cfg_.num_experts);
+        mx::array inds;
+        mx::array scores;
+        if (wrap.k1 == wrap.k2) {
+            std::tie(inds, scores) =
+                lmp::model::mlxl::moe_topk(gate_logits, wrap.k1, cfg_.norm_topk_prob);
+        } else {
+            std::tie(inds, scores) =
+                lmp::model::mlxl::moe_topk(gate_logits, wrap.k1, wrap.k2, cfg_.norm_topk_prob);
+        }
         // Diagnostic capture (S19.3). Off unless LMP_MOE_TRACE is set; see moe_trace.hpp
         // for why it is a runtime branch rather than a compile-time one, and why a traced
         // run's throughput figures must be discarded.
