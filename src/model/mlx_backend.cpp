@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -1258,6 +1260,157 @@ GenResult MlxBackend::warm_stable_prefix_impl(const InferenceTask& task,
     return r;
 }
 
+PulseDecodeResult MlxBackend::pulse_decode(const PulseDecodeTask& task,
+                                           const CancelToken& cancel) {
+    try {
+        return pulse_decode_impl(task, cancel);
+    } catch (const std::exception& e) {
+        PulseDecodeResult r;
+        r.error = std::string("MLX threw during pulse_decode: ") + e.what();
+        r.reuse_mode = "error";
+        return r;
+    } catch (...) {
+        PulseDecodeResult r;
+        r.error = "MLX threw a non-standard exception during pulse_decode";
+        r.reuse_mode = "error";
+        return r;
+    }
+}
+
+PulseDecodeResult MlxBackend::pulse_decode_impl(const PulseDecodeTask& task,
+                                                const CancelToken& cancel) {
+    PulseDecodeResult out;
+    if (!loaded_) {
+        out.error = "MlxBackend: no model loaded";
+        out.reuse_mode = "error";
+        return out;
+    }
+    if (task.prompt.empty()) {
+        out.error = "MlxBackend: empty pulse prompt";
+        out.reuse_mode = "error";
+        return out;
+    }
+    if (task.option_ids.empty()) {
+        out.error = "MlxBackend: empty pulse option set";
+        out.reuse_mode = "error";
+        return out;
+    }
+
+    // Snapshot live KV so the Pulse suffix does not pollute the next real turn.
+    const auto pre_pulse_cp = impl_->model.checkpoint();
+    const std::size_t pre_pulse_len = ledger_.size();
+    const auto saved_ckpt_cp = impl_->ckpt.cp;
+    const std::size_t saved_ckpt_len = impl_->ckpt.len;
+    const bool saved_ckpt_valid = impl_->ckpt.valid;
+
+    auto restore_pre_pulse = [&]() {
+        impl_->model.restore(pre_pulse_cp);
+        ledger_.truncate_to(pre_pulse_len);
+        impl_->ckpt.cp = saved_ckpt_cp;
+        impl_->ckpt.len = saved_ckpt_len;
+        impl_->ckpt.valid = saved_ckpt_valid;
+        impl_->model.mtp_reset();
+    };
+
+    InferenceTask itask;
+    itask.prompt = task.prompt;
+    itask.checkpoint_at = task.checkpoint_at;
+    itask.max_new_tokens = 1;
+
+    const TurnReuse plan = plan_turn_reuse(ledger_, itask.prompt, impl_->ckpt.len,
+                                           impl_->ckpt.valid, /*prompt_tags=*/{});
+    out.reuse_mode = std::string(reuse_mode_str(plan.mode));
+    switch (plan.mode) {
+        case ReuseMode::Extend:
+            break;
+        case ReuseMode::Restore:
+            impl_->model.restore(impl_->ckpt.cp);
+            ledger_.truncate_to(impl_->ckpt.len);
+            impl_->model.mtp_reset();
+            break;
+        case ReuseMode::Reset: {
+            GenResult discard;
+            reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                          impl_->ckpt.valid, discard);
+            break;
+        }
+    }
+    const std::size_t start = plan.prefill_from;
+    out.prefill_reused_tokens = start;
+
+    const auto t0 = clock_.mono();
+    std::vector<float> logits_host;
+    GenResult pref;
+    const std::size_t prompt_n = itask.prompt.size();
+    const std::size_t boundary =
+        itask.checkpoint_at > start && itask.checkpoint_at <= prompt_n ? itask.checkpoint_at
+                                                                       : 0;
+    if (!prefill_tokens(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                        impl_->ckpt.valid, itask, cancel, /*image_rows=*/{},
+                        /*prompt_tags=*/{}, start, prompt_n, boundary,
+                        /*want_last_logits=*/true, logits_host, pref)) {
+        restore_pre_pulse();
+        out.error = pref.status == GenStatus::Cancelled ? "cancelled" : pref.error;
+        return out;
+    }
+
+    // Softmax over option ids only (same contract as loop::pulse_decode_from_logits).
+    constexpr float kNegInf = -std::numeric_limits<float>::infinity();
+    std::vector<float> scores(task.option_ids.size(), kNegInf);
+    bool any = false;
+    for (std::size_t i = 0; i < task.option_ids.size(); ++i) {
+        const TokenId id = task.option_ids[i];
+        if (id < 0 || static_cast<std::size_t>(id) >= logits_host.size()) {
+            continue;
+        }
+        scores[i] = logits_host[static_cast<std::size_t>(id)];
+        any = true;
+    }
+    if (!any) {
+        restore_pre_pulse();
+        out.error = "pulse: no option id in logits range";
+        return out;
+    }
+    float max_logit = kNegInf;
+    for (float s : scores) {
+        if (s > max_logit) {
+            max_logit = s;
+        }
+    }
+    out.p_vec.assign(task.option_ids.size(), 0.0F);
+    float total = 0.0F;
+    for (std::size_t i = 0; i < scores.size(); ++i) {
+        if (scores[i] == kNegInf) {
+            continue;
+        }
+        const float p = std::exp(scores[i] - max_logit);
+        out.p_vec[i] = p;
+        total += p;
+    }
+    if (total <= 0.0F) {
+        restore_pre_pulse();
+        out.error = "pulse: zero mass over options";
+        return out;
+    }
+    for (float& p : out.p_vec) {
+        p /= total;
+    }
+    std::size_t best = 0;
+    for (std::size_t i = 1; i < out.p_vec.size(); ++i) {
+        if (out.p_vec[i] > out.p_vec[best]) {
+            best = i;
+        }
+    }
+    out.chosen_index = best;
+    out.chosen_id = task.option_ids[best];
+    out.p = out.p_vec[best];
+    out.latency_ms = ms_between(t0, clock_.mono());
+    out.ok = true;
+
+    restore_pre_pulse();
+    return out;
+}
+
 #else // !LMP_HAVE_MLX
 
 struct MlxBackend::Impl {};
@@ -1309,6 +1462,22 @@ GenResult MlxBackend::warm_stable_prefix(const InferenceTask& task,
     r.status = GenStatus::BackendError;
     r.error = "MlxBackend: MLX not compiled in";
     return r;
+}
+
+PulseDecodeResult MlxBackend::pulse_decode(const PulseDecodeTask& task,
+                                           const CancelToken& cancel) {
+    (void)task;
+    (void)cancel;
+    (void)clock_;
+    PulseDecodeResult r;
+    r.error = "MlxBackend: MLX not compiled in";
+    r.reuse_mode = "unsupported";
+    return r;
+}
+
+PulseDecodeResult MlxBackend::pulse_decode_impl(const PulseDecodeTask& task,
+                                                const CancelToken& cancel) {
+    return pulse_decode(task, cancel);
 }
 
 GenResult MlxBackend::warm_stable_prefix_impl(const InferenceTask& task,
