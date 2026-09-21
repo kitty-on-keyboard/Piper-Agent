@@ -116,9 +116,7 @@ TEST(c_roundtrip_protected_exact_compressed_sane) {
     for (int h = 0; h < Hv; ++h) {
         for (int d : mask.indices(0, h)) {
             for (int dv = 0; dv < Dv; ++dv) {
-                const std::size_t i =
-                    ((((static_cast<std::size_t>(0) * Hv + h) * Dv + dv) * Dk) +
-                     static_cast<std::size_t>(d));
+                const std::size_t i = lmp::model::mlxl::damp_detail::flat4(0, h, dv, d, Hv, Dv, Dk);
                 CHECK(roundtrip[i] == state[i]);
             }
         }

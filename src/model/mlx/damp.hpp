@@ -551,6 +551,22 @@ struct DampPackedDelta {
     }
 };
 
+namespace damp_detail {
+
+[[nodiscard]] inline std::size_t sz(int v) noexcept {
+    return static_cast<std::size_t>(v);
+}
+
+[[nodiscard]] inline std::size_t flat4(int a, int b, int c, int d, int Db, int Dc, int Dd) noexcept {
+    return ((sz(a) * sz(Db) + sz(b)) * sz(Dc) + sz(c)) * sz(Dd) + sz(d);
+}
+
+[[nodiscard]] inline std::size_t flat3(int a, int b, int c, int Db, int Dc) noexcept {
+    return (sz(a) * sz(Db) + sz(b)) * sz(Dc) + sz(c);
+}
+
+} // namespace damp_detail
+
 [[nodiscard]] inline bool damp_quantize_cpu(const float* state, int B, int Hv, int Dv, int Dk,
                                             const DampMask& mask, int layer, DampPackedDelta& out,
                                             std::string* err = nullptr) {
@@ -576,28 +592,32 @@ struct DampPackedDelta {
     out.Dk = Dk;
     out.k_hi = k_hi;
     out.layer = layer;
-    out.hi.assign(static_cast<std::size_t>(B) * Hv * Dv * k_hi, 0.f);
-    out.lo.assign(static_cast<std::size_t>(B) * Hv * Dv * k_lo, 0);
-    out.scale.assign(static_cast<std::size_t>(B) * Hv * Dv, 0.f);
+    out.hi.assign(damp_detail::sz(B) * damp_detail::sz(Hv) * damp_detail::sz(Dv) *
+                      damp_detail::sz(k_hi),
+                  0.f);
+    out.lo.assign(damp_detail::sz(B) * damp_detail::sz(Hv) * damp_detail::sz(Dv) *
+                      damp_detail::sz(k_lo),
+                  0);
+    out.scale.assign(damp_detail::sz(B) * damp_detail::sz(Hv) * damp_detail::sz(Dv), 0.f);
 
     // Per-head boolean: is channel d protected?
-    std::vector<std::vector<char>> is_hi(static_cast<std::size_t>(Hv),
-                                         std::vector<char>(static_cast<std::size_t>(Dk), 0));
-    std::vector<std::vector<int>> hi_order(static_cast<std::size_t>(Hv));
-    std::vector<std::vector<int>> lo_order(static_cast<std::size_t>(Hv));
+    std::vector<std::vector<char>> is_hi(damp_detail::sz(Hv),
+                                         std::vector<char>(damp_detail::sz(Dk), 0));
+    std::vector<std::vector<int>> hi_order(damp_detail::sz(Hv));
+    std::vector<std::vector<int>> lo_order(damp_detail::sz(Hv));
     for (int h = 0; h < Hv; ++h) {
         const auto& prot = mask.indices(layer, h);
-        hi_order[static_cast<std::size_t>(h)] = prot;
+        hi_order[damp_detail::sz(h)] = prot;
         for (int d : prot) {
-            is_hi[static_cast<std::size_t>(h)][static_cast<std::size_t>(d)] = 1;
+            is_hi[damp_detail::sz(h)][damp_detail::sz(d)] = 1;
         }
-        lo_order[static_cast<std::size_t>(h)].reserve(static_cast<std::size_t>(k_lo));
+        lo_order[damp_detail::sz(h)].reserve(damp_detail::sz(k_lo));
         for (int d = 0; d < Dk; ++d) {
-            if (!is_hi[static_cast<std::size_t>(h)][static_cast<std::size_t>(d)]) {
-                lo_order[static_cast<std::size_t>(h)].push_back(d);
+            if (!is_hi[damp_detail::sz(h)][damp_detail::sz(d)]) {
+                lo_order[damp_detail::sz(h)].push_back(d);
             }
         }
-        if (static_cast<int>(lo_order[static_cast<std::size_t>(h)].size()) != k_lo) {
+        if (static_cast<int>(lo_order[damp_detail::sz(h)].size()) != k_lo) {
             if (err) {
                 *err = "lo_order size";
             }
@@ -606,38 +626,33 @@ struct DampPackedDelta {
     }
 
     auto at = [&](int b, int h, int dv, int d) -> const float& {
-        const std::size_t i =
-            ((((static_cast<std::size_t>(b) * Hv + h) * Dv + dv) * Dk) + d);
-        return state[i];
+        return state[damp_detail::flat4(b, h, dv, d, Hv, Dv, Dk)];
     };
 
     for (int b = 0; b < B; ++b) {
         for (int h = 0; h < Hv; ++h) {
             for (int dv = 0; dv < Dv; ++dv) {
-                const std::size_t base_hi =
-                    ((((static_cast<std::size_t>(b) * Hv + h) * Dv + dv) * k_hi));
-                const std::size_t base_lo =
-                    ((((static_cast<std::size_t>(b) * Hv + h) * Dv + dv) * k_lo));
-                const std::size_t scale_i =
-                    ((static_cast<std::size_t>(b) * Hv + h) * Dv + dv);
+                const std::size_t base_hi = damp_detail::flat3(b, h, dv, Hv, Dv) * damp_detail::sz(k_hi);
+                const std::size_t base_lo = damp_detail::flat3(b, h, dv, Hv, Dv) * damp_detail::sz(k_lo);
+                const std::size_t scale_i = damp_detail::flat3(b, h, dv, Hv, Dv);
 
                 for (int i = 0; i < k_hi; ++i) {
-                    const int d = hi_order[static_cast<std::size_t>(h)][static_cast<std::size_t>(i)];
-                    out.hi[base_hi + static_cast<std::size_t>(i)] = at(b, h, dv, d);
+                    const int d = hi_order[damp_detail::sz(h)][damp_detail::sz(i)];
+                    out.hi[base_hi + damp_detail::sz(i)] = at(b, h, dv, d);
                 }
 
                 float absmax = 0.f;
                 for (int i = 0; i < k_lo; ++i) {
-                    const int d = lo_order[static_cast<std::size_t>(h)][static_cast<std::size_t>(i)];
+                    const int d = lo_order[damp_detail::sz(h)][damp_detail::sz(i)];
                     absmax = std::max(absmax, std::fabs(at(b, h, dv, d)));
                 }
                 const float s = absmax > 0.f ? absmax / 127.f : 0.f;
                 out.scale[scale_i] = s;
                 for (int i = 0; i < k_lo; ++i) {
-                    const int d = lo_order[static_cast<std::size_t>(h)][static_cast<std::size_t>(i)];
+                    const int d = lo_order[damp_detail::sz(h)][damp_detail::sz(i)];
                     float q = s > 0.f ? at(b, h, dv, d) / s : 0.f;
                     q = std::max(-127.f, std::min(127.f, std::round(q)));
-                    out.lo[base_lo + static_cast<std::size_t>(i)] = static_cast<std::int8_t>(q);
+                    out.lo[base_lo + damp_detail::sz(i)] = static_cast<std::int8_t>(q);
                 }
             }
         }
@@ -668,52 +683,47 @@ struct DampPackedDelta {
     const int k_lo = Dk - k_hi;
     const int layer = packed.layer;
 
-    std::vector<std::vector<char>> is_hi(static_cast<std::size_t>(Hv),
-                                         std::vector<char>(static_cast<std::size_t>(Dk), 0));
-    std::vector<std::vector<int>> hi_order(static_cast<std::size_t>(Hv));
-    std::vector<std::vector<int>> lo_order(static_cast<std::size_t>(Hv));
+    std::vector<std::vector<char>> is_hi(damp_detail::sz(Hv),
+                                         std::vector<char>(damp_detail::sz(Dk), 0));
+    std::vector<std::vector<int>> hi_order(damp_detail::sz(Hv));
+    std::vector<std::vector<int>> lo_order(damp_detail::sz(Hv));
     for (int h = 0; h < Hv; ++h) {
         const auto& prot = mask.indices(layer, h);
-        hi_order[static_cast<std::size_t>(h)] = prot;
+        hi_order[damp_detail::sz(h)] = prot;
         for (int d : prot) {
-            is_hi[static_cast<std::size_t>(h)][static_cast<std::size_t>(d)] = 1;
+            is_hi[damp_detail::sz(h)][damp_detail::sz(d)] = 1;
         }
         for (int d = 0; d < Dk; ++d) {
-            if (!is_hi[static_cast<std::size_t>(h)][static_cast<std::size_t>(d)]) {
-                lo_order[static_cast<std::size_t>(h)].push_back(d);
+            if (!is_hi[damp_detail::sz(h)][damp_detail::sz(d)]) {
+                lo_order[damp_detail::sz(h)].push_back(d);
             }
         }
     }
 
-    const std::size_t n =
-        static_cast<std::size_t>(B) * Hv * Dv * Dk;
+    const std::size_t n = damp_detail::sz(B) * damp_detail::sz(Hv) * damp_detail::sz(Dv) *
+                          damp_detail::sz(Dk);
     std::fill(out, out + n, 0.f);
 
     auto at = [&](int b, int h, int dv, int d) -> float& {
-        const std::size_t i =
-            ((((static_cast<std::size_t>(b) * Hv + h) * Dv + dv) * Dk) + d);
-        return out[i];
+        return out[damp_detail::flat4(b, h, dv, d, Hv, Dv, Dk)];
     };
 
     for (int b = 0; b < B; ++b) {
         for (int h = 0; h < Hv; ++h) {
             for (int dv = 0; dv < Dv; ++dv) {
-                const std::size_t base_hi =
-                    ((((static_cast<std::size_t>(b) * Hv + h) * Dv + dv) * k_hi));
-                const std::size_t base_lo =
-                    ((((static_cast<std::size_t>(b) * Hv + h) * Dv + dv) * k_lo));
-                const std::size_t scale_i =
-                    ((static_cast<std::size_t>(b) * Hv + h) * Dv + dv);
+                const std::size_t base_hi = damp_detail::flat3(b, h, dv, Hv, Dv) * damp_detail::sz(k_hi);
+                const std::size_t base_lo = damp_detail::flat3(b, h, dv, Hv, Dv) * damp_detail::sz(k_lo);
+                const std::size_t scale_i = damp_detail::flat3(b, h, dv, Hv, Dv);
                 const float s = packed.scale[scale_i];
 
                 for (int i = 0; i < k_hi; ++i) {
-                    const int d = hi_order[static_cast<std::size_t>(h)][static_cast<std::size_t>(i)];
-                    at(b, h, dv, d) = packed.hi[base_hi + static_cast<std::size_t>(i)];
+                    const int d = hi_order[damp_detail::sz(h)][damp_detail::sz(i)];
+                    at(b, h, dv, d) = packed.hi[base_hi + damp_detail::sz(i)];
                 }
                 for (int i = 0; i < k_lo; ++i) {
-                    const int d = lo_order[static_cast<std::size_t>(h)][static_cast<std::size_t>(i)];
+                    const int d = lo_order[damp_detail::sz(h)][damp_detail::sz(i)];
                     at(b, h, dv, d) =
-                        static_cast<float>(packed.lo[base_lo + static_cast<std::size_t>(i)]) * s;
+                        static_cast<float>(packed.lo[base_lo + damp_detail::sz(i)]) * s;
                 }
             }
         }
