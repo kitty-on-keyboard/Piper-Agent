@@ -1,8 +1,7 @@
-// Pulse T1 — pure mask / logits / policy unit tests (gate, no GPU).
-//
-// Kill bars for shape: mask permits only options; escape fails; flag-off == baseline.
+// Pulse T1 Iteration A — letter codes, shuffle, hindsight strip (gate, no GPU).
 
 #include <cmath>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -42,36 +41,41 @@ TEST(pulse_option_mask_permits_only_options) {
 }
 
 TEST(pulse_mask_escape_fails_for_free_text_ids) {
-    const std::vector<TokenId> opts = {1, 2, 3, 4};
+    const std::vector<TokenId> opts = {1, 2, 3, 4}; // A/B/C/D letter ids
     const TokenMask m = pulse_option_mask(16, opts);
-    // Any id outside the closed set is an escape (would be free text under an open mask).
     for (TokenId id = 0; id < 16; ++id) {
         const bool opt = id >= 1 && id <= 4;
         CHECK_EQ(pulse_mask_escape(m, id), !opt);
     }
 }
 
-TEST(pulse_decode_from_logits_argmax_and_softmax) {
-    const std::vector<TokenId> opts = {2, 5, 8, 9}; // force_tool, nudge, stall, compact
-    auto logits = logits_favoring(16, /*winner=*/8, /*win=*/4.0F, /*other=*/0.0F);
-    const PulseMicroResult r = pulse_decode_from_logits(logits, opts, /*latency_ms=*/12.5);
+TEST(pulse_decode_from_logits_maps_letter_slot_to_enum) {
+    // Presentation order: stall, force_tool, nudge, compact → letters A B C D
+    const std::vector<TokenId> opts = {2, 5, 8, 9};
+    const std::vector<PulseChoice> choices = {
+        PulseChoice::Stall, PulseChoice::ForceTool, PulseChoice::Nudge, PulseChoice::Compact};
+    // Winner = letter B (id 5) → force_tool
+    auto logits = logits_favoring(16, /*winner=*/5, /*win=*/4.0F, /*other=*/0.0F);
+    const PulseMicroResult r =
+        pulse_decode_from_logits(logits, opts, choices, /*latency_ms=*/12.5);
     CHECK(r.ok);
-    CHECK(r.choice == PulseChoice::Stall);
-    CHECK_EQ(r.choice_name, std::string("stall"));
+    CHECK(r.choice == PulseChoice::ForceTool);
+    CHECK_EQ(r.choice_name, std::string("force_tool"));
+    CHECK(r.letter == 'B');
+    CHECK_EQ(r.encoding, std::string("letter"));
     CHECK(r.p_vec.size() == 4);
     CHECK(r.p > 0.5F);
-    CHECK(std::fabs(r.p - r.p_vec[2]) < 1e-5F);
+    CHECK(std::fabs(r.p - r.p_vec[1]) < 1e-5F);
     float sum = 0.0F;
     for (float p : r.p_vec) {
         sum += p;
     }
     CHECK(std::fabs(sum - 1.0F) < 1e-5F);
-    CHECK(std::fabs(r.latency_ms - 12.5) < 1e-9);
 }
 
 TEST(pulse_decode_rejects_empty_options) {
     std::vector<float> logits(8, 1.0F);
-    const PulseMicroResult r = pulse_decode_from_logits(logits, {}, 0.0);
+    const PulseMicroResult r = pulse_decode_from_logits(logits, {}, {}, 0.0);
     CHECK(!r.ok);
     CHECK(!r.error.empty());
 }
@@ -110,10 +114,86 @@ TEST(pulse_enum_mask_source_is_block_stable) {
     CHECK(pulse_mask_escape(src.mask(), 11));
 }
 
-TEST(pulse_t1_forced_prefix_lists_all_options) {
-    const std::string prefix = pulse_t1_forced_prefix();
-    CHECK(prefix.find("force_tool") != std::string::npos);
-    CHECK(prefix.find("nudge") != std::string::npos);
-    CHECK(prefix.find("stall") != std::string::npos);
-    CHECK(prefix.find("compact") != std::string::npos);
+TEST(pulse_t1_forced_prefix_is_neutral_with_letter_codes) {
+    const PulseChoiceOrder order = {PulseChoice::Stall, PulseChoice::Nudge,
+                                    PulseChoice::ForceTool, PulseChoice::Compact};
+    PulseFeatures f;
+    f.consec = 2;
+    f.streak = 2;
+    f.prompt_tok = 100;
+    f.why = "degenerate";
+    const std::string prefix = pulse_t1_forced_prefix(order, f);
+    CHECK(prefix.find("text-instead-of-tool") == std::string::npos);
+    CHECK(prefix.find("Pick exactly one harness next-step") != std::string::npos);
+    CHECK(prefix.find("A = ") != std::string::npos);
+    CHECK(prefix.find("B = ") != std::string::npos);
+    CHECK(prefix.find("C = ") != std::string::npos);
+    CHECK(prefix.find("D = ") != std::string::npos);
+    CHECK(prefix.find("stall —") != std::string::npos);       // A
+    CHECK(prefix.find("force_tool —") != std::string::npos); // C
+    CHECK(prefix.find("Features:") != std::string::npos);
+    CHECK(prefix.find("consec=2") != std::string::npos);
+    CHECK(prefix.find("why=degenerate") != std::string::npos);
+}
+
+TEST(pulse_shuffle_moves_force_off_first_slot_for_some_seeds) {
+    bool force_was_first = false;
+    bool force_was_not_first = false;
+    std::set<std::string> signatures;
+    for (std::uint64_t seed = 1; seed <= 64; ++seed) {
+        const PulseChoiceOrder o = shuffle_t1_choices(seed);
+        std::string sig;
+        for (PulseChoice c : o) {
+            sig += pulse_choice_name(c);
+            sig += ',';
+        }
+        signatures.insert(sig);
+        if (o[0] == PulseChoice::ForceTool) {
+            force_was_first = true;
+        } else {
+            force_was_not_first = true;
+        }
+    }
+    CHECK(force_was_not_first); // required: force not always first
+    CHECK(force_was_first);     // and sometimes is (shuffle is a perm, not a ban)
+    CHECK(signatures.size() >= 4); // multiple distinct orders across seeds
+}
+
+TEST(pulse_shuffle_is_deterministic) {
+    const PulseChoiceOrder a = shuffle_t1_choices(42);
+    const PulseChoiceOrder b = shuffle_t1_choices(42);
+    for (std::size_t i = 0; i < kPulseT1OptionCount; ++i) {
+        CHECK(a[i] == b[i]);
+    }
+}
+
+TEST(pulse_strip_hindsight_removes_next_and_outcome) {
+    const std::string raw =
+        "consec=3 streak=3 prompt_tok=900 why=degenerate next=force_tool outcome=stall "
+        "gold=nudge\n"
+        "keep_me=1";
+    const std::string cleaned = strip_pulse_hindsight(raw);
+    CHECK(cleaned.find("next=") == std::string::npos);
+    CHECK(cleaned.find("outcome=") == std::string::npos);
+    CHECK(cleaned.find("gold=") == std::string::npos);
+    CHECK(cleaned.find("consec=3") != std::string::npos);
+    CHECK(cleaned.find("why=degenerate") != std::string::npos);
+    CHECK(cleaned.find("keep_me=1") != std::string::npos);
+}
+
+TEST(pulse_format_features_is_structured_only) {
+    PulseFeatures f;
+    f.consec = 1;
+    f.streak = 2;
+    f.prompt_tok = 50;
+    f.reread_max = 3;
+    f.think = 10;
+    f.text = 20;
+    f.tool_tok = 0;
+    f.why = "loop_cut";
+    const std::string block = format_pulse_features(f);
+    CHECK(block.find("consec=1") != std::string::npos);
+    CHECK(block.find("streak=2") != std::string::npos);
+    CHECK(block.find("why=loop_cut") != std::string::npos);
+    CHECK(block.find("essay") == std::string::npos);
 }

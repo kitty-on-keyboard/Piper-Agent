@@ -2627,15 +2627,43 @@ PulsePolicy Agent::run_pulse_t1(const model::CancelToken& cancel, const char* wh
             micro.error = "pulse_probe returned nullopt";
         }
     } else {
-        PulseOptionIds opts = resolve_t1_option_ids(tok_);
+        // Iteration A: shuffle letter→enum, neutral prefix, structured features only.
+        const std::uint64_t shuffle_seed =
+            (static_cast<std::uint64_t>(turns_generated_) << 32U) ^
+            static_cast<std::uint64_t>(inert_turns_) ^
+            static_cast<std::uint64_t>(last_prompt_tokens_);
+        const PulseChoiceOrder order = shuffle_t1_choices(shuffle_seed);
+        PulseOptionIds opts = resolve_t1_letter_ids(tok_, order);
         if (!opts.ok()) {
-            micro.error = opts.error.empty() ? "pulse: option id resolve failed" : opts.error;
+            micro.error = opts.error.empty() ? "pulse: letter id resolve failed" : opts.error;
         } else {
+            PulseFeatures feats;
+            feats.consec = static_cast<int>(inert_turns_);
+            feats.streak = static_cast<int>(inert_turns_);
+            feats.prompt_tok = static_cast<int>(last_prompt_tokens_);
+            feats.reread_max = 0;
+            feats.think = 0;
+            feats.text = 0;
+            feats.tool_tok = 0;
+            // Map harness why_detail onto the closed why set.
+            const std::string_view w = when == nullptr ? "" : when;
+            if (w == "loop_cut" || w.find("loop") != std::string_view::npos) {
+                feats.why = "loop_cut";
+            } else if (w == "no_progress" || w.find("progress") != std::string_view::npos) {
+                feats.why = "no_progress";
+            } else if (w == "degenerate_text" || w.find("degenerate") != std::string_view::npos ||
+                       w.find("length_capped") != std::string_view::npos ||
+                       w.find("text_only") != std::string_view::npos) {
+                feats.why = "degenerate";
+            } else {
+                feats.why = "none";
+            }
+
             model::PulseDecodeTask task;
             // Prefer Extend: host turn prompt + Pulse forced-prefix suffix.
             task.prompt = last_prompt_ids_;
-            const std::vector<model::TokenId> suffix =
-                tok_.encode_content(pulse_t1_forced_prefix());
+            const std::string prefix = pulse_t1_forced_prefix(order, feats);
+            const std::vector<model::TokenId> suffix = tok_.encode_content(prefix);
             task.prompt.insert(task.prompt.end(), suffix.begin(), suffix.end());
             task.option_ids = opts.ids;
             task.checkpoint_at = last_checkpoint_at_;
@@ -2647,15 +2675,30 @@ PulsePolicy Agent::run_pulse_t1(const model::CancelToken& cancel, const char* wh
             micro.kv_reuse = dec.reuse_mode.empty() ? "unknown" : dec.reuse_mode;
             micro.p_vec = dec.p_vec;
             micro.p = dec.p;
-            if (dec.ok && dec.chosen_index < kPulseT1OptionCount) {
-                micro.choice = static_cast<PulseChoice>(dec.chosen_index);
+            micro.encoding = opts.encoding;
+            {
+                std::string order_str;
+                for (std::size_t i = 0; i < order.size(); ++i) {
+                    if (i > 0) {
+                        order_str += ',';
+                    }
+                    order_str += pulse_choice_name(order[i]);
+                }
+                micro.order = std::move(order_str);
+            }
+            if (dec.ok && dec.chosen_index < opts.choices.size()) {
+                micro.choice = opts.choices[dec.chosen_index];
                 micro.choice_name = std::string(pulse_choice_name(micro.choice));
+                micro.letter = kPulseT1Letters[dec.chosen_index];
+                if (dec.chosen_index < micro.p_vec.size()) {
+                    micro.p = micro.p_vec[dec.chosen_index];
+                }
             } else if (dec.ok) {
-                // Map chosen_id back onto the option list when index was not filled.
                 for (std::size_t i = 0; i < opts.ids.size(); ++i) {
                     if (opts.ids[i] == dec.chosen_id) {
-                        micro.choice = static_cast<PulseChoice>(i);
+                        micro.choice = opts.choices[i];
                         micro.choice_name = std::string(pulse_choice_name(micro.choice));
+                        micro.letter = kPulseT1Letters[i];
                         break;
                     }
                 }
@@ -2665,8 +2708,8 @@ PulsePolicy Agent::run_pulse_t1(const model::CancelToken& cancel, const char* wh
 
     const PulsePolicy policy = apply_pulse_policy(micro, config_.pulse_p_min);
 
-    std::string questions;
-    {
+    std::string questions = micro.order;
+    if (questions.empty()) {
         const char* const* names = pulse_t1_option_names();
         for (std::size_t i = 0; i < kPulseT1OptionCount; ++i) {
             if (i > 0) {
@@ -2686,6 +2729,9 @@ PulsePolicy Agent::run_pulse_t1(const model::CancelToken& cancel, const char* wh
          {{"when", when == nullptr ? "t1_degenerate" : when},
           {"questions", questions},
           {"choice", micro.ok ? micro.choice_name : ""},
+          {"letter", micro.ok ? std::string(1, micro.letter) : ""},
+          {"encoding", micro.encoding.empty() ? "letter" : micro.encoding},
+          {"order", micro.order},
           {"p", std::to_string(micro.p)},
           {"p_vec", p_vec_str},
           {"p_min", std::to_string(config_.pulse_p_min)},

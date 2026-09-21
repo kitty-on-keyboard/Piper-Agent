@@ -2,10 +2,11 @@
 //
 // Pulse -- schema-only Choice gate over option-token logprobs (T1 degenerate).
 //
-// Between turns, the already-loaded model answers a tiny closed questionnaire under an
-// enum mask; harness branches on (choice, P). No free text. Default OFF (`LMP_PULSE=0`).
-// See docs/PULSE.md and research notes PULSE_IMPLEMENTABLE_NOTE.
+// Iteration A: neutral cue + A/B/C/D letter codes + structured features; option order
+// shuffled per item; hindsight stripped from any probe summary. Default OFF
+// (`LMP_PULSE=0`). See docs/PULSE.md and research/pulse/ITERATION_A_PROMPT.md.
 //
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,10 @@ enum class PulseChoice : std::uint8_t {
 
 inline constexpr std::size_t kPulseT1OptionCount = 4;
 
+// Decode mask uses single-letter codes A/B/C/D (vocab-stable first-token ids).
+// Journal still records the enum name (force_tool|nudge|stall|compact).
+inline constexpr char kPulseT1Letters[kPulseT1OptionCount] = {'A', 'B', 'C', 'D'};
+
 [[nodiscard]] constexpr std::string_view pulse_choice_name(PulseChoice c) noexcept {
     switch (c) {
         case PulseChoice::ForceTool:
@@ -50,29 +55,72 @@ inline constexpr const char* kPulseT1OptionNames[kPulseT1OptionCount] = {
     return kPulseT1OptionNames;
 }
 
-// Forced prefix closed over the four T1 options. Appended as a Pulse suffix; prefer
-// Extend on the live KV when plan_turn_reuse allows.
-[[nodiscard]] inline std::string pulse_t1_forced_prefix() {
-    return "[Pulse] Degenerate / text-instead-of-tool pressure. "
-           "Answer with exactly one of these tokens and nothing else:\n"
-           "force_tool\n"
-           "nudge\n"
-           "stall\n"
-           "compact\n"
-           "Answer:";
+// One-line defs for the Iteration A forced prefix (letter assigned after shuffle).
+[[nodiscard]] constexpr std::string_view pulse_choice_def(PulseChoice c) noexcept {
+    switch (c) {
+        case PulseChoice::ForceTool:
+            return "force_tool — task clearly needs a tool next (read/edit/test/shell); "
+                   "stop pure think/text.";
+        case PulseChoice::Nudge:
+            return "nudge — one more recovery chance; mild stuck, not exhausted.";
+        case PulseChoice::Stall:
+            return "stall — further nudges futile; end cleanly.";
+        case PulseChoice::Compact:
+            return "compact — context bloated or re-read storm; compact before another "
+                   "nudge.";
+    }
+    return "nudge — one more recovery chance; mild stuck, not exhausted.";
 }
 
+// Structured features only — no free prose essay (Iteration A).
+struct PulseFeatures {
+    int consec = 0;
+    int streak = 0;
+    int prompt_tok = 0;
+    int reread_max = 0;
+    int think = 0;
+    int text = 0;
+    int tool_tok = 0;
+    // loop_cut | no_progress | degenerate | none (and harness why_detail aliases).
+    std::string why = "none";
+};
+
+[[nodiscard]] std::string format_pulse_features(const PulseFeatures& f);
+
+// Remove hindsight / post-decision trails from probe context before decode.
+// Strips `next=`, `outcome=`, and similar post-decision fields.
+[[nodiscard]] std::string strip_pulse_hindsight(std::string_view text);
+
+// Presentation order of the four choices (letters A..D map to these slots).
+using PulseChoiceOrder = std::array<PulseChoice, kPulseT1OptionCount>;
+
+// Seeded shuffle so force_tool is not always letter A / first slot.
+[[nodiscard]] PulseChoiceOrder shuffle_t1_choices(std::uint64_t seed) noexcept;
+
+// Neutral forced prefix + letter defs in shuffled order + Features block.
+// Optional mission stub is omitted when empty; callers must keep it ≤20 tokens.
+[[nodiscard]] std::string pulse_t1_forced_prefix(const PulseChoiceOrder& order,
+                                                 const PulseFeatures& features,
+                                                 std::string_view mission = {});
+
 struct PulseOptionIds {
-    // First-token id per option, parallel to pulse_t1_option_names().
+    // Token id per presented letter (A..D order), parallel to `choices`.
     std::vector<model::TokenId> ids;
-    std::string error; // non-empty when resolution failed (empty encode, collision, ...)
+    // Enum for each presented letter slot (same order as ids).
+    std::vector<PulseChoice> choices;
+    // "letter" when masking A/B/C/D single-token ids (Iteration A default).
+    std::string encoding = "letter";
+    std::string error;
     [[nodiscard]] bool ok() const noexcept {
-        return error.empty() && ids.size() == kPulseT1OptionCount;
+        return error.empty() && ids.size() == kPulseT1OptionCount &&
+               choices.size() == kPulseT1OptionCount;
     }
 };
 
-// Resolve first-token ids for T1 options. Colliding first tokens are a shape failure.
-[[nodiscard]] PulseOptionIds resolve_t1_option_ids(const model::QwenTokenizer& tok);
+// Resolve single-letter token ids for A/B/C/D in presentation order.
+// Prefers encode_content("A") etc.; requires unique first tokens.
+[[nodiscard]] PulseOptionIds resolve_t1_letter_ids(const model::QwenTokenizer& tok,
+                                                   const PulseChoiceOrder& order);
 
 // Enum mask: ONLY the given option token ids are legal. Everything else is denied.
 [[nodiscard]] model::TokenMask pulse_option_mask(std::size_t vocab_size,
@@ -86,20 +134,22 @@ struct PulseMicroResult {
     std::string error;
     PulseChoice choice = PulseChoice::Nudge;
     std::string choice_name = "nudge";
-    // Normalised mass over the option set, parallel to option order. Empty on failure.
+    char letter = '?'; // A..D as presented
+    // Normalised mass over the presented letter set (A..D order). Empty on failure.
     std::vector<float> p_vec;
     float p = 0.0F; // P[choice]
     double latency_ms = 0.0;
-    // Filled by the live decode path when known; unit tests leave empty/"unknown".
     std::size_t prefill_reused_tokens = 0;
     std::string kv_reuse; // Extend|Restore|Reset|unknown|n/a
+    std::string encoding; // "letter"
+    std::string order;    // e.g. "stall,force_tool,nudge,compact"
 };
 
-// Softmax over option token ids only (raw last-step logits). No free text: if the option
-// set is empty or every option id is out of range, returns ok=false.
+// Softmax over option token ids only. `choices` is parallel to `option_ids` (presentation
+// order after shuffle). Maps argmax letter slot → enum for journal.
 [[nodiscard]] PulseMicroResult pulse_decode_from_logits(
     const std::vector<float>& logits, const std::vector<model::TokenId>& option_ids,
-    double latency_ms = 0.0);
+    const std::vector<PulseChoice>& choices, double latency_ms = 0.0);
 
 // Argmax if P[choice] >= p_min; otherwise Fallback (caller keeps #150 / stall heuristics).
 enum class PulsePolicy : std::uint8_t {
@@ -107,7 +157,7 @@ enum class PulsePolicy : std::uint8_t {
     Nudge,
     Stall,
     Compact,
-    Fallback, // P below floor -- do not hard-fail open
+    Fallback,
 };
 
 inline constexpr float kPulseDefaultPMin = 0.55F;
@@ -146,8 +196,6 @@ class PulseEnumMask final : public model::MaskSource {
     model::TokenMask mask_;
 };
 
-// Optional test / Mac-probe seam. When set on AgentConfig, T1 uses this instead of the
-// backend. Returning nullopt means "no Pulse answer" → policy Fallback.
 using PulseProbe = std::function<std::optional<PulseMicroResult>()>;
 
 } // namespace lmp::loop

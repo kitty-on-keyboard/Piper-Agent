@@ -1,6 +1,6 @@
 # Pulse
 
-**Status:** v1 T1 wire behind `LMP_PULSE` (default **off**). Product stays off until Mac labeled set KEEP (Benchbot / Research).
+**Status:** v1 T1 wire behind `LMP_PULSE` (default **off**). Iteration A prompt/decode (letter codes + shuffle + hindsight strip). Product stays off until Mac labeled set KEEP.
 
 ## What it is
 
@@ -18,13 +18,16 @@ Unset or `LMP_PULSE=0` → baseline #150 / stall heuristics only.
 
 ## T1 trigger (v1 only)
 
-After `degenerate_text` / TextOnly (text-instead-of-tool) where #150 would nudge:
+After `degenerate_text` / TextOnly where #150 would nudge.
 
-`next ∈ {force_tool, nudge, stall, compact}`
+### Iteration A decode shape
 
-- Argmax if `P[choice] ≥ p_min`, else **fallback** to existing nudge/stall path.
-- Does not change the #150 detector; Pulse only selects among harness actions.
-- Journals `pulse` events: `when`, `questions`, `choice`, `p`, `p_vec`, `latency_ms`, `kv_reuse`, …
+- **Neutral** forced prefix (no “text-instead-of-tool” hostility).
+- Options presented as **letter codes** `A`/`B`/`C`/`D` with one-line defs.
+- **Mask over single-letter token ids** (`encoding=letter`). Journal maps letter → enum (`force_tool|nudge|stall|compact`).
+- **Shuffle** of which enum sits under A–D, seeded by turn/inert/prompt size (label id in offline micro).
+- **Structured features only** (`consec=… why=…`); hindsight (`next=`, `outcome=`, …) stripped from any probe summary.
+- Argmax if `P[choice] ≥ p_min` (default 0.55), else fallback to #150 / stall heuristics.
 
 ## Kill bars (Mac labeled set)
 
@@ -36,7 +39,7 @@ After `degenerate_text` / TextOnly (text-instead-of-tool) where #150 would nudge
 | KV | Pulse causes Reset storms / TTFT regressions |
 | Shape | Escape from enum mask / free text |
 
-Revert / leave flag off if kill bars fail. Hang fix #192 is already merged — do not block on it.
+Iteration A success gate (before B): see `research/pulse/ITERATION_A_PROMPT.md`.
 
 ## Not in v1
 
