@@ -1166,10 +1166,12 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // re-renders and re-tokenizes the whole context, and a batched turn would do it four
     // times to answer a question this number already answers.
     last_prompt_tokens_ = task.prompt.size();
+    last_prompt_ids_ = task.prompt;
     // Everything except the live-state block, which changes every turn. The backend
     // snapshots here so the next turn rolls back instead of re-prefilling the context.
     const std::size_t stable = ctx_.stable_message_count("");
     task.checkpoint_at = stable < offsets.size() ? offsets[stable] : 0;
+    last_checkpoint_at_ = task.checkpoint_at;
     task.max_new_tokens = config_.max_new_tokens;
     task.sampling = config_.sampling;
     // config_.seed stays authoritative over the sampling block's own field: it is the
@@ -2612,6 +2614,170 @@ void Agent::maybe_warm_stable_prefix(const model::InferenceTask& task,
                             {"ms", std::to_string(wr.ttft_ms)}});
 }
 
+PulsePolicy Agent::run_pulse_t1(const model::CancelToken& cancel, const char* when) {
+    if (!config_.pulse) {
+        return PulsePolicy::Fallback;
+    }
+
+    // Structured features first — Stage-0 is deterministic and never asks the model
+    // for stall/compact.
+    PulseFeatures feats;
+    feats.consec = static_cast<int>(inert_turns_);
+    feats.streak = static_cast<int>(inert_turns_);
+    feats.prompt_tok = static_cast<int>(last_prompt_tokens_);
+    feats.reread_max = 0;
+    feats.think = 0;
+    feats.text = 0;
+    feats.tool_tok = 0;
+    const std::string_view w = when == nullptr ? "" : when;
+    if (w == "loop_cut" || w.find("loop") != std::string_view::npos) {
+        feats.why = "loop_cut";
+    } else if (w == "no_progress" || w.find("progress") != std::string_view::npos) {
+        feats.why = "no_progress";
+    } else if (w == "degenerate_text" || w.find("degenerate") != std::string_view::npos ||
+               w.find("length_capped") != std::string_view::npos ||
+               w.find("text_only") != std::string_view::npos) {
+        feats.why = "degenerate";
+    } else {
+        feats.why = "none";
+    }
+
+    if (const std::optional<PulsePolicy> stage0 = stage0_pulse_policy(feats)) {
+        const PulsePolicy policy = *stage0;
+        emit("pulse",
+             {{"when", when == nullptr ? "t1_degenerate" : when},
+              {"questions", "force_tool,nudge"},
+              {"choice", std::string(pulse_policy_name(policy))},
+              {"letter", ""},
+              {"encoding", "stage0"},
+              {"order", ""},
+              {"p", "1"},
+              {"p_force", "0"},
+              {"p_vec", ""},
+              {"p_min", std::to_string(config_.pulse_p_min)},
+              {"policy", std::string(pulse_policy_name(policy))},
+              {"stage0", "1"},
+              {"latency_ms", "0"},
+              {"kv_reuse", "stage0"},
+              {"prefill_reused_tokens", "0"},
+              {"ok", "1"},
+              {"error", ""}});
+        return policy;
+    }
+
+    PulseMicroResult micro;
+    if (config_.pulse_probe) {
+        if (std::optional<PulseMicroResult> probed = config_.pulse_probe()) {
+            micro = std::move(*probed);
+        } else {
+            micro.error = "pulse_probe returned nullopt";
+        }
+    } else {
+        // Binary Pulse: shuffle letter→{force_tool,nudge}, neutral prefix, features only.
+        const std::uint64_t shuffle_seed =
+            (static_cast<std::uint64_t>(turns_generated_) << 32U) ^
+            static_cast<std::uint64_t>(inert_turns_) ^
+            static_cast<std::uint64_t>(last_prompt_tokens_);
+        const PulseChoiceOrder order = shuffle_t1_choices(shuffle_seed);
+        PulseOptionIds opts = resolve_t1_letter_ids(tok_, order);
+        if (!opts.ok()) {
+            micro.error = opts.error.empty() ? "pulse: letter id resolve failed" : opts.error;
+        } else {
+            model::PulseDecodeTask task;
+            // Prefer Extend: host turn prompt + Pulse forced-prefix suffix.
+            task.prompt = last_prompt_ids_;
+            const std::string prefix = pulse_t1_forced_prefix(order, feats);
+            const std::vector<model::TokenId> suffix = tok_.encode_content(prefix);
+            task.prompt.insert(task.prompt.end(), suffix.begin(), suffix.end());
+            task.option_ids = opts.ids;
+            task.checkpoint_at = last_checkpoint_at_;
+            const model::PulseDecodeResult dec = backend_.pulse_decode(task, cancel);
+            micro.ok = dec.ok;
+            micro.error = dec.error;
+            micro.latency_ms = dec.latency_ms;
+            micro.prefill_reused_tokens = dec.prefill_reused_tokens;
+            micro.kv_reuse = dec.reuse_mode.empty() ? "unknown" : dec.reuse_mode;
+            micro.p_vec = dec.p_vec;
+            micro.p = dec.p;
+            micro.encoding = opts.encoding;
+            {
+                std::string order_str;
+                for (std::size_t i = 0; i < order.size(); ++i) {
+                    if (i > 0) {
+                        order_str += ',';
+                    }
+                    order_str += pulse_choice_name(order[i]);
+                }
+                micro.order = std::move(order_str);
+            }
+            if (dec.ok && dec.chosen_index < opts.choices.size()) {
+                micro.choice = opts.choices[dec.chosen_index];
+                micro.choice_name = std::string(pulse_choice_name(micro.choice));
+                micro.letter = kPulseT1Letters[dec.chosen_index];
+                if (dec.chosen_index < micro.p_vec.size()) {
+                    micro.p = micro.p_vec[dec.chosen_index];
+                }
+            } else if (dec.ok) {
+                for (std::size_t i = 0; i < opts.ids.size(); ++i) {
+                    if (opts.ids[i] == dec.chosen_id) {
+                        micro.choice = opts.choices[i];
+                        micro.choice_name = std::string(pulse_choice_name(micro.choice));
+                        micro.letter = kPulseT1Letters[i];
+                        break;
+                    }
+                }
+            }
+            // p_force from letter→enum map (not argmax slot).
+            for (std::size_t i = 0; i < opts.choices.size() && i < micro.p_vec.size(); ++i) {
+                if (opts.choices[i] == PulseChoice::ForceTool) {
+                    micro.p_force = micro.p_vec[i];
+                    break;
+                }
+            }
+        }
+    }
+
+    const PulsePolicy policy = apply_pulse_policy(micro, config_.pulse_p_min);
+
+    std::string questions = micro.order;
+    if (questions.empty()) {
+        const char* const* names = pulse_t1_option_names();
+        for (std::size_t i = 0; i < kPulseT1OptionCount; ++i) {
+            if (i > 0) {
+                questions += ',';
+            }
+            questions += names[i];
+        }
+    }
+    std::string p_vec_str;
+    for (std::size_t i = 0; i < micro.p_vec.size(); ++i) {
+        if (i > 0) {
+            p_vec_str += ',';
+        }
+        p_vec_str += std::to_string(micro.p_vec[i]);
+    }
+    emit("pulse",
+         {{"when", when == nullptr ? "t1_degenerate" : when},
+          {"questions", questions},
+          {"choice", micro.ok ? micro.choice_name : ""},
+          {"letter", micro.ok ? std::string(1, micro.letter) : ""},
+          {"encoding", micro.encoding.empty() ? "letter" : micro.encoding},
+          {"order", micro.order},
+          {"p", std::to_string(micro.p)},
+          {"p_force", std::to_string(micro.p_force)},
+          {"p_vec", p_vec_str},
+          {"p_min", std::to_string(config_.pulse_p_min)},
+          {"policy", std::string(pulse_policy_name(policy))},
+          {"stage0", "0"},
+          {"latency_ms", std::to_string(micro.latency_ms)},
+          {"kv_reuse", micro.kv_reuse.empty() ? "n/a" : micro.kv_reuse},
+          {"prefill_reused_tokens", std::to_string(micro.prefill_reused_tokens)},
+          {"ok", micro.ok ? "1" : "0"},
+          {"error", micro.error}});
+    return policy;
+}
+
+
 // Takes whatever the user has said since the last turn boundary into the context.
 //
 // Everything downstream falls out of ContextStore::add_user_message: the text enters the
@@ -3262,7 +3428,22 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                                          : (turn.cut_for_looping ? "loop_cut"
                                                                  : "no_tool_recovery");
 
-            if (inert_turns_ <= allowed) {
+            // Pulse T1: after degenerate / TextOnly where #150 would nudge. Selects among
+            // harness actions only; P-below-floor falls back to the existing path below.
+            // Spun (no_progress tool) turns keep the heuristic path — T1 is text pressure.
+            PulsePolicy pulse_act = PulsePolicy::Fallback;
+            if (config_.pulse && !spun) {
+                pulse_act = run_pulse_t1(cancel, why_detail);
+            }
+            const bool pulse_stall_now =
+                pulse_act == PulsePolicy::Stall && !policy_.conversational;
+
+            if (inert_turns_ <= allowed && !pulse_stall_now) {
+                if (pulse_act == PulsePolicy::Compact) {
+                    // Pulse chose context pressure relief; compact then still nudge so the
+                    // model gets an action cue on the next turn.
+                    compact_to_budget();
+                }
                 // THE NOTE SAYS WHICH FAILURE THIS IS. "Call a tool now" is the wrong
                 // advice for a model that just called one and got back bytes it already
                 // had -- and it is exactly what the old single note told it, which is how
@@ -3288,6 +3469,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 const bool degenerate_babble = !spun && turn.degenerate_text;
                 const bool length_capped_no_tool =
                     !spun && turn.outcome == Outcome::LengthCapped;
+                const bool pulse_force_tool = pulse_act == PulsePolicy::ForceTool;
                 // THE FILE NOTE IS FOR FILES. r-18d29b4a83a4a1b0 stalled on four identical
                 // `execute_blender_code` calls; each nudge told it the file was
                 // byte-identical and not to re-read -- advice for a state it was not in,
@@ -3329,7 +3511,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 }
                 context::TurnRecord note;
                 note.observation =
-                    display_only_turn || spun
+                    pulse_force_tool
+                        ? "[Note: Pulse selected force_tool. Stop narrating and call ONE "
+                          "tool this turn (`read_file`, `replace_in_file`, `shell`, or "
+                          "`ask_user` if blocked). Text without a tool call ends the run.]"
+                    : display_only_turn || spun
                     ? spun_note
                     : loop_cut
                         ? "[Note: That turn was cut because the same stretch of reasoning "
@@ -3381,7 +3567,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                                 {"why_detail", why_detail},
                                 {"consecutive", std::to_string(inert_turns_)},
                                 {"cap", std::to_string(allowed)},
-                                {"degenerate", turn.degenerate_text ? "1" : "0"}});
+                                {"degenerate", turn.degenerate_text ? "1" : "0"},
+                                {"pulse_policy", std::string(pulse_policy_name(pulse_act))}});
                 continue;
             }
             if (policy_.conversational) {

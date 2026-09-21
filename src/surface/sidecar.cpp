@@ -767,6 +767,23 @@ class RunInbox {
             config.degenerate_nudge_cap = static_cast<std::size_t>(v);
         }
     }
+    // Pulse T1 default OFF. Exact `0`/`1` only, matching other LMP_* bool overlays.
+    surface::overlay_lmp_env_bool("LMP_PULSE", &config.pulse);
+    // Per-model seed default (27B→0.55, A3B/MoE→0.50), then env override if set.
+    {
+        const std::string model_dir = surface::string_field(message, "model_dir");
+        if (!model_dir.empty()) {
+            config.pulse_p_min = loop::pulse_default_p_min(model_dir);
+        }
+        if (const char* pmin = std::getenv("LMP_PULSE_P_MIN");
+            pmin != nullptr && pmin[0] != '\0') {
+            char* end = nullptr;
+            const float v = std::strtof(pmin, &end);
+            if (end != pmin && *end == '\0' && v > 0.0F && v <= 1.0F) {
+                config.pulse_p_min = v;
+            }
+        }
+    }
 
     return apply_autonomy(id, message, config);
 }
