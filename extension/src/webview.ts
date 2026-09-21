@@ -2631,15 +2631,15 @@ function retractQuestionProse(questionText) {
   const raw = (el.innerText || '').trim();
   if (q && raw === q) { el.remove(); return; }
   const optRe = /^(?:\\*{0,2})?(?:[A-Ea-e]|[0-9]{1,2})[.)]\\s/;
-  const blocks = [...el.querySelectorAll('p, li, h4, h3, h2')];
+  const blocks = el.querySelectorAll('p, li, h4, h3, h2');
   let first = -1;
   let n = 0;
-  blocks.forEach((b, i) => {
-    if (optRe.test((b.textContent || '').trim())) {
+  for (let i = 0; i < blocks.length; i++) {
+    if (optRe.test((blocks[i].textContent || '').trim())) {
       if (first < 0) first = i;
       n++;
     }
-  });
+  }
   if (n < 2 || first < 0) return;
   let cut = first;
   for (let i = first - 1; i >= 0; i--) {
