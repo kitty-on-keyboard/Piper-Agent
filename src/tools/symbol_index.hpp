@@ -22,8 +22,9 @@
 // nested in a function, which is nearly always what "where is this defined" means.
 //
 #include <algorithm>
+#include <charconv>
 #include <cstddef>
-#include <cstdlib> // strtol, below -- reached only transitively before, via <string>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -111,21 +112,32 @@ inline constexpr std::string_view kDefinitionKeywords[] = {
         if (c2 == std::string_view::npos) {
             continue;
         }
-        SymbolHit h;
-        h.path = std::string(row.substr(0, c1));
-        h.line = std::strtol(std::string(row.substr(c1 + 1, c2 - c1 - 1)).c_str(), nullptr, 10);
-        h.text = std::string(row.substr(c2 + 1));
-        if (h.line <= 0) {
+        const std::string_view path_sv = row.substr(0, c1);
+        const std::string_view line_sv = row.substr(c1 + 1, c2 - c1 - 1);
+        long line = 0;
+        const auto [ptr, ec] =
+            std::from_chars(line_sv.data(), line_sv.data() + line_sv.size(), line);
+        if (ec != std::errc{} || line <= 0) {
             continue;
         }
-        h.score = score_hit(h.text, symbol);
-        h.indent = indent_of(h.text);
-        const bool dup = std::any_of(hits.begin(), hits.end(), [&h](const SymbolHit& e) {
-            return e.line == h.line && e.path == h.path;
-        });
-        if (!dup) {
-            hits.push_back(std::move(h));
+
+        // Fast-path duplicate check using string_view before constructing path/text std::strings
+        const bool dup =
+            std::any_of(hits.begin(), hits.end(), [line, path_sv](const SymbolHit& e) {
+                return e.line == line && e.path == path_sv;
+            });
+        if (dup) {
+            continue;
         }
+
+        const std::string_view text_sv = row.substr(c2 + 1);
+        SymbolHit h;
+        h.path = std::string(path_sv);
+        h.line = line;
+        h.text = std::string(text_sv);
+        h.score = score_hit(text_sv, symbol);
+        h.indent = indent_of(text_sv);
+        hits.push_back(std::move(h));
     }
     std::stable_sort(hits.begin(), hits.end(), [](const SymbolHit& a, const SymbolHit& b) {
         if (a.score != b.score) {
