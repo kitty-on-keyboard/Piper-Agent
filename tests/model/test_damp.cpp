@@ -15,6 +15,7 @@
 using lmp::model::mlxl::DampMask;
 using lmp::model::mlxl::DampPackedDelta;
 using lmp::model::mlxl::damp_dequantize_cpu;
+using lmp::model::mlxl::damp_k_hi;
 using lmp::model::mlxl::damp_passthrough_cpu;
 using lmp::model::mlxl::damp_quantize_cpu;
 using lmp::model::mlxl::load_damp_mask_file;
@@ -41,6 +42,9 @@ TEST(a_damp_off_matches_baseline_passthrough) {
     CHECK_EQ(parse_lmp_damp_k_hi("16", 16), 16);
     CHECK_EQ(parse_lmp_damp_k_hi("8", 16), 8);
     CHECK_EQ(parse_lmp_damp_k_hi("nope", 16), 16);
+    // Cached env wrapper (default 16 when LMP_DAMP_K_HI unset). Referenced so the
+    // dead_code ratchet does not treat the kill-switch helper as unused.
+    CHECK(damp_k_hi() >= 1);
 
     // When DAMP is off the live path must not reshape state: passthrough is bit-identical.
     const std::vector<float> src{0.0f, -1.5f, 2.25f, 3.0f, 4.5f, -7.0f};
