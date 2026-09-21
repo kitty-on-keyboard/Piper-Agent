@@ -593,6 +593,17 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     // block that defers its forward has no row to hand back.
     decoder.seed(std::move(logits_host));
 
+    // Fresh decode after a (possibly restored) prefill: the MTP head's KV must not carry
+    // draft positions from a previous generate. reset_cache()/Restore also clear it; this
+    // is the belt-and-suspenders so Extend turns start clean too.
+    if (model.has_mtp()) {
+        model.mtp_reset();
+        fwd.mtp_reset();
+    }
+    std::fprintf(stderr, "decode_begin speculative=1 mtp=%d prompt=%zu\n",
+                 model.has_mtp() ? 1 : 0, task.prompt.size());
+    std::fflush(stderr);
+
     const auto is_special = [&task](TokenId id) {
         return task.mask != nullptr && task.mask->is_block_boundary(id);
     };
@@ -670,6 +681,8 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
                 r.ttft_ms = ms_between(t0, clock.mono());
                 t_decode_start = clock.mono();
                 first_token = false;
+                std::fprintf(stderr, "decode_first_token ttft_ms=%.1f\n", r.ttft_ms);
+                std::fflush(stderr);
             }
             ++r.tokens_generated;
             recent.push_back(id);
@@ -930,6 +943,15 @@ bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         }
         if (want_last_logits && chunk_end == end) {
             logits_to_host(logits, logits_host);
+            // MTP's first propose() evals last_hidden. logits_to_host only forced the
+            // final-position lm_head slice; the full-chunk last_hidden_ graph can still
+            // sit on reclaimable intermediates. Pin the last row now so the clear_cache
+            // below cannot leave decode holding a zombie graph. Measured hang: after a
+            // large Restore prefill (~4k suffix to ~10k prompt) prefill_done printed and
+            // then nothing -- no [spec] line -- until the harness SIGKILL at 900s.
+            if (model.has_mtp()) {
+                model.pin_last_hidden_for_decode();
+            }
         }
         // Drop this chunk's activations. eval_caches() has already synced the KV rows
         // into live arrays; without a reclaim, MLX parks the dead buffers in its
@@ -1039,6 +1061,10 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             // Exactly the position the caches went back to. A ledger that disagreed with
             // the caches is the silent-stale-context failure S5.10 exists to prevent.
             ledger_.truncate_to(impl_->ckpt.len);
+            // Target KV rewound; the MTP draft cache did not. Drop it so the first
+            // propose after the suffix prefill cannot attend over positions the
+            // restored target no longer owns.
+            impl_->model.mtp_reset();
             break;
         case ReuseMode::Reset:
             // Stale context is never decoded past. One honest full re-prefill.

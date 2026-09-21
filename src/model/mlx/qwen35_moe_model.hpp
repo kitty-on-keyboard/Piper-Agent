@@ -106,6 +106,13 @@ public:
         kv_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), KVCache{});
         qkv_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), QuantizedKVCache{});
         ssm_caches_.assign(static_cast<std::size_t>(cfg_.num_hidden_layers), SsmCache{});
+        // The MTP head keeps its own KV. Leaving it across a target reset (or a
+        // Restore that rewound the target) pairs a fresh target hidden with a
+        // draft cache from a position the target never kept -- silent wrong drafts
+        // at best, and on a large Restore+prefill the first mtp_step has hung the
+        // Metal queue hard enough that the harness had to SIGKILL the sidecar.
+        mtp_reset();
+        last_hidden_.reset();
     }
 
     [[nodiscard]] int cache_seq_len() const noexcept {
@@ -463,6 +470,27 @@ public:
     void mtp_reset() {
         mtp_cache_ = KVCache{};
         mtp_qcache_ = QuantizedKVCache{};
+    }
+
+    // Force the last hidden row onto the device BEFORE the prefill-chunk clear_cache.
+    //
+    // forward_logits() keeps last_hidden_ as the full chunk tensor, lazy. logits_to_host
+    // only evals the final-position slice through the lm_head, so the rest of that graph
+    // can still be sitting on reclaimable intermediates. clear_cache then drops them.
+    // MTP's first propose() evals last_hidden; after a multi-kilotoken Restore prefill
+    // that eval has been observed to never return (no [spec] line, no decode journals,
+    // harness SIGKILL at the try cap). Propose only reads rows.back(), so keep that row
+    // alone and materialize it now.
+    void pin_last_hidden_for_decode() {
+        if (!mtp_loaded_ || !last_hidden_.has_value()) {
+            return;
+        }
+        mx::array& h = *last_hidden_;
+        const int seq = static_cast<int>(h.shape()[1]);
+        const int hidden = static_cast<int>(h.shape()[2]);
+        mx::array last = mx::slice(h, {0, seq - 1, 0}, {1, seq, hidden});
+        mx::eval(last);
+        last_hidden_ = std::move(last);
     }
 
     // The final-normed hidden from the most recent forward, which is what the head
