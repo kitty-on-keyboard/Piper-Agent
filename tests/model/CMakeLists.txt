@@ -80,6 +80,12 @@ target_compile_definitions(test_model_bounds PRIVATE LMP_MINI_VOCAB_JSON="${LMP_
 lmp_add_test(test_image_preprocess SOURCES test_image_preprocess.cpp LABELS gate
              LINK lmp_model TIMEOUT 120)
 
+# G2 DAMP (delta_state 2-tier stub): CPU mask load + quant/dequant + kill switch.
+# GATE on purpose — CI builds with LMP_WITH_MLX=OFF; this must not need Metal.
+lmp_add_test(test_damp SOURCES test_damp.cpp LABELS gate LINK lmp_model)
+target_compile_definitions(test_damp PRIVATE
+  LMP_DAMP_SYNTHETIC_MASK="${PROJECT_SOURCE_DIR}/tests/fixtures/damp/synthetic_mask.json")
+
 # Real-model tests (S11.6): excluded from the gate, and `ctest --preset realmodel`
 # pins jobs=1 -- concurrent large model loads exhaust unified memory.
 lmp_add_test(test_grammar_realmodel SOURCES test_grammar.cpp LABELS realmodel LINK lmp_model TIMEOUT 300)

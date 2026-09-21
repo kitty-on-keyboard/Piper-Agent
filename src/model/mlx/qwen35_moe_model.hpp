@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "activations.hpp"
+#include "damp.hpp"
 #include "gated_delta.hpp"
 #include "kv_cache.hpp"
 #include "quant_attention.hpp"
@@ -207,7 +208,7 @@ public:
             mx::eval(live);
         }
         for (const auto& c : ssm_caches_) {
-            cp.ssm.push_back({c.conv_state, c.delta_state, c.offset});
+            cp.ssm.push_back({c.conv_state, c.delta_state, c.damp_delta, c.offset});
         }
         return cp;
     }
@@ -343,7 +344,8 @@ public:
             h = x;
         } else {
             mx::array attn_out = forward_gated_delta(
-                p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len);
+                p + "linear_attn.", h, ssm_caches_[static_cast<std::size_t>(layer)], seq_len,
+                layer);
             h = mx::add(x, attn_out);
         }
         mx::array mlp_in = rms_norm(h, p + "post_attention_layernorm.weight");
@@ -826,7 +828,67 @@ private:
         return weights_.linear(h, "language_model.lm_head");
     }
 
-    mx::array forward_gated_delta(const std::string& p, const mx::array& inputs, SsmCache& cache, int /*seq_len*/) {
+    // G2 DAMP mask (optional). Loaded once from LMP_DAMP_MASK when LMP_DAMP=1.
+    // Missing/invalid mask → packing stays off even if the flag is set (FP32 path).
+    static const DampMask* damp_mask_or_null() {
+        static const std::optional<DampMask> held = []() -> std::optional<DampMask> {
+            if (!damp_enabled()) {
+                return std::nullopt;
+            }
+            const auto path = damp_mask_path_from_env();
+            if (!path) {
+                std::fprintf(stderr,
+                             "lmp: LMP_DAMP=1 but LMP_DAMP_MASK unset — keeping FP32 "
+                             "delta_state (see docs/G2_DAMP.md)\n");
+                return std::nullopt;
+            }
+            DampMask m;
+            std::string err;
+            if (!load_damp_mask_file(*path, m, &err)) {
+                std::fprintf(stderr, "lmp: failed to load LMP_DAMP_MASK=%s (%s) — FP32 path\n",
+                             path->c_str(), err.c_str());
+                return std::nullopt;
+            }
+            return m;
+        }();
+        return held ? &*held : nullptr;
+    }
+
+    // Host round-trip pack/dequant for the stub. Proves quality/GB; Metal fused path later.
+    static mx::array damp_materialize_fp32(const SsmCache& cache, const DampMask& mask) {
+        const DampPackedDelta& p = *cache.damp_delta;
+        std::vector<float> host(static_cast<std::size_t>(p.B) * p.Hv * p.Dv * p.Dk);
+        std::string err;
+        if (!damp_dequantize_cpu(p, mask, host.data(), &err)) {
+            return mx::zeros({p.B, p.Hv, p.Dv, p.Dk}, mx::float32);
+        }
+        return mx::array(host.data(), {p.B, p.Hv, p.Dv, p.Dk}, mx::float32);
+    }
+
+    static void damp_pack_state(SsmCache& cache, const mx::array& state, const DampMask& mask,
+                                int layer) {
+        const int B = static_cast<int>(state.shape()[0]);
+        const int Hv = static_cast<int>(state.shape()[1]);
+        const int Dv = static_cast<int>(state.shape()[2]);
+        const int Dk = static_cast<int>(state.shape()[3]);
+        mx::array cont = mx::contiguous(mx::astype(state, mx::float32));
+        mx::eval({cont});
+        const float* data = cont.data<float>();
+        const std::size_t n = static_cast<std::size_t>(B) * Hv * Dv * Dk;
+        std::vector<float> host(data, data + n);
+        DampPackedDelta packed;
+        std::string err;
+        if (!damp_quantize_cpu(host.data(), B, Hv, Dv, Dk, mask, layer, packed, &err)) {
+            cache.damp_delta.reset();
+            cache.delta_state = state;
+            return;
+        }
+        cache.damp_delta = std::move(packed);
+        cache.delta_state.reset(); // free FP32 recurrent state between steps
+    }
+
+    mx::array forward_gated_delta(const std::string& p, const mx::array& inputs, SsmCache& cache,
+                                  int /*seq_len*/, int layer) {
         const int B = static_cast<int>(inputs.shape()[0]);
         const int S = static_cast<int>(inputs.shape()[1]);
         const int key_dim = cfg_.linear_num_key_heads * cfg_.linear_key_head_dim;
@@ -898,10 +960,31 @@ private:
         mx::array out = mx::zeros({B, S, cfg_.linear_num_value_heads, cfg_.linear_value_head_dim},
                                   inputs.dtype());
         if (ablation() != Ablate::deltakernel) {
-            auto [o, state] =
-                lmp::model::mlxl::gated_delta_update(q, k, v, a, b, a_log, dt_bias, cache.delta_state);
-            out = o;
-            cache.delta_state = state;
+            // G2 DAMP kill switch: unset LMP_DAMP → historical path only (no pack, no
+            // host round-trip). Enabled + valid LMP_DAMP_MASK → dequant→FP32→update→pack.
+            const DampMask* mask = damp_mask_or_null();
+            if (mask == nullptr) {
+                auto [o, state] = lmp::model::mlxl::gated_delta_update(
+                    q, k, v, a, b, a_log, dt_bias, cache.delta_state);
+                out = o;
+                cache.delta_state = state;
+            } else {
+                std::optional<mx::array> state_in = cache.delta_state;
+                if (cache.damp_delta.has_value()) {
+                    state_in = damp_materialize_fp32(cache, *mask);
+                }
+                auto [o, state] = lmp::model::mlxl::gated_delta_update(
+                    q, k, v, a, b, a_log, dt_bias, state_in);
+                out = o;
+                if (layer >= 0 && layer < mask->num_layers &&
+                    static_cast<int>(state.shape()[1]) == mask->num_heads &&
+                    static_cast<int>(state.shape()[3]) == mask->dk) {
+                    damp_pack_state(cache, state, *mask, layer);
+                } else {
+                    cache.damp_delta.reset();
+                    cache.delta_state = state;
+                }
+            }
         }
         cache.offset += S;
 

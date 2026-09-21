@@ -9,7 +9,7 @@
 # When you add a test: add its name below AND bump `count`. That is two edits, and it is
 # meant to be.
 
-count 62
+count 63
 test_agent_step
 test_arena
 test_assertions_enabled
@@ -21,6 +21,7 @@ test_context_journal
 test_context_tools
 test_corpus_loads
 test_corpus_pins
+test_damp
 test_event_log
 test_extension_typecheck
 test_fs

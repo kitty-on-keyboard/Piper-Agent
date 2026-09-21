@@ -8,6 +8,8 @@
 #include <tuple>
 #include <vector>
 
+#include "damp.hpp"
+
 #include "mlx/array.h"
 #include "mlx/ops.h"
 #include "mlx/transforms.h"
@@ -91,11 +93,16 @@ struct KVCache {
 struct SsmCache {
     std::optional<mx::array> conv_state;
     std::optional<mx::array> delta_state;
+    // G2 DAMP: optional packed delta_state (LMP_DAMP=1). When set, the FP32
+    // delta_state may be empty between steps and is materialized for the kernel only.
+    // Unset whenever LMP_DAMP is off — Snapshot/restore stay bit-compatible with main.
+    std::optional<DampPackedDelta> damp_delta;
     int offset{0};
 
     void clear() noexcept {
         conv_state.reset();
         delta_state.reset();
+        damp_delta.reset();
         offset = 0;
     }
 
@@ -113,6 +120,7 @@ struct SsmCache {
     struct Snapshot {
         std::optional<mx::array> conv_state;
         std::optional<mx::array> delta_state;
+        std::optional<DampPackedDelta> damp_delta;
         int offset{0};
     };
 
@@ -122,12 +130,13 @@ struct SsmCache {
         // held across a speculative block is the block's whole activation set. A no-op when
         // the caller has already synced, which the decode loop has.
         sync();
-        return Snapshot{conv_state, delta_state, offset};
+        return Snapshot{conv_state, delta_state, damp_delta, offset};
     }
 
     void restore(const Snapshot& s) {
         conv_state = s.conv_state;
         delta_state = s.delta_state;
+        damp_delta = s.damp_delta;
         offset = s.offset;
     }
 
