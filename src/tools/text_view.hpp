@@ -17,6 +17,8 @@
 //      which is that engine's contract. The failure mode is a wasted turn, never a
 //      corrupted file. Both tool descriptions say so anyway.
 //
+#include <algorithm>
+#include <charconv>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -25,23 +27,22 @@ namespace lmp::tools {
 
 // Lines in `s`, counting the last one whether or not it ends in a newline.
 [[nodiscard]] inline std::size_t count_lines(std::string_view s) {
-    std::size_t n = 1;
-    for (char c : s) {
-        n += static_cast<std::size_t>(c == '\n');
-    }
-    return n;
+    return static_cast<std::size_t>(std::count(s.begin(), s.end(), '\n')) + 1;
 }
 
 // `body` with each line prefixed by its absolute 1-based number and a tab.
+// Fast path: uses std::to_chars into a stack buffer to eliminate std::to_string heap allocations per line.
 [[nodiscard]] inline std::string number_lines(std::string_view body, long first_line) {
     std::string out;
     out.reserve(body.size() + body.size() / 16 + 16);
     long line = first_line;
     std::size_t at = 0;
+    char num_buf[32];
     while (at < body.size()) {
         const std::size_t nl = body.find('\n', at);
         const std::size_t stop = nl == std::string_view::npos ? body.size() : nl + 1;
-        out += std::to_string(line);
+        const auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line);
+        out.append(num_buf, static_cast<std::size_t>(ptr - num_buf));
         out += '\t';
         out.append(body, at, stop - at);
         if (nl == std::string_view::npos) {

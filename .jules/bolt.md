@@ -45,3 +45,7 @@
 ## 2026-05-25 - Avoid spreading querySelectorAll in Webview Hot Paths
 **Learning:** Constructing arrays from `querySelectorAll` results using the spread operator (`[...feed.querySelectorAll('.msg')]`) requires allocating a full list in memory and evaluating an $O(N)$ query over the entire subtree. In frequently-called loops such as message stream management or finding the last `.msg.assistant`, this creates unnecessary DOM lookups and array allocations.
 **Action:** Replace `querySelectorAll` array spreading with direct DOM traversals (e.g., using `while (feed.firstChild && feed.firstChild !== live) { feed.firstChild.remove(); }` or walking backwards via `live.previousElementSibling`) to achieve $O(1)$ and $O(K)$ performance without allocations.
+
+## 2026-05-26 - Zero-Allocation Line Numbering for Tool File Observations
+**Learning:** `number_lines()` in `src/tools/text_view.hpp` previously called `std::to_string(line)` on every line during file reads (`read_file`, `read_many`, `read_slice`). For multi-thousand line files, this triggered thousands of heap allocations and string constructions per read. Using `std::to_chars` with a stack buffer (`char num_buf[32]`) formats integer line numbers with zero allocations.
+**Action:** Use `std::to_chars` into local stack buffers for loop-level string formatting of integer line numbers instead of `std::to_string`.
