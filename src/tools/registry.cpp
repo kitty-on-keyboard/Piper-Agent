@@ -17,6 +17,7 @@
 #include <optional>
 #include <sstream>
 #include <string_view>
+#include <charconv>
 
 #include "src/pcc/diff.hpp"
 #include "src/platform/fs.hpp"
@@ -1108,6 +1109,10 @@ Registry::Registry(WorkspaceContext ctx)
             // than left to guess. A 5,000-line slice costs the context as much as a whole
             // file, so the bound applies here too.
             long stopped_at = 0;
+            // ⚡ Bolt: Zero-allocation line numbering. std::to_chars writes directly
+            // to a stack buffer, avoiding the heap allocations and locale overhead
+            // of std::to_string(line) in this tight text-formatting loop.
+            char num_buf[32];
             while (at <= f.bytes.size() && line <= end) {
                 const std::size_t nl = f.bytes.find('\n', at);
                 const std::size_t stop =
@@ -1117,7 +1122,8 @@ Registry::Registry(WorkspaceContext ctx)
                         stopped_at = line;
                         break;
                     }
-                    outp += std::to_string(line);
+                    const auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line);
+                    outp.append(num_buf, static_cast<std::size_t>(ptr - num_buf));
                     outp += '\t';
                     outp.append(f.bytes, at, stop - at);
                 }
