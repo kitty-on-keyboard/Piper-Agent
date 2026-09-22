@@ -901,6 +901,200 @@ TEST(a_tool_phase_cap_stops_before_the_turn_budget) {
     CHECK(told_it_was_too_long);
 }
 
+// --- tool-phase cap museum ----------------------------------------------------
+//
+// Default max_tool_tokens=8192 must not break legitimate large-but-finite writes, and
+// must not charge commit_think harvested fence bytes to the tool-phase budget (those
+// live in <think>; the call itself is only path + block_id).
+
+TEST(tool_cap_museum_under_cap_write_file_succeeds) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    const std::string marker = "UNDER_CAP_MUSEUM_PAYLOAD_v1";
+    std::string content = marker + "\n";
+    for (int i = 0; i < 40; ++i) {
+        content += "line " + std::to_string(i) + " of a modest under-cap write\n";
+    }
+    const std::string body =
+        "<function=write_file>\n<parameter=path>\nunder_cap.txt\n</parameter>\n"
+        "<parameter=content>\n" +
+        content + "</parameter>\n</function>\n";
+
+    // Tool-phase length clearly under the default 8192.
+    const auto tool_ids = tok.encode_content(body);
+    REQUIRE(tool_ids.size() + 2 < 8192); // + open/close specials
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "writing a modest file"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write under the tool cap");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    config.max_new_tokens = 32768;
+    config.max_tool_tokens = 8192; // the default under test
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+    CHECK(turn.outcome == loop::Outcome::ToolCallExecuted);
+    CHECK(turn.tool_result.ok());
+    CHECK_EQ(turn.tool_name, std::string("write_file"));
+    CHECK(turn.cap_phase.empty());
+    CHECK(turn.tool_tokens < 8192);
+    const auto written =
+        lmp::platform::read_file_whole(root + "/under_cap.txt", 1U << 20);
+    CHECK(written.ok());
+    CHECK(written.bytes.find(marker) != std::string::npos);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+TEST(tool_cap_museum_over_cap_write_file_is_cut_off) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    std::string content;
+    content.reserve(20000);
+    for (int i = 0; i < 900; ++i) {
+        // Unique lines so LoopBreaker cannot fire if any prose path were involved; the
+        // body itself is tool-channel and is what must exceed the default 8192.
+        content += "OVER_CAP museum line " + std::to_string(i) +
+                   " with enough unique bytes to overrun the tool-phase budget\n";
+    }
+    const std::string body =
+        "<function=write_file>\n<parameter=path>\nover_cap.txt\n</parameter>\n"
+        "<parameter=content>\n" +
+        content + "</parameter>\n</function>\n";
+    const auto tool_ids = tok.encode_content(body);
+    REQUIRE(tool_ids.size() + 2 > 8192);
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "writing far too much"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write over the tool cap");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    config.max_new_tokens = 32768;
+    config.max_tool_tokens = 8192; // the default under test
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    std::string capped_phase;
+    std::size_t capped_tool_tokens = 0;
+    bool saw_capped = false;
+    bool saw_executed_write = false;
+    loop::Observer obs;
+    obs.on_turn = [&](const loop::TurnResult& t, double) {
+        if (t.outcome == loop::Outcome::LengthCapped) {
+            saw_capped = true;
+            capped_phase = t.cap_phase;
+            capped_tool_tokens = t.tool_tokens;
+        }
+        if (t.outcome == loop::Outcome::ToolCallExecuted && t.tool_name == "write_file") {
+            saw_executed_write = true;
+        }
+    };
+    agent.set_observer(std::move(obs));
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(saw_capped);
+    CHECK_EQ(capped_phase, std::string("tool"));
+    CHECK(!saw_executed_write);
+    // Stopped at the default tool-phase budget, not the whole turn.
+    CHECK(capped_tool_tokens >= 8192);
+    CHECK(capped_tool_tokens < 32768);
+
+    bool told_cut_off = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.observation.find("CUT OFF") != std::string::npos) {
+            told_cut_off = true;
+            CHECK(rec.observation.find("write_file") != std::string::npos ||
+                  rec.observation.find("over_cap.txt") != std::string::npos ||
+                  rec.observation.find("append_file") != std::string::npos);
+        }
+    }
+    CHECK(told_cut_off);
+    CHECK(!lmp::platform::read_file_whole(root + "/over_cap.txt", 1024).ok());
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+// Tight tool-phase cap + fat think fence + small commit_think_block. Harvested fence
+// bytes must NOT count against max_tool_tokens; only the tiny tool XML does. If think
+// were charged, entering ToolCall with thousands of prior think tokens would exhaust a
+// 64-token tool budget immediately and LengthCap before the commit ran.
+TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    std::string fence;
+    fence.reserve(8000);
+    for (int i = 0; i < 250; ++i) {
+        fence += "fat think fence line " + std::to_string(i) +
+                 " harvested bytes must not burn the tool-phase budget\n";
+    }
+    const std::string reasoning = "draft\n```txt\n" + fence + "```\n";
+    const auto think_ids = tok.encode_content(reasoning);
+    REQUIRE(think_ids.size() > 128); // clearly larger than the tight tool cap below
+
+    const std::string body =
+        "<function=commit_think_block>\n<parameter=path>\nout.txt\n</parameter>\n"
+        "<parameter=block_id>\n0\n</parameter>\n</function>\n";
+    const auto tool_body_ids = tok.encode_content(body);
+    REQUIRE(tool_body_ids.size() + 2 < 64);
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, reasoning));
+
+    tools::WorkspaceContext ws = workspace(root);
+    ws.commit_think = true;
+    tools::Registry registry(ws);
+    context::ContextStore ctx("commit the fat fence");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    config.max_new_tokens = 32768;
+    config.max_tool_tokens = 64; // tight: fails if think were charged to the tool budget
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+
+    CHECK(turn.outcome == loop::Outcome::ToolCallExecuted);
+    CHECK(turn.tool_result.ok());
+    CHECK_EQ(turn.tool_name, std::string("commit_think_block"));
+    CHECK(turn.cap_phase.empty() || turn.cap_phase == "think_budget");
+    CHECK(turn.think_tokens > 128);
+    CHECK(turn.tool_tokens < 64);
+    const auto written = lmp::platform::read_file_whole(root + "/out.txt", 1U << 20);
+    CHECK(written.ok());
+    CHECK(written.bytes.find("fat think fence line 0") != std::string::npos);
+    CHECK(written.bytes.find("fat think fence line 249") != std::string::npos);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
 // Failed tool observations stay factual -- no ritual System Directive that forces a
 // root-cause essay before the next action.
 TEST(a_failed_tool_observation_has_no_system_directive) {
