@@ -1,6 +1,7 @@
 // Main Frontend Logic for Piper Orchestrator Visualizer
 import { initOrb } from './orb.js';
 import { ConduitBus } from './conduit.js';
+import { apply, emptyState, offloadPercent, expandLive, expandLog, estimateTokens } from './feed_model.js';
 
 class PiperVisualizerApp {
   constructor() {
@@ -48,6 +49,18 @@ class PiperVisualizerApp {
     this.lastTaskHash = null;
     this.lastResultHash = null;
     this.seenSeqs = new Set();
+
+    // Feed reducer state
+    this.feed = emptyState();
+    this.liveActive = false;
+    this.seenLive = new Set();
+    this.seenOrch = new Set();
+    this.turnCount = 0;
+    this.piperSection = null;
+    this.orchRunning = null;
+    this.lastAction = '';
+    this.thoughtEl = null;
+    this.answerEl = null;
 
     // Thinking mode: collapsed | expanded | hidden
     this.thinkingMode = localStorage.getItem('piperThinkingMode') || 'collapsed';
@@ -183,6 +196,14 @@ class PiperVisualizerApp {
       this.handleLogEvent(JSON.parse(e.data));
     });
 
+    evtSource.addEventListener('live_event', (e) => {
+      this.handleLive(JSON.parse(e.data));
+    });
+
+    evtSource.addEventListener('orch_event', (e) => {
+      this.handleOrch(JSON.parse(e.data));
+    });
+
     evtSource.addEventListener('wake_event', (e) => {
       this.handleWake(JSON.parse(e.data));
     });
@@ -194,6 +215,14 @@ class PiperVisualizerApp {
       const data = await res.json();
       if (data.cwd) this.cwdLabel.textContent = data.cwd.split('/').pop() || data.cwd;
       if (data.task) this.handleTask(data.task, false);
+      // Live lines share no seq space with the event log. Apply them first so
+      // a replayed log cannot add a second row or a second token total.
+      if (data.recent_live && data.recent_live.length) {
+        for (const line of data.recent_live) this.handleLive(line);
+      }
+      if (data.recent_orch && data.recent_orch.length) {
+        for (const line of data.recent_orch) this.handleOrch(line);
+      }
       if (data.recent_events && data.recent_events.length) {
         for (const ev of data.recent_events) {
           this.handleLogEvent(ev);
@@ -276,6 +305,12 @@ class PiperVisualizerApp {
 
     this.currentAssistantMsg = null;
     this.activeThoughtBlock = null;
+    this.beginSection(task.id);
+    const cloud = estimateTokens(task.prompt || '');
+    if (cloud > 0) {
+      this.feed = apply(this.feed, { kind: 'cloud', tokens: cloud });
+      this.renderFeed();
+    }
   }
 
   handleResult(result, animate = true) {
@@ -294,13 +329,11 @@ class PiperVisualizerApp {
     this.stopElapsed();
     this.setActivity('');
 
-    // If result contains metrics, use authoritative token data
-    if (result.metrics) {
-      const m = result.metrics;
-      const genTok = (m.generated_tokens || m.think_tokens + m.text_tokens + m.tool_tokens) || 0;
-      if (genTok > 0) this.piperTokens = genTok;
+    const genTok = Number(result.generated_tokens);
+    if (Number.isFinite(genTok)) {
+      this.feed = apply(this.feed, { kind: 'result', generated_tokens: genTok });
     }
-    this.updateTokenMetrics();
+    this.renderFeed();
 
     if (animate) {
       this.conduit.flyPacket('left-to-right', 'result', result.task_id, result.diff_stat || result.status);
@@ -322,7 +355,7 @@ class PiperVisualizerApp {
       <div class="msg-text"><strong>${this.esc(result.message || 'Slice concluded.')}</strong></div>
       <div class="diff-stats">
         <span>Diff:</span>
-        <strong style="color: ${isOk ? 'var(--ok)' : 'var(--warn)'}">${this.esc(result.diff_stat || 'none')}</strong>
+        <strong style="color: ${isOk ? 'var(--ok)' : 'var(--warn)'}">${this.esc(this.formatDiff(result.diff_stat))}</strong>
       </div>
       ${result.files_touched && result.files_touched.length ? `
         <div class="files-list">
@@ -451,58 +484,23 @@ class PiperVisualizerApp {
       if (pTok > 0) {
         this.piperStatusBadge.textContent = `Prefill ${pTok.toLocaleString()} tok`;
         this.setActivity(`Loading ${pTok.toLocaleString()} prompt tokens...`);
-        const tile = document.createElement('div');
-        tile.className = 'tool-tile';
-        tile.innerHTML = `
-          <div class="tool-tile-head">
-            <span class="tool-chip check">Prompt Loaded</span>
-            <span class="tag-time">${this.ts()}</span>
-          </div>
-          <div class="tool-cmd">${pTok.toLocaleString()} prompt tokens loaded into MLX memory</div>
-        `;
-        this.piperFeed.appendChild(tile);
-        this.scrollBottom(this.piperFeed);
       }
     }
 
     if (ev.kind === 'generation') {
-      const genTok = parseInt(this.getEventField(ev, 'tokens') || 0, 10);
-      const thinkTok = parseInt(this.getEventField(ev, 'think_tokens') || 0, 10);
       const speed = this.getEventField(ev, 'decode_tok_per_s');
       const ttft = this.getEventField(ev, 'ttft_ms');
-
-      // Do NOT add genTok to piperTokens here — turn event is authoritative.
-      // Only update the display speed badge.
-
-      const speedStr = speed ? ` · ${parseFloat(speed).toFixed(1)} tok/s` : '';
-      const ttftStr = ttft ? ` · TTFT ${(parseFloat(ttft) / 1000).toFixed(1)}s` : '';
       this.piperStatusBadge.textContent = speed ? `${parseFloat(speed).toFixed(1)} tok/s` : 'Working';
-      this.setActivity(speed ? `Generating at ${parseFloat(speed).toFixed(1)} tok/s` : 'Generating...');
-
-      const tile = document.createElement('div');
-      tile.className = 'tool-tile';
-      tile.innerHTML = `
-        <div class="tool-tile-head">
-          <span class="tool-chip exec">Model Generation</span>
-          <span class="tag-time">${this.ts()}</span>
-        </div>
-        <div class="tool-cmd">${genTok} tokens (${thinkTok} reasoning)${speedStr}${ttftStr}</div>
-      `;
-      this.piperFeed.appendChild(tile);
-      this.scrollBottom(this.piperFeed);
+      this.setActivity(speed
+        ? `Generating at ${parseFloat(speed).toFixed(1)} tok/s`
+        : (ttft ? `First token ${(parseFloat(ttft) / 1000).toFixed(1)}s` : 'Generating...'));
     }
 
     if (ev.kind === 'turn') {
       const turnNum = this.getEventField(ev, 'n', ['turn', 'step']);
       if (turnNum) this.piperTurnBadge.textContent = `turn ${turnNum}`;
-
-      // Authoritative token count: REPLACE, don't add.
-      const tokVal = parseInt(this.getEventField(ev, 'tokens', ['tokens_generated']) || 0, 10);
-      if (tokVal > 0) {
-        this.piperTokens = tokVal;
-        this.updateTokenMetrics();
-      }
-
+      const tool = this.getEventField(ev, 'tool');
+      if (tool && tool !== '-') this.lastAction = tool;
       this.setActivity(`Turn ${turnNum || '?'} complete`);
     }
 
@@ -511,66 +509,22 @@ class PiperVisualizerApp {
       const toolName = this.getEventField(ev, 'tool', ['name']) || ev.kind;
       const cmd = this.getEventField(ev, 'command', ['path', 'cmd']) || '';
       this.piperStatusBadge.textContent = `Exec ${toolName}`;
+      this.lastAction = toolName;
       this.setActivity(`Executing ${toolName}${cmd ? ': ' + cmd.split('/').pop() : ''}...`);
-
-      // Track files
       const path = this.getEventField(ev, 'path', ['file']) || cmd;
       if (path && !path.startsWith('-')) this.trackFile(path);
-
-      const tile = document.createElement('div');
-      tile.className = 'tool-tile';
-      const isWrite = toolName.includes('write') || toolName.includes('replace');
-      tile.innerHTML = `
-        <div class="tool-tile-head">
-          <span class="tool-chip ${isWrite ? 'write' : 'exec'}">${this.esc(toolName)}</span>
-          <span class="tag-time">${this.ts()}</span>
-        </div>
-        ${cmd ? `<div class="tool-cmd">${this.esc(cmd)}</div>` : (ev.index !== undefined ? `<div class="tool-cmd">Invocation #${ev.index}</div>` : '')}
-      `;
-      this.piperFeed.appendChild(tile);
-      this.scrollBottom(this.piperFeed);
     }
 
     if (ev.kind === 'write') {
       const path = this.getEventField(ev, 'path', ['file', 'normalised']) || '';
       const tool = this.getEventField(ev, 'tool') || 'write';
-      const bytes = this.getEventField(ev, 'edit_bytes') || '';
-
+      this.lastAction = tool;
       if (path) this.trackFile(path);
       this.setActivity(`Writing ${path.split('/').pop() || path}...`);
-
-      const tile = document.createElement('div');
-      tile.className = 'tool-tile';
-      tile.innerHTML = `
-        <div class="tool-tile-head">
-          <span class="tool-chip write">${this.esc(tool)}</span>
-          <span class="tag-time">${this.ts()}</span>
-        </div>
-        <div class="tool-cmd">${this.esc(path)}${bytes ? ` · ${bytes} bytes` : ''}</div>
-      `;
-      this.piperFeed.appendChild(tile);
-      this.scrollBottom(this.piperFeed);
     }
 
-    if (ev.kind === 'tool_result') {
-      const tool = this.getEventField(ev, 'tool') || 'tool';
-      const status = this.getEventField(ev, 'status') || 'Ok';
-      const summary = this.getEventField(ev, 'summary') || '';
-      if (summary) {
-        const isOk = status.toLowerCase() === 'ok';
-        const tile = document.createElement('div');
-        tile.className = 'tool-tile';
-        tile.innerHTML = `
-          <div class="tool-tile-head">
-            <span class="tool-chip ${isOk ? 'exec' : 'check'}">${this.esc(tool)} Result · ${this.esc(status)}</span>
-            <span class="tag-time">${this.ts()}</span>
-          </div>
-          <div class="tool-cmd" style="max-height: 120px; overflow-y: auto;">${this.esc(summary)}</div>
-        `;
-        this.piperFeed.appendChild(tile);
-        this.scrollBottom(this.piperFeed);
-      }
-    }
+    this.absorbLog(ev);
+    this.renderFeed();
 
     if (ev.kind === 'verification') {
       const contract = this.getEventField(ev, 'contract') || '';
@@ -592,40 +546,6 @@ class PiperVisualizerApp {
       this.scrollBottom(this.piperFeed);
     }
 
-    if (ev.kind === 'checklist') {
-      const itemsStr = this.getEventField(ev, 'items') || '';
-      const openCount = this.getEventField(ev, 'open') || '0';
-      const items = itemsStr.split('|').map(s => s.trim()).filter(Boolean);
-      if (items.length) {
-        const card = document.createElement('div');
-        card.className = 'msg-card accent-piper';
-        card.innerHTML = `
-          <div class="msg-card-head">
-            <span class="msg-card-tag tag-piper">Checklist · ${openCount} open</span>
-            <span class="tag-time">${this.ts()}</span>
-          </div>
-          <div style="display: flex; flex-direction: column; gap: 4px; font-size: 11px;">
-            ${items.map(it => {
-              const ch = it.startsWith('[x]');
-              const tx = it.replace(/^\[[ x]\]\s*/, '');
-              return `<div style="display: flex; gap: 6px; color: ${ch ? 'var(--faint)' : 'var(--fg)'}; text-decoration: ${ch ? 'line-through' : 'none'};">
-                <span>${ch ? '✓' : '○'}</span>
-                <span>${this.esc(tx)}</span>
-              </div>`;
-            }).join('')}
-          </div>
-        `;
-        this.piperFeed.appendChild(card);
-        this.scrollBottom(this.piperFeed);
-      }
-    }
-
-    if (ev.kind === 'token') {
-      const valField = this.getEventField(ev, 'token', ['text']);
-      // Do NOT increment piperTokens here — turn event is authoritative.
-      if (valField) this.appendToken(valField);
-    }
-
     if (ev.kind === 'run_end') {
       const reason = this.getEventField(ev, 'termination_reason') || 'done';
       this.piperStatusBadge.textContent = reason === 'wall_clock' ? 'Timed Out' : 'Finished';
@@ -640,6 +560,261 @@ class PiperVisualizerApp {
     } else if (wake.kind === 'done') {
       this.handleResult(wake);
     }
+  }
+
+  beginSection(sliceId) {
+    this.feed = emptyState();
+    this.liveActive = false;
+    this.seenLive = new Set();
+    this.seenOrch = new Set();
+    this.turnCount = 0;
+    this.lastAction = '';
+    this.piperSection = null;
+    this.thoughtEl = null;
+    this.answerEl = null;
+    this.ensureSection();
+    this.orchRunning = document.createElement('div');
+    this.orchRunning.className = 'msg-card accent-orch';
+    this.orchRunning.textContent = `${sliceId || 'slice'} · waiting`;
+    this.orchFeed.appendChild(this.orchRunning);
+    this.scrollBottom(this.orchFeed);
+    this.renderFeed();
+  }
+
+  ensureSection() {
+    if (this.piperSection) return;
+    this.piperSection = document.createElement('div');
+    this.piperSection.className = 'slice-section';
+    this.piperFeed.appendChild(this.piperSection);
+    this.thoughtEl = null;
+    this.answerEl = null;
+  }
+
+  handleLive(line) {
+    if (!line || typeof line !== 'object') return;
+    if (line.seq != null) {
+      if (this.seenLive.has(line.seq)) return;
+      this.seenLive.add(line.seq);
+    }
+    if (line.kind === 'delta' || line.kind === 'turn' || line.kind === 'write') {
+      this.liveActive = true;
+    }
+    if (line.kind === 'turn') {
+      this.turnCount += 1;
+      if (line.tool) this.lastAction = line.tool;
+      this.piperTurnBadge.textContent = `turn ${this.turnCount}`;
+    }
+    if (line.kind === 'write' && line.path) this.trackFile(line.path);
+    if (line.kind === 'turn' && line.path) this.trackFile(line.path);
+    for (const ev of expandLive(line)) this.feed = apply(this.feed, ev);
+    this.renderFeed();
+  }
+
+  handleOrch(line) {
+    if (!line || typeof line !== 'object') return;
+    const key = JSON.stringify(line);
+    if (this.seenOrch.has(key)) return;
+    this.seenOrch.add(key);
+    const text = line.text || line.note || '';
+    const event = { kind: 'orch', text };
+    if (Object.hasOwn(line, 'tokens') && Number.isFinite(Number(line.tokens))) {
+      event.tokens = Number(line.tokens);
+    }
+    this.feed = apply(this.feed, event);
+    const card = document.createElement('div');
+    card.className = 'msg-card accent-orch';
+    const head = document.createElement('div');
+    head.className = 'msg-card-head';
+    const tag = document.createElement('span');
+    tag.className = 'msg-card-tag tag-orch';
+    tag.textContent = 'Orchestrator';
+    const time = document.createElement('span');
+    time.className = 'tag-time';
+    time.textContent = this.ts();
+    head.append(tag, time);
+    const body = document.createElement('div');
+    body.className = 'msg-text';
+    body.textContent = text;
+    card.append(head, body);
+    this.orchFeed.appendChild(card);
+    this.scrollBottom(this.orchFeed);
+    this.renderFeed();
+  }
+
+  absorbLog(ev) {
+    const structural = ev.kind === 'turn' || ev.kind === 'tool_call' || ev.kind === 'tool' ||
+      ev.kind === 'exec' || ev.kind === 'write' || ev.kind === 'tool_result';
+    if (structural && this.liveActive) return;
+    const event = (ev.kind === 'tool' || ev.kind === 'exec') ? { ...ev, kind: 'tool_call' } : ev;
+    for (const item of expandLog(event)) this.feed = apply(this.feed, item);
+  }
+
+  renderFeed() {
+    this.ensureSection();
+    this.renderChecklist();
+    this.renderTimeline();
+
+    if (this.orchRunning) {
+      const id = this.currentSliceId || 'slice';
+      if (this.turnCount === 0 && !this.lastAction) {
+        this.orchRunning.textContent = `${id} · waiting`;
+      } else {
+        const action = this.lastAction ? ` · ${this.lastAction}` : '';
+        this.orchRunning.textContent = `${id} · turn ${this.turnCount}${action}`;
+      }
+    }
+    this.updateTokenMetrics();
+    this.scrollBottom(this.piperFeed);
+  }
+
+  renderChecklist() {
+    const list = this.feed.checklist;
+    let panel = this.piperSection.querySelector(':scope > .checklist-panel');
+    if (!list || !list.items || !list.items.length) {
+      if (panel) panel.remove();
+      return;
+    }
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.className = 'checklist-panel';
+      this.piperSection.prepend(panel);
+    }
+    const done = list.items.filter((item) => item.done).length;
+    const head = document.createElement('div');
+    head.className = 'checklist-head';
+    head.textContent = `Checklist · ${done}/${list.total} done`;
+    const ul = document.createElement('ul');
+    for (const item of list.items) {
+      const li = document.createElement('li');
+      if (item.done) li.className = 'done';
+      const box = document.createElement('span');
+      box.className = 'box';
+      box.textContent = item.done ? '✓' : '';
+      const label = document.createElement('span');
+      label.textContent = item.text;
+      li.append(box, label);
+      ul.append(li);
+    }
+    panel.replaceChildren(head, ul);
+  }
+
+  renderTimeline() {
+    let timeline = this.piperSection.querySelector(':scope > .feed-timeline');
+    if (!timeline) {
+      timeline = document.createElement('div');
+      timeline.className = 'feed-timeline';
+      this.piperSection.appendChild(timeline);
+    }
+    const thoughts = this.feed.thoughts || [];
+    const bySeq = new Map();
+    for (const thought of thoughts) {
+      if (thought.seq != null) bySeq.set(String(thought.seq), thought);
+    }
+    const used = new Set();
+    const order = [];
+    for (const action of this.feed.actions) {
+      const thought = bySeq.get(String(action.seq));
+      if (thought && !used.has(thought)) {
+        order.push({ type: 'thought', thought, key: 't-' + String(thought.seq) });
+        used.add(thought);
+      }
+      order.push({ type: 'action', action, key: 'a-' + String(action.seq) });
+    }
+    thoughts.forEach((thought, i) => {
+      if (!used.has(thought)) order.push({ type: 'thought', thought, key: 't-loose-' + i });
+    });
+    if (this.feed.thinking) order.push({ type: 'live', key: 'live-think' });
+    if (this.feed.answer) order.push({ type: 'answer', key: 'answer' });
+
+    const keep = new Set();
+    for (const item of order) {
+      keep.add(item.key);
+      let node = timeline.querySelector(`[data-key="${CSS.escape(item.key)}"]`);
+      if (item.type === 'thought' || item.type === 'live') {
+        if (!node) {
+          node = document.createElement('details');
+          node.className = 'thought-block';
+          node.dataset.key = item.key;
+          node.open = item.type === 'live' || this.thinkingMode === 'expanded';
+          const summary = document.createElement('summary');
+          summary.textContent = 'Reasoning';
+          const body = document.createElement('div');
+          body.className = 'thought-content';
+          node.append(summary, body);
+        }
+        node.querySelector('.thought-content').textContent =
+          item.type === 'live' ? this.feed.thinking : item.thought.text;
+        if (item.type === 'live' || this.thinkingMode === 'expanded') node.open = true;
+      } else if (item.type === 'answer') {
+        if (!node) {
+          node = document.createElement('div');
+          node.className = 'msg-card accent-piper';
+          node.dataset.key = item.key;
+          const head = document.createElement('div');
+          head.className = 'msg-card-head';
+          const tag = document.createElement('span');
+          tag.className = 'msg-card-tag tag-piper';
+          tag.textContent = 'Piper';
+          head.appendChild(tag);
+          const body = document.createElement('div');
+          body.className = 'msg-text msg-stream-body';
+          node.append(head, body);
+        }
+        node.querySelector('.msg-text').textContent = this.feed.answer;
+      } else {
+        node = this.actionTile(timeline, item.action, item.key);
+      }
+      timeline.appendChild(node);
+    }
+    for (const child of [...timeline.children]) {
+      if (!keep.has(child.dataset.key)) child.remove();
+    }
+  }
+
+  actionTile(timeline, action, key) {
+    let tile = timeline.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (!tile) {
+      tile = document.createElement('div');
+      tile.className = 'tool-tile';
+      tile.dataset.key = key;
+      tile.dataset.seq = String(action.seq);
+      const head = document.createElement('div');
+      head.className = 'tool-tile-head';
+      const chip = document.createElement('span');
+      chip.className = 'tool-chip exec';
+      const time = document.createElement('span');
+      time.className = 'tag-time';
+      const cmd = document.createElement('div');
+      cmd.className = 'tool-cmd';
+      head.append(chip, time);
+      tile.append(head, cmd);
+    }
+    const chip = tile.querySelector('.tool-chip');
+    const write = (action.tool || '').includes('write') || (action.tool || '').includes('replace') || action.edit_bytes > 0;
+    chip.className = 'tool-chip ' + (write ? 'write' : 'exec');
+    chip.textContent = action.tool || 'action';
+    const bits = [];
+    if (action.path) bits.push(action.path);
+    else if (action.command) bits.push(action.command);
+    if (action.read_bytes) bits.push(`${action.read_bytes} read`);
+    if (action.edit_bytes) bits.push(`${action.edit_bytes} written`);
+    if (action.status) bits.push(action.status);
+    if (action.summary) bits.push(action.summary);
+    tile.querySelector('.tool-cmd').textContent = bits.join(' · ');
+    if (action.path) this.trackFile(action.path);
+    return tile;
+  }
+
+  formatDiff(stat) {
+    if (!stat) return 'none';
+    if (typeof stat === 'string') return stat;
+    if (typeof stat === 'object') {
+      const ins = stat.insertions ?? 0;
+      const del = stat.deletions ?? 0;
+      const files = stat.files ?? 0;
+      return `+${ins} -${del} (${files} files)`;
+    }
+    return String(stat);
   }
 
   // ---------------------------------------------------------------------------
@@ -707,38 +882,34 @@ class PiperVisualizerApp {
   // ---------------------------------------------------------------------------
 
   updateTokenMetrics() {
-    const fmtP = this.piperTokens.toLocaleString();
+    const generated = this.feed ? this.feed.generatedTokens : 0;
+    const fmtP = generated.toLocaleString();
 
     if (this.piperTokensTotal) {
       this.piperTokensTotal.textContent = fmtP;
       this.piperTokensTotal.classList.add('counter-bump');
       setTimeout(() => this.piperTokensTotal.classList.remove('counter-bump'), 300);
     }
-    if (this.piperTokensPaneBadge) this.piperTokensPaneBadge.textContent = `${fmtP} tokens`;
-
-    // Orchestrator tokens: only show real data, not heuristics
-    if (this.orchTokensKnown) {
-      const fmtO = this.orchTokens.toLocaleString();
-      if (this.orchTokensTotal) this.orchTokensTotal.textContent = fmtO;
-      if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = `${fmtO} tokens`;
-    } else {
-      if (this.orchTokensTotal) this.orchTokensTotal.textContent = '—';
-      if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = '— tokens';
+    if (this.piperTokensPaneBadge) {
+      const ctx = this.feed && this.feed.contextTokens != null
+        ? ` · ctx ${this.feed.contextTokens.toLocaleString()}`
+        : '';
+      this.piperTokensPaneBadge.textContent = `${fmtP} tokens${ctx}`;
     }
 
-    // Offloaded %: only when both sides have real data
+    const cloud = this.feed ? this.feed.cloudTokens : null;
+    if (cloud == null) {
+      if (this.orchTokensTotal) this.orchTokensTotal.textContent = '—';
+      if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = '— tokens';
+    } else {
+      const fmtO = cloud.toLocaleString();
+      if (this.orchTokensTotal) this.orchTokensTotal.textContent = fmtO;
+      if (this.orchTokensPaneBadge) this.orchTokensPaneBadge.textContent = `${fmtO} tokens`;
+    }
+
     if (this.offloadPct) {
-      if (this.orchTokensKnown && this.orchTokens > 0) {
-        const total = this.piperTokens + this.orchTokens;
-        this.offloadPct.textContent = total > 0
-          ? `${((this.piperTokens / total) * 100).toFixed(0)}%`
-          : '—';
-      } else if (this.piperTokens > 0) {
-        // We know local but not cloud — show indicator that local is doing work
-        this.offloadPct.textContent = '100%';
-      } else {
-        this.offloadPct.textContent = '—';
-      }
+      const pct = this.feed ? offloadPercent(this.feed) : null;
+      this.offloadPct.textContent = pct == null ? '—' : `${pct}%`;
     }
   }
 

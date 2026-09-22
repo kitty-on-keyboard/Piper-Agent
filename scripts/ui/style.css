@@ -686,6 +686,58 @@ body.thinking-expanded .thought-block {
   /* Blocks render and are open by default. JS sets open=true. */
 }
 
+.checklist-panel {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+.checklist-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.checklist-panel ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.checklist-panel li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 3px 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.checklist-panel li .box {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border-radius: 3px;
+  border: 1.5px solid var(--faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: #fff;
+}
+.checklist-panel li.done .box {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+.checklist-panel li.done span:last-child {
+  color: var(--dim);
+  text-decoration: line-through;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Tool Execution Tiles
    ═══════════════════════════════════════════════════════════════ */

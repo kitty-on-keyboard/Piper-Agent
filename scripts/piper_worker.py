@@ -487,6 +487,124 @@ def result_shell(*, task_id, cwd, model_dir, status, message, wall_seconds=0,
     }
 
 
+class LiveJournal:
+    """Append-only live.jsonl writer fed by sidecar notifications."""
+
+    _WRITE_TOOLS = frozenset({"write_file", "apply_patch", "commit_think_block"})
+
+    def __init__(self, path: str) -> None:
+        self._fh = open(path, "w", encoding="utf-8")
+        self._seq = 0
+        self._buffer = ""
+        self._channel = ""
+
+    def _write_line(self, obj: dict) -> None:
+        self._seq += 1
+        obj["seq"] = self._seq
+        self._fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        self._fh.flush()
+
+    def _flush_buffer(self) -> None:
+        if self._buffer:
+            self._write_line({
+                "kind": "delta",
+                "channel": self._channel,
+                "text": self._buffer,
+            })
+            self._buffer = ""
+
+    def on_notification(self, method: str, params) -> None:
+        if method == "lmp/token":
+            channel = params.get("channel") or ""
+            text = params.get("text") or ""
+            if channel not in ("thinking", "answer"):
+                return
+            if not text:
+                return
+            if channel != self._channel:
+                self._flush_buffer()
+                self._channel = channel
+            self._buffer += text
+            if len(self._buffer) >= 64:
+                self._flush_buffer()
+        elif method == "lmp/turn":
+            self._flush_buffer()
+            self._handle_turn(params)
+        # Other methods: no flush, no write.
+
+    def _handle_turn(self, params) -> None:
+        tool_name = params.get("tool_name") or ""
+        tool_status = params.get("tool_status") or ""
+        summary = str(params.get("summary") or "")[:240]
+        read_bytes = int(params.get("read_bytes") or 0)
+        edit_bytes = int(params.get("edit_bytes") or 0)
+        think_tokens = int(params.get("think_tokens") or 0)
+        text_tokens = int(params.get("text_tokens") or 0)
+        tool_tokens = int(params.get("tool_tokens") or 0)
+
+        path, command = self._parse_tool_args(params.get("tool_args"))
+
+        self._write_line({
+            "kind": "turn",
+            "tool": tool_name,
+            "path": path,
+            "command": command,
+            "status": tool_status,
+            "summary": summary,
+            "read_bytes": read_bytes,
+            "edit_bytes": edit_bytes,
+            "think_tokens": think_tokens,
+            "text_tokens": text_tokens,
+            "tool_tokens": tool_tokens,
+        })
+
+        if edit_bytes > 0 or tool_name in self._WRITE_TOOLS:
+            self._write_line({
+                "kind": "write",
+                "tool": tool_name,
+                "path": path,
+                "edit_bytes": edit_bytes,
+            })
+
+    @staticmethod
+    def _parse_tool_args(raw):
+        """Extract (path, command) from tool_args which may be a JSON string or dict."""
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return "", ""
+            if not isinstance(data, dict):
+                return "", ""
+        elif isinstance(raw, dict):
+            data = raw
+        else:
+            return "", ""
+
+        path_keys = ("path", "file", "filepath", "file_path", "target")
+        cmd_keys = ("command", "cmd")
+        path = ""
+        for k in path_keys:
+            v = data.get(k)
+            if isinstance(v, str) and v:
+                path = v
+                break
+        command = ""
+        for k in cmd_keys:
+            v = data.get(k)
+            if isinstance(v, str) and v:
+                command = v
+                break
+        return path, command
+
+    def flush(self) -> None:
+        self._flush_buffer()
+
+    def close(self) -> None:
+        self._flush_buffer()
+        self._fh.close()
+
+
 def run_mission(task_arg, jsonl=False, orch_webhook=None):
     """Drive one packet. Returns process exit code; always tries to write result.json."""
     result_path = None
@@ -534,6 +652,7 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
     result_dir = os.path.dirname(os.path.abspath(result_path))
     os.makedirs(result_dir, exist_ok=True)
     archive_prior_events(result_dir)
+    journal = LiveJournal(os.path.join(result_dir, "live.jsonl"))
     harness_dir = tempfile.mkdtemp(prefix=f"piper-worker-{packet['id']}-")
     event_log = os.path.join(harness_dir, "events.jsonl")
     durable_log = os.path.join(result_dir, "events.jsonl")
@@ -545,6 +664,7 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
             sys.stdout.flush()
         if method == "lmp/token" and params.get("channel") == "answer":
             answer_parts.append(params.get("text") or "")
+        journal.on_notification(method, params)
 
     meta = {
         "name": packet["id"],
@@ -572,6 +692,7 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
     except Exception as exc:
         protocol_error = exc
     finally:
+        journal.close()
         if os.path.isfile(event_log):
             try:
                 shutil.copy2(event_log, durable_log)
