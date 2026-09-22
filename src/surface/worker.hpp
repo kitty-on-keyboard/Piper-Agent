@@ -231,6 +231,11 @@ struct WebhookPayload {
     std::string question;
 };
 
+// Read first non-empty http(s) wake URL from `.piper/orch_webhook` under roots.
+// Mirrors scripts/piper_worker.py::read_orch_webhook_file. Never invents a host.
+[[nodiscard]] std::string read_orch_webhook_file(
+    const std::vector<std::string>& roots);
+
 // Serialize and POST a wake-up event to the specified webhook URL.
 // Returns true on HTTP 2xx, false on failure or timeout. Never throws.
 bool post_orch_webhook(const std::string& webhook_url,

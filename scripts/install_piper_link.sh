@@ -10,8 +10,9 @@
 #   ./scripts/install_piper_link.sh /path/to/build/src/surface/piper
 #   cmake --build --preset dev --target install-piper-link
 #
-# Mac + writable Homebrew only. Missing /opt/homebrew/bin (Linux CI, non-Mac)
-# is a clean no-op (exit 0). Permission failures print a copy-paste ln and exit 1.
+# Mac preferred (Homebrew). Non-Darwin is a clean no-op (exit 0).
+# If Homebrew bin is missing/unwritable, falls back to ~/.local/bin or ~/bin
+# automatically — no copy-paste ln.
 set -euo pipefail
 
 readonly HOMEBREW_BIN="/opt/homebrew/bin"
@@ -76,25 +77,39 @@ main() {
     exit 0
   fi
 
-  if [[ ! -d "${HOMEBREW_BIN}" ]]; then
-    echo "install_piper_link: ${HOMEBREW_BIN} missing; skipping (piper is at ${target})"
-    exit 0
+  if [[ -d "${HOMEBREW_BIN}" ]]; then
+    dest="${HOMEBREW_BIN}/${LINK_NAME}"
+    if [[ -w "${HOMEBREW_BIN}" ]] && ln -sfn "${target}" "${dest}"; then
+      echo "install_piper_link: ${dest} -> ${target}"
+      return 0
+    fi
+  else
+    echo "install_piper_link: ${HOMEBREW_BIN} missing; trying user bin" >&2
   fi
 
-  dest="${HOMEBREW_BIN}/${LINK_NAME}"
-  if [[ ! -w "${HOMEBREW_BIN}" ]]; then
-    echo "install_piper_link: ${HOMEBREW_BIN} not writable; run:" >&2
-    echo "  ln -sfn '${target}' '${dest}'" >&2
-    exit 1
-  fi
+  # Homebrew missing/not writable (or ln failed): fall back to a user bin — no copy-paste ln.
+  local fallback dest2
+  for fallback in "${HOME}/.local/bin" "${HOME}/bin"; do
+    mkdir -p "${fallback}" 2>/dev/null || true
+    if [[ -d "${fallback}" && -w "${fallback}" ]]; then
+      dest2="${fallback}/${LINK_NAME}"
+      if ln -sfn "${target}" "${dest2}"; then
+        echo "install_piper_link: ${dest2} -> ${target}"
+        case ":${PATH}:" in
+          *":${fallback}:"*) ;;
+          *)
+            echo "install_piper_link: note: ${fallback} is not on PATH; open a new shell or add it" >&2
+            ;;
+        esac
+        return 0
+      fi
+    fi
+  done
 
-  if ! ln -sfn "${target}" "${dest}"; then
-    echo "install_piper_link: ln failed; run:" >&2
-    echo "  ln -sfn '${target}' '${dest}'" >&2
-    exit 1
-  fi
-
-  echo "install_piper_link: ${dest} -> ${target}"
+  echo "install_piper_link: could not link into ${HOMEBREW_BIN} or ~/bin ~/.local/bin" >&2
+  echo "  built piper is at: ${target}" >&2
+  echo "  call it by absolute path, or fix directory permissions and re-run" >&2
+  exit 1
 }
 
 main "$@"
