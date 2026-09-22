@@ -49,3 +49,7 @@
 ## 2026-05-26 - Zero-Allocation Line Numbering for Tool File Observations
 **Learning:** `number_lines()` in `src/tools/text_view.hpp` previously called `std::to_string(line)` on every line during file reads (`read_file`, `read_many`, `read_slice`). For multi-thousand line files, this triggered thousands of heap allocations and string constructions per read. Using `std::to_chars` with a stack buffer (`char num_buf[32]`) formats integer line numbers with zero allocations.
 **Action:** Use `std::to_chars` into local stack buffers for loop-level string formatting of integer line numbers instead of `std::to_string`.
+
+## 2026-05-27 - Fast-Path Allocation-Free Parsing and Duplicate Checking in Symbol Hit Ranking
+**Learning:** `rank_symbol_hits` in `src/tools/symbol_index.hpp` previously created `std::string` heap allocations for `path` and `text`, plus a temporary `std::string` just to convert line numbers via `std::strtol`, before checking if the line number was valid (`<= 0`) or if `(path, line)` was a duplicate. On large symbol search results, this created thousands of short-lived heap allocations and temporary string copies.
+**Action:** Parse line numbers directly from `std::string_view` via `std::from_chars` and check duplicates using `std::string_view` before constructing `SymbolHit`'s `std::string` members (`path` and `text`).
