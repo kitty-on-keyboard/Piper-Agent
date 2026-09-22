@@ -28,6 +28,7 @@
 #include <string>
 
 #include "src/context/context.hpp"
+#include "src/loop/tiny_gate.hpp"
 #include "src/loop/turn.hpp"
 #include "src/model/backend.hpp"
 #include "src/model/chat_template.hpp"
@@ -247,6 +248,28 @@ struct AgentConfig {
     // use kRunNudgesBeforeEnding (agent) / kPlanNudgesBeforeEnding (plan).
     // `LMP_DEGENERATE_NUDGE_CAP=N` (positive integer) overrides when set.
     std::size_t degenerate_nudge_cap = 0;
+
+    // Tiny second-process T1 gate (letter-mask Choice over a small Qwen3). Default OFF.
+    // `LMP_TINY_GATE=0|1` overlays when set. When on, T1/#150 adjacency calls the gate
+    // helper instead of same-weights Pulse (which never landed on main). Flag-off ==
+    // baseline #150 heuristics. Not product default.
+    bool tiny_gate = false;
+
+    // Binary residual: force_tool iff p_force >= this floor, else nudge.
+    // Default 0.55. `LMP_TINY_GATE_P_MIN` (float in (0,1]) overrides when set.
+    float tiny_gate_p_min = kGateDefaultPMin;
+
+    // Gate helper base URL (HTTP). Default http://127.0.0.1:18765.
+    // `LMP_GATE_URL` overrides when set. Process lifecycle is external (Benchbot /
+    // `scripts/lmp_tiny_gate.py --listen`); this client only POSTs.
+    std::string tiny_gate_url = "http://127.0.0.1:18765";
+
+    // Optional model path recorded in journal events (from LMP_GATE_MODEL_DIR).
+    std::string tiny_gate_model_dir;
+
+    // Test / probe seam: when set and tiny_gate is on, T1 uses this instead of HTTP.
+    // Returning nullopt → policy Fallback (existing #150 path). Production leaves empty.
+    GateProbe tiny_gate_probe;
 };
 
 // How many of `max_new_tokens` stay reserved for the tool call after think ends.
@@ -469,6 +492,9 @@ class Agent {
     // No-op unless `config_.shadow_compact` and `kv_invalidated_by_compact_`.
     void maybe_warm_stable_prefix(const model::InferenceTask& task,
                                   const model::CancelToken& cancel);
+    // T1 tiny-gate at the #150 nudge seam. Journals `gate`; returns the policy action
+    // (Fallback means keep existing nudge/stall heuristics).
+    [[nodiscard]] GatePolicy run_tiny_gate_t1(const char* when);
     // Drains the steer source into the context. Returns how many instructions landed.
     [[nodiscard]] std::size_t take_steering();
     [[nodiscard]] TurnResult::PlanOutcome apply_plan(

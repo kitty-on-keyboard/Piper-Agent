@@ -5,7 +5,9 @@ model in-process via [MLX](https://github.com/ml-explore/mlx) and drives a tool-
 loop against a workspace. Two interfaces, one agent: a VS Code / Cursor extension for
 humans, and a `piper` CLI worker for cloud orchestrators / scripts.
 
-**Scope:** Mac-local Qwen/MLX, one model loaded, no subagents, no second inference server.
+**Scope:** Mac-local Qwen/MLX, one model loaded in the sidecar, no subagents.
+An optional flag-off **tiny gate** helper (`LMP_TINY_GATE`, default off) may run a
+second small Qwen3 process for T1 Choice — see [docs/TINY_GATE.md](docs/TINY_GATE.md).
 
 License: [Apache-2.0](LICENSE). Credits: [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 **Model weights are not in this repo.** Follow the checkpoint's own license.

@@ -770,6 +770,23 @@ class RunInbox {
             config.degenerate_nudge_cap = static_cast<std::size_t>(v);
         }
     }
+    // Tiny second-process T1 gate. Default OFF. Exact `0`/`1` only.
+    surface::overlay_lmp_env_bool("LMP_TINY_GATE", &config.tiny_gate);
+    if (const char* pmin = std::getenv("LMP_TINY_GATE_P_MIN");
+        pmin != nullptr && pmin[0] != '\0') {
+        char* end = nullptr;
+        const float v = std::strtof(pmin, &end);
+        if (end != pmin && *end == '\0' && v > 0.0F && v <= 1.0F) {
+            config.tiny_gate_p_min = v;
+        }
+    }
+    if (const char* url = std::getenv("LMP_GATE_URL"); url != nullptr && url[0] != '\0') {
+        config.tiny_gate_url = url;
+    }
+    if (const char* gdir = std::getenv("LMP_GATE_MODEL_DIR");
+        gdir != nullptr && gdir[0] != '\0') {
+        config.tiny_gate_model_dir = gdir;
+    }
 
     return apply_autonomy(id, message, config);
 }
