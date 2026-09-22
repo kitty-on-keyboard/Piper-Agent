@@ -8,6 +8,8 @@ Exit 0 only when:
   4. piper_ui wake-file helper matches the worker path convention
   5. `piper review` prints a deterministic PASS card from result.json
   6. UI answer path shares write_answer_file (approved → allow)
+  7. `piper status` reports ask/done without freehand cat/jq
+  8. `piper await` returns when ask appears (no sleep-loop paste)
 """
 
 from __future__ import annotations
@@ -104,6 +106,42 @@ def main():
         with open(shared, encoding="utf-8") as fh:
             if json.load(fh) != {"text": "allow"}:
                 return fail("shared write_answer_file shape mismatch")
+
+        # 7. status card (no freehand cat/jq)
+        st_dir = os.path.join(tmp, "status_ws")
+        os.makedirs(st_dir)
+        with open(os.path.join(st_dir, "awaiting_user.json"), "w", encoding="utf-8") as fh:
+            json.dump({"question": "Allow overwrite?", "options": "allow,deny"}, fh)
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            st_rc = w.main(["status", "--dir", st_dir])
+        if st_rc != w.EXIT_OK:
+            return fail(f"piper status ask rc={st_rc}")
+        if "state:    ask" not in buf.getvalue() or "Allow overwrite?" not in buf.getvalue():
+            return fail(f"status ask card: {buf.getvalue()!r}")
+
+        # 8. await returns when ask appears
+        await_dir = os.path.join(tmp, "await_ws")
+        os.makedirs(await_dir)
+        import threading
+        import time
+
+        def _later():
+            time.sleep(0.1)
+            with open(os.path.join(await_dir, "awaiting_user.json"), "w", encoding="utf-8") as fh:
+                json.dump({"question": "Go?", "options": "allow,deny"}, fh)
+
+        threading.Thread(target=_later, daemon=True).start()
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            aw_rc = w.main(["await", "--dir", await_dir, "--timeout-s", "2",
+                            "--interval-s", "0.05"])
+        if aw_rc != w.EXIT_OK:
+            return fail(f"piper await rc={aw_rc}")
+        if "state:    ask" not in buf2.getvalue():
+            return fail(f"await card: {buf2.getvalue()!r}")
 
     print("prove_deterministic_harness: ok")
     return 0

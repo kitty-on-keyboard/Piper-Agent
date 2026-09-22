@@ -1190,7 +1190,7 @@ class WorkerParser(argparse.ArgumentParser):
 HELP_CONTRACT = (
     "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
     "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
-    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, or LMP_ORCH_WEBHOOK). "
+    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook). "
     "A run that writes result.json POSTs done if completed, stalled if stopped/failed. Process exit with no result.json POSTs died. "
     "Silent detached workers are refused."
 )
@@ -1494,6 +1494,196 @@ def init_project(target_dir="."):
     return EXIT_OK
 
 
+
+def resolve_status_dir(dir_arg=None, task_arg=None):
+    """Directory that holds awaiting_user.json / result.json / answer.json."""
+    if dir_arg:
+        return os.path.abspath(os.path.expanduser(dir_arg))
+    if task_arg:
+        packet = load_packet(task_arg)
+        return os.path.dirname(os.path.abspath(packet["result_path"]))
+    return os.path.abspath(".")
+
+
+def read_json_object(path):
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def collect_run_status(directory):
+    """Deterministic workspace status — parents should not freehand cat/jq.
+
+    Priority: ask (awaiting_user.json) > finished (result.json) > idle.
+    """
+    directory = os.path.abspath(directory)
+    awaiting_path = os.path.join(directory, "awaiting_user.json")
+    result_path = os.path.join(directory, "result.json")
+    answer_path = os.path.join(directory, "answer.json")
+    awaiting = read_json_object(awaiting_path)
+    result = read_json_object(result_path)
+    answer_present = os.path.isfile(answer_path)
+    if awaiting is not None:
+        question = str(awaiting.get("question") or "").strip()
+        return {
+            "state": "ask",
+            "directory": directory,
+            "awaiting_path": awaiting_path,
+            "result_path": result_path if os.path.isfile(result_path) else None,
+            "answer_present": answer_present,
+            "question": question,
+            "options": awaiting.get("options"),
+            "run_id": awaiting.get("run_id"),
+            "seq": awaiting.get("seq"),
+            "result": result,
+        }
+    if result is not None:
+        status = str(result.get("status") or "").lower()
+        if status == "ok":
+            state = "done"
+        elif status == "stalled":
+            state = "stalled"
+        elif status == "timeout":
+            state = "timeout"
+        else:
+            state = "error"
+        return {
+            "state": state,
+            "directory": directory,
+            "awaiting_path": None,
+            "result_path": result_path,
+            "answer_present": answer_present,
+            "question": None,
+            "options": None,
+            "run_id": result.get("run_id") or result.get("task_id"),
+            "seq": None,
+            "result": result,
+            "status": status,
+            "message": result.get("message"),
+            "task_id": result.get("task_id"),
+        }
+    return {
+        "state": "idle",
+        "directory": directory,
+        "awaiting_path": None,
+        "result_path": None,
+        "answer_present": answer_present,
+        "question": None,
+        "options": None,
+        "run_id": None,
+        "seq": None,
+        "result": None,
+    }
+
+
+def format_status_card(info):
+    state = info.get("state") or "idle"
+    lines = [
+        "── piper status ─────────────────────────",
+        f"state:    {state}",
+        f"dir:      {info.get('directory')}",
+    ]
+    if state == "ask":
+        q = str(info.get("question") or "").strip().replace("\n", " ")
+        if len(q) > 160:
+            q = q[:157] + "..."
+        lines.append(f"question: {q or '(empty)'}")
+        if info.get("options") is not None:
+            lines.append(f"options:  {info.get('options')}")
+        lines.append(f"awaiting: {info.get('awaiting_path')}")
+        lines.append("next:     piper answer allow|deny|--text ...")
+    elif state in ("done", "stalled", "timeout", "error"):
+        lines.append(f"task:     {info.get('task_id') or '(unknown)'}")
+        lines.append(f"status:   {info.get('status')}")
+        msg = str(info.get("message") or "").strip().replace("\n", " ")
+        if len(msg) > 160:
+            msg = msg[:157] + "..."
+        lines.append(f"message:  {msg or '(empty)'}")
+        lines.append(f"result:   {info.get('result_path')}")
+        lines.append("next:     piper review --result …")
+    else:
+        lines.append("next:     piper dispatch --task …  (or wait for a run)")
+    lines.append("─────────────────────────────────────────")
+    return "\n".join(lines)
+
+
+def status_exit_code(info):
+    state = info.get("state")
+    if state == "ask":
+        return EXIT_OK
+    if state == "done":
+        return EXIT_OK
+    if state == "idle":
+        return EXIT_OK
+    if state == "timeout":
+        return EXIT_TIMEOUT
+    if state in ("stalled", "error"):
+        return EXIT_ERROR
+    return EXIT_ERROR
+
+
+def cmd_status(args):
+    try:
+        directory = resolve_status_dir(getattr(args, "dir", None), getattr(args, "task", None))
+    except PacketError as exc:
+        print(f"piper status: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    info = collect_run_status(directory)
+    if getattr(args, "json", False):
+        print(json.dumps(info, indent=2))
+    else:
+        print(format_status_card(info))
+    return status_exit_code(info)
+
+
+def cmd_await(args):
+    """Poll until ask/done/stalled/error/timeout — no hand-rolled sleep loops."""
+    try:
+        directory = resolve_status_dir(getattr(args, "dir", None), getattr(args, "task", None))
+    except PacketError as exc:
+        print(f"piper await: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    timeout_s = float(getattr(args, "timeout_s", 600.0) or 600.0)
+    interval_s = float(getattr(args, "interval_s", 0.25) or 0.25)
+    if timeout_s < 0:
+        print("piper await: --timeout-s must be >= 0", file=sys.stderr)
+        return EXIT_INVALID
+    if interval_s <= 0:
+        print("piper await: --interval-s must be > 0", file=sys.stderr)
+        return EXIT_INVALID
+    terminal = {"ask", "done", "stalled", "error", "timeout"}
+    deadline = time.time() + timeout_s
+    last_state = None
+    while True:
+        info = collect_run_status(directory)
+        state = info.get("state")
+        if state != last_state and getattr(args, "verbose", False):
+            print(f"piper await: state={state}", file=sys.stderr)
+            last_state = state
+        if state in terminal:
+            if getattr(args, "json", False):
+                print(json.dumps(info, indent=2))
+            else:
+                print(format_status_card(info))
+            return status_exit_code(info)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            print("piper await: timed out still idle", file=sys.stderr)
+            if getattr(args, "json", False):
+                info = collect_run_status(directory)
+                info["state"] = "idle"
+                info["await_timeout"] = True
+                print(json.dumps(info, indent=2))
+            return EXIT_TIMEOUT
+        time.sleep(min(interval_s, remaining))
+
+
+
 def build_parser():
     parser = WorkerParser(
         prog="piper",
@@ -1613,6 +1803,29 @@ def build_parser():
     dispatch_p.add_argument("--json", action="store_true",
                             help="emit machine-readable JSON including the review card")
 
+    status_p = sub.add_parser(
+        "status",
+        help="print deterministic run status (idle/ask/done/stalled/error)",
+        description="Read awaiting_user.json / result.json and print a status card. "
+                    "Parents should not freehand cat/jq the workspace.",
+    )
+    status_p.add_argument("--dir", default=None, help="directory holding awaiting_user.json/result.json")
+    status_p.add_argument("--task", default=None, help="task.json whose result_path directory is inspected")
+    status_p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    await_p = sub.add_parser(
+        "await",
+        help="wait until ask/done/stalled/error (no hand-rolled sleep loops)",
+        description="Poll the workspace until a terminal state appears, then print status. "
+                    "Use this instead of pasting sleep/poll snippets into chat.",
+    )
+    await_p.add_argument("--dir", default=None, help="directory holding awaiting_user.json/result.json")
+    await_p.add_argument("--task", default=None, help="task.json whose result_path directory is watched")
+    await_p.add_argument("--timeout-s", type=float, default=600.0, help="max seconds to wait (default 600)")
+    await_p.add_argument("--interval-s", type=float, default=0.25, help="poll interval seconds (default 0.25)")
+    await_p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    await_p.add_argument("--verbose", action="store_true", help="print state transitions on stderr")
+
     return parser
 
 
@@ -1635,6 +1848,10 @@ def main(argv=None):
         return cmd_review(args)
     if command == "dispatch":
         return cmd_dispatch(args)
+    if command == "status":
+        return cmd_status(args)
+    if command == "await":
+        return cmd_await(args)
 
     if command == "init" or (command == "worker" and getattr(args, "worker_cmd", None) == "init"):
         return init_project(getattr(args, "target_dir", "."))
@@ -2354,11 +2571,72 @@ def self_test():
         check(os.path.isfile(os.path.join(disp_ws, "result.json")),
               "dispatch must leave result.json")
 
+        # 20. status card from awaiting_user.json / result.json (no freehand cat/jq)
+        st_dir = os.path.join(tmp, "status_dir")
+        os.makedirs(st_dir)
+        idle_stdout = io.StringIO()
+        with contextlib.redirect_stdout(idle_stdout):
+            idle_rc = main(["status", "--dir", st_dir])
+        check(idle_rc == EXIT_OK, f"status idle must exit 0, got {idle_rc}")
+        check("state:    idle" in idle_stdout.getvalue(),
+              f"status idle card, got {idle_stdout.getvalue()!r}")
+        with open(os.path.join(st_dir, "awaiting_user.json"), "w", encoding="utf-8") as fh:
+            json.dump({"question": "Allow irreversible delete?", "options": "allow,deny",
+                       "run_id": "r1", "seq": 7}, fh)
+        ask_stdout = io.StringIO()
+        with contextlib.redirect_stdout(ask_stdout):
+            ask_rc = main(["status", "--dir", st_dir])
+        check(ask_rc == EXIT_OK, f"status ask must exit 0, got {ask_rc}")
+        ask_out = ask_stdout.getvalue()
+        check("state:    ask" in ask_out and "Allow irreversible delete?" in ask_out,
+              f"status ask card, got {ask_out!r}")
+        check("piper answer" in ask_out, f"status ask must point at piper answer, got {ask_out!r}")
+        os.remove(os.path.join(st_dir, "awaiting_user.json"))
+        with open(os.path.join(st_dir, "result.json"), "w", encoding="utf-8") as fh:
+            json.dump(result_shell(
+                task_id="st-1", cwd=st_dir, model_dir=model_dir, status="ok",
+                message="Done.", files_touched=["z.py"],
+            ), fh)
+        done_stdout = io.StringIO()
+        with contextlib.redirect_stdout(done_stdout):
+            done_rc = main(["status", "--dir", st_dir])
+        check(done_rc == EXIT_OK, f"status done must exit 0, got {done_rc}")
+        check("state:    done" in done_stdout.getvalue(),
+              f"status done card, got {done_stdout.getvalue()!r}")
+
+        # 21. await returns when ask appears (no hand-rolled sleep snippet)
+        await_dir = os.path.join(tmp, "await_dir")
+        os.makedirs(await_dir)
+
+        def _write_ask_later():
+            time.sleep(0.15)
+            with open(os.path.join(await_dir, "awaiting_user.json"), "w", encoding="utf-8") as fh:
+                json.dump({"question": "Continue?", "options": "allow,deny",
+                           "run_id": "r2", "seq": 1}, fh)
+
+        thr = threading.Thread(target=_write_ask_later, daemon=True)
+        thr.start()
+        await_stdout = io.StringIO()
+        with contextlib.redirect_stdout(await_stdout):
+            await_rc = main(["await", "--dir", await_dir, "--timeout-s", "2",
+                             "--interval-s", "0.05"])
+        thr.join(timeout=2)
+        check(await_rc == EXIT_OK, f"await ask must exit 0, got {await_rc}")
+        check("state:    ask" in await_stdout.getvalue(),
+              f"await must print ask card, got {await_stdout.getvalue()!r}")
+        # idle timeout
+        empty_await = os.path.join(tmp, "await_empty")
+        os.makedirs(empty_await)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            to_rc = main(["await", "--dir", empty_await, "--timeout-s", "0.2",
+                          "--interval-s", "0.05"])
+        check(to_rc == EXIT_TIMEOUT, f"await idle timeout must exit 2, got {to_rc}")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 20 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 22 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 

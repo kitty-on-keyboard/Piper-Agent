@@ -88,6 +88,8 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    ```bash
    piper dispatch --task /path/to/task.json   # run attached → wait → print review card
    piper review --result /path/to/result.json # card only, when you already waited
+   piper status --dir /path/to/slice          # idle/ask/done without freehand cat/jq
+   piper await --dir /path/to/slice           # wait for ask/done (no sleep-loop paste)
    ```
    Piper writes a structured result upon completion:
    ```json
