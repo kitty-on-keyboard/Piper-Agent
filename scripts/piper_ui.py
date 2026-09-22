@@ -443,8 +443,21 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
     return VisualizerHTTPHandler
 
 
+def write_wake_url_file(workspace_dir, wake_url):
+    """Persist wake URL under .piper/orch_webhook — parents must not copy from this panel."""
+    root = os.path.abspath(workspace_dir)
+    path = os.path.join(root, ".piper", "orch_webhook")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(wake_url.strip() + "\n")
+    os.replace(tmp, path)
+    return path
+
+
 def run_server(workspace_dir, port=8765, open_browser=True, log_path=None):
     static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "ui"))
+    workspace_dir = os.path.abspath(workspace_dir)
     broker = EventBroker()
     watcher = WorkspaceWatcher(workspace_dir, broker, log_path=log_path)
     watcher.start()
@@ -453,11 +466,14 @@ def run_server(workspace_dir, port=8765, open_browser=True, log_path=None):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
 
     url = f"http://127.0.0.1:{port}"
+    wake_url = url + "/wake"
+    wake_file = write_wake_url_file(workspace_dir, wake_url)
     print(f"┌────────────────────────────────────────────────────────┐")
     print(f"│  Piper Orchestration Visualizer                        │")
     print(f"│  Dashboard: {url:<43}│")
     print(f"│  Workspace: {workspace_dir:<43}│")
-    print(f"│  Webhook:   {url + '/wake':<43}│")
+    print(f"│  Wake file: {wake_file:<43}│")
+    print(f"│  (worker reads the file — do not copy the URL)         │")
     print(f"└────────────────────────────────────────────────────────┘")
 
     if open_browser:

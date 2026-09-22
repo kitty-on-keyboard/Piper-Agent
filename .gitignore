@@ -57,4 +57,5 @@ lmp_events.jsonl
 # Keep summarize_events.py in scripts/; never commit raw dumps.
 /piper-bench/
 .piper/slices/
+.piper/orch_webhook
 

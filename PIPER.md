@@ -134,7 +134,8 @@ Otherwise, before start:
 
 - `--orch-webhook URL`, or
 - task field `orch_webhook`, or
-- env `LMP_ORCH_WEBHOOK`
+- env `LMP_ORCH_WEBHOOK`, or
+- file `.piper/orch_webhook` (written by `piper_ui`; do not copy from the panel)
 
 Detached with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
@@ -147,7 +148,7 @@ mission. No URL means no POST.
 
 | kind | when | parent does |
 | --- | --- | --- |
-| `ask` | `awaiting_user.json` written, or an irreversible call is paused | write `answer.json` as `{"text":"..."}`. Do not restart. `allow` or `deny` for an irreversible call. Guidance for a real question. |
+| `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow\|deny\|--text "..."` (writes `answer.json`). Do not restart. Do not freehand JSON. |
 | `done` | `result.json` written and the slice completed | read the files. Send the next slice or stop. |
 | `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
