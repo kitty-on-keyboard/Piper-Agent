@@ -30,6 +30,7 @@ void TurnGrammar::reset() {
     think_.clear();
     text_.clear();
     calls_.clear();
+    tool_tokens_ = 0;
     if (tools_.empty()) {
         guard_.reset();
         return;
@@ -54,6 +55,7 @@ void TurnGrammar::checkpoint() {
     mark_.think = think_.size();
     mark_.text = text_.size();
     mark_.calls = calls_.size();
+    mark_.tool_tokens = tool_tokens_;
     mark_.held = true;
 }
 
@@ -68,6 +70,7 @@ void TurnGrammar::rollback() {
     think_.resize(mark_.think);
     text_.resize(mark_.text);
     calls_.resize(mark_.calls);
+    tool_tokens_ = mark_.tool_tokens;
     mark_.held = false;
 }
 
@@ -113,10 +116,12 @@ Advance TurnGrammar::advance_text(TokenId id) {
             return Advance::Rejected;
         }
         phase_ = TurnPhase::ToolCall;
+        ++tool_tokens_;
         guard_->reset();
         // The guard's grammar includes the <tool_call>\n framing itself.
         if (guard_->feed("<tool_call>\n") != parsephony::Error::Ok) {
             phase_ = TurnPhase::Text;
+            --tool_tokens_;
             return Advance::Rejected;
         }
         return Advance::Ok;
@@ -144,6 +149,7 @@ Advance TurnGrammar::advance_tool_call(TokenId id) {
         if (guard_->feed(bytes) != parsephony::Error::Ok || !guard_->complete()) {
             return Advance::Rejected;
         }
+        ++tool_tokens_;
         close_call();
         return Advance::Ok;
     }
@@ -153,6 +159,7 @@ Advance TurnGrammar::advance_tool_call(TokenId id) {
     if (guard_->feed(bytes) != parsephony::Error::Ok) {
         return Advance::Rejected;
     }
+    ++tool_tokens_;
     // THE CLOSER IS NOT ALWAYS ONE TOKEN, and assuming it was is what ended runs.
     //
     // `</tool_call>` has a vocab id of its own and the model usually emits it. It does
@@ -327,6 +334,22 @@ const TokenMask& ThinkCapMask::mask() const {
         close_only_built_ = true;
     }
     return close_only_;
+}
+
+// --- ToolCapMask -------------------------------------------------------------
+
+const TokenMask& ToolCapMask::mask() const {
+    if (!at_cap()) {
+        return inner_.mask();
+    }
+    // EMPTY on purpose. ThinkCapMask forces a real `</think>`; there is no analogous
+    // single id that cleanly ends a mid-body tool call. The decode loop must treat this
+    // empty mask as LengthCapped via budget_exhausted(), not as a build defect.
+    if (!empty_built_) {
+        empty_.reset(tok_.vocab_size());
+        empty_built_ = true;
+    }
+    return empty_;
 }
 
 } // namespace lmp::model

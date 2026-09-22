@@ -843,6 +843,64 @@ TEST(a_tool_call_cut_at_the_cap_is_told_it_was_too_long) {
     CHECK(!told_nothing_began);
 }
 
+// The tool-phase budget (ToolCapMask) must stop a runaway call well before max_new_tokens
+// is exhausted. Measured grade-school: tool body burned ~32k tokens after tests already
+// passed; with max_tool_tokens=32 the LengthCapped recovery fires early and the turn
+// still reports cap_phase=tool so the CUT OFF observation teaches slicing.
+TEST(a_tool_phase_cap_stops_before_the_turn_budget) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::string body = "<function=list_dir>\n<parameter=path>\n";
+    for (int i = 0; i < 400; ++i) {
+        body += "a directory that does not exist ";
+    }
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, body, "writing it all out"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("write the file");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    // Turn budget is huge; the tool-phase cap is what must fire.
+    config.max_new_tokens = 32768;
+    config.max_tool_tokens = 32;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    std::string capped_phase;
+    std::size_t capped_tool_tokens = 0;
+    bool saw_capped_turn = false;
+    loop::Observer obs;
+    obs.on_turn = [&](const loop::TurnResult& t, double) {
+        if (t.outcome == loop::Outcome::LengthCapped) {
+            saw_capped_turn = true;
+            capped_phase = t.cap_phase;
+            capped_tool_tokens = t.tool_tokens;
+        }
+    };
+    agent.set_observer(std::move(obs));
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(saw_capped_turn);
+    CHECK_EQ(capped_phase, std::string("tool"));
+    // Stopped by the tool cap, not by burning the whole turn.
+    CHECK(capped_tool_tokens <= 64);
+    CHECK(capped_tool_tokens >= 32);
+
+    bool told_it_was_too_long = false;
+    for (const context::TurnRecord& rec : ctx.recent()) {
+        if (rec.observation.find("CUT OFF") != std::string::npos) {
+            told_it_was_too_long = true;
+        }
+    }
+    CHECK(told_it_was_too_long);
+}
+
 // Failed tool observations stay factual -- no ritual System Directive that forces a
 // root-cause essay before the next action.
 TEST(a_failed_tool_observation_has_no_system_directive) {

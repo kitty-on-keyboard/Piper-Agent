@@ -1283,10 +1283,15 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     const std::size_t think_cap =
         think_token_cap(config_.max_think_tokens, config_.max_new_tokens,
                         config_.reserved_tool_tokens);
-    // The budget constrains the MASK, not the automaton: at the cap the only legal id is
-    // `</think>`, so the model emits a real one and its own context carries the boundary.
-    // See ThinkCapMask for what happened when the phase was flipped from under it instead.
-    model::ThinkCapMask capped_mask(grammar, tok_, think_cap);
+    const std::size_t tool_cap =
+        tool_token_cap(config_.max_tool_tokens, config_.max_new_tokens);
+    // The budget constrains the MASK, not the automaton: at the think cap the only legal
+    // id is `</think>`, so the model emits a real one and its own context carries the
+    // boundary. See ThinkCapMask for what happened when the phase was flipped from under
+    // it instead. ToolCapMask wraps that: at the tool-channel cap the mask empties and
+    // budget_exhausted() forces LengthCapped with cap_phase=tool.
+    model::ThinkCapMask think_mask(grammar, tok_, think_cap);
+    model::ToolCapMask capped_mask(think_mask, grammar, tok_, tool_cap);
     task.mask = &capped_mask;
     GrammarSink sink(grammar, streamer.get());
     turn.generation = backend_.generate(task, sink, cancel);
