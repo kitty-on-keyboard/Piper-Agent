@@ -1054,13 +1054,16 @@ TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
     }
     const std::string reasoning = "draft\n```txt\n" + fence + "```\n";
     const auto think_ids = tok.encode_content(reasoning);
-    REQUIRE(think_ids.size() > 128); // clearly larger than the tight tool cap below
+    REQUIRE(think_ids.size() > 256); // clearly larger than the tight tool cap below
 
     const std::string body =
         "<function=commit_think_block>\n<parameter=path>\nout.txt\n</parameter>\n"
         "<parameter=block_id>\n0\n</parameter>\n</function>\n";
     const auto tool_body_ids = tok.encode_content(body);
-    REQUIRE(tool_body_ids.size() + 2 < 64);
+    // Mini vocab is near one-id-per-char; 128 leaves room for the small call XML while
+    // still failing hard if the thousands of think tokens were charged to the tool budget.
+    constexpr std::int32_t kTightToolCap = 128;
+    REQUIRE(tool_body_ids.size() + 2 < static_cast<std::size_t>(kTightToolCap));
 
     model::ScriptedBackend backend;
     backend.enqueue_response(call_turn(tok, body, reasoning));
@@ -1075,7 +1078,7 @@ TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
     config.auto_syntax_check = false;
     config.auto_approve_writes = true;
     config.max_new_tokens = 32768;
-    config.max_tool_tokens = 64; // tight: fails if think were charged to the tool budget
+    config.max_tool_tokens = kTightToolCap;
     loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
 
     const model::CancelToken cancel;
@@ -1085,8 +1088,8 @@ TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
     CHECK(turn.tool_result.ok());
     CHECK_EQ(turn.tool_name, std::string("commit_think_block"));
     CHECK(turn.cap_phase.empty() || turn.cap_phase == "think_budget");
-    CHECK(turn.think_tokens > 128);
-    CHECK(turn.tool_tokens < 64);
+    CHECK(turn.think_tokens > static_cast<std::size_t>(kTightToolCap));
+    CHECK(turn.tool_tokens < static_cast<std::size_t>(kTightToolCap));
     const auto written = lmp::platform::read_file_whole(root + "/out.txt", 1U << 20);
     CHECK(written.ok());
     CHECK(written.bytes.find("fat think fence line 0") != std::string::npos);
