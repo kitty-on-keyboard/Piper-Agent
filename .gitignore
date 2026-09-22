@@ -58,4 +58,5 @@ lmp_events.jsonl
 /piper-bench/
 .piper/slices/
 .piper/orch_webhook
+.piper/progress.log
 

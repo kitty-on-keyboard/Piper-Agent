@@ -136,6 +136,8 @@ Piper says it finished a slice. Piper can be wrong; the loop exists to catch tha
 4. `worker serve` keep-warm.
 5. Thin orchestrator helper script: `dispatch → wait → print review card` (**landed**: `piper dispatch` / `piper review`)
    (still driven by cloud decisions, not autonomy theater).
+6. Explicit MCP trust without hand JSON (**landed**: `piper mcp-list` / `piper packet --trust-mcp`).
+7. One-line progress memory (**landed**: `piper progress` → `.piper/progress.log`).
 
 ## Demo path that matches the vision
 

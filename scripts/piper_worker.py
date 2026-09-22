@@ -574,9 +574,68 @@ def write_answer_file(directory, payload):
     return path
 
 
+def mcp_json_path(cwd):
+    return os.path.join(os.path.abspath(cwd), ".mcp.json")
+
+
+def list_mcp_servers(cwd):
+    """Return ordered server names from workspace `.mcp.json` (empty if absent)."""
+    path = mcp_json_path(cwd)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PacketError(f".mcp.json is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PacketError(".mcp.json must be an object")
+    servers = data.get("mcpServers")
+    if servers is None:
+        return []
+    if not isinstance(servers, dict):
+        raise PacketError(".mcp.json mcpServers must be an object")
+    return [str(name) for name in servers.keys() if str(name).strip()]
+
+
+def normalize_trust_mcp(names):
+    """Deduplicate trust_mcp names while preserving first-seen order."""
+    out = []
+    seen = set()
+    for raw in names or []:
+        name = str(raw).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def validate_trust_mcp_names(cwd, names):
+    """Consent stays explicit: named servers must exist in cwd `.mcp.json`."""
+    wanted = normalize_trust_mcp(names)
+    if not wanted:
+        return []
+    available = list_mcp_servers(cwd)
+    if not available:
+        raise PacketError(
+            f"trust_mcp names server(s), but .mcp.json was not found or has no "
+            f"mcpServers in {os.path.abspath(cwd)}"
+        )
+    missing = [n for n in wanted if n not in available]
+    if missing:
+        avail_s = ", ".join(available)
+        miss_s = ", ".join(missing)
+        raise PacketError(
+            f"trust_mcp names unknown server(s): {miss_s} "
+            f"(available: {avail_s})"
+        )
+    return wanted
+
+
 def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
                      check=None, timeout_s=600, result_path=None,
-                     auto_approve_irreversible=True):
+                     auto_approve_irreversible=True, trust_mcp=None):
     """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
     cwd = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
@@ -603,6 +662,8 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
         packet["result_path"] = os.path.abspath(os.path.expanduser(result_path))
     else:
         packet["result_path"] = os.path.join(os.path.dirname(out_path), "result.json")
+    if trust_mcp:
+        packet["trust_mcp"] = validate_trust_mcp_names(cwd, trust_mcp)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     tmp = out_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -610,6 +671,43 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
         fh.write("\n")
     os.replace(tmp, out_path)
     return out_path, packet
+
+
+PROGRESS_DEFAULT_RELPATH = os.path.join(".piper", "progress.log")
+
+
+def format_progress_line(slice_id, verdict, note=""):
+    """Known-right one-line progress memory — parents should not freehand the shape."""
+    sid = str(slice_id or "").strip()
+    if not sid:
+        raise ValueError("progress requires a non-empty slice id")
+    ver = str(verdict or "").strip().lower()
+    aliases = {
+        "pass": "pass", "ok": "pass", "passed": "pass", "success": "pass",
+        "fail": "fail", "failed": "fail", "error": "fail",
+        "stalled": "stalled", "stall": "stalled",
+        "timeout": "timeout", "timedout": "timeout", "timed-out": "timeout",
+        "died": "died", "skip": "skip", "skipped": "skip",
+    }
+    if ver not in aliases:
+        raise ValueError(
+            f"unknown progress verdict {verdict!r}; "
+            "use pass|fail|stalled|timeout|died|skip"
+        )
+    note_s = " ".join(str(note or "").strip().split())
+    if note_s:
+        return f"{sid} | {aliases[ver]} | {note_s}"
+    return f"{sid} | {aliases[ver]}"
+
+
+def append_progress_log(path, line):
+    """Append one progress line (creates parent dirs). Returns absolute path."""
+    path = os.path.abspath(os.path.expanduser(path))
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    text = line if line.endswith("\n") else line + "\n"
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(text)
+    return path
 
 
 def cmd_answer(args):
@@ -655,11 +753,64 @@ def cmd_packet(args):
             timeout_s=args.timeout_s,
             result_path=args.result_path,
             auto_approve_irreversible=not args.no_auto_approve_irreversible,
+            trust_mcp=getattr(args, "trust_mcp", None),
         )
     except PacketError as exc:
         print(f"piper packet: {exc}", file=sys.stderr)
         return EXIT_INVALID
     print(path)
+    return EXIT_OK
+
+
+def cmd_mcp_list(args):
+    """List `.mcp.json` server names — no freehand guessing for trust_mcp."""
+    cwd = os.path.abspath(os.path.expanduser(args.cwd or "."))
+    if not os.path.isdir(cwd):
+        print(f"piper mcp-list: cwd is not a directory: {cwd}", file=sys.stderr)
+        return EXIT_INVALID
+    try:
+        names = list_mcp_servers(cwd)
+    except PacketError as exc:
+        print(f"piper mcp-list: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    path = mcp_json_path(cwd)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "cwd": cwd,
+            "mcp_json": path if os.path.isfile(path) else None,
+            "servers": names,
+        }, indent=2))
+    else:
+        if not names:
+            print(f"piper mcp-list: no mcpServers in {path}", file=sys.stderr)
+            return EXIT_INVALID
+        for name in names:
+            print(name)
+    return EXIT_OK
+
+
+def cmd_progress(args):
+    """Append one progress line — vision loop memory without freehand paste."""
+    try:
+        line = format_progress_line(args.id, args.verdict, getattr(args, "note", "") or "")
+    except ValueError as exc:
+        print(f"piper progress: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    if getattr(args, "file", None):
+        path = os.path.abspath(os.path.expanduser(args.file))
+    else:
+        root = os.path.abspath(os.path.expanduser(args.dir or "."))
+        path = os.path.join(root, PROGRESS_DEFAULT_RELPATH)
+    try:
+        written = append_progress_log(path, line)
+    except OSError as exc:
+        print(f"piper progress: cannot write {path}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if getattr(args, "json", False):
+        print(json.dumps({"path": written, "line": line}, indent=2))
+    else:
+        print(written)
+        print(line)
     return EXIT_OK
 
 
@@ -1298,10 +1449,16 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    - **Irreversible tools**: Destructive tools or project managers (like `godot_project`, `delete_file`, or whole-file overwrites) escalate to `gate: irreversible`. Set `"auto_approve_irreversible": true` or pass `--auto-approve-irreversible` / `--auto-approve-all` for unattended runs; otherwise Piper pauses and writes `awaiting_user.json` for `answer.json`.
 
 5. **Review `result.json` & Inspect Changes**
-   Prefer the thin helper (no freehand rubric):
+   Prefer the thin helpers (no freehand rubric / paste):
    ```bash
+   piper packet --id slice-001 --cwd /abs/ws --prompt-file prompt.md --out task.json
+   piper packet ... --trust-mcp godoer        # explicit MCP consent; no hand JSON array
+   piper mcp-list --cwd /abs/ws               # list .mcp.json server names
    piper dispatch --task /path/to/task.json   # run attached → wait → print review card
    piper review --result /path/to/result.json # card only, when you already waited
+   piper status --dir /path/to/slice          # idle/ask/done without freehand cat/jq
+   piper await --dir /path/to/slice           # wait for ask/done (no sleep-loop paste)
+   piper progress --id slice-001 pass --note "validator + test"
    ```
    Piper writes a structured result upon completion:
    ```json
@@ -1366,7 +1523,7 @@ mission. No URL means no POST.
 
 | kind | when | parent does |
 | --- | --- | --- |
-| `ask` | `awaiting_user.json` written, or an irreversible call is paused | write `answer.json` as `{"text":"..."}`. Do not restart. `allow` or `deny` for an irreversible call. Guidance for a real question. |
+| `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | read the files. Send the next slice or stop. |
 | `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
@@ -1434,40 +1591,31 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
    Break the horizon goal into small slices touching 1–3 files per slice.
    Never ask Piper to solve an entire complex task in a single prompt.
 
-2. **Prepare a Task Packet (`task.json`)**:
-   Write a packet file with this structure:
-   ```json
-   {
-     "id": "slice-001",
-     "cwd": "/absolute/path/to/workspace",
-     "prompt": "## Goal\\nImplement X.\\n\\n## Files\\n- EDIT: src/a.cpp\\n- CREATE: tests/test_a.cpp\\n- DO NOT TOUCH: other files\\n\\n## Done When\\n- Tests compile and pass.",
-     "auto_approve_exec": true,
-     "auto_approve_irreversible": true,
-     "timeout_s": 600
-   }
-   ```
+2. **Prepare a Task Packet**:
+   Prefer the emitter (no freehand JSON):
+   `piper packet --id slice-001 --cwd /abs/workspace --prompt-file prompt.md --out task.json`
+   Optional MCP consent (still explicit): `piper mcp-list --cwd /abs/workspace` then
+   `piper packet ... --trust-mcp godoer` (names must exist in workspace `.mcp.json`).
 
 3. **Dispatch Piper CLI**:
-   Run and stay attached to the process:
-   `piper run --task path/to/task.json` (or `piper worker run --task ...`)
-   - For unattended execution (no pauses on irreversible tools): pass `--auto-approve-irreversible` or `--auto-approve-all`.
-   - Exit code `0` = success, non-zero = error / timeout.
-   - If running detached/background, pass `--orch-webhook <URL>`.
+   Prefer: `piper dispatch --task path/to/task.json` (attached run → wait → review card).
+   Or stay attached: `piper run --task path/to/task.json`
+   - Unattended irreversible: `--auto-approve-irreversible` or `--auto-approve-all`.
+   - Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper_ui`).
 
 4. **Review Results**:
-   Inspect `result.json` written by Piper:
-   - Check `status` ("ok" vs "error"/"stalled").
-   - Review `files_touched` and `git_diff` — verify changes match instructions.
-   - Run slice acceptance tests.
+   Prefer: `piper review --task path/to/task.json` or the card from `piper dispatch`.
+   Status without freehand cat/jq: `piper status --dir …` / `piper await --dir …`.
 
 5. **Loop Until Horizon Complete**:
-   - If slice passed: dispatch the next slice.
-   - If slice failed: write a narrower prompt or fix minor issues directly.
-   - Repeat until all acceptance criteria for the greater task pass.
+   - If slice passed: `piper progress --id slice-001 pass --note "…"` then next slice.
+   - If slice failed: narrower packet, or fix that spot yourself.
+   - Repeat until horizon acceptance is green.
 
 6. **Parent Contract & Events**:
    - Stay attached and read exit code + `result.json`.
-   - Events: `ask` (write `answer.json`), `done`, `stalled` (not success; harness stopped), `died` (crashed).
+   - Events: `ask` → `piper answer allow|deny|--text` (do not freehand `answer.json`);
+     `done`, `stalled` (not success), `died` (do not relaunch blindly).
    - See `PIPER.md` for full specification and review rubric.
 """
 
@@ -1810,8 +1958,34 @@ def build_parser():
     packet_p.add_argument("--check", default=None, help="optional acceptance command")
     packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
     packet_p.add_argument("--result-path", default=None, help="optional result_path")
+    packet_p.add_argument("--trust-mcp", action="append", default=None,
+                          help="explicit MCP server name to trust (repeatable; must exist in cwd .mcp.json)")
     packet_p.add_argument("--no-auto-approve-irreversible", action="store_true",
                           help="leave auto_approve_irreversible false")
+
+    mcp_list_p = sub.add_parser(
+        "mcp-list",
+        help="list server names from workspace .mcp.json (for explicit trust_mcp)",
+        description="Print mcpServers keys from cwd/.mcp.json. Consent stays explicit: "
+                    "use names with piper packet --trust-mcp. No freehand guessing.",
+    )
+    mcp_list_p.add_argument("--cwd", default=".", help="workspace root containing .mcp.json")
+    mcp_list_p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+
+    progress_p = sub.add_parser(
+        "progress",
+        help="append one progress log line (no freehand progress paste)",
+        description="Append `slice | verdict | note` to .piper/progress.log (or --file). "
+                    "Vision-loop memory without pasting log snippets into chat.",
+    )
+    progress_p.add_argument("--id", required=True, help="slice / task id")
+    progress_p.add_argument("verdict",
+                            help="slice outcome: pass|fail|stalled|timeout|died|skip")
+    progress_p.add_argument("--note", default="", help="optional short note")
+    progress_p.add_argument("--dir", default=None,
+                            help="workspace root for .piper/progress.log (default: cwd)")
+    progress_p.add_argument("--file", default=None, help="explicit progress log path")
+    progress_p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
 
     wake_p = sub.add_parser(
         "wake-url",
@@ -1888,6 +2062,10 @@ def main(argv=None):
         return cmd_answer(args)
     if command == "packet":
         return cmd_packet(args)
+    if command == "mcp-list":
+        return cmd_mcp_list(args)
+    if command == "progress":
+        return cmd_progress(args)
     if command == "wake-url":
         return cmd_wake_url(args)
     if command == "review":
@@ -2769,11 +2947,78 @@ def self_test():
                           "--interval-s", "0.05"])
         check(to_rc == EXIT_TIMEOUT, f"await idle timeout must exit 2, got {to_rc}")
 
+        # 22. mcp-list + packet --trust-mcp (explicit consent, no hand JSON array)
+        mcp_ws = os.path.join(tmp, "mcp_ws")
+        os.makedirs(mcp_ws)
+        with open(os.path.join(mcp_ws, ".mcp.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "mcpServers": {
+                    "godoer": {"command": "godoer", "args": ["mcp"]},
+                    "memory": {"command": "npx", "args": ["-y", "server-memory"]},
+                }
+            }, fh)
+        mcp_out = io.StringIO()
+        with contextlib.redirect_stdout(mcp_out):
+            mcp_rc = main(["mcp-list", "--cwd", mcp_ws])
+        check(mcp_rc == EXIT_OK, f"mcp-list must exit 0, got {mcp_rc}")
+        listed = [ln.strip() for ln in mcp_out.getvalue().splitlines() if ln.strip()]
+        check(listed == ["godoer", "memory"], f"mcp-list names, got {listed!r}")
+        trust_out = os.path.join(tmp, "trust_task.json")
+        check(
+            main(["packet", "--id", "trust-1", "--cwd", mcp_ws, "--prompt", "Use Godoer.",
+                  "--out", trust_out, "--model-dir", model_dir, "--trust-mcp", "godoer"]) == EXIT_OK,
+            "packet --trust-mcp must exit 0",
+        )
+        trusted = load_packet(trust_out)
+        check(trusted.get("trust_mcp") == ["godoer"],
+              f"trust_mcp field, got {trusted.get('trust_mcp')!r}")
+        with contextlib.redirect_stderr(io.StringIO()):
+            bad_trust = main(["packet", "--id", "trust-bad", "--cwd", mcp_ws, "--prompt", "x",
+                              "--out", os.path.join(tmp, "bad_trust.json"),
+                              "--model-dir", model_dir, "--trust-mcp", "nope"])
+        check(bad_trust == EXIT_INVALID, f"unknown trust_mcp must exit 3, got {bad_trust}")
+
+        # 23. progress log append (no freehand progress paste)
+        prog_root = os.path.join(tmp, "prog_ws")
+        os.makedirs(prog_root)
+        prog_stdout = io.StringIO()
+        with contextlib.redirect_stdout(prog_stdout):
+            prog_rc = main(["progress", "--id", "slice-001", "pass",
+                            "--note", "validator + test", "--dir", prog_root])
+        check(prog_rc == EXIT_OK, f"progress must exit 0, got {prog_rc}")
+        prog_path = os.path.join(prog_root, ".piper", "progress.log")
+        check(os.path.isfile(prog_path), "progress.log must exist")
+        with open(prog_path, encoding="utf-8") as fh:
+            prog_body = fh.read()
+        check("slice-001 | pass | validator + test\n" in prog_body,
+              f"progress line shape, got {prog_body!r}")
+        check(format_progress_line("s2", "ok", "note") == "s2 | pass | note",
+              "progress ok alias must normalize to pass")
+        with contextlib.redirect_stderr(io.StringIO()):
+            bad_prog = main(["progress", "--id", "s3", "maybe", "--dir", prog_root])
+        check(bad_prog == EXIT_INVALID, f"bad progress verdict must exit 3, got {bad_prog}")
+
+        # 24. piper init cursor rule points at helpers (no freehand answer.json teaching)
+        init_ws = os.path.join(tmp, "init_helpers")
+        os.makedirs(init_ws)
+        with contextlib.redirect_stdout(io.StringIO()):
+            check(main(["init", init_ws]) == EXIT_OK, "init helpers workspace must exit 0")
+        rule_path = os.path.join(init_ws, ".cursor", "rules", "piper-parent.mdc")
+        with open(rule_path, encoding="utf-8") as fh:
+            rule_body = fh.read()
+        check("piper answer allow|deny|--text" in rule_body,
+              "init rule must teach piper answer")
+        check("piper packet" in rule_body and "piper dispatch" in rule_body,
+              "init rule must teach packet/dispatch")
+        check("piper progress" in rule_body, "init rule must teach progress")
+        check('write `answer.json`' not in rule_body and "write answer.json" not in rule_body,
+              "init rule must not teach freehand answer.json paste")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 27 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 30 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 

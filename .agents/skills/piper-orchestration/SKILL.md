@@ -96,10 +96,12 @@ Stop after 3 failed attempts at the same error. Explain the blocker in your fina
 
 ### Wake Events (Parent must handle all 4)
 One short JSON POST per event:
-1. `ask`: Paused on user question or irreversible tool. Parent writes `answer.json` containing `{"text": "..."}` or `allow`/`deny`. Do NOT restart process.
-2. `done`: Run completed with `status: "ok"`. Parent reads `result.json` and git diff, then dispatches next slice or marks horizon complete.
+1. `ask`: Paused on user question or irreversible tool. Run `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do NOT freehand the JSON. Do NOT restart process.
+2. `done`: Run completed with `status: "ok"`. Prefer `piper review --task …` / the card from `piper dispatch`, then next slice or mark horizon complete.
 3. `stalled`: Loop stopped without completion (`stalled`, `max_turns`, or failed check). **Do NOT treat as done.** Inspect state, narrow scope, or intervene.
 4. `died`: Process exited with no `result.json`. Alert operator; do NOT relaunch blindly.
+
+Record progress with `piper progress --id slice-001 pass --note "…"` (appends `.piper/progress.log`).
 
 ---
 
@@ -115,8 +117,7 @@ Cloud orchestrator reviews outcomes at a high level—do not reread every line o
 | **Acceptance** | `test.exit_code == 0` | If failed, review `test.output_tail` and dispatch targeted fix slice. |
 | **Summary** | `result.message` confirms goal | Review log if ambiguous. |
 
-*Record a one-line progress log per slice to maintain long-horizon memory:*
-`slice-001 | pass | added validator and unit test (+42 -2)`
+Prefer `piper review` / `piper dispatch` for the card. Record progress with `piper progress` (do not freehand the log line).
 
 ---
 
