@@ -25,6 +25,60 @@ mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("text/html", ".html")
 
 
+def read_appended(path, offset):
+    """Return (parsed_objects, new_offset).
+
+    Missing file -> ([], offset) and do not change offset.
+    If the file shrinks below offset, start over at 0.
+    Incomplete trailing JSON is left for the next read: only consume
+    complete lines (split on \\n). A partial last line stays unparsed
+    and the returned offset points at the start of that partial line.
+    Malformed complete lines are skipped.
+    """
+    if not os.path.exists(path):
+        return [], offset
+
+    size = os.path.getsize(path)
+    if size < offset:
+        offset = 0
+
+    if size <= offset:
+        return [], offset
+
+    with open(path, "rb") as f:
+        f.seek(offset)
+        data = f.read()
+
+    lines = data.split(b"\n")
+
+    if data.endswith(b"\n"):
+        complete_lines = lines[:-1]
+        has_partial = False
+    else:
+        complete_lines = lines[:-1]
+        partial = lines[-1]
+        has_partial = bool(partial)
+
+    parsed = []
+    for line in complete_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            obj = json.loads(stripped.decode("utf-8"))
+            parsed.append(obj)
+        except Exception:
+            pass
+
+    if has_partial:
+        last_newline = data.rfind(b"\n")
+        new_offset = offset + last_newline + 1
+    else:
+        new_offset = size
+
+    return parsed, new_offset
+
+
 class EventBroker:
     def __init__(self):
         self._clients = set()
@@ -62,6 +116,7 @@ class WorkspaceWatcher:
         self.log_path = self._resolve_log_path(log_path)
         self.file_mtimes = {}
         self.log_offset = 0
+        self.extra_offsets = {}
         self.running = True
 
         # Position offset to read recent events
@@ -143,28 +198,59 @@ class WorkspaceWatcher:
                     self.log_path = cand
                     self.log_offset = 0
 
-            # 2. Tail events log
-            if os.path.exists(self.log_path):
+            # 2. Tail live.jsonl and orch.jsonl before the event log.
+            # Live lines and log lines use different seq spaces. The page
+            # stops applying log tool rows once any live line has arrived,
+            # so a same-tick batch must deliver live first.
+            result_dir = None
+            task_fp = os.path.join(self.workspace_dir, "task.json")
+            if os.path.exists(task_fp):
                 try:
-                    size = os.path.getsize(self.log_path)
-                    if size < self.log_offset:
-                        self.log_offset = 0
-                    if size > self.log_offset:
-                        with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
-                            f.seek(self.log_offset)
-                            lines = f.readlines()
-                            self.log_offset = f.tell()
-                            for line in lines:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                try:
-                                    ev = json.loads(line)
-                                    self.broker.broadcast("log_event", ev)
-                                except Exception:
-                                    pass
+                    with open(task_fp, "r", encoding="utf-8") as f:
+                        tj = json.load(f)
+                        rp = tj.get("result_path")
+                        if rp:
+                            result_dir = os.path.abspath(os.path.dirname(rp))
                 except Exception:
                     pass
+
+            live_paths = set()
+            orch_paths = set()
+            for d in [self.workspace_dir] + ([result_dir] if result_dir else []):
+                live_paths.add(os.path.join(d, "live.jsonl"))
+                orch_paths.add(os.path.join(d, "orch.jsonl"))
+
+            all_extra = live_paths | orch_paths
+            for p in all_extra:
+                if p not in self.extra_offsets:
+                    self.extra_offsets[p] = 0
+
+            for p in sorted(live_paths):
+                if p in orch_paths:
+                    continue
+                offset = self.extra_offsets.get(p, 0)
+                objs, new_offset = read_appended(p, offset)
+                self.extra_offsets[p] = new_offset
+                for obj in objs:
+                    self.broker.broadcast("live_event", obj)
+
+            for p in sorted(orch_paths):
+                if p in live_paths:
+                    continue
+                offset = self.extra_offsets.get(p, 0)
+                objs, new_offset = read_appended(p, offset)
+                self.extra_offsets[p] = new_offset
+                for obj in objs:
+                    self.broker.broadcast("orch_event", obj)
+
+            # 3. Tail events log (finished runs, and the fallback when no
+            # live journal is being written).
+            try:
+                events, self.log_offset = read_appended(self.log_path, self.log_offset)
+                for ev in events:
+                    self.broker.broadcast("log_event", ev)
+            except Exception:
+                pass
 
             time.sleep(0.1)
 
@@ -247,10 +333,44 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
                         except Exception:
                             pass
 
+                def read_jsonl(path):
+                    rows = []
+                    if not path or not os.path.exists(path):
+                        return rows
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                            for raw in fh:
+                                raw = raw.strip()
+                                if not raw:
+                                    continue
+                                try:
+                                    rows.append(json.loads(raw))
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    return rows
+
+                live_dirs = [workspace_dir]
+                if task_data and task_data.get("result_path"):
+                    live_dirs.append(os.path.dirname(os.path.abspath(task_data["result_path"])))
+                recent_live = []
+                recent_orch = []
+                seen_live_paths = set()
+                for d in live_dirs:
+                    for name, bucket in (("live.jsonl", recent_live), ("orch.jsonl", recent_orch)):
+                        fp = os.path.join(d, name)
+                        if fp in seen_live_paths:
+                            continue
+                        seen_live_paths.add(fp)
+                        bucket.extend(read_jsonl(fp))
+
                 status_data = {
                     "cwd": workspace_dir,
                     "task": task_data,
                     "result": res_data,
+                    "recent_live": recent_live,
+                    "recent_orch": recent_orch,
                     "awaiting_user": read_j("awaiting_user.json"),
                     "answer": read_j("answer.json"),
                     "recent_events": recent_events,

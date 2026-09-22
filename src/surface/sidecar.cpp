@@ -17,8 +17,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1805,6 +1808,102 @@ extern "C" void fatal_signal_handler(int sig) {
 
 namespace lmp::surface::worker {
 
+// Append-only live.jsonl. events.jsonl has no per-token lines, and this process
+// is the one `piper run` executes, so thinking and tool paths have to land here
+// as the notifications arrive. on_token runs on the streamer thread.
+class LiveJournal {
+ public:
+    explicit LiveJournal(const std::filesystem::path& path) {
+        out_.open(path.string(), std::ios::out | std::ios::trunc);
+    }
+
+    LiveJournal(const LiveJournal&) = delete;
+    LiveJournal& operator=(const LiveJournal&) = delete;
+
+    ~LiveJournal() { close(); }
+
+    void on_token(const std::string& channel, const std::string& text) {
+        if (channel != "thinking" && channel != "answer") return;
+        if (text.empty()) return;
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!out_.is_open()) return;
+        if (channel != channel_) {
+            flush_unlocked();
+            channel_ = channel;
+        }
+        buffer_ += text;
+        if (buffer_.size() >= 64) flush_unlocked();
+    }
+
+    void on_turn(const loop::TurnResult& t) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!out_.is_open()) return;
+        flush_unlocked();
+        const std::string path = first_arg(t.tool_params, {"path", "file", "filepath", "file_path", "target"});
+        const std::string command = first_arg(t.tool_params, {"command", "cmd"});
+        std::string summary = t.tool_result.summary;
+        if (summary.size() > 240) summary.resize(240);
+        const auto read_bytes = static_cast<std::uint64_t>(t.tool_result.bytes_read);
+        const auto edit_bytes = static_cast<std::uint64_t>(t.tool_result.bytes_changed);
+        write_unlocked({{"kind", "turn"},
+                        {"tool", t.tool_name},
+                        {"path", path},
+                        {"command", command},
+                        {"status", std::string(tools::to_string(t.tool_result.status))},
+                        {"summary", summary},
+                        {"read_bytes", read_bytes},
+                        {"edit_bytes", edit_bytes},
+                        {"think_tokens", static_cast<std::uint64_t>(t.think_tokens)},
+                        {"text_tokens", static_cast<std::uint64_t>(t.text_tokens)},
+                        {"tool_tokens", static_cast<std::uint64_t>(t.tool_tokens)}});
+        if (edit_bytes > 0 || is_write_tool(t.tool_name)) {
+            write_unlocked({{"kind", "write"},
+                            {"tool", t.tool_name},
+                            {"path", path},
+                            {"edit_bytes", edit_bytes}});
+        }
+    }
+
+    void close() {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!out_.is_open()) return;
+        flush_unlocked();
+        out_.close();
+    }
+
+ private:
+    static bool is_write_tool(const std::string& name) {
+        return name == "write_file" || name == "apply_patch" || name == "commit_think_block";
+    }
+
+    static std::string first_arg(const std::vector<tools::ToolParamValue>& params,
+                                 std::initializer_list<const char*> keys) {
+        for (const char* key : keys) {
+            std::string value = loop::param_value(params, key);
+            if (!value.empty()) return value;
+        }
+        return {};
+    }
+
+    void flush_unlocked() {
+        if (buffer_.empty()) return;
+        write_unlocked({{"kind", "delta"}, {"channel", channel_}, {"text", buffer_}});
+        buffer_.clear();
+    }
+
+    void write_unlocked(nlohmann::json obj) {
+        obj["seq"] = ++seq_;
+        out_ << obj.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << '\n';
+        out_.flush();
+    }
+
+    std::mutex mu_;
+    std::ofstream out_;
+    int seq_ = 0;
+    std::string buffer_;
+    std::string channel_;
+};
+
 int execute_task_packet(const TaskPacket& packet, surface::Session& session,
                         platform::SystemClock& clock, bool jsonl, bool quiet,
                         int client_fd = -1) {
@@ -1887,16 +1986,19 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     bool timed_out_awaiting_user = false;
 
     std::string plan_accum;
+    LiveJournal journal(result_dir / "live.jsonl");
     RunLoopHooks hooks;
     hooks.on_plan_ready = [&plan_accum](const std::string& plan) {
         plan_accum = plan;
     };
-    hooks.on_token = [&answer_accum](const std::string& channel, const std::string& text) {
+    hooks.on_token = [&answer_accum, &journal](const std::string& channel, const std::string& text) {
         if (channel == "answer") {
             answer_accum += text;
         }
+        journal.on_token(channel, text);
     };
-    hooks.on_turn = [&generated_tokens, &finish_summary](const loop::TurnResult& t, double /*duration_ms*/) {
+    hooks.on_turn = [&generated_tokens, &finish_summary, &journal](const loop::TurnResult& t, double /*duration_ms*/) {
+        journal.on_turn(t);
         generated_tokens += static_cast<int>(t.think_tokens + t.text_tokens + t.tool_tokens);
         // The answer stream also carries interim narration. Prefer the explicit
         // completion handoff so its summary is not buried beyond the message cap.
