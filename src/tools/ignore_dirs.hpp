@@ -10,6 +10,8 @@
 // genuinely model-facing, so the gate stays strict instead of growing a stoplist of
 // directory names that would blunt it for everyone after us.
 //
+#include <algorithm>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -22,23 +24,17 @@ namespace lmp::tools {
 //
 // Consulted only when a walk DESCENDS. Naming one of these as a search's `subdir` still
 // searches it, because then it is what was asked for rather than something wandered into.
-[[nodiscard]] inline bool skip_during_descent(const std::string& name) {
+[[nodiscard]] inline bool skip_during_descent(std::string_view name) {
+    // Alphabetically sorted array for O(log N) binary search lookup.
     static constexpr std::string_view kSkip[] = {
-        ".git",         ".hg",           ".svn",         ".jj",
-        ".build",       "build",         "DerivedData",  ".gradle",
-        "target",       "dist",          ".next",        ".turbo",
-        "node_modules", "__pycache__",   ".pytest_cache",
-        ".venv",        "venv",          ".mypy_cache",  ".ruff_cache",
-        ".cache",       ".ccache",       ".swiftpm",
-        // Ours: the sandbox's TMPDIR and the shell spool.
-        ".lmp_tmp",     ".lmp_spool",
+        ".build",       ".cache",        ".ccache",      ".git",
+        ".gradle",      ".hg",           ".jj",          ".lmp_spool",
+        ".lmp_tmp",     ".mypy_cache",   ".next",        ".pytest_cache",
+        ".ruff_cache",  ".svn",          ".swiftpm",     ".turbo",
+        ".venv",        "DerivedData",   "__pycache__",  "build",
+        "dist",         "node_modules",  "target",       "venv",
     };
-    for (std::string_view s : kSkip) {
-        if (name == s) {
-            return true;
-        }
-    }
-    return false;
+    return std::binary_search(std::begin(kSkip), std::end(kSkip), name);
 }
 
 } // namespace lmp::tools
