@@ -655,18 +655,42 @@ def cmd_packet(args):
     return EXIT_OK
 
 
+def read_task_roots(task_arg):
+    """Lightweight task.json read for wake discovery — no model_dir required."""
+    path = os.path.abspath(os.path.expanduser(task_arg))
+    if not os.path.isfile(path):
+        raise PacketError(f"task packet not found: {path}")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PacketError(f"task.json is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PacketError("task.json must be an object")
+    roots = [os.path.dirname(path)]
+    for key in ("cwd", "task_dir"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            roots.append(os.path.abspath(os.path.expanduser(val.strip())))
+    result_path = data.get("result_path")
+    if isinstance(result_path, str) and result_path.strip():
+        roots.append(os.path.dirname(os.path.abspath(os.path.expanduser(result_path.strip()))))
+    # Preserve orch_webhook field if present without validating the rest.
+    return data, roots
+
+
 def cmd_wake_url(args):
     roots = []
+    packet = None
     if getattr(args, "dir", None):
         roots.append(args.dir)
     if getattr(args, "task", None):
         try:
-            packet = load_packet(args.task)
+            packet, task_roots = read_task_roots(args.task)
         except PacketError as exc:
             print(f"piper wake-url: {exc}", file=sys.stderr)
             return EXIT_INVALID
-        roots.extend([packet.get("cwd"), packet.get("task_dir"),
-                      os.path.dirname(packet.get("result_path") or "")])
+        roots.extend(task_roots)
         url = resolve_orch_webhook(packet=packet, search_roots=roots)
     else:
         roots.append(os.getcwd())
@@ -2066,6 +2090,20 @@ def self_test():
         check(wake_rc == EXIT_OK, f"wake-url must exit 0, got {wake_rc}")
         check(wake_stdout.getvalue().strip() == wake_url,
               f"wake-url must print file URL, got {wake_stdout.getvalue()!r}")
+
+        # 16b. wake-url --task must not require model_dir (packet emit is optional there)
+        pkt_no_model = os.path.join(tmp, "wake_task_no_model.json")
+        check(
+            main(["packet", "--id", "wake-nm", "--cwd", wake_root, "--prompt", "x",
+                  "--out", pkt_no_model]) == EXIT_OK,
+            "packet without model_dir must exit 0",
+        )
+        wake_stdout2 = io.StringIO()
+        with contextlib.redirect_stdout(wake_stdout2):
+            wake_rc2 = main(["wake-url", "--task", pkt_no_model])
+        check(wake_rc2 == EXIT_OK, f"wake-url --task without model_dir must exit 0, got {wake_rc2}")
+        check(wake_stdout2.getvalue().strip() == wake_url,
+              f"wake-url --task must print file URL, got {wake_stdout2.getvalue()!r}")
 
         # 17. piper_ui wake-file helper matches worker discovery path
         try:
