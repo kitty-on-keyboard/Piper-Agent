@@ -462,6 +462,222 @@ def post_orch_webhook(url, payload, timeout=5.0):
         return False
 
 
+
+# --- Deterministic harness helpers (no paste / no freehand JSON) ------------
+
+ORCH_WEBHOOK_RELPATH = os.path.join(".piper", "orch_webhook")
+
+
+def orch_webhook_path(root):
+    return os.path.join(os.path.abspath(root), ORCH_WEBHOOK_RELPATH)
+
+
+def write_orch_webhook_file(root, url):
+    """Persist the wake URL so parents never copy it from a panel."""
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("orch webhook URL must be non-empty")
+    path = orch_webhook_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(url + "\n")
+    os.replace(tmp, path)
+    return path
+
+
+def read_orch_webhook_file(*roots):
+    """Return first non-empty wake URL found under the given roots."""
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        root = os.path.abspath(root)
+        if root in seen:
+            continue
+        seen.add(root)
+        path = orch_webhook_path(root)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                url = fh.read().strip()
+        except OSError:
+            continue
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+    return ""
+
+
+def resolve_orch_webhook(cli_url=None, packet=None, search_roots=None):
+    """CLI > task.json > env > .piper/orch_webhook file. Never invent a host."""
+    for candidate in (
+        (cli_url or "").strip(),
+        ((packet or {}).get("orch_webhook") or "").strip(),
+        (os.environ.get("LMP_ORCH_WEBHOOK") or "").strip(),
+    ):
+        if candidate:
+            return candidate
+    roots = list(search_roots or [])
+    if packet:
+        roots.extend([packet.get("cwd"), packet.get("task_dir"),
+                      os.path.dirname(packet.get("result_path") or "")])
+    return read_orch_webhook_file(*roots)
+
+
+def build_answer_payload(action=None, text=None):
+    """Known-right answer.json body. Models judge; harness owns the shape."""
+    if action is not None and text is not None:
+        raise ValueError("pass either action or text, not both")
+    if action is not None:
+        key = str(action).strip().lower()
+        if key in ("allow", "approve", "yes", "y", "true", "1"):
+            return {"text": "allow"}
+        if key in ("deny", "refuse", "no", "n", "false", "0"):
+            return {"text": "deny"}
+        raise ValueError(f"unknown answer action {action!r}; use allow or deny")
+    if text is None:
+        raise ValueError("answer requires allow/deny or --text")
+    if not isinstance(text, str):
+        raise ValueError("answer text must be a string")
+    if not text.strip():
+        raise ValueError("answer text must be non-empty")
+    return {"text": text}
+
+
+def resolve_answer_dir(dir_arg=None, task_arg=None):
+    if dir_arg:
+        return os.path.abspath(os.path.expanduser(dir_arg))
+    if task_arg:
+        packet = load_packet(task_arg)
+        return os.path.dirname(os.path.abspath(packet["result_path"]))
+    return os.path.abspath(".")
+
+
+def write_answer_file(directory, payload):
+    directory = os.path.abspath(directory)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "answer.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
+                     check=None, timeout_s=600, result_path=None,
+                     auto_approve_irreversible=True):
+    """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
+    cwd = os.path.abspath(os.path.expanduser(cwd))
+    if not os.path.isdir(cwd):
+        raise PacketError(f"cwd is not a directory: {cwd}")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise PacketError("id must be a non-empty string")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise PacketError("prompt must be a non-empty string")
+    out_path = os.path.abspath(os.path.expanduser(out_path))
+    packet = {
+        "id": task_id.strip(),
+        "cwd": cwd,
+        "prompt": prompt,
+        "auto_approve_exec": True,
+        "auto_approve_writes": True,
+        "auto_approve_irreversible": bool(auto_approve_irreversible),
+        "timeout_s": float(timeout_s),
+    }
+    if model_dir:
+        packet["model_dir"] = os.path.abspath(os.path.expanduser(model_dir))
+    if check:
+        packet["check"] = check
+    if result_path:
+        packet["result_path"] = os.path.abspath(os.path.expanduser(result_path))
+    else:
+        packet["result_path"] = os.path.join(os.path.dirname(out_path), "result.json")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(packet, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, out_path)
+    return out_path, packet
+
+
+def cmd_answer(args):
+    try:
+        if getattr(args, "text", None) is not None:
+            payload = build_answer_payload(text=args.text)
+        else:
+            action = getattr(args, "action", None)
+            if not action:
+                print("piper answer: need allow|deny or --text", file=sys.stderr)
+                return EXIT_INVALID
+            payload = build_answer_payload(action=action)
+        directory = resolve_answer_dir(getattr(args, "dir", None), getattr(args, "task", None))
+        path = write_answer_file(directory, payload)
+    except (ValueError, PacketError) as exc:
+        print(f"piper answer: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    print(path)
+    return EXIT_OK
+
+
+def cmd_packet(args):
+    prompt = args.prompt
+    if args.prompt_file:
+        try:
+            with open(os.path.expanduser(args.prompt_file), encoding="utf-8") as fh:
+                prompt = fh.read()
+        except OSError as exc:
+            print(f"piper packet: cannot read --prompt-file: {exc}", file=sys.stderr)
+            return EXIT_INVALID
+    if not prompt or not str(prompt).strip():
+        print("piper packet: need --prompt or --prompt-file", file=sys.stderr)
+        return EXIT_INVALID
+    out_path = args.out or os.path.join(os.getcwd(), "task.json")
+    try:
+        path, _packet = emit_task_packet(
+            task_id=args.id,
+            cwd=args.cwd,
+            prompt=prompt,
+            out_path=out_path,
+            model_dir=args.model_dir,
+            check=args.check,
+            timeout_s=args.timeout_s,
+            result_path=args.result_path,
+            auto_approve_irreversible=not args.no_auto_approve_irreversible,
+        )
+    except PacketError as exc:
+        print(f"piper packet: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    print(path)
+    return EXIT_OK
+
+
+def cmd_wake_url(args):
+    roots = []
+    if getattr(args, "dir", None):
+        roots.append(args.dir)
+    if getattr(args, "task", None):
+        try:
+            packet = load_packet(args.task)
+        except PacketError as exc:
+            print(f"piper wake-url: {exc}", file=sys.stderr)
+            return EXIT_INVALID
+        roots.extend([packet.get("cwd"), packet.get("task_dir"),
+                      os.path.dirname(packet.get("result_path") or "")])
+        url = resolve_orch_webhook(packet=packet, search_roots=roots)
+    else:
+        roots.append(os.getcwd())
+        url = resolve_orch_webhook(search_roots=roots)
+    if not url:
+        print("piper wake-url: no wake URL in env or .piper/orch_webhook", file=sys.stderr)
+        return EXIT_INVALID
+    print(url)
+    return EXIT_OK
+
+
 def empty_test_block():
     return {"ran": False, "exit_code": None, "command": None, "output_tail": None}
 
@@ -634,7 +850,7 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
             task_id=packet["id"], cwd=packet["cwd"], model_dir=packet["model_dir"],
             status="error", message=err, error=err,
         ))
-        hook = orch_webhook or packet.get("orch_webhook") or os.environ.get("LMP_ORCH_WEBHOOK")
+        hook = resolve_orch_webhook(orch_webhook, packet)
         if hook:
             post_orch_webhook(hook, {
                 "kind": "stalled",
@@ -764,7 +980,7 @@ def run_mission(task_arg, jsonl=False, orch_webhook=None):
         files_touched=files_touched, diff_stat=diff_stat,
         git_diff_path=git_diff_path, log_path=durable_log, error=error,
     ))
-    hook = orch_webhook or packet.get("orch_webhook") or os.environ.get("LMP_ORCH_WEBHOOK")
+    hook = resolve_orch_webhook(orch_webhook, packet)
     if hook:
         is_completed = bool(state.get("completed")) and (status == "ok")
         hook_payload = {
@@ -799,7 +1015,7 @@ HELP_CONTRACT = (
 PARENT_CONTRACT_BANNER = (
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
     "Do not detach unless you pass --orch-webhook. No default URL. Events:\n"
-    "ask (write answer.json), done, stalled (not success), died (do not relaunch).\n"
+    "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
     "See PIPER.md if present.\n"
 )
 
@@ -1111,7 +1327,7 @@ def build_parser():
         p.add_argument("--auto-approve-all", action="store_true",
                        help="auto-approve all tool calls (exec + writes + irreversible)")
         p.add_argument("--detach", action="store_true",
-                       help="detach from launch session (requires --orch-webhook, task.json orch_webhook, or LMP_ORCH_WEBHOOK)")
+                       help="detach from launch session (requires --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook)")
 
     def add_serve_flags(p):
         p.add_argument("--socket", default=None, help="unix domain socket path")
@@ -1146,6 +1362,48 @@ def build_parser():
                              help="target project directory (default: current directory)")
 
     sub.add_parser("self-test", help="fake-sidecar protocol tests (no model)")
+
+    answer_p = sub.add_parser(
+        "answer",
+        help="write answer.json for an ask (allow/deny/--text; no freehand JSON)",
+        description="Write a correctly shaped answer.json next to result.json. "
+                    "Use this instead of pasting JSON into a file.",
+    )
+    answer_p.add_argument("action", nargs="?", choices=("allow", "deny"),
+                          help="approve or deny an irreversible ask")
+    answer_p.add_argument("--text", default=None,
+                          help="free-text answer for a real question (writes {\"text\":...})")
+    answer_p.add_argument("--dir", default=None,
+                          help="directory that holds answer.json (default: cwd)")
+    answer_p.add_argument("--task", default=None,
+                          help="task.json whose result_path directory receives answer.json")
+
+    packet_p = sub.add_parser(
+        "packet",
+        help="emit a correctly shaped task.json (no freehand packet JSON)",
+        description="Emit task.json with the known-right fields. Models invent goals; "
+                    "the harness owns packet shape.",
+    )
+    packet_p.add_argument("--id", required=True, help="task id")
+    packet_p.add_argument("--cwd", required=True, help="absolute workspace cwd")
+    packet_p.add_argument("--prompt", default=None, help="prompt string")
+    packet_p.add_argument("--prompt-file", default=None, help="read prompt from file")
+    packet_p.add_argument("--out", default=None, help="output path (default: ./task.json)")
+    packet_p.add_argument("--model-dir", default=None, help="optional model_dir")
+    packet_p.add_argument("--check", default=None, help="optional acceptance command")
+    packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
+    packet_p.add_argument("--result-path", default=None, help="optional result_path")
+    packet_p.add_argument("--no-auto-approve-irreversible", action="store_true",
+                          help="leave auto_approve_irreversible false")
+
+    wake_p = sub.add_parser(
+        "wake-url",
+        help="print the resolved orch wake URL (env or .piper/orch_webhook)",
+        description="Resolve the wake URL without copying it from a dashboard panel.",
+    )
+    wake_p.add_argument("--dir", default=None, help="workspace root containing .piper/orch_webhook")
+    wake_p.add_argument("--task", default=None, help="task.json used to locate search roots")
+
     return parser
 
 
@@ -1158,6 +1416,12 @@ def main(argv=None):
         return EXIT_INVALID
     if command == "self-test":
         return self_test()
+    if command == "answer":
+        return cmd_answer(args)
+    if command == "packet":
+        return cmd_packet(args)
+    if command == "wake-url":
+        return cmd_wake_url(args)
 
     if command == "init" or (command == "worker" and getattr(args, "worker_cmd", None) == "init"):
         return init_project(getattr(args, "target_dir", "."))
@@ -1191,8 +1455,12 @@ def main(argv=None):
     elif getattr(args, "auto_approve_irreversible", False):
         packet["auto_approve_irreversible"] = True
 
-    webhook_url = getattr(args, "orch_webhook", None) or packet.get("orch_webhook") or os.environ.get("LMP_ORCH_WEBHOOK") or ""
-    webhook_url = webhook_url.strip()
+    webhook_url = resolve_orch_webhook(
+        getattr(args, "orch_webhook", None),
+        packet,
+        search_roots=[packet.get("cwd"), packet.get("task_dir"),
+                      os.path.dirname(packet.get("result_path") or ""), os.getcwd()],
+    )
 
     flag = os.environ.get("LMP_DAEMONIZE", "")
     is_detached = bool(getattr(args, "detach", False)) or (flag == "1") or (
@@ -1748,11 +2016,74 @@ def self_test():
         merged = merge_files_touched(["a.tscn"], ["a.tscn", "b.gd"])
         check(merged == ["a.tscn", "b.gd"], f"merge_files_touched unique union, got {merged!r}")
 
+        # 14. piper answer writes known-right answer.json (no freehand paste)
+        ans_dir = os.path.join(tmp, "answer_dir")
+        os.makedirs(ans_dir)
+        check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_OK, "answer allow must exit 0")
+        with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
+            ans_body = json.load(fh)
+        check(ans_body == {"text": "allow"}, f"answer allow payload, got {ans_body!r}")
+        check(main(["answer", "deny", "--dir", ans_dir]) == EXIT_OK, "answer deny must exit 0")
+        with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
+            ans_body = json.load(fh)
+        check(ans_body == {"text": "deny"}, f"answer deny payload, got {ans_body!r}")
+        check(main(["answer", "--text", "use option B", "--dir", ans_dir]) == EXIT_OK,
+              "answer --text must exit 0")
+        with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
+            ans_body = json.load(fh)
+        check(ans_body == {"text": "use option B"}, f"answer text payload, got {ans_body!r}")
+        check(main(["answer", "--dir", ans_dir]) == EXIT_INVALID,
+              "answer without action/text must exit 3")
+
+        # 15. piper packet emits loadable task.json
+        pkt_out = os.path.join(tmp, "emitted_task.json")
+        check(
+            main(["packet", "--id", "emit-1", "--cwd", tmp, "--prompt", "Ship X.",
+                  "--out", pkt_out, "--model-dir", model_dir, "--check", "true"]) == EXIT_OK,
+            "packet emit must exit 0",
+        )
+        loaded = load_packet(pkt_out)
+        check(loaded["id"] == "emit-1", f"emitted id, got {loaded.get('id')!r}")
+        check(loaded["cwd"] == os.path.abspath(tmp), f"emitted cwd, got {loaded.get('cwd')!r}")
+        check("Ship X." in loaded["prompt"], f"emitted prompt, got {loaded.get('prompt')!r}")
+
+        # 16. .piper/orch_webhook file is discovered (no panel copy)
+        wake_root = os.path.join(tmp, "wake_ws")
+        os.makedirs(wake_root)
+        wake_url = "http://127.0.0.1:9/wake"
+        written = write_orch_webhook_file(wake_root, wake_url)
+        check(os.path.isfile(written), "wake file must exist")
+        os.environ.pop("LMP_ORCH_WEBHOOK", None)
+        resolved = resolve_orch_webhook(
+            None,
+            {"orch_webhook": "", "cwd": wake_root, "task_dir": wake_root,
+             "result_path": os.path.join(wake_root, "result.json")},
+        )
+        check(resolved == wake_url, f"file wake URL must resolve, got {resolved!r}")
+        wake_stdout = io.StringIO()
+        with contextlib.redirect_stdout(wake_stdout):
+            wake_rc = main(["wake-url", "--dir", wake_root])
+        check(wake_rc == EXIT_OK, f"wake-url must exit 0, got {wake_rc}")
+        check(wake_stdout.getvalue().strip() == wake_url,
+              f"wake-url must print file URL, got {wake_stdout.getvalue()!r}")
+
+        # 17. piper_ui wake-file helper matches worker discovery path
+        try:
+            import piper_ui as pui
+            ui_wake = pui.write_wake_url_file(wake_root, "http://127.0.0.1:8765/wake")
+            check(ui_wake == written or os.path.isfile(ui_wake),
+                  f"ui wake file path must match harness convention, got {ui_wake!r}")
+            with open(ui_wake, encoding="utf-8") as fh:
+                check(fh.read().strip() == "http://127.0.0.1:8765/wake",
+                      "ui wake file must contain the URL")
+        except Exception as exc:
+            check(False, f"piper_ui wake helper must import/run: {exc}")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 12 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 17 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
