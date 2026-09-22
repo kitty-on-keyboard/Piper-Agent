@@ -1299,14 +1299,12 @@ std::string read_orch_webhook_file(const std::vector<std::string>& roots) {
         }
         std::string url;
         std::getline(fh, url);
-        while (!url.empty() && (url.back() == '
-' || url.back() == '
-' ||
-                                url.back() == ' ' || url.back() == '	')) {
+        while (!url.empty() && (url.back() == '\n' || url.back() == '\r' ||
+                                url.back() == ' ' || url.back() == '\t')) {
             url.pop_back();
         }
         size_t start = 0;
-        while (start < url.size() && (url[start] == ' ' || url[start] == '	')) {
+        while (start < url.size() && (url[start] == ' ' || url[start] == '\t')) {
             ++start;
         }
         if (start > 0) {
