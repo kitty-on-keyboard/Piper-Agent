@@ -84,12 +84,16 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    - **Irreversible tools**: Destructive tools or project managers (like `godot_project`, `delete_file`, or whole-file overwrites) escalate to `gate: irreversible`. Set `"auto_approve_irreversible": true` or pass `--auto-approve-irreversible` / `--auto-approve-all` for unattended runs; otherwise Piper pauses and writes `awaiting_user.json` for `answer.json`.
 
 5. **Review `result.json` & Inspect Changes**
-   Prefer the thin helper (no freehand rubric):
+   Prefer the thin helpers (no freehand rubric / paste):
    ```bash
+   piper packet --id slice-001 --cwd /abs/ws --prompt-file prompt.md --out task.json
+   piper packet ... --trust-mcp godoer        # explicit MCP consent; no hand JSON array
+   piper mcp-list --cwd /abs/ws               # list .mcp.json server names
    piper dispatch --task /path/to/task.json   # run attached → wait → print review card
    piper review --result /path/to/result.json # card only, when you already waited
    piper status --dir /path/to/slice          # idle/ask/done without freehand cat/jq
    piper await --dir /path/to/slice           # wait for ask/done (no sleep-loop paste)
+   piper progress --id slice-001 pass --note "validator + test"
    ```
    Piper writes a structured result upon completion:
    ```json

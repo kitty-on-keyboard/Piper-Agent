@@ -10,14 +10,20 @@ Exit 0 only when:
   6. UI answer path shares write_answer_file (approved → allow)
   7. `piper status` reports ask/done without freehand cat/jq
   8. `piper await` returns when ask appears (no sleep-loop paste)
+  9. `piper mcp-list` + `packet --trust-mcp` write known-right trust_mcp
+ 10. `piper progress` appends the known-right progress line
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
 import tempfile
+import threading
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -86,8 +92,6 @@ def main():
                 files_touched=["scripts/prove_deterministic_harness.py"],
                 diff_stat={"insertions": 1, "deletions": 0, "files": 1},
             ), fh)
-        import io
-        import contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rev_rc = w.main(["review", "--result", result_path])
@@ -112,8 +116,6 @@ def main():
         os.makedirs(st_dir)
         with open(os.path.join(st_dir, "awaiting_user.json"), "w", encoding="utf-8") as fh:
             json.dump({"question": "Allow overwrite?", "options": "allow,deny"}, fh)
-        import io
-        import contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             st_rc = w.main(["status", "--dir", st_dir])
@@ -125,8 +127,6 @@ def main():
         # 8. await returns when ask appears
         await_dir = os.path.join(tmp, "await_ws")
         os.makedirs(await_dir)
-        import threading
-        import time
 
         def _later():
             time.sleep(0.1)
@@ -142,6 +142,40 @@ def main():
             return fail(f"piper await rc={aw_rc}")
         if "state:    ask" not in buf2.getvalue():
             return fail(f"await card: {buf2.getvalue()!r}")
+
+        # 9. mcp-list + packet --trust-mcp
+        mcp_ws = os.path.join(tmp, "mcp_ws")
+        os.makedirs(mcp_ws)
+        with open(os.path.join(mcp_ws, ".mcp.json"), "w", encoding="utf-8") as fh:
+            json.dump({"mcpServers": {"godoer": {"command": "godoer"}}}, fh)
+        buf3 = io.StringIO()
+        with contextlib.redirect_stdout(buf3):
+            if w.main(["mcp-list", "--cwd", mcp_ws]) != w.EXIT_OK:
+                return fail("piper mcp-list")
+        if buf3.getvalue().strip() != "godoer":
+            return fail(f"mcp-list output {buf3.getvalue()!r}")
+        trust_out = os.path.join(tmp, "trust_task.json")
+        if w.main([
+            "packet", "--id", "trust-1", "--cwd", mcp_ws, "--prompt", "Use Godoer.",
+            "--out", trust_out, "--model-dir", model, "--trust-mcp", "godoer",
+        ]) != w.EXIT_OK:
+            return fail("piper packet --trust-mcp")
+        trusted = w.load_packet(trust_out)
+        if trusted.get("trust_mcp") != ["godoer"]:
+            return fail(f"trust_mcp {trusted.get('trust_mcp')!r}")
+
+        # 10. progress log
+        prog_root = os.path.join(tmp, "prog_ws")
+        os.makedirs(prog_root)
+        buf4 = io.StringIO()
+        with contextlib.redirect_stdout(buf4):
+            if w.main(["progress", "--id", "slice-001", "pass",
+                       "--note", "prove", "--dir", prog_root]) != w.EXIT_OK:
+                return fail("piper progress")
+        prog_path = os.path.join(prog_root, ".piper", "progress.log")
+        with open(prog_path, encoding="utf-8") as fh:
+            if fh.read() != "slice-001 | pass | prove\n":
+                return fail("progress.log shape mismatch")
 
     print("prove_deterministic_harness: ok")
     return 0
