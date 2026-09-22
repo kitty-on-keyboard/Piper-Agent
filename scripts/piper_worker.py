@@ -2527,9 +2527,10 @@ def self_test():
         pkt_status = os.path.join(tmp, "status_task_no_model.json")
         check(
             main(["packet", "--id", "status-nm", "--cwd", status_root, "--prompt", "x",
-                  "--out", pkt_status]) == EXIT_OK,
+                  "--out", pkt_status, "--result", os.path.join(status_root, "result.json")]) == EXIT_OK,
             "packet for status --task must exit 0",
         )
+        # Clear any leftover error result from earlier scenarios that share tmp.
         with open(os.path.join(status_root, "result.json"), "w", encoding="utf-8") as fh:
             json.dump({"status": "ok", "task_id": "status-nm", "message": "done"}, fh)
         st_out = io.StringIO()
