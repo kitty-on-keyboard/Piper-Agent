@@ -2121,7 +2121,7 @@ def self_test():
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 17 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 18 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
