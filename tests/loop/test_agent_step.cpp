@@ -1038,7 +1038,10 @@ TEST(tool_cap_museum_over_cap_write_file_is_cut_off) {
 // Tight tool-phase cap + fat think fence + small commit_think_block. Harvested fence
 // bytes must NOT count against max_tool_tokens; only the tiny tool XML does. If think
 // were charged, entering ToolCall with thousands of prior think tokens would exhaust a
-// 64-token tool budget immediately and LengthCap before the commit ran.
+// 128-token tool budget immediately and LengthCap before the commit ran.
+//
+// Fence lines must not share a long identical suffix: LoopBreaker watches think prose for
+// a repeated 32-token window, and a shared trailer would cut the turn before the call.
 TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
     const model::QwenTokenizer& tok = mini_vocab();
     REQUIRE(tok.loaded());
@@ -1048,9 +1051,13 @@ TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
 
     std::string fence;
     fence.reserve(8000);
-    for (int i = 0; i < 250; ++i) {
-        fence += "fat think fence line " + std::to_string(i) +
-                 " harvested bytes must not burn the tool-phase budget\n";
+    for (int i = 0; i < 300; ++i) {
+        // Fully unique per line (no shared 32-token trailer) so LoopBreaker stays quiet.
+        fence += "#";
+        fence += std::to_string(i);
+        fence += "=";
+        fence += std::to_string(static_cast<unsigned>(i) * 2654435761u + 97u);
+        fence += ";\n";
     }
     const std::string reasoning = "draft\n```txt\n" + fence + "```\n";
     const auto think_ids = tok.encode_content(reasoning);
@@ -1084,6 +1091,7 @@ TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
     const model::CancelToken cancel;
     const loop::TurnResult turn = agent.step(cancel);
 
+    CHECK(!turn.cut_for_looping);
     CHECK(turn.outcome == loop::Outcome::ToolCallExecuted);
     CHECK(turn.tool_result.ok());
     CHECK_EQ(turn.tool_name, std::string("commit_think_block"));
@@ -1092,8 +1100,8 @@ TEST(tool_cap_museum_fat_think_commit_succeeds_under_tight_tool_cap) {
     CHECK(turn.tool_tokens < static_cast<std::size_t>(kTightToolCap));
     const auto written = lmp::platform::read_file_whole(root + "/out.txt", 1U << 20);
     CHECK(written.ok());
-    CHECK(written.bytes.find("fat think fence line 0") != std::string::npos);
-    CHECK(written.bytes.find("fat think fence line 249") != std::string::npos);
+    CHECK(written.bytes.find("#0=") != std::string::npos);
+    CHECK(written.bytes.find("#299=") != std::string::npos);
 
     (void)::system(("rm -rf " + root).c_str());
 }
