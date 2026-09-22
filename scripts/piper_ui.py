@@ -420,17 +420,24 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
                 return
 
             if path == "/api/answer":
-                # User injection of gate approval/denial
+                # Gate approval/denial — same write_answer_file path as `piper answer`
                 try:
+                    import piper_worker as pw
                     payload = json.loads(body.decode("utf-8"))
-                    answer_path = os.path.join(workspace_dir, "answer.json")
-                    with open(answer_path, "w", encoding="utf-8") as f:
-                        json.dump(payload, f, indent=2)
-                    broker.broadcast("answer_updated", payload)
+                    if isinstance(payload.get("text"), str):
+                        body_out = pw.build_answer_payload(text=payload["text"])
+                    elif "answer" in payload:
+                        body_out = pw.build_answer_payload(action=payload["answer"])
+                    elif "action" in payload:
+                        body_out = pw.build_answer_payload(action=payload["action"])
+                    else:
+                        raise ValueError("answer body needs text, answer, or action")
+                    answer_path = pw.write_answer_file(workspace_dir, body_out)
+                    broker.broadcast("answer_updated", body_out)
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    self.wfile.write(b'{"status":"ok"}')
+                    self.wfile.write(json.dumps({"status": "ok", "path": answer_path}).encode("utf-8"))
                 except Exception as e:
                     self.send_response(500)
                     self.end_headers()

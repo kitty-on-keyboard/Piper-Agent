@@ -467,6 +467,13 @@ def post_orch_webhook(url, payload, timeout=5.0):
 
 ORCH_WEBHOOK_RELPATH = os.path.join(".piper", "orch_webhook")
 
+DETACHED_NO_WAKE_MSG = (
+    "piper: detached launch needs a wake URL. "
+    "Start piper_ui (writes .piper/orch_webhook), "
+    "or pass --orch-webhook / task orch_webhook / LMP_ORCH_WEBHOOK. "
+    "Or stay attached."
+)
+
 
 def orch_webhook_path(root):
     return os.path.join(os.path.abspath(root), ORCH_WEBHOOK_RELPATH)
@@ -531,9 +538,9 @@ def build_answer_payload(action=None, text=None):
         raise ValueError("pass either action or text, not both")
     if action is not None:
         key = str(action).strip().lower()
-        if key in ("allow", "approve", "yes", "y", "true", "1"):
+        if key in ("allow", "allowed", "approve", "approved", "yes", "y", "true", "1"):
             return {"text": "allow"}
-        if key in ("deny", "refuse", "no", "n", "false", "0"):
+        if key in ("deny", "denied", "refuse", "refused", "no", "n", "false", "0"):
             return {"text": "deny"}
         raise ValueError(f"unknown answer action {action!r}; use allow or deny")
     if text is None:
@@ -700,6 +707,158 @@ def cmd_wake_url(args):
         return EXIT_INVALID
     print(url)
     return EXIT_OK
+
+
+
+
+def load_result_file(result_path):
+    """Load result.json if present; return None when missing or unreadable."""
+    if not result_path or not os.path.isfile(result_path):
+        return None
+    try:
+        with open(result_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def review_verdict(result, exit_code):
+    """Cheap parent verdict: PASS / FAIL / STALLED / DIED."""
+    if result is None:
+        return "DIED"
+    status = str(result.get("status") or "").lower()
+    if status == "ok" and exit_code == EXIT_OK:
+        return "PASS"
+    if status == "stalled":
+        return "STALLED"
+    return "FAIL"
+
+
+def format_diff_stat(diff_stat):
+    if not isinstance(diff_stat, dict):
+        return str(diff_stat or "-")
+    ins = diff_stat.get("insertions", 0) or 0
+    dels = diff_stat.get("deletions", 0) or 0
+    files = diff_stat.get("files", 0) or 0
+    return f"+{ins} -{dels} ({files} files)"
+
+
+def format_review_card(result, *, exit_code, result_path):
+    """Deterministic review card — parents should not freehand the rubric."""
+    verdict = review_verdict(result, exit_code)
+    if result is None:
+        return (
+            "── piper review ─────────────────────────\n"
+            f"result:   {result_path or '(none)'}\n"
+            f"exit:     {exit_code}\n"
+            f"verdict:  {verdict}  (no result.json)\n"
+            "─────────────────────────────────────────"
+        )
+    files = result.get("files_touched") or []
+    if isinstance(files, list):
+        files_s = ", ".join(str(x) for x in files) if files else "(none)"
+    else:
+        files_s = str(files)
+    test = result.get("test") or {}
+    if isinstance(test, dict) and test.get("ran"):
+        test_s = f"exit={test.get('exit_code')} cmd={test.get('command')!r}"
+    elif isinstance(test, dict):
+        test_s = "not run"
+    else:
+        test_s = str(test)
+    msg = str(result.get("message") or "").strip().replace("\n", " ")
+    if len(msg) > 160:
+        msg = msg[:157] + "..."
+    return (
+        "── piper review ─────────────────────────\n"
+        f"task:     {result.get('task_id') or '(unknown)'}\n"
+        f"status:   {result.get('status')}\n"
+        f"exit:     {exit_code}\n"
+        f"message:  {msg or '(empty)'}\n"
+        f"files:    {files_s}\n"
+        f"diff:     {format_diff_stat(result.get('diff_stat'))}\n"
+        f"test:     {test_s}\n"
+        f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
+        f"verdict:  {verdict}\n"
+        "─────────────────────────────────────────"
+    )
+
+
+def resolve_result_path(result_arg=None, task_arg=None):
+    if result_arg:
+        return os.path.abspath(os.path.expanduser(result_arg))
+    if task_arg:
+        packet = load_packet(task_arg)
+        return os.path.abspath(packet["result_path"])
+    return os.path.abspath("result.json")
+
+
+def cmd_review(args):
+    try:
+        result_path = resolve_result_path(
+            getattr(args, "result", None), getattr(args, "task", None)
+        )
+    except PacketError as exc:
+        print(f"piper review: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    result = load_result_file(result_path)
+    # When reviewing an existing result, treat missing status/ok as the card source of truth.
+    exit_code = EXIT_OK
+    if result is None:
+        exit_code = EXIT_ERROR
+    elif str(result.get("status") or "").lower() == "ok":
+        exit_code = EXIT_OK
+    elif str(result.get("status") or "").lower() == "timeout":
+        exit_code = EXIT_TIMEOUT
+    else:
+        exit_code = EXIT_ERROR
+    card = format_review_card(result, exit_code=exit_code, result_path=result_path)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "result_path": result_path,
+            "exit_code": exit_code,
+            "verdict": review_verdict(result, exit_code),
+            "result": result,
+            "card": card,
+        }, indent=2))
+    else:
+        print(card)
+    return EXIT_OK if result is not None else EXIT_ERROR
+
+
+def cmd_dispatch(args):
+    """dispatch → wait → print review card. Cloud still decides next slice."""
+    try:
+        packet = load_packet(args.task)
+    except PacketError as exc:
+        print(f"piper dispatch: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+    result_path = packet["result_path"]
+    run_argv = ["run", "--task", args.task]
+    if getattr(args, "jsonl", False):
+        run_argv.append("--jsonl")
+    if getattr(args, "orch_webhook", None):
+        run_argv.extend(["--orch-webhook", args.orch_webhook])
+    if getattr(args, "auto_approve_all", False):
+        run_argv.append("--auto-approve-all")
+    elif getattr(args, "auto_approve_irreversible", False):
+        run_argv.append("--auto-approve-irreversible")
+    # Always attached: dispatch owns wait. Detach is out of scope for this helper.
+    code = main(run_argv)
+    result = load_result_file(result_path)
+    card = format_review_card(result, exit_code=code, result_path=result_path)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "result_path": result_path,
+            "exit_code": code,
+            "verdict": review_verdict(result, code),
+            "result": result,
+            "card": card,
+        }, indent=2))
+    else:
+        print(card)
+    return code
 
 
 def empty_test_block():
@@ -1129,6 +1288,11 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    - **Irreversible tools**: Destructive tools or project managers (like `godot_project`, `delete_file`, or whole-file overwrites) escalate to `gate: irreversible`. Set `"auto_approve_irreversible": true` or pass `--auto-approve-irreversible` / `--auto-approve-all` for unattended runs; otherwise Piper pauses and writes `awaiting_user.json` for `answer.json`.
 
 5. **Review `result.json` & Inspect Changes**
+   Prefer the thin helper (no freehand rubric):
+   ```bash
+   piper dispatch --task /path/to/task.json   # run attached → wait → print review card
+   piper review --result /path/to/result.json # card only, when you already waited
+   ```
    Piper writes a structured result upon completion:
    ```json
    {
@@ -1428,6 +1592,27 @@ def build_parser():
     wake_p.add_argument("--dir", default=None, help="workspace root containing .piper/orch_webhook")
     wake_p.add_argument("--task", default=None, help="task.json used to locate search roots")
 
+    review_p = sub.add_parser(
+        "review",
+        help="print a deterministic review card from result.json",
+        description="Print the cheap parent review card. No freehand rubric.",
+    )
+    review_p.add_argument("--result", default=None, help="path to result.json (default: ./result.json)")
+    review_p.add_argument("--task", default=None, help="task.json whose result_path is reviewed")
+    review_p.add_argument("--json", action="store_true", help="emit machine-readable JSON including the card")
+
+    dispatch_p = sub.add_parser(
+        "dispatch",
+        help="run a task attached, wait, print review card",
+        description="Thin orchestrator helper: dispatch → wait → print review card. "
+                    "Cloud still decides the next slice.",
+    )
+    add_run_flags(dispatch_p)
+    # Dispatch stays attached; drop --detach from this helper's UX by not advertising it.
+    # (Flag may still exist via add_run_flags; we ignore it and never pass --detach.)
+    dispatch_p.add_argument("--json", action="store_true",
+                            help="emit machine-readable JSON including the review card")
+
     return parser
 
 
@@ -1446,6 +1631,10 @@ def main(argv=None):
         return cmd_packet(args)
     if command == "wake-url":
         return cmd_wake_url(args)
+    if command == "review":
+        return cmd_review(args)
+    if command == "dispatch":
+        return cmd_dispatch(args)
 
     if command == "init" or (command == "worker" and getattr(args, "worker_cmd", None) == "init"):
         return init_project(getattr(args, "target_dir", "."))
@@ -1492,7 +1681,7 @@ def main(argv=None):
     )
 
     if is_detached and not webhook_url:
-        print("create YOUR wake URL and pass it, or stay attached", file=sys.stderr)
+        print(DETACHED_NO_WAKE_MSG, file=sys.stderr)
         return EXIT_INVALID
 
     sys.stderr.write(PARENT_CONTRACT_BANNER)
@@ -1805,8 +1994,9 @@ def self_test():
         with contextlib.redirect_stderr(stderr_buf):
             code = main(["worker", "run", "--task", task, "--detach"])
         check(code == EXIT_INVALID, f"detached without webhook must exit 3, got {code}")
-        check("create YOUR wake URL and pass it, or stay attached" in stderr_buf.getvalue(),
-              f"detached without webhook must print contract line, got {stderr_buf.getvalue()!r}")
+        stderr_det = stderr_buf.getvalue()
+        check("piper_ui" in stderr_det and ".piper/orch_webhook" in stderr_det,
+              f"detached without webhook must point at piper_ui / wake file, got {stderr_det!r}")
 
         # 6. Webhook notification on done
         import http.server
@@ -2117,11 +2307,58 @@ def self_test():
         except Exception as exc:
             check(False, f"piper_ui wake helper must import/run: {exc}")
 
+        # 18. review card is deterministic from result.json (no freehand rubric)
+        rev_dir = os.path.join(tmp, "review_dir")
+        os.makedirs(rev_dir)
+        rev_path = os.path.join(rev_dir, "result.json")
+        with open(rev_path, "w", encoding="utf-8") as fh:
+            json.dump(result_shell(
+                task_id="rev-1", cwd=rev_dir, model_dir=model_dir, status="ok",
+                message="Shipped the helper.", files_touched=["a.py"],
+                diff_stat={"insertions": 3, "deletions": 1, "files": 1},
+            ), fh)
+        rev_stdout = io.StringIO()
+        with contextlib.redirect_stdout(rev_stdout):
+            rev_rc = main(["review", "--result", rev_path])
+        check(rev_rc == EXIT_OK, f"review must exit 0, got {rev_rc}")
+        rev_out = rev_stdout.getvalue()
+        check("verdict:  PASS" in rev_out, f"review card must PASS, got {rev_out!r}")
+        check("rev-1" in rev_out and "a.py" in rev_out, f"review card must show task/files, got {rev_out!r}")
+        check(build_answer_payload(action="approved") == {"text": "allow"},
+              "approved must normalize to allow")
+        check(build_answer_payload(action="denied") == {"text": "deny"},
+              "denied must normalize to deny")
+
+        # 19. dispatch → wait → review card (fake sidecar)
+        disp_ws = os.path.join(tmp, "dispatch_ws")
+        os.makedirs(disp_ws)
+        disp_task = os.path.join(disp_ws, "task.json")
+        with open(disp_task, "w", encoding="utf-8") as fh:
+            json.dump({
+                "id": "disp-1",
+                "cwd": disp_ws,
+                "prompt": "Ship review card.",
+                "model_dir": model_dir,
+                "result_path": os.path.join(disp_ws, "result.json"),
+                "timeout_s": 30,
+                "auto_approve_exec": True,
+                "auto_approve_writes": True,
+                "auto_approve_irreversible": True,
+            }, fh)
+        disp_stdout = io.StringIO()
+        with _sidecar_env(fake), contextlib.redirect_stdout(disp_stdout):
+            disp_rc = main(["dispatch", "--task", disp_task])
+        check(disp_rc == EXIT_OK, f"dispatch must exit 0, got {disp_rc}")
+        disp_out = disp_stdout.getvalue()
+        check("verdict:  PASS" in disp_out, f"dispatch must print PASS card, got {disp_out!r}")
+        check(os.path.isfile(os.path.join(disp_ws, "result.json")),
+              "dispatch must leave result.json")
+
         httpd.shutdown()
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 18 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 20 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 

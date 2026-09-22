@@ -745,12 +745,24 @@ TEST(load_packet_parses_orch_webhook) {
         CHECK_EQ(p2->orch_webhook, "https://env.example.com/wake");
     }
 
-    // 3. Unset env
+    // 3. Unset env — no wake file yet
     ::unsetenv("LMP_ORCH_WEBHOOK");
     auto p3 = load_packet(task_file, err);
     CHECK(p3.has_value());
     if (p3) {
         CHECK_EQ(p3->orch_webhook, "");
+    }
+
+    // 4. `.piper/orch_webhook` file under cwd (parity with Python worker)
+    {
+        std::filesystem::create_directories(tmp_dir / ".piper");
+        std::ofstream wf((tmp_dir / ".piper" / "orch_webhook").string());
+        wf << "https://file.example.com/wake\n";
+    }
+    auto p4 = load_packet(task_file, err);
+    CHECK(p4.has_value());
+    if (p4) {
+        CHECK_EQ(p4->orch_webhook, "https://file.example.com/wake");
     }
 
     std::filesystem::remove_all(tmp_dir);
