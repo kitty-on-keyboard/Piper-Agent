@@ -556,8 +556,9 @@ def resolve_answer_dir(dir_arg=None, task_arg=None):
     if dir_arg:
         return os.path.abspath(os.path.expanduser(dir_arg))
     if task_arg:
-        packet = load_packet(task_arg)
-        return os.path.dirname(os.path.abspath(packet["result_path"]))
+        packet, _roots = read_task_roots(task_arg)
+        task_path = resolve_task_json_path(task_arg)
+        return os.path.dirname(result_path_from_light_packet(packet, task_path))
     return os.path.abspath(".")
 
 
@@ -663,9 +664,18 @@ def cmd_packet(args):
 
 
 def read_task_roots(task_arg):
-    """Lightweight task.json read for wake discovery — no model_dir required."""
+    """Lightweight task.json read for wake discovery — no model_dir required.
+
+    Accepts a task.json file or a directory containing task.json (same as run/dispatch).
+    """
     path = os.path.abspath(os.path.expanduser(task_arg))
-    if not os.path.isfile(path):
+    if os.path.isdir(path):
+        candidate = os.path.join(path, "task.json")
+        if os.path.isfile(candidate):
+            path = candidate
+        else:
+            raise PacketError(f"task packet not found: {candidate}")
+    elif not os.path.isfile(path):
         raise PacketError(f"task packet not found: {path}")
     try:
         with open(path, encoding="utf-8") as fh:
@@ -790,7 +800,7 @@ def resolve_result_path(result_arg=None, task_arg=None):
         return os.path.abspath(os.path.expanduser(result_arg))
     if task_arg:
         packet, _roots = read_task_roots(task_arg)
-        task_path = os.path.abspath(os.path.expanduser(task_arg))
+        task_path = resolve_task_json_path(task_arg)
         return result_path_from_light_packet(packet, task_path)
     return os.path.abspath("result.json")
 
@@ -1496,11 +1506,31 @@ def init_project(target_dir="."):
 
 
 def result_path_from_light_packet(packet, task_path):
-    """Resolve result_path from a light packet read (no model_dir required)."""
+    """Resolve result_path from a light packet read (no model_dir required).
+
+    Relative paths are joined to the task.json directory — same as load_packet.
+    """
+    task_dir = os.path.dirname(os.path.abspath(task_path))
     raw = packet.get("result_path")
     if isinstance(raw, str) and raw.strip():
-        return os.path.abspath(os.path.expanduser(raw.strip()))
-    return os.path.join(os.path.dirname(os.path.abspath(task_path)), "result.json")
+        expanded = os.path.expanduser(raw.strip())
+        if os.path.isabs(expanded):
+            return os.path.abspath(expanded)
+        return os.path.abspath(os.path.join(task_dir, expanded))
+    return os.path.join(task_dir, "result.json")
+
+
+def resolve_task_json_path(task_arg):
+    """Return absolute task.json path; accept file or directory containing task.json."""
+    path = os.path.abspath(os.path.expanduser(task_arg))
+    if os.path.isdir(path):
+        candidate = os.path.join(path, "task.json")
+        if not os.path.isfile(candidate):
+            raise PacketError(f"task packet not found: {candidate}")
+        return candidate
+    if not os.path.isfile(path):
+        raise PacketError(f"task packet not found: {path}")
+    return path
 
 
 def resolve_status_dir(dir_arg=None, task_arg=None):
@@ -1509,7 +1539,7 @@ def resolve_status_dir(dir_arg=None, task_arg=None):
         return os.path.abspath(os.path.expanduser(dir_arg))
     if task_arg:
         packet, _roots = read_task_roots(task_arg)
-        task_path = os.path.abspath(os.path.expanduser(task_arg))
+        task_path = resolve_task_json_path(task_arg)
         return os.path.dirname(result_path_from_light_packet(packet, task_path))
     return os.path.abspath(".")
 
@@ -1804,11 +1834,18 @@ def build_parser():
         "dispatch",
         help="run a task attached, wait, print review card",
         description="Thin orchestrator helper: dispatch → wait → print review card. "
-                    "Cloud still decides the next slice.",
+                    "Cloud still decides the next slice. Always attached; detach is not supported here.",
     )
-    add_run_flags(dispatch_p)
-    # Dispatch stays attached; drop --detach from this helper's UX by not advertising it.
-    # (Flag may still exist via add_run_flags; we ignore it and never pass --detach.)
+    dispatch_p.add_argument("--task", required=True,
+                            help="task.json path, or a directory containing task.json")
+    dispatch_p.add_argument("--jsonl", action="store_true",
+                            help="stream lmp/* notifications as ndjson on stdout")
+    dispatch_p.add_argument("--orch-webhook", default=None,
+                            help="webhook URL to wake cloud orchestrator on ask/done/died events")
+    dispatch_p.add_argument("--auto-approve-irreversible", action="store_true",
+                            help="auto-approve irreversible tool calls (destroys data / overwrite)")
+    dispatch_p.add_argument("--auto-approve-all", action="store_true",
+                            help="auto-approve all tool calls (exec + writes + irreversible)")
     dispatch_p.add_argument("--json", action="store_true",
                             help="emit machine-readable JSON including the review card")
 
@@ -2550,6 +2587,68 @@ def self_test():
         check("state:    done" in aw_out.getvalue(),
               f"await --task card must show done, got {aw_out.getvalue()!r}")
 
+        # 16d. answer --task must not require model_dir
+        ans_out = io.StringIO()
+        with contextlib.redirect_stdout(ans_out):
+            ans_rc = main(["answer", "allow", "--task", pkt_status])
+        check(ans_rc == EXIT_OK, f"answer --task without model_dir must exit 0, got {ans_rc}")
+        ans_path = os.path.join(status_root, "answer.json")
+        check(os.path.isfile(ans_path), "answer --task must write answer.json beside result")
+
+        # 16e. relative result_path joins to task.json dir (not process cwd)
+        rel_root = os.path.join(tmp, "rel_task_dir")
+        os.makedirs(rel_root, exist_ok=True)
+        rel_pkt = os.path.join(rel_root, "task.json")
+        with open(rel_pkt, "w", encoding="utf-8") as fh:
+            json.dump({
+                "id": "rel",
+                "cwd": rel_root,
+                "prompt": "x",
+                "result_path": "onlyhere/result.json",
+            }, fh)
+        onlyhere = os.path.join(rel_root, "onlyhere")
+        os.makedirs(onlyhere, exist_ok=True)
+        with open(os.path.join(onlyhere, "result.json"), "w", encoding="utf-8") as fh:
+            json.dump({"status": "ok", "task_id": "rel", "message": "rel-ok"}, fh)
+        other = os.path.join(tmp, "other_cwd")
+        os.makedirs(other, exist_ok=True)
+        prev = os.getcwd()
+        try:
+            os.chdir(other)
+            rel_out = io.StringIO()
+            with contextlib.redirect_stdout(rel_out):
+                rel_rc = main(["status", "--task", rel_pkt])
+        finally:
+            os.chdir(prev)
+        check(rel_rc == EXIT_OK, f"status relative result_path must exit 0, got {rel_rc}")
+        check("state:    done" in rel_out.getvalue(),
+              f"status relative result_path must find done, got {rel_out.getvalue()!r}")
+
+        # 16f. wake-url --task accepts a directory containing task.json
+        wake_dir = os.path.join(tmp, "wake_dir_packet")
+        os.makedirs(os.path.join(wake_dir, ".piper"), exist_ok=True)
+        with open(os.path.join(wake_dir, ".piper", "orch_webhook"), "w", encoding="utf-8") as fh:
+            fh.write(wake_url + "\n")
+        with open(os.path.join(wake_dir, "task.json"), "w", encoding="utf-8") as fh:
+            json.dump({"id": "wake-dir", "cwd": wake_dir, "prompt": "x",
+                       "result_path": os.path.join(wake_dir, "result.json")}, fh)
+        wake_dir_out = io.StringIO()
+        with contextlib.redirect_stdout(wake_dir_out):
+            wake_dir_rc = main(["wake-url", "--task", wake_dir])
+        check(wake_dir_rc == EXIT_OK, f"wake-url --task DIR must exit 0, got {wake_dir_rc}")
+        check(wake_dir_out.getvalue().strip() == wake_url,
+              f"wake-url --task DIR must print URL, got {wake_dir_out.getvalue()!r}")
+
+        # 16g. dispatch must not advertise --detach
+        help_out = io.StringIO()
+        with contextlib.redirect_stdout(help_out):
+            try:
+                main(["dispatch", "--help"])
+            except SystemExit as exc:
+                check(exc.code in (0, None), f"dispatch --help exit {exc.code}")
+        check("  --detach" not in help_out.getvalue(),
+              "dispatch --help must not advertise a --detach flag")
+
         # 17. piper_ui wake-file helper matches worker discovery path
         try:
             import piper_ui as pui
@@ -2674,7 +2773,7 @@ def self_test():
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 23 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 27 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
