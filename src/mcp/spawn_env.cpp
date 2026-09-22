@@ -78,6 +78,7 @@ namespace {
         "TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "PAT", "AUTH", "JWT",
         "APIKEY", "PASSPHRASE", "PRIVATEKEY", "PRIVKEY", "PASSCODE", "TICKET", "COOKIE", "SESSID", "SESSION",
         "BEARER", "CERT", "CERTIFICATE", "SIGNATURE", "CRED", "CREDS", "TOKEN_ID", "SECRET_KEY", "AUTH_TOKEN", "ACCESS_TOKEN",
+        "SECRET_ID", "SESSION_ID", "SESS_ID",
     };
     for (const std::string_view s : kSuffix) {
         if (ascii_ieq(key, s)) {
