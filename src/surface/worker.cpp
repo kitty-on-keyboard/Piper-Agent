@@ -412,6 +412,9 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
             packet.orch_webhook = env_hook;
         }
     }
+    if (packet.orch_webhook.empty()) {
+        packet.orch_webhook = read_orch_webhook_file({packet.cwd, task_dir});
+    }
 
     auto parse_skills = [&](const std::string& key) {
         if (j.contains(key)) {
@@ -1271,6 +1274,51 @@ std::optional<std::string> read_and_consume_answer(const std::string& answer_pat
     return answer;
 }
 
+std::string read_orch_webhook_file(const std::vector<std::string>& roots) {
+    std::unordered_set<std::string> seen;
+    for (const std::string& root_in : roots) {
+        if (root_in.empty()) {
+            continue;
+        }
+        std::error_code ec;
+        std::filesystem::path root = std::filesystem::absolute(root_in, ec);
+        if (ec) {
+            continue;
+        }
+        const std::string key = root.lexically_normal().string();
+        if (!seen.insert(key).second) {
+            continue;
+        }
+        const std::filesystem::path path = root / ".piper" / "orch_webhook";
+        if (!std::filesystem::is_regular_file(path, ec) || ec) {
+            continue;
+        }
+        std::ifstream fh(path);
+        if (!fh.is_open()) {
+            continue;
+        }
+        std::string url;
+        std::getline(fh, url);
+        while (!url.empty() && (url.back() == '
+' || url.back() == '
+' ||
+                                url.back() == ' ' || url.back() == '	')) {
+            url.pop_back();
+        }
+        size_t start = 0;
+        while (start < url.size() && (url[start] == ' ' || url[start] == '	')) {
+            ++start;
+        }
+        if (start > 0) {
+            url = url.substr(start);
+        }
+        if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+            return url;
+        }
+    }
+    return {};
+}
+
 bool post_orch_webhook(const std::string& webhook_url,
                        const WebhookPayload& payload,
                        double timeout_s) {
@@ -1705,7 +1753,8 @@ Otherwise, before start:
 
 - `--orch-webhook URL`, or
 - task field `orch_webhook`, or
-- env `LMP_ORCH_WEBHOOK`
+- env `LMP_ORCH_WEBHOOK`, or
+- file `.piper/orch_webhook` (written by `piper_ui`)
 
 Detached with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help

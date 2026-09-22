@@ -134,7 +134,7 @@ Piper says it finished a slice. Piper can be wrong; the loop exists to catch tha
 2. Cleaner `message` (strip think leakage) + reliable `git_diff` / `diff_stat`.
 3. Optional `check` command in task.json → fill `result.test`.
 4. `worker serve` keep-warm.
-5. Thin orchestrator helper script: `dispatch → wait → print review card`
+5. Thin orchestrator helper script: `dispatch → wait → print review card` (**landed**: `piper dispatch` / `piper review`)
    (still driven by cloud decisions, not autonomy theater).
 
 ## Demo path that matches the vision
