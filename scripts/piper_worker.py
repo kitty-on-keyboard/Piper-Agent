@@ -789,10 +789,10 @@ def resolve_result_path(result_arg=None, task_arg=None):
     if result_arg:
         return os.path.abspath(os.path.expanduser(result_arg))
     if task_arg:
-        packet = load_packet(task_arg)
-        return os.path.abspath(packet["result_path"])
+        packet, _roots = read_task_roots(task_arg)
+        task_path = os.path.abspath(os.path.expanduser(task_arg))
+        return result_path_from_light_packet(packet, task_path)
     return os.path.abspath("result.json")
-
 
 def cmd_review(args):
     try:
@@ -1495,13 +1495,22 @@ def init_project(target_dir="."):
 
 
 
+def result_path_from_light_packet(packet, task_path):
+    """Resolve result_path from a light packet read (no model_dir required)."""
+    raw = packet.get("result_path")
+    if isinstance(raw, str) and raw.strip():
+        return os.path.abspath(os.path.expanduser(raw.strip()))
+    return os.path.join(os.path.dirname(os.path.abspath(task_path)), "result.json")
+
+
 def resolve_status_dir(dir_arg=None, task_arg=None):
     """Directory that holds awaiting_user.json / result.json / answer.json."""
     if dir_arg:
         return os.path.abspath(os.path.expanduser(dir_arg))
     if task_arg:
-        packet = load_packet(task_arg)
-        return os.path.dirname(os.path.abspath(packet["result_path"]))
+        packet, _roots = read_task_roots(task_arg)
+        task_path = os.path.abspath(os.path.expanduser(task_arg))
+        return os.path.dirname(result_path_from_light_packet(packet, task_path))
     return os.path.abspath(".")
 
 
@@ -2512,6 +2521,34 @@ def self_test():
         check(wake_stdout2.getvalue().strip() == wake_url,
               f"wake-url --task must print file URL, got {wake_stdout2.getvalue()!r}")
 
+        # 16c. status/review/await --task must not require model_dir
+        status_root = os.path.join(tmp, "status_no_model")
+        os.makedirs(status_root, exist_ok=True)
+        pkt_status = os.path.join(tmp, "status_task_no_model.json")
+        check(
+            main(["packet", "--id", "status-nm", "--cwd", status_root, "--prompt", "x",
+                  "--out", pkt_status]) == EXIT_OK,
+            "packet for status --task must exit 0",
+        )
+        with open(os.path.join(status_root, "result.json"), "w", encoding="utf-8") as fh:
+            json.dump({"status": "ok", "task_id": "status-nm", "message": "done"}, fh)
+        st_out = io.StringIO()
+        with contextlib.redirect_stdout(st_out):
+            st_rc = main(["status", "--task", pkt_status])
+        check(st_rc == EXIT_OK, f"status --task without model_dir must exit 0, got {st_rc}")
+        check("state:    done" in st_out.getvalue(),
+              f"status --task card must show done, got {st_out.getvalue()!r}")
+        rev_out = io.StringIO()
+        with contextlib.redirect_stdout(rev_out):
+            rev_rc = main(["review", "--task", pkt_status])
+        check(rev_rc == EXIT_OK, f"review --task without model_dir must exit 0, got {rev_rc}")
+        aw_out = io.StringIO()
+        with contextlib.redirect_stdout(aw_out):
+            aw_rc = main(["await", "--task", pkt_status, "--timeout-s", "1", "--interval-s", "0.1"])
+        check(aw_rc == EXIT_OK, f"await --task without model_dir must exit 0, got {aw_rc}")
+        check("state:    done" in aw_out.getvalue(),
+              f"await --task card must show done, got {aw_out.getvalue()!r}")
+
         # 17. piper_ui wake-file helper matches worker discovery path
         try:
             import piper_ui as pui
@@ -2636,7 +2673,7 @@ def self_test():
 
     for line in failures:
         print(f"  FAIL: {line}")
-    print(f"  piper_worker self-test: 22 scenario(s), {len(failures)} failure(s)")
+    print(f"  piper_worker self-test: 23 scenario(s), {len(failures)} failure(s)")
     return EXIT_ERROR if failures else EXIT_OK
 
 
