@@ -111,6 +111,11 @@ class TurnGrammar final : public MaskSource {
     [[nodiscard]] TurnPhase phase() const noexcept { return phase_; }
     [[nodiscard]] const std::vector<TokenId>& think_ids() const noexcept { return think_; }
     [[nodiscard]] const std::vector<TokenId>& text_ids() const noexcept { return text_; }
+    // Tokens that went to the tool-call channel this turn (open + body + closer). Not
+    // stored as ids -- GrammarSink keeps those for truncated-XML recovery -- but counted
+    // here so ToolCapMask can read the committed size the same way ThinkCapMask reads
+    // think_ids().size().
+    [[nodiscard]] std::size_t tool_token_count() const noexcept { return tool_tokens_; }
     // One turn may carry several calls (S9.1 amended): the model batches independent
     // reads, and serialising them cost a full prefill+decode round-trip each. The guard
     // is reset between calls, so each is parsed by the same automaton -- parsing is not
@@ -154,6 +159,7 @@ class TurnGrammar final : public MaskSource {
     std::vector<TokenId> think_;
     std::vector<TokenId> text_;
     std::vector<ParsedCall> calls_;
+    std::size_t tool_tokens_ = 0;
 
     // The mask outside a call turns on exactly one bit: may another <tool_call> open
     // here? That keeps the cache key a bool, as it was when the answer was "have we
@@ -170,6 +176,7 @@ class TurnGrammar final : public MaskSource {
         std::size_t think = 0;
         std::size_t text = 0;
         std::size_t calls = 0;
+        std::size_t tool_tokens = 0;
         bool held = false;
     };
     Checkpoint mark_;
@@ -246,6 +253,56 @@ class ThinkCapMask final : public MaskSource {
     // Built on first use and never rebuilt: one id in a vocabulary-wide bitset.
     mutable TokenMask close_only_;
     mutable bool close_only_built_ = false;
+};
+
+// The tool-phase budget, same spirit as ThinkCapMask: a MASK POLICY over the grammar so
+// a runaway `replace_in_file` / `write_file` body cannot burn the entire remaining turn
+// (measured: ~32k tokens / minutes of wall after tests already passed).
+//
+// Unlike think, there is no single structural closer that cleanly ends a mid-body call --
+// forcing `</tool_call>` would hand the harness a truncated parse, and flipping the phase
+// from under the model is the defect ThinkCapMask already removed. So at the cap the
+// legal set collapses to EMPTY and `budget_exhausted()` is true: the decode loop stops
+// as LengthCapped with `cap_phase=tool`, and the existing length_capped_tool_observation
+// path teaches the model to slice.
+//
+// Wraps an inner MaskSource (normally ThinkCapMask) so both budgets compose. `cap` 0
+// means no tool-phase budget: every call delegates.
+class ToolCapMask final : public MaskSource {
+  public:
+    ToolCapMask(MaskSource& inner, TurnGrammar& g, const QwenTokenizer& tok, std::size_t cap)
+        : inner_(inner), g_(g), tok_(tok), cap_(cap) {}
+
+    [[nodiscard]] const TokenMask& mask() const final;
+
+    [[nodiscard]] bool budget_exhausted() const final {
+        return at_cap() || inner_.budget_exhausted();
+    }
+
+    [[nodiscard]] bool mask_is_block_stable() const final {
+        return !at_cap() && inner_.mask_is_block_stable();
+    }
+
+    [[nodiscard]] bool can_checkpoint() const final { return inner_.can_checkpoint(); }
+    void checkpoint() final { inner_.checkpoint(); }
+    void rollback() final { inner_.rollback(); }
+    bool probe_advance(TokenId id) final { return inner_.probe_advance(id); }
+    [[nodiscard]] bool is_block_boundary(TokenId id) const final {
+        return inner_.is_block_boundary(id);
+    }
+
+  private:
+    [[nodiscard]] bool at_cap() const noexcept {
+        return cap_ > 0 && g_.phase() == TurnPhase::ToolCall &&
+               g_.tool_token_count() >= cap_;
+    }
+
+    MaskSource& inner_;
+    TurnGrammar& g_;
+    const QwenTokenizer& tok_;
+    std::size_t cap_ = 0;
+    mutable TokenMask empty_;
+    mutable bool empty_built_ = false;
 };
 
 } // namespace lmp::model

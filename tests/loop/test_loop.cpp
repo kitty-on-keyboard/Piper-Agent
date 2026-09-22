@@ -996,6 +996,17 @@ TEST(think_token_cap_keeps_room_for_a_write) {
     CHECK(think_token_cap(8192, 4096, 1024) > 0);
 }
 
+TEST(tool_token_cap_defaults_match_reserved_tool_budget_scale) {
+    AgentConfig cfg;
+    // Defaults: 8k tool-phase cap on a 32k turn -- same quarter-scale as reserved_tool_budget.
+    CHECK_EQ(tool_token_cap(cfg.max_tool_tokens, cfg.max_new_tokens), std::size_t{8192});
+    CHECK_EQ(tool_token_cap(8192, 32768), std::size_t{8192});
+    // Never larger than the turn itself.
+    CHECK_EQ(tool_token_cap(16384, 4096), std::size_t{4096});
+    // 0 disables.
+    CHECK_EQ(tool_token_cap(0, 32768), std::size_t{0});
+}
+
 TEST(a_cut_write_observation_names_append_file_and_the_path) {
     const std::string xml =
         "<function=write_file>\n<parameter=path>\ngame.js\n</parameter>\n"

@@ -618,6 +618,11 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
             r.status = GenStatus::Cancelled;
             return r;
         }
+        // ToolCapMask: a mid-tool runaway must LengthCap, not burn the rest of the turn.
+        if (task.mask != nullptr && task.mask->budget_exhausted()) {
+            r.status = GenStatus::LengthCapped;
+            break;
+        }
         // Block-stable, or checkpointable AND opted in.
         //
         // The second arm puts tool-call bodies in scope -- their mask moves per token, so
@@ -650,6 +655,11 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         r.forward_ms += ms_between(t_s0, clock.mono());
 
         if (st.no_legal_token) {
+            // Deliberate budget stop (ToolCapMask) is LengthCapped, not a build defect.
+            if (task.mask != nullptr && task.mask->budget_exhausted()) {
+                r.status = GenStatus::LengthCapped;
+                break;
+            }
             ++r.grammar_empty_mask;
             r.status = GenStatus::BackendError;
             // SELF-DESCRIBING, because three separate theories about this failure were
@@ -698,6 +708,11 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
             // that accepted -- so stop feeding at the first refusal and drop the rest.
             if (!sink.on_token(id)) {
                 r.status = GenStatus::Complete;
+                stop = true;
+                break;
+            }
+            if (task.mask != nullptr && task.mask->budget_exhausted()) {
+                r.status = GenStatus::LengthCapped;
                 stop = true;
                 break;
             }
@@ -1144,12 +1159,20 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             r.status = GenStatus::Cancelled;
             return r;
         }
+        if (task.mask != nullptr && task.mask->budget_exhausted()) {
+            r.status = GenStatus::LengthCapped;
+            break;
+        }
         const auto t_s0 = clock_.mono();
         // ONE mask lookup per step, not one predicate call per vocabulary id.
         const TokenMask* mask = task.mask != nullptr ? &task.mask->mask() : nullptr;
         const SampleResult pick = sampler.sample(logits_host, mask, recent);
         r.sample_ms += ms_between(t_s0, clock_.mono());
         if (pick.no_legal_token) {
+            if (task.mask != nullptr && task.mask->budget_exhausted()) {
+                r.status = GenStatus::LengthCapped;
+                break;
+            }
             ++r.grammar_empty_mask;
             r.status = GenStatus::BackendError;
             r.error = "constrained decode: no legal token -- the grammar and the "
@@ -1171,6 +1194,10 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
         const bool keep_going = sink.on_token(pick.id);
         if (!keep_going) {
             r.status = GenStatus::Complete;
+            break;
+        }
+        if (task.mask != nullptr && task.mask->budget_exhausted()) {
+            r.status = GenStatus::LengthCapped;
             break;
         }
 

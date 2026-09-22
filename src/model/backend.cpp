@@ -4,7 +4,7 @@ namespace lmp::model {
 namespace {
 
 GenResult play(const std::vector<TokenId>& ids, TokenSink& sink, const CancelToken& cancel,
-               std::int32_t max_new_tokens) {
+               std::int32_t max_new_tokens, MaskSource* mask) {
     GenResult r;
     for (TokenId id : ids) {
         if (cancel.cancelled()) {
@@ -15,9 +15,19 @@ GenResult play(const std::vector<TokenId>& ids, TokenSink& sink, const CancelTok
             r.status = GenStatus::LengthCapped;
             return r;
         }
+        // ToolCapMask (and any future budget mask) may already be exhausted from a prior
+        // token; stop before playing more of the script.
+        if (mask != nullptr && mask->budget_exhausted()) {
+            r.status = GenStatus::LengthCapped;
+            return r;
+        }
         ++r.tokens_generated;
         if (!sink.on_token(id)) {
             r.status = GenStatus::Complete;
+            return r;
+        }
+        if (mask != nullptr && mask->budget_exhausted()) {
+            r.status = GenStatus::LengthCapped;
             return r;
         }
     }
@@ -44,7 +54,7 @@ GenResult ScriptedBackend::generate(const InferenceTask& task, TokenSink& sink,
         r.reuse_reason = "unknown";
         return r;
     }
-    GenResult r = play(script_[next_++], sink, cancel, task.max_new_tokens);
+    GenResult r = play(script_[next_++], sink, cancel, task.max_new_tokens, task.mask);
     // Gate tests have no real KV; still emit attribution fields so the agent journal
     // path is exercised without inventing Extend/Restore behavior.
     r.prompt_tokens = task.prompt.size();
@@ -63,7 +73,7 @@ GenResult ReplayBackend::generate(const InferenceTask& task, TokenSink& sink,
         r.error = "ReplayBackend: trace has no turn " + std::to_string(turns_.size() + 1);
         return r;
     }
-    return play(turns_[next_++], sink, cancel, task.max_new_tokens);
+    return play(turns_[next_++], sink, cancel, task.max_new_tokens, task.mask);
 }
 
 } // namespace lmp::model

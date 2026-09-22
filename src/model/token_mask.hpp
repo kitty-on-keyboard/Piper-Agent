@@ -119,6 +119,12 @@ class MaskSource {
 
     [[nodiscard]] virtual const TokenMask& mask() const = 0;
 
+    // True when this source has exhausted a harness-owned budget (e.g. ToolCapMask) and
+    // generation must stop as LengthCapped -- NOT as BackendError. An empty mask alone is
+    // the build-defect path; budget_exhausted distinguishes a deliberate early stop from
+    // "the grammar and the vocabulary disagree". Defaults to false.
+    [[nodiscard]] virtual bool budget_exhausted() const { return false; }
+
     // True when mask() depends only on state that drafted-but-uncommitted tokens cannot
     // move -- so one snapshot of it is valid for a whole speculative block.
     //

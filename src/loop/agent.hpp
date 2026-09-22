@@ -177,6 +177,13 @@ struct AgentConfig {
     // think_token_cap() also keeps a quarter of the turn for the call itself.
     std::int32_t max_think_tokens = 8192;
     std::int32_t reserved_tool_tokens = 1024;
+    // Hard cap on tool-channel tokens inside one turn (ToolCapMask). Same spirit as
+    // max_think_tokens: once the grammar is in the tool phase, a runaway write/replace
+    // body cannot burn the entire remaining max_new_tokens (~32k). Default 8192 matches
+    // reserved_tool_budget's quarter-of-turn scale -- enough for a large but finite
+    // patch; whole-file dumps of huge files still cut earlier and teach slicing via
+    // length_capped_tool_observation. 0 disables the tool-phase budget.
+    std::int32_t max_tool_tokens = 8192;
     std::uint64_t seed = 0;
 
     // --- autonomy -----------------------------------------------------------
@@ -271,6 +278,16 @@ struct AgentConfig {
     const auto reserved = reserved_tool_budget(max_new_tokens, reserved_floor);
     const auto room = std::max(0, max_new_tokens - reserved);
     return static_cast<std::size_t>(std::max(0, std::min(max_think_tokens, room)));
+}
+
+// Tokens the tool-phase mask will allow. Zero means no tool-phase budget.
+// Never larger than the turn itself; the configured max_tool_tokens is the policy knob.
+[[nodiscard]] inline std::size_t tool_token_cap(std::int32_t max_tool_tokens,
+                                                std::int32_t max_new_tokens) noexcept {
+    if (max_tool_tokens <= 0 || max_new_tokens <= 0) {
+        return 0;
+    }
+    return static_cast<std::size_t>(std::min(max_tool_tokens, max_new_tokens));
 }
 
 // The UI feed. The Agent emits structured facts; the sidecar serializes them with the

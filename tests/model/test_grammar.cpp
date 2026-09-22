@@ -212,6 +212,74 @@ TEST(a_zero_think_cap_delegates_everything) {
     CHECK(capped.mask_is_block_stable());
 }
 
+// The tool-phase budget collapses the legal set to empty and reports budget_exhausted, so
+// the decode loop LengthCaps with cap_phase=tool instead of burning the rest of the turn.
+TEST(the_tool_cap_empties_the_mask_and_reports_budget_exhausted) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    ThinkCapMask think(g, tok(), /*cap=*/0);
+    ToolCapMask capped(think, g, tok(), /*cap=*/8);
+
+    CHECK(g.advance(tok().specials().think_close) == Advance::Ok);
+    CHECK(g.advance(tok().specials().tool_call_open) == Advance::Ok);
+    CHECK(g.phase() == TurnPhase::ToolCall);
+    CHECK_EQ(g.tool_token_count(), std::size_t{1});
+    CHECK(!capped.budget_exhausted());
+    CHECK(capped.mask().any());
+
+    // Feed ordinary body tokens until the tool-channel count hits the cap.
+    const auto ids = tok().encode_content(
+        "<function=read_file>\n<parameter=path>\n");
+    REQUIRE(ids.size() >= 8);
+    for (std::size_t i = 0; i < 7; ++i) {
+        CHECK(g.advance(ids[i]) == Advance::Ok);
+    }
+    CHECK_EQ(g.tool_token_count(), std::size_t{8});
+    CHECK(capped.budget_exhausted());
+    CHECK_EQ(capped.mask().count(), std::size_t{0});
+    CHECK(!capped.mask_is_block_stable());
+    // Overshoot is accepted by the grammar (same rule as ThinkCapMask); the mask stays
+    // empty and budget_exhausted stays true so the next decode step LengthCaps.
+    CHECK(g.advance(ids[7]) == Advance::Ok);
+    CHECK(g.tool_token_count() > 8);
+    CHECK(capped.budget_exhausted());
+    CHECK_EQ(capped.mask().count(), std::size_t{0});
+}
+
+TEST(a_zero_tool_cap_delegates_everything) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    ThinkCapMask think(g, tok(), /*cap=*/0);
+    ToolCapMask capped(think, g, tok(), /*cap=*/0);
+    CHECK(g.advance(tok().specials().think_close) == Advance::Ok);
+    CHECK(g.advance(tok().specials().tool_call_open) == Advance::Ok);
+    CHECK(feed_text(g, "<function=read_file>\n<parameter=path>\nsrc/main.cpp\n"
+                       "</parameter>\n</function>\n") == Advance::Ok);
+    CHECK(!capped.budget_exhausted());
+    CHECK_EQ(capped.mask().count(), g.mask().count());
+}
+
+TEST(tool_token_count_rolls_back_with_the_grammar) {
+    REQUIRE(tok().loaded());
+    const auto tools = one_tool();
+    TurnGrammar g(tok(), tools);
+    ThinkCapMask think(g, tok(), /*cap=*/0);
+    ToolCapMask capped(think, g, tok(), /*cap=*/100);
+    CHECK(g.advance(tok().specials().think_close) == Advance::Ok);
+    CHECK(g.advance(tok().specials().tool_call_open) == Advance::Ok);
+    REQUIRE(feed_text(g, "<function=read_file>\n<parameter=path>\nsrc/") == Advance::Ok);
+    const std::size_t before = g.tool_token_count();
+    REQUIRE(before > 0);
+    capped.checkpoint();
+    CHECK(capped.probe_advance(tok().encode_content("x")[0]));
+    CHECK(g.tool_token_count() == before + 1);
+    capped.rollback();
+    CHECK_EQ(g.tool_token_count(), before);
+    CHECK(!capped.budget_exhausted());
+}
+
 // `</think>` in Text is a no-op rather than a rejection: reasoning has already ended, so a
 // second closer carries nothing -- and ending the turn on it loses a run to punctuation.
 TEST(a_second_think_close_in_text_is_a_no_op) {
