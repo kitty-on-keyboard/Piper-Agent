@@ -30,40 +30,21 @@ A3B is not the smartest — **packets must be fat and scoped**, and **every turn
 
 1. **Frame the horizon** — one sentence goal + acceptance checklist (tests, UX, “file X exists”).
 2. **Pick the next slice** — smallest useful step; name the files; say what *not* to touch.
-3. **Write a detailed packet** — see template below. Cloud burns *input* tokens here on purpose so Piper burns the *output* tokens locally.
-4. **Dispatch** — `piper worker run --task …` (later: submit to keep-warm `serve`).
-5. **Wait on process exit** — `0` ok, `1` error, `2` timeout, `3` bad packet.
-6. **Review high-level**
-   - Read `result.message` (summary only).
-   - Skim `files_touched` / `git.diff` — expected paths? Surprises?
-   - Run / check the slice’s acceptance (test command, open the HTML, etc.).
-   - Do **not** re-read every line unless something smells wrong.
+3. **Write `prompt.md`** — see the shape below. Cloud burns *input* tokens on direction so Piper burns the *output* tokens locally. Do not hand-write `task.json`.
+4. **Emit** — `piper packet --id … --cwd … --prompt-file prompt.md --check "…" --out task.json`. MCP only via `piper mcp-list` then `--trust-mcp` for a name that exists.
+5. **Dispatch** — `piper dispatch --task task.json` (attached; prints the review card). Exit `0` ok, `1` error, `2` timeout, `3` bad packet. Keep-warm: `piper worker serve`, then `piper worker run`.
+6. **Review the card** — `status`, `files_touched`, diff size, `check`. Do not re-read every line unless something smells wrong. `piper status` / `piper await` instead of cat/jq. On `ask`: `piper answer allow|deny|--text`.
 7. **Decide**
    - **Pass** → next slice (or mark horizon done).
-   - **Fail (agent)** → thinner/clearer packet, same worker.
+   - **Fail (agent)** → thinner/clearer brief, same worker.
    - **Fail (infra)** → restart sidecar / clear lock / bump timeout; log the issue.
    - **Fail (model ceiling)** → cloud does that one hard edit itself, or shrink scope.
-8. **Record** — append to an issue/progress log so the next cloud turn has memory.
+8. **Record** — `piper progress --id slice-003 pass --note "…"`.
 9. Repeat from 2 until horizon acceptance is green.
 
-## Packet template (`task.json`)
+## What `piper packet` emits
 
-Cloud should write packets like a senior briefing a mid-level implementer:
-
-```json
-{
-  "id": "horizon-slug/slice-003",
-  "cwd": "/absolute/path/to/workspace",
-  "mode": "agent",
-  "model_dir": "/Users/dev/Desktop/Models/Qwen3.6-35B-A3B-MLX-4bit",
-  "prompt": "…see prompt.md shape below…",
-  "auto_approve_exec": true,
-  "timeout_s": 600,
-  "result_path": "/absolute/path/to/slice-003/result.json",
-  "commit_think": true,
-  "shadow_compact": true
-}
-```
+The cloud writes `prompt.md`. The emitter writes `id`, `cwd`, `prompt`, auto-approve flags, `timeout_s`, `result_path`, and optional `model_dir`, `check`, and `trust_mcp`. Turn budget defaults to 30, or 60 when `trust_mcp` is set.
 
 ### `prompt` / `prompt.md` shape (recommended sections)
 
@@ -107,7 +88,7 @@ For each `result.json`:
 | Acceptance | done-when checks hold | new slice to fix, not a novel |
 | Message | readable summary | ignore think-leak; fix worker later |
 
-Log one line per slice: `slice-id | pass/fail | note`.
+Record the slice with `piper progress --id slice-id pass --note "…"`. Do not paste the log line by hand.
 
 ## Troubleshooting / restart (cloud owns this)
 
