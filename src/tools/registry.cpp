@@ -12,6 +12,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <map>
 #include <optional>
@@ -1110,6 +1111,7 @@ Registry::Registry(WorkspaceContext ctx)
             // than left to guess. A 5,000-line slice costs the context as much as a whole
             // file, so the bound applies here too.
             long stopped_at = 0;
+            char num_buf[32];
             while (at <= f.bytes.size() && line <= end) {
                 const std::size_t nl = f.bytes.find('\n', at);
                 const std::size_t stop =
@@ -1119,7 +1121,8 @@ Registry::Registry(WorkspaceContext ctx)
                         stopped_at = line;
                         break;
                     }
-                    outp += std::to_string(line);
+                    auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line);
+                    outp.append(num_buf, static_cast<std::size_t>(ptr - num_buf));
                     outp += '\t';
                     outp.append(f.bytes, at, stop - at);
                 }
@@ -1238,14 +1241,22 @@ Registry::Registry(WorkspaceContext ctx)
                             nl == std::string_view::npos ? bytes.size() : nl;
                         const std::string_view line = bytes.substr(at, stop - at);
                         if (line.find(needle) != std::string_view::npos) {
-                            const std::string hit =
-                                path + ":" + std::to_string(line_number) + ":" +
-                                std::string(line) + "\n";
+                            char num_buf[32];
+                            auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line_number);
+                            const std::string_view num_str(num_buf, ptr - num_buf);
+
+                            std::size_t hit_size = path.size() + 1 + num_str.size() + 1 + line.size() + 1;
+
                             if (matches >= 200 ||
-                                output.size() + hit.size() > ctx_.max_result_bytes) {
+                                output.size() + hit_size > ctx_.max_result_bytes) {
                                 return false;
                             }
-                            output += hit;
+                            output += path;
+                            output += ':';
+                            output.append(num_str);
+                            output += ':';
+                            output.append(line);
+                            output += '\n';
                             ++matches;
                         }
                         if (nl == std::string_view::npos) {
@@ -1387,8 +1398,14 @@ Registry::Registry(WorkspaceContext ctx)
                             nl == std::string_view::npos ? bytes.size() : nl;
                         const std::string_view line = bytes.substr(at, stop - at);
                         if (definition_shaped(line, sym)) {
-                            candidates += path + ":" + std::to_string(line_number) +
-                                          ":" + std::string(line) + "\n";
+                            char num_buf[32];
+                            auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line_number);
+                            candidates += path;
+                            candidates += ':';
+                            candidates.append(num_buf, ptr - num_buf);
+                            candidates += ':';
+                            candidates.append(line);
+                            candidates += '\n';
                             if (++candidate_count >= 400) {
                                 return false;
                             }
