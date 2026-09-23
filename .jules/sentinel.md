@@ -46,3 +46,8 @@
 **Vulnerability:** Unix domain socket path truncation via strncpy in `connect` and `bind`. Unchecked paths exactly matching the buffer size minus one byte might silently truncate and cause binding/connecting to incorrect paths if sizes differ from `sockaddr_un::sun_path`.
 **Learning:** Checking against `sizeof(sockaddr_un::sun_path)` rather than the instance member size can lead to obscure problems if types drift, and initialization position matters.
 **Prevention:** Initialize structures like `struct sockaddr_un addr{};` *before* checking bounds to cleanly use `sizeof(addr.sun_path)` as the size limit, ensuring both correct checking and a null-terminated buffer.
+
+## 2026-09-23 - Insecure Path Validation for Workspace File Isolation
+**Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
+**Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
+**Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
