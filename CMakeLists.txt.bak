@@ -38,7 +38,7 @@ endif()
 project(lm_pipe2 CXX)
 
 # LM_Pipe v2 -- Apple Silicon only. Unified memory is assumed, not abstracted over.
-if(FALSE)
+if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
   message(FATAL_ERROR
     "LM_Pipe v2 targets Apple Silicon only (see spec S1). "
     "Detected: ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}. "
