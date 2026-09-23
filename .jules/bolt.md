@@ -57,3 +57,7 @@
 ## 2026-05-28 - Fast-Path File Content Check and Lazy Path Construction in Workspace File Walks
 **Learning:** In `search` and `locate_symbol`, line-by-line scanning and string slicing ran on every file in the workspace, even when the needle/symbol was completely absent from the file. Furthermore, `walk_file_names` and `walk_regular_files` allocated `std::string child` heap paths before evaluating `skip_during_descent` or `entry.kind`.
 **Action:** Perform `bytes.find(needle) == std::string_view::npos` fast-path checks to skip line scanning for non-matching files during search, and defer path string allocations until after directory descent filter checks pass.
+
+## 2026-05-29 - Pre-Tokenization Callback and Bitmask Popcount Matching in Edit Diagnostics
+**Learning:** `nearest_regions` in `src/tools/edit_diagnostics.hpp` previously created temporary `std::string` windows and re-tokenized token vectors across sliding line windows, leading to $O(N \times win)$ string allocations, copies, and linear token searches ($1.75\text{s}$ per 10k lines). Pre-tokenizing lines once via zero-allocation callback `tokenize_cb` into per-line token counts and a 64-bit target token presence mask (`uint64_t want_mask`) reduces window matching to $O(1)$ bitwise OR and `std::popcount`, improving candidate search throughput by ~4.8x (~366ms).
+**Action:** Pre-tokenize lines once using callbacks and use bitwise masks (`uint64_t`) with `std::popcount` for fast multi-token sliding window intersection scoring instead of string concatenation and vector re-tokenization.

@@ -6,7 +6,9 @@
 // model can re-author old_text; the graft / apply_patch engines remain exact.
 //
 #include <algorithm>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -45,6 +47,26 @@ inline std::vector<std::string_view> tokenize(std::string_view s) {
     return out;
 }
 
+// Fast path: Tokenize s via callback to avoid heap allocations per line during window scanning.
+template <typename Fn>
+inline void tokenize_cb(std::string_view s, Fn&& fn) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        if (is_ws(s[i])) {
+            ++i;
+        } else if (is_ident(s[i])) {
+            const std::size_t start = i;
+            while (i < s.size() && is_ident(s[i])) {
+                ++i;
+            }
+            fn(s.substr(start, i - start));
+        } else {
+            fn(s.substr(i, 1));
+            ++i;
+        }
+    }
+}
+
 inline void split_lines(std::string_view text, std::vector<std::string_view>& out) {
     out.clear();
     std::size_t pos = 0;
@@ -61,21 +83,6 @@ inline void split_lines(std::string_view text, std::vector<std::string_view>& ou
         out.push_back(line);
         pos = nl + 1;
     }
-}
-
-[[nodiscard]] inline double token_jaccard(const std::vector<std::string_view>& a,
-                                          const std::vector<std::string_view>& b) {
-    if (a.empty() || b.empty()) {
-        return 0.0;
-    }
-    std::size_t inter = 0;
-    for (std::string_view t : a) {
-        if (std::find(b.begin(), b.end(), t) != b.end()) {
-            ++inter;
-        }
-    }
-    const std::size_t uni = a.size() + b.size() - inter;
-    return uni == 0 ? 0.0 : static_cast<double>(inter) / static_cast<double>(uni);
 }
 
 } // namespace detail
@@ -116,23 +123,81 @@ struct Candidate {
     }
     const std::size_t win = std::min(std::max(old_lines, std::size_t{1}), std::size_t{12});
 
+    // Fast path: Pre-tokenize lines once using callback and record token counts / bitmask matches.
+    // Re-allocating window strings and re-tokenizing vector strings across sliding windows was O(N * win).
+    struct LineInfo {
+        std::size_t token_count = 0;
+        std::uint64_t want_mask = 0; // bit m set if want[m] is in this line (for m < 64)
+        std::vector<std::size_t> extra_want_indices; // fallback if want.size() > 64
+    };
+
+    const std::size_t n_lines = lines.size();
+    const std::size_t want_size = want.size();
+    const bool use_mask = (want_size <= 64);
+
+    std::vector<LineInfo> line_info(n_lines);
+    for (std::size_t k = 0; k < n_lines; ++k) {
+        detail::tokenize_cb(lines[k], [&](std::string_view tok) {
+            line_info[k].token_count++;
+            for (std::size_t m = 0; m < want_size; ++m) {
+                if (want[m] == tok) {
+                    if (m < 64) {
+                        line_info[k].want_mask |= (std::uint64_t{1} << m);
+                    } else {
+                        line_info[k].extra_want_indices.push_back(m);
+                    }
+                }
+            }
+        });
+    }
+
     struct Scored {
         std::size_t line;
         double score;
     };
     std::vector<Scored> scored;
-    scored.reserve(lines.size());
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        std::string window;
-        for (std::size_t j = i; j < lines.size() && j < i + win; ++j) {
-            if (j > i) {
-                window.push_back('\n');
+    scored.reserve(n_lines);
+
+    for (std::size_t i = 0; i < n_lines; ++i) {
+        const std::size_t end_j = std::min(n_lines, i + win);
+        std::size_t b_size = 0;
+        std::size_t inter = 0;
+
+        if (use_mask) {
+            std::uint64_t win_mask = 0;
+            for (std::size_t j = i; j < end_j; ++j) {
+                b_size += line_info[j].token_count;
+                win_mask |= line_info[j].want_mask;
             }
-            window.append(lines[j].data(), lines[j].size());
+            inter = static_cast<std::size_t>(std::popcount(win_mask));
+        } else {
+            // General fallback for want > 64 tokens
+            std::vector<bool> found(want_size, false);
+            for (std::size_t j = i; j < end_j; ++j) {
+                b_size += line_info[j].token_count;
+                if (line_info[j].want_mask != 0) {
+                    std::uint64_t m = line_info[j].want_mask;
+                    while (m) {
+                        int idx = std::countr_zero(m);
+                        found[idx] = true;
+                        m &= m - 1;
+                    }
+                }
+                for (std::size_t idx : line_info[j].extra_want_indices) {
+                    found[idx] = true;
+                }
+            }
+            for (bool f : found) {
+                if (f) ++inter;
+            }
         }
-        const double score = detail::token_jaccard(want, detail::tokenize(window));
-        if (score >= 0.35) {
-            scored.push_back(Scored{i + 1, score});
+
+        if (b_size > 0 || want_size > 0) {
+            const std::size_t uni = want_size + b_size - inter;
+            const double score = (uni == 0) ? 0.0 : static_cast<double>(inter) / static_cast<double>(uni);
+            if (score >= 0.35) {
+                scored.push_back(Scored{i + 1, score});
+            }
         }
     }
     std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {

@@ -1314,6 +1314,24 @@ TEST(replace_nomatch_lists_nearest_candidates_as_diagnostics_only) {
                          "def gamma():\n    return 3\n"));
 }
 
+TEST(nearest_regions_handles_small_and_large_want_sets_correctly) {
+    std::string file = "def alpha():\n    return 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    return 3\n";
+    // small want set (< 64 tokens)
+    auto cands_small = edit_diagnostics::nearest_regions(file, "def beta():\n    return 99\n");
+    REQUIRE(!cands_small.empty());
+    CHECK_EQ(cands_small[0].line, std::size_t{4});
+
+    // large want set (> 64 tokens)
+    std::string large_want;
+    for (int i = 0; i < 70; ++i) {
+        large_want += "tok_" + std::to_string(i) + " ";
+    }
+    large_want += "\ndef beta():\n";
+    std::string file_large = "header line\n" + large_want + "footer line\n";
+    auto cands_large = edit_diagnostics::nearest_regions(file_large, large_want);
+    REQUIRE(!cands_large.empty());
+}
+
 // FOUR FILES THAT EACH FIT DO NOT ADD UP TO ONE THAT DOES.
 //
 // Every part of a read_many is already inside max_model_read_bytes; nothing bounded their
