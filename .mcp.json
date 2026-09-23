@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "warm-lsp": {
+      "command": "/opt/homebrew/bin/python3",
+      "args": ["scripts/warm_lsp_mcp.py"]
+    }
+  }
+}

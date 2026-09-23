@@ -517,6 +517,25 @@ std::string build_start_message(const TaskPacket& packet, const std::string& req
                                 }
                             }
                         }
+                        // Parent LMP_* never reaches an MCP child (spawn_env drops that
+                        // prefix). Copy the warm-LSP gate explicitly, and only when it
+                        // is on, so a trusted server with the flag unset starts no
+                        // language server.
+                        if (name == "warm-lsp") {
+                            const char* warm = std::getenv("LMP_WARM_LSP");
+                            if (warm != nullptr && std::string(warm) == "1") {
+                                env_arr.push_back("LMP_WARM_LSP=1");
+                            }
+                            // spawn_env does not inherit these. The server also
+                            // defaults to the Godoer fork when none are set.
+                            for (const char* key :
+                                 {"LMP_GODOT_BIN", "GODOER_GODOT_BIN", "GODOT_BIN"}) {
+                                const char* value = std::getenv(key);
+                                if (value != nullptr && value[0] != '\0') {
+                                    env_arr.push_back(std::string(key) + "=" + value);
+                                }
+                            }
+                        }
                         s_obj["env"] = env_arr;
                         s_obj["trusted"] = true;
 
