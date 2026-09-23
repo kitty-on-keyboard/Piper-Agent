@@ -275,15 +275,16 @@ bool walk_file_names(const fsx::WorkspaceFs& workspace, const std::string& path,
                   return a.name < b.name;
               });
     for (const fsx::DirectoryEntry& entry : dir.entries) {
-        const std::string child = child_path(path, entry.name);
         if (entry.kind == fsx::DirectoryEntryKind::Directory) {
             if (skip_during_descent(entry.name)) {
                 continue;
             }
+            const std::string child = child_path(path, entry.name);
             if (!walk_file_names(workspace, child, visit)) {
                 return false;
             }
         } else if (entry.kind == fsx::DirectoryEntryKind::File) {
+            const std::string child = child_path(path, entry.name);
             if (!visit(child)) {
                 return false;
             }
@@ -305,15 +306,16 @@ bool walk_regular_files(const fsx::WorkspaceFs& workspace, const std::string& pa
                   return a.name < b.name;
               });
     for (const fsx::DirectoryEntry& entry : dir.entries) {
-        const std::string child = child_path(path, entry.name);
         if (entry.kind == fsx::DirectoryEntryKind::Directory) {
             if (skip_during_descent(entry.name)) {
                 continue;
             }
+            const std::string child = child_path(path, entry.name);
             if (!walk_regular_files(workspace, child, max_read_bytes, visit)) {
                 return false;
             }
         } else if (entry.kind == fsx::DirectoryEntryKind::File) {
+            const std::string child = child_path(path, entry.name);
             const fsx::FileContents file =
                 workspace.read_file_whole(child, max_read_bytes);
             if (file.ok() && !visit(child, file.bytes)) {
@@ -1224,6 +1226,10 @@ Registry::Registry(WorkspaceContext ctx)
                     if (bytes.find('\0') != std::string_view::npos) {
                         return true;
                     }
+                    // Fast path: skip line-by-line scanning if needle is absent from the file.
+                    if (bytes.find(needle) == std::string_view::npos) {
+                        return true;
+                    }
                     std::size_t at = 0;
                     std::size_t line_number = 1;
                     while (at <= bytes.size()) {
@@ -1367,6 +1373,10 @@ Registry::Registry(WorkspaceContext ctx)
                 workspace_fs_, ".", ctx_.max_read_bytes,
                 [&](const std::string& path, std::string_view bytes) {
                     if (bytes.find('\0') != std::string_view::npos) {
+                        return true;
+                    }
+                    // Fast path: skip line-by-line scanning if symbol is absent from the file.
+                    if (bytes.find(sym) == std::string_view::npos) {
                         return true;
                     }
                     std::size_t at = 0;

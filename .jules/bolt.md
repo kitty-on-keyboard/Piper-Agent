@@ -53,3 +53,7 @@
 ## 2026-05-27 - Fast-Path Allocation-Free Parsing and Duplicate Checking in Symbol Hit Ranking
 **Learning:** `rank_symbol_hits` in `src/tools/symbol_index.hpp` previously created `std::string` heap allocations for `path` and `text`, plus a temporary `std::string` just to convert line numbers via `std::strtol`, before checking if the line number was valid (`<= 0`) or if `(path, line)` was a duplicate. On large symbol search results, this created thousands of short-lived heap allocations and temporary string copies.
 **Action:** Parse line numbers directly from `std::string_view` via `std::from_chars` and check duplicates using `std::string_view` before constructing `SymbolHit`'s `std::string` members (`path` and `text`).
+
+## 2026-05-28 - Fast-Path File Content Check and Lazy Path Construction in Workspace File Walks
+**Learning:** In `search` and `locate_symbol`, line-by-line scanning and string slicing ran on every file in the workspace, even when the needle/symbol was completely absent from the file. Furthermore, `walk_file_names` and `walk_regular_files` allocated `std::string child` heap paths before evaluating `skip_during_descent` or `entry.kind`.
+**Action:** Perform `bytes.find(needle) == std::string_view::npos` fast-path checks to skip line scanning for non-matching files during search, and defer path string allocations until after directory descent filter checks pass.
