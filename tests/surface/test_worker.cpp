@@ -1270,7 +1270,7 @@ TEST(forward_to_daemon_exits_on_result_without_hanging) {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    CHECK(sock_path.length() < sizeof(sockaddr_un::sun_path));
+    CHECK(sock_path.length() < sizeof(addr.sun_path));
     std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
     CHECK_EQ(::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
     CHECK_EQ(::listen(listen_fd, 1), 0);
@@ -1324,7 +1324,7 @@ TEST(forward_to_daemon_handles_clean_eof_and_exit_code) {
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    CHECK(sock_path.length() < sizeof(sockaddr_un::sun_path));
+    CHECK(sock_path.length() < sizeof(addr.sun_path));
     std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
     CHECK_EQ(::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
     CHECK_EQ(::listen(listen_fd, 1), 0);
@@ -1361,7 +1361,7 @@ TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
     CHECK(listener >= 0);
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    CHECK(path.length() < sizeof(sockaddr_un::sun_path));
+    CHECK(path.length() < sizeof(addr.sun_path));
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     CHECK_EQ(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
     CHECK_EQ(::listen(listener, 1), 0);
@@ -1683,7 +1683,7 @@ TEST(busy_daemon_is_not_mistaken_for_absent_worker) {
     CHECK(listener >= 0);
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    CHECK(path.length() < sizeof(sockaddr_un::sun_path));
+    CHECK(path.length() < sizeof(addr.sun_path));
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     CHECK_EQ(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
     CHECK_EQ(::listen(listener, 1), 0);
