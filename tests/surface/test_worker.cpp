@@ -2,6 +2,7 @@
 #include "src/surface/socket_reader.hpp"
 
 #include <arpa/inet.h>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <netinet/in.h>
@@ -204,6 +205,7 @@ TEST(build_start_message_formats_proper_jsonrpc) {
     CHECK_EQ(j["params"]["settings"]["verify_contract"].get<std::string>(), "npm test");
     CHECK_EQ(j["params"]["settings"]["auto_approve_writes"].get<bool>(), true);
     CHECK_EQ(j["params"]["settings"]["auto_approve_irreversible"].get<bool>(), false);
+    CHECK_EQ(j["params"]["reasoning_effort"].get<std::string>(), "xhigh");
 }
 
 TEST(resolve_max_iterations_defaults_and_packet_override) {
@@ -700,6 +702,55 @@ TEST(build_start_message_includes_trusted_mcp_servers) {
     auto j_no_trust = nlohmann::json::parse(msg_no_trust, nullptr, false);
     CHECK(!j_no_trust["params"]["settings"].contains("mcp_servers"));
 
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(build_start_message_forwards_warm_lsp_flag_only_when_on) {
+    std::filesystem::path tmp_dir =
+        std::filesystem::temp_directory_path() / "test_worker_warm_lsp";
+    std::filesystem::create_directories(tmp_dir);
+    {
+        nlohmann::json mcp_j = {
+            {"mcpServers",
+             {{"warm-lsp",
+               {{"command", "/opt/homebrew/bin/python3"},
+                {"args", {"scripts/warm_lsp_mcp.py"}}}}}}};
+        std::ofstream mf(tmp_dir / ".mcp.json");
+        mf << mcp_j.dump();
+    }
+
+    TaskPacket packet;
+    packet.cwd = tmp_dir.string();
+    packet.prompt = "p";
+    packet.model_dir = tmp_dir.string();
+    packet.trust_mcp = {"warm-lsp"};
+
+    const char* prev = std::getenv("LMP_WARM_LSP");
+    const std::string saved = prev != nullptr ? prev : std::string();
+
+    auto env_has_flag = [](const nlohmann::json& msg) {
+        const auto& env = msg["params"]["settings"]["mcp_servers"][0]["env"];
+        for (const auto& e : env) {
+            if (e.get<std::string>() == "LMP_WARM_LSP=1") {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    REQUIRE(setenv("LMP_WARM_LSP", "1", 1) == 0);
+    auto on = nlohmann::json::parse(build_start_message(packet, "1"), nullptr, false);
+    CHECK(env_has_flag(on));
+
+    REQUIRE(setenv("LMP_WARM_LSP", "0", 1) == 0);
+    auto off = nlohmann::json::parse(build_start_message(packet, "2"), nullptr, false);
+    CHECK(!env_has_flag(off));
+
+    if (prev != nullptr) {
+        REQUIRE(setenv("LMP_WARM_LSP", saved.c_str(), 1) == 0);
+    } else {
+        unsetenv("LMP_WARM_LSP");
+    }
     std::filesystem::remove_all(tmp_dir);
 }
 

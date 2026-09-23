@@ -1,0 +1,6 @@
+; Minimal fixture for a headless LSP probe. Not a product project.
+config_version=5
+
+[application]
+config/name="WarmLspProbe"
+config/features=PackedStringArray("4.6")

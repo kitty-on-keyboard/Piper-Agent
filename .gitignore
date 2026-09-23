@@ -57,6 +57,17 @@ lmp_events.jsonl
 # Keep summarize_events.py in scripts/; never commit raw dumps.
 /piper-bench/
 .piper/slices/
+.piper/watch/
+.piper/lsp-venv/
+.piper/lsp-py/
+.piper/lsp-cache/
+.piper/lsp-tmp/
+.piper/lsp-home/
 .piper/orch_webhook
 .piper/progress.log
+testdata/warm_lsp/gdscript/.godot/
+testdata/warm_lsp/gdscript/*.uid
+testdata/warm_lsp/swift/.build/
+testdata/warm_lsp/agent_off/
+testdata/warm_lsp/agent_on/
 
