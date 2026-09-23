@@ -2378,16 +2378,18 @@ void handle_daemon_sig(int sig) {
 static constexpr const char* kParentContractBanner =
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
     "Do not detach unless you pass --orch-webhook. No default URL. Events:\n"
-    "ask (write answer.json), done, stalled (not success), died (do not relaunch).\n"
+    "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
     "See PIPER.md if present.\n";
 
 static constexpr const char* kWorkerHelpText =
     "Usage: piper <command> [options]\n\n"
-    "Commands:\n"
-    "  init [dir]                      Initialize PIPER.md and .cursor/rules/piper-parent.mdc\n"
+    "This binary is the worker. Parent commands exec scripts/piper_worker.py:\n"
+    "  packet, dispatch, answer, progress, review, status, await,\n"
+    "  mcp-list, wake-url, init\n\n"
+    "Worker commands:\n"
     "  run --task <task.json> [flags]  Run one task packet (synonym for worker run)\n"
     "  serve [flags]                   Run keep-warm daemon\n"
-    "  worker <subcommand>             Worker commands (run, serve, init)\n\n"
+    "  worker <subcommand>             Worker commands (run, serve)\n\n"
     "Flags for run:\n"
     "  --task <path>                   task.json path or directory containing task.json\n"
     "  --auto-approve-irreversible     Auto-approve irreversible tool calls (destroys data / overwrite)\n"
@@ -2409,6 +2411,10 @@ static constexpr const char* kWorkerHelpText =
 
 int worker_main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
+
+    if (std::optional<int> forwarded = forward_parent_harness(argc, argv)) {
+        return *forwarded;
+    }
 
     if (argc <= 1) {
         std::fprintf(stdout, "%s", kWorkerHelpText);

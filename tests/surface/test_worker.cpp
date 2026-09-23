@@ -1212,6 +1212,9 @@ TEST(init_project_creates_files_and_preserves_godoer) {
     CHECK(cursor_text.find("piper: you are the parent.") != std::string::npos);
     CHECK(cursor_text.find("Cloud directs, local writes") != std::string::npos);
     CHECK(cursor_text.find("task.json") != std::string::npos);
+    CHECK(cursor_text.find("piper packet") != std::string::npos);
+    CHECK(cursor_text.find("piper dispatch") != std::string::npos);
+    CHECK(cursor_text.find("Write a packet file") == std::string::npos);
     CHECK(cursor_text.find("piper run --task") != std::string::npos);
 
     // Verify Godoer briefs remain completely intact

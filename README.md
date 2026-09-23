@@ -54,12 +54,14 @@ piper worker serve                           # listens on ~/.piper/worker.sock
 piper worker run --task /path/to/task.json   # forwards to the warm daemon
 ```
 
-`install-piper-link` refreshes `/opt/homebrew/bin/piper` to the absolute path of
-`build/src/surface/piper` in this checkout (so a rename of the tree cannot leave a
-dead symlink). It no-ops cleanly when Homebrew's bin dir is missing. Re-run it after
-each build (or after moving the checkout) if orchestrators call bare `piper`.
+`install-piper-link` refreshes `/opt/homebrew/bin/piper` to this checkout's parent
+harness, `scripts/piper_worker.py` (so a rename of the tree cannot leave a dead
+symlink). `build/src/surface/piper` stays a symlink to `lmp_sidecar`; the harness
+execs that worker for `run` and `serve`. The link no-ops cleanly when Homebrew's
+bin dir is missing. Re-run it after each build (or after moving the checkout) if
+orchestrators call bare `piper`.
 
-Direct binary invocation is also supported: `lmp_sidecar --worker --task <path>` or `lmp_sidecar --worker --serve`.
+Direct worker invocation is also supported: `lmp_sidecar --worker --task <path>` or `lmp_sidecar --worker --serve`. Parent commands (`packet`, `dispatch`, `init`, …) on that binary exec the harness.
 Override the binary with `LMP_SIDECAR`; the model with `model_dir` in the packet or `LMP_QWEN_DIR`.
 
 ## Use

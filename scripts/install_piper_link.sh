@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Refresh /opt/homebrew/bin/piper so bare `piper` resolves to THIS checkout's
-# built binary (build/src/surface/piper -> lmp_sidecar).
+# Refresh /opt/homebrew/bin/piper so bare `piper` is THIS checkout's parent
+# harness (scripts/piper_worker.py). The built worker (build/src/surface/piper
+# -> lmp_sidecar) stays beside its Metal kernels; the harness execs it for
+# run and serve.
 #
 # Why: a checkout rename (e.g. LM_Pipe_2 -> Piper) leaves a stale Homebrew
 # symlink; orchestrators that call bare `piper` then get "command not found".
+# Linking the worker binary instead of the harness hides `piper packet`.
 #
 # Usage (after building lmp_sidecar):
 #   ./scripts/install_piper_link.sh
@@ -63,24 +66,34 @@ absolute_target() {
 }
 
 main() {
-  local built target dest
+  local built worker harness dest
   built="$(resolve_built_piper "${1:-}")"
   if [[ ! -e "${built}" ]]; then
     echo "install_piper_link: built binary not found: ${built}" >&2
     echo "  build first: cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8" >&2
     exit 1
   fi
-  target="$(absolute_target "${built}")"
+  worker="$(absolute_target "${built}")"
+
+  local harness_src
+  harness_src="$(repo_root)/scripts/piper_worker.py"
+  if [[ ! -f "${harness_src}" ]]; then
+    echo "install_piper_link: parent harness not found: ${harness_src}" >&2
+    exit 1
+  fi
+  chmod +x "${harness_src}"
+  harness="$(absolute_target "${harness_src}")"
 
   if [[ "$(uname -s)" != "Darwin" ]]; then
-    echo "install_piper_link: skipping Homebrew link (not Darwin); piper is at ${target}"
+    echo "install_piper_link: skipping Homebrew link (not Darwin); harness is at ${harness}; worker is at ${worker}"
     exit 0
   fi
 
   if [[ -d "${HOMEBREW_BIN}" ]]; then
     dest="${HOMEBREW_BIN}/${LINK_NAME}"
-    if [[ -w "${HOMEBREW_BIN}" ]] && ln -sfn "${target}" "${dest}"; then
-      echo "install_piper_link: ${dest} -> ${target}"
+    if [[ -w "${HOMEBREW_BIN}" ]] && ln -sfn "${harness}" "${dest}"; then
+      echo "install_piper_link: ${dest} -> ${harness}"
+      echo "install_piper_link: worker stays ${worker}"
       return 0
     fi
   else
@@ -93,8 +106,9 @@ main() {
     mkdir -p "${fallback}" 2>/dev/null || true
     if [[ -d "${fallback}" && -w "${fallback}" ]]; then
       dest2="${fallback}/${LINK_NAME}"
-      if ln -sfn "${target}" "${dest2}"; then
-        echo "install_piper_link: ${dest2} -> ${target}"
+      if ln -sfn "${harness}" "${dest2}"; then
+        echo "install_piper_link: ${dest2} -> ${harness}"
+        echo "install_piper_link: worker stays ${worker}"
         case ":${PATH}:" in
           *":${fallback}:"*) ;;
           *)
@@ -107,8 +121,9 @@ main() {
   done
 
   echo "install_piper_link: could not link into ${HOMEBREW_BIN} or ~/bin ~/.local/bin" >&2
-  echo "  built piper is at: ${target}" >&2
-  echo "  call it by absolute path, or fix directory permissions and re-run" >&2
+  echo "  harness is at: ${harness}" >&2
+  echo "  worker is at: ${worker}" >&2
+  echo "  call the harness by absolute path, or fix directory permissions and re-run" >&2
   exit 1
 }
 

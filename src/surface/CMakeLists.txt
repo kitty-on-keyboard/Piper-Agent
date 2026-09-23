@@ -16,21 +16,24 @@ target_link_libraries(lmp_sidecar PRIVATE lmp_warnings lmp_assertions
 # MLX opens its Metal kernels from beside the executable. No-op when MLX is off.
 lmp_stage_metallib(lmp_sidecar)
 
-# Direct native CLI: piper on PATH or in build directory is a symlink to lmp_sidecar
+# Direct native worker: build/src/surface/piper is a symlink to lmp_sidecar so
+# Metal kernels stay beside the executable. PATH `piper` is the Python harness
+# (install-piper-link below), not this symlink.
 add_custom_command(TARGET lmp_sidecar POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E create_symlink lmp_sidecar "${CMAKE_CURRENT_BINARY_DIR}/piper"
   COMMENT "Creating piper symlink to lmp_sidecar"
   VERBATIM)
 
-# Opt-in: refresh /opt/homebrew/bin/piper -> this build's piper (realpath). Renaming
-# the checkout otherwise leaves a dead Homebrew symlink and bare `piper` disappears
-# for orchestrators. No-op off Darwin or when Homebrew's bin dir is absent; never
-# part of `all` so Linux/CI builds that never ask for it stay untouched.
+# Opt-in: refresh /opt/homebrew/bin/piper -> scripts/piper_worker.py in this
+# checkout. The script realpath keeps ROOT correct after a rename. The command
+# still requires the built worker. No-op off Darwin or when Homebrew's bin dir
+# is absent; never part of `all` so Linux/CI builds that never ask for it stay
+# untouched.
 add_custom_target(install-piper-link
   DEPENDS lmp_sidecar
   COMMAND "${PROJECT_SOURCE_DIR}/scripts/install_piper_link.sh"
           "${CMAKE_CURRENT_BINARY_DIR}/piper"
-  COMMENT "Refreshing /opt/homebrew/bin/piper -> this build's piper"
+  COMMENT "Refreshing /opt/homebrew/bin/piper -> scripts/piper_worker.py"
   VERBATIM)
 
 # `cmake --build build --target vsix` produces extension/lm-pipe.vsix with THIS binary
