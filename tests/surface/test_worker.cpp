@@ -205,7 +205,6 @@ TEST(build_start_message_formats_proper_jsonrpc) {
     CHECK_EQ(j["params"]["settings"]["verify_contract"].get<std::string>(), "npm test");
     CHECK_EQ(j["params"]["settings"]["auto_approve_writes"].get<bool>(), true);
     CHECK_EQ(j["params"]["settings"]["auto_approve_irreversible"].get<bool>(), false);
-    CHECK_EQ(j["params"]["reasoning_effort"].get<std::string>(), "xhigh");
 }
 
 TEST(resolve_max_iterations_defaults_and_packet_override) {

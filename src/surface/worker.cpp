@@ -562,12 +562,7 @@ std::string build_start_message(const TaskPacket& packet, const std::string& req
         {"method", "lmp/start"},
         {"params", {
             {"mission", packet.prompt},
-            {"settings", settings},
-            // Qwen3.8's template default is xhigh, but an empty field parses as
-            // Default and injects no sentence. Ask for xhigh explicitly. A
-            // checkpoint whose template has no reasoning_effort logs supported=0
-            // and leaves the prompt unchanged.
-            {"reasoning_effort", "xhigh"}
+            {"settings", settings}
         }}
     };
     return msg.dump();
