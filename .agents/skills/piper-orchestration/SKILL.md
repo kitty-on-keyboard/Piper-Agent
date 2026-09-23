@@ -8,45 +8,23 @@ description: Use this when orchestrating Piper / local Piper worker / cloud dire
 Piper is a headless local coding worker running on Apple Silicon via MLX (typically `Qwen3.6-35B-A3B-MLX-4bit`). It executes edits, tools, and shell commands inside `cwd` with zero cloud output token cost.
 
 ## 1. Division of Labor
-- **Cloud Orchestrator (Long-Horizon Brain):** Decomposes goals, specifies file-level bounds, writes acceptance criteria, reviews diffs/outcomes, troubleshoots failures, decides when the horizon is complete.
+- **Cloud Orchestrator (Long-Horizon Brain):** Decomposes goals, writes `prompt.md`, reviews the dispatch card, troubleshoots failures, decides when the horizon is complete.
 - **Piper Worker (Local MLX Hands):** Writes code, modifies files, runs local tools/tests inside `cwd`.
+- **Harness:** Owns `task.json` shape, `answer.json`, and the progress-log line. Parents call the helpers. They do not hand-author those files.
 - **Core Loop:** `Cloud directs → Piper writes → Cloud verifies → Repeat`.
 - **Concurrency Rule:** Never run IDE Piper and CLI Piper worker simultaneously (one MLX process per system to avoid unified memory contention).
 
 ---
 
-## 2. Packet Design (The Quality Lever)
-Local models require fat direction and thin scope: burn cloud input tokens on explicit briefing so Piper burns free local tokens on implementation.
+## 2. Slice Brief (The Quality Lever)
+Local models require fat direction and thin scope: burn cloud input tokens on the brief so Piper burns free local tokens on implementation.
 
 - **Scope:** 1–3 files per slice. Never dispatch open-ended multi-module tasks.
-- **Explicitness:** Explicitly enumerate `EDIT`, `CREATE`, and `DO NOT TOUCH` files.
-- **Acceptance:** Include an automated `check` command. A passing check promotes incomplete loop stops (e.g., hitting `max_iterations` without an explicit finish call) to `status: "ok"`.
-- **Stop Condition:** Give explicit instructions on when to stop if stuck.
+- **Explicitness:** Enumerate `EDIT`, `CREATE`, and `DO NOT TOUCH` in `prompt.md`.
+- **Acceptance:** Put an automated check in the brief and pass it to `piper packet --check`. A passing check promotes an incomplete loop stop (for example `max_turns` without an explicit finish) to `status: "ok"`.
+- **Stop Condition:** Say when to stop if stuck.
 
-### `task.json` Template
-Place in a slice directory (e.g. `.piper/slices/slice-001/task.json`):
-
-```json
-{
-  "id": "feature-x/slice-001",
-  "cwd": "/absolute/path/to/workspace",
-  "mode": "agent",
-  "model_dir": "/Users/dev/Desktop/Models/Qwen3.6-35B-A3B-MLX-4bit",
-  "prompt": "See prompt.md or inline string",
-  "auto_approve_exec": true,
-  "auto_approve_writes": true,
-  "auto_approve_irreversible": true,
-  "timeout_s": 600,
-  "max_iterations": 30,
-  "check": "pytest tests/test_slice.py",
-  "check_timeout_s": 60.0,
-  "result_path": "/absolute/path/to/slice-001/result.json"
-}
-```
-
-*Note: If `prompt` is omitted in `task.json`, Piper automatically loads a sibling `prompt.md`.*
-
-### `prompt.md` Template
+### `prompt.md` template
 ```markdown
 ## Horizon Context
 Brief 2–4 sentence summary of the overarching goal and architecture.
@@ -70,81 +48,88 @@ Single focused outcome for this turn. Do not start subsequent steps.
 3. Final response summarizes changes and verification result.
 
 ## If Stuck
-Stop after 3 failed attempts at the same error. Explain the blocker in your final answer rather than hallucinating alternatives or modifying out-of-scope files.
+Stop after 3 failed attempts at the same error. Explain the blocker in your final answer rather than inventing alternatives or editing out-of-scope files.
 ```
 
 ---
 
-## 3. Dispatch Contract
+## 3. Deterministic Parent Loop
 
-### Launching
-- **Attached Mode (Preferred):** Cloud parent waits on process exit.
-  ```bash
-  piper run --task /abs/path/to/task.json --auto-approve-irreversible
-  # Equivalent: piper worker run --task /abs/path/to/task.json
-  # Pass --auto-approve-all for unattended exec + writes + irreversible tools
-  ```
-- **Exit Codes:**
-  - `0`: Completed successfully (`status: "ok"`).
-  - `1`: Error (worker failure or denied irreversible tool).
-  - `2`: Execution timed out (`timeout_s` exceeded).
-  - `3`: Invalid packet or detached launch without wake URL.
-- **Detached Mode (`nohup`, `screen`, background):**
-  - **MANDATORY:** Must pass `--orch-webhook <URL>`, task field `"orch_webhook": "<URL>"`, or env `LMP_ORCH_WEBHOOK`.
-  - Detached runs without a wake URL exit immediately with code `3`. Never run silent background workers.
-  - Parent owns the wake URL. Do not ask humans to copy webhooks. Do not poll directories as primary coordination.
+```bash
+# 1. Optional: names that exist in cwd/.mcp.json
+piper mcp-list --cwd /abs/workspace
 
-### Wake Events (Parent must handle all 4)
-One short JSON POST per event:
-1. `ask`: Paused on user question or irreversible tool. Run `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do NOT freehand the JSON. Do NOT restart process.
-2. `done`: Run completed with `status: "ok"`. Prefer `piper review --task …` / the card from `piper dispatch`, then next slice or mark horizon complete.
-3. `stalled`: Loop stopped without completion (`stalled`, `max_turns`, or failed check). **Do NOT treat as done.** Inspect state, narrow scope, or intervene.
-4. `died`: Process exited with no `result.json`. Alert operator; do NOT relaunch blindly.
+# 2. Emit task.json. Do not hand-write it.
+piper packet --id slice-001 --cwd /abs/workspace \
+  --prompt-file prompt.md --check "pytest tests/test_slice.py" \
+  --out .piper/slices/slice-001/task.json
+# piper packet ... --trust-mcp godoer
 
-Record progress with `piper progress --id slice-001 pass --note "…"` (appends `.piper/progress.log`).
+# 3. Attached run. Prints the review card. Does not detach.
+piper dispatch --task .piper/slices/slice-001/task.json --auto-approve-irreversible
+
+# 4. Record the slice. Do not paste the log line.
+piper progress --id slice-001 pass --note "validator + test"
+```
+
+- **Unattended irreversible tools:** `--auto-approve-irreversible` or `--auto-approve-all` on `piper dispatch`.
+- **Ask:** `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not freehand `answer.json`. Do not restart the process.
+- **Already finished:** `piper review --task …`. Status without cat/jq: `piper status --dir …` / `piper await --dir …`.
+- **Lower-level attached run:** `piper run --task …` (same as `piper worker run`). Keep weights warm with `piper worker serve`, then `piper worker run`.
+- **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL.
+
+The emitter writes `id`, `cwd`, `prompt`, auto-approve flags, `timeout_s` (default 600), and `result_path`. Optional `--model-dir`, `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set.
+
+### Wake
+Stay attached (`piper dispatch` / `piper run`). Detach only with a wake URL: `--orch-webhook`, task field `orch_webhook`, `LMP_ORCH_WEBHOOK`, or `.piper/orch_webhook` written by `piper_ui`. Resolve it with `piper wake-url`. Do not copy a URL from the panel. Do not poll as the primary wake.
+
+| kind | parent does |
+| --- | --- |
+| `ask` | `piper answer`. Do not relaunch. |
+| `done` | Read the review card. Next slice or stop. |
+| `stalled` | Not success. Narrow the brief or stop. |
+| `died` | No `result.json`. Tell the user. Do not relaunch blindly. |
 
 ---
 
-## 4. Cheap Cloud Review Rubric
+## 4. Review Card
 
-Cloud orchestrator reviews outcomes at a high level—do not reread every line of code unless anomalies appear:
+Use the card from `piper dispatch` or `piper review`. Do not re-read every line when the card is green.
 
-| Check | Pass Signal | Action on Failure |
+| Check | Pass signal | On failure |
 |---|---|---|
-| **Status** | `status == "ok"` | Check `error` field or run acceptance check manually. |
-| **Touched Files** | `files_touched ⊆ expected` | Revert unexpected modifications (`git checkout -- <file>`), tighten `DO NOT TOUCH`. |
-| **Diff Stat** | Proportional to slice (e.g. +50/-10) | Reject drive-by rewrites or massive churn. |
-| **Acceptance** | `test.exit_code == 0` | If failed, review `test.output_tail` and dispatch targeted fix slice. |
-| **Summary** | `result.message` confirms goal | Review log if ambiguous. |
-
-Prefer `piper review` / `piper dispatch` for the card. Record progress with `piper progress` (do not freehand the log line).
+| **Status** | `status == "ok"` | `"stalled"` is not done. Read `error` or the card. |
+| **Touched files** | `files_touched` ⊆ the brief | Revert the surprise, tighten DO NOT TOUCH, re-slice. |
+| **Diff** | Proportional to the slice | Reject a drive-by rewrite. |
+| **Acceptance** | `check` exit code 0 | New slice aimed at `test.output_tail`. |
+| **Summary** | `result.message` matches the goal | If the card is ambiguous, read the log. |
 
 ---
 
 ## 5. Failure Playbook
 
-- **Timeout (`exit 2` or `status: "timeout"`):** Split into smaller 1-file slices or increase `timeout_s`.
-- **Sidecar Crash / No Result (`died`):** Kill stale processes (`pkill -9 lmp_sidecar`), remove any lockfiles, retry packet once.
-- **Model Thrashing (Repeated failed tool loops):** Switch `mode: "plan"` for read-only diagnosis, then dispatch a pinpoint edit slice.
-- **Model Ceiling (A3B struggles with complex abstraction):** Orchestrator writes the complex logic directly, then hands unit tests and boilerplate back to Piper.
-- **Irreversible Tool Gate Paused:** Ensure `"auto_approve_irreversible": true` or `--auto-approve-irreversible` was passed if unattended execution was intended.
+- **Timeout (`exit 2` or `status: "timeout"`):** Smaller slice, or a higher `timeout_s` on the next `piper packet`.
+- **`died` / no result:** Kill a stale `lmp_sidecar`, clear the lock, retry the same packet once.
+- **Thrash:** `mode` is not on the emitter. For a read-only diagnosis, say so in `prompt.md` and keep the slice to one file. Then a pinpoint edit slice.
+- **Model ceiling:** Orchestrator writes the hard logic, then hands tests and boilerplate back to Piper.
+- **Irreversible gate paused:** Re-dispatch with `--auto-approve-irreversible`, or `piper answer allow`.
 
 ---
 
 ## 6. Anti-Patterns
-1. **Giant Unbounded Packets:** Asking Piper to "build the auth service and frontend" in one task.
-2. **Silent Detach:** Running background jobs without an active `--orch-webhook`.
-3. **Polling Instead of Wake:** Spinning on filesystem checks instead of waiting on process exit or webhook events.
-4. **Parallel MLX:** Launching multiple CLI workers or running IDE Piper alongside CLI worker on Apple Silicon.
-5. **Micro-Reviewing Every Token:** Wasting cloud tokens reading entire source files when diffs and automated checks are green.
-6. **Trusting Status Without Check:** Relying on the model claiming "done" without a deterministic `check` command.
+1. **Giant unbounded slices.** "Build the auth service and the frontend" in one task.
+2. **Hand-written `task.json`, `answer.json`, or progress lines.**
+3. **Silent detach.** Background with no wake URL.
+4. **Polling instead of staying attached or receiving the wake.**
+5. **Parallel MLX.** IDE Piper and the CLI worker at the same time.
+6. **Re-reading every token** when the review card and `check` are green.
+7. **Trusting a model "done"** with no `--check`.
 
 ---
 
-## 7. First Slice Smoke Checklist
-Before executing an ambitious multi-slice plan, verify the setup with a 2-minute smoke test:
-1. [ ] Confirm model directory exists (`/Users/dev/Desktop/Models/Qwen3.6-35B-A3B-MLX-4bit` or `$LMP_QWEN_DIR`).
-2. [ ] Verify no competing `lmp_sidecar` or IDE Piper processes are running (`pgrep lmp_sidecar`).
-3. [ ] Dispatch minimal slice: create a dummy test file and run `piper run --task task.json`.
-4. [ ] Confirm exit code `0`, `result.json` written with `status: "ok"`, and `files_touched` recorded.
-5. [ ] Clean up smoke test artifact and proceed to Horizon Slice 1.
+## 7. First Slice Smoke
+1. Model dir exists (`$LMP_QWEN_DIR` or the usual Qwen MLX folder).
+2. No competing `lmp_sidecar` (`pgrep lmp_sidecar`).
+3. `prompt.md` for a dummy file, then `piper packet`, then `piper dispatch`.
+4. Exit `0` and a review card with `status: "ok"`.
+5. Delete the smoke artifact. `piper progress`. Start horizon slice 1.

@@ -13,29 +13,38 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
    Break the horizon goal into small slices touching 1–3 files per slice.
    Never ask Piper to solve an entire complex task in a single prompt.
 
-2. **Prepare a Task Packet**:
-   Prefer the emitter (no freehand JSON):
-   `piper packet --id slice-001 --cwd /abs/workspace --prompt-file prompt.md --out task.json`
-   Optional MCP consent (still explicit): `piper mcp-list --cwd /abs/workspace` then
-   `piper packet ... --trust-mcp godoer` (names must exist in workspace `.mcp.json`).
+2. **Prepare a Task Packet (`task.json`)**:
+   Write a packet file with this structure:
+   ```json
+   {
+     "id": "slice-001",
+     "cwd": "/absolute/path/to/workspace",
+     "prompt": "## Goal\nImplement X.\n\n## Files\n- EDIT: src/a.cpp\n- CREATE: tests/test_a.cpp\n- DO NOT TOUCH: other files\n\n## Done When\n- Tests compile and pass.",
+     "auto_approve_exec": true,
+     "auto_approve_irreversible": true,
+     "timeout_s": 600
+   }
+   ```
 
 3. **Dispatch Piper CLI**:
-   Prefer: `piper dispatch --task path/to/task.json` (attached run → wait → review card).
-   Or stay attached: `piper run --task path/to/task.json`
-   - Unattended irreversible: `--auto-approve-irreversible` or `--auto-approve-all`.
-   - Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper_ui`).
+   Run and stay attached to the process:
+   `piper run --task path/to/task.json` (or `piper worker run --task ...`)
+   - For unattended execution (no pauses on irreversible tools): pass `--auto-approve-irreversible` or `--auto-approve-all`.
+   - Exit code `0` = success, non-zero = error / timeout.
+   - If running detached/background, pass `--orch-webhook <URL>`.
 
 4. **Review Results**:
-   Prefer: `piper review --task path/to/task.json` or the card from `piper dispatch`.
-   Status without freehand cat/jq: `piper status --dir …` / `piper await --dir …`.
+   Inspect `result.json` written by Piper:
+   - Check `status` ("ok" vs "error"/"stalled").
+   - Review `files_touched` and `git_diff` — verify changes match instructions.
+   - Run slice acceptance tests.
 
 5. **Loop Until Horizon Complete**:
-   - If slice passed: `piper progress --id slice-001 pass --note "…"` then next slice.
-   - If slice failed: narrower packet, or fix that spot yourself.
-   - Repeat until horizon acceptance is green.
+   - If slice passed: dispatch the next slice.
+   - If slice failed: write a narrower prompt or fix minor issues directly.
+   - Repeat until all acceptance criteria for the greater task pass.
 
 6. **Parent Contract & Events**:
    - Stay attached and read exit code + `result.json`.
-   - Events: `ask` → `piper answer allow|deny|--text` (do not freehand `answer.json`);
-     `done`, `stalled` (not success), `died` (do not relaunch blindly).
+   - Events: `ask` (write `answer.json`), `done`, `stalled` (not success; harness stopped), `died` (crashed).
    - See `PIPER.md` for full specification and review rubric.

@@ -84,17 +84,6 @@ Local models work best on scoped packets: **packets must be specific**, and **ev
    - **Irreversible tools**: Destructive tools or project managers (like `godot_project`, `delete_file`, or whole-file overwrites) escalate to `gate: irreversible`. Set `"auto_approve_irreversible": true` or pass `--auto-approve-irreversible` / `--auto-approve-all` for unattended runs; otherwise Piper pauses and writes `awaiting_user.json` for `answer.json`.
 
 5. **Review `result.json` & Inspect Changes**
-   Prefer the thin helpers (no freehand rubric / paste):
-   ```bash
-   piper packet --id slice-001 --cwd /abs/ws --prompt-file prompt.md --out task.json
-   piper packet ... --trust-mcp godoer        # explicit MCP consent; no hand JSON array
-   piper mcp-list --cwd /abs/ws               # list .mcp.json server names
-   piper dispatch --task /path/to/task.json   # run attached → wait → print review card
-   piper review --result /path/to/result.json # card only, when you already waited
-   piper status --dir /path/to/slice          # idle/ask/done without freehand cat/jq
-   piper await --dir /path/to/slice           # wait for ask/done (no sleep-loop paste)
-   piper progress --id slice-001 pass --note "validator + test"
-   ```
    Piper writes a structured result upon completion:
    ```json
    {
@@ -146,7 +135,7 @@ Otherwise, before start:
 - `--orch-webhook URL`, or
 - task field `orch_webhook`, or
 - env `LMP_ORCH_WEBHOOK`, or
-- file `.piper/orch_webhook` (written by `piper_ui`; do not copy from the panel)
+- file `.piper/orch_webhook` (written by `piper_ui`)
 
 Detached with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
@@ -159,7 +148,7 @@ mission. No URL means no POST.
 
 | kind | when | parent does |
 | --- | --- | --- |
-| `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow\|deny\|--text "..."` (writes `answer.json`). Do not restart. Do not freehand JSON. |
+| `ask` | `awaiting_user.json` written, or an irreversible call is paused | write `answer.json` as `{"text":"..."}`. Do not restart. `allow` or `deny` for an irreversible call. Guidance for a real question. |
 | `done` | `result.json` written and the slice completed | read the files. Send the next slice or stop. |
 | `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |

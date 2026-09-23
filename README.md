@@ -43,13 +43,15 @@ MLX process at a time — do not load the sidebar and the worker together.
 cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
 cmake --build --preset dev --target install-piper-link   # or: ./scripts/install_piper_link.sh
 piper --help
+piper init                                   # PIPER.md, parent rule, Cursor + Codex skills
 
-# One-shot headless dispatch:
-piper worker run --task /path/to/task.json   # blocks; then read result.json
+# Parent loop: write prompt.md, then
+piper packet --id slice-001 --cwd "$PWD" --prompt-file prompt.md --out task.json
+piper dispatch --task task.json              # attached; prints the review card
 
-# Or keep-warm daemon mode (keeps weights resident in Unified Memory across slices):
+# Keep-warm daemon (weights stay resident across slices):
 piper worker serve                           # listens on ~/.piper/worker.sock
-piper worker run --task /path/to/task.json   # automatically forwards to warm daemon!
+piper worker run --task /path/to/task.json   # forwards to the warm daemon
 ```
 
 `install-piper-link` refreshes `/opt/homebrew/bin/piper` to the absolute path of
