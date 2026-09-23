@@ -47,7 +47,7 @@ bool is_daemon_alive(const std::string& socket_path) {
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return false;
 
-    if (socket_path.length() >= sizeof(sockaddr_un::sun_path)) {
+    if (socket_path.length() >= sizeof(sockaddr_un::sun_path) - 1) {
         ::close(fd);
         return false;
     }
@@ -107,7 +107,7 @@ std::optional<int> forward_to_daemon(
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return std::nullopt;
 
-    if (socket_path.length() >= sizeof(sockaddr_un::sun_path)) {
+    if (socket_path.length() >= sizeof(sockaddr_un::sun_path) - 1) {
         ::close(fd);
         return std::nullopt;
     }
@@ -227,7 +227,7 @@ bool DaemonListener::start() {
     if (listen_fd_ < 0) return false;
     ::fcntl(listen_fd_, F_SETFD, FD_CLOEXEC);
 
-    if (config_.socket_path.length() >= sizeof(sockaddr_un::sun_path)) {
+    if (config_.socket_path.length() >= sizeof(sockaddr_un::sun_path) - 1) {
         ::close(listen_fd_);
         listen_fd_ = -1;
         return false;

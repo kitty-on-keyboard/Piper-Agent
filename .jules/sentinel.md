@@ -36,3 +36,7 @@
 **Vulnerability:** Unix domain socket path truncation in `strncpy` due to unchecked length vs `sizeof(sockaddr_un::sun_path)`.
 **Learning:** `strncpy` truncates silently when the string is too long. If the socket path is longer than `sun_path` (usually 108 bytes), the connection will silently attempt to connect/bind to the truncated path.
 **Prevention:** Always check `socket_path.length() < sizeof(sockaddr_un::sun_path)` before copying path strings to `sockaddr_un` structs. Return an error or close handles and gracefully abort if the path is too long.
+## 2024-10-25 - Fix strncpy bounds check off-by-one
+**Vulnerability:** Strncpy length limit off-by-one allowing truncation without null termination if source string length exactly matches buffer limit - 1.
+**Learning:** `strncpy` requires the source length to be strictly less than the passed buffer limit to guarantee the insertion of a null terminator by `strncpy` itself. Even when the target buffer is zero-initialized, it is best practice and prevents SAST tool warnings to verify that the source string fits within `buffer_size - 1`.
+**Prevention:** When using `strncpy`, the condition checking whether the string fits must use `>= sizeof(buf) - 1` rather than `>= sizeof(buf)`.
