@@ -61,3 +61,7 @@
 ## 2026-05-29 - Pre-Tokenization Callback and Bitmask Popcount Matching in Edit Diagnostics
 **Learning:** `nearest_regions` in `src/tools/edit_diagnostics.hpp` previously created temporary `std::string` windows and re-tokenized token vectors across sliding line windows, leading to $O(N \times win)$ string allocations, copies, and linear token searches ($1.75\text{s}$ per 10k lines). Pre-tokenizing lines once via zero-allocation callback `tokenize_cb` into per-line token counts and a 64-bit target token presence mask (`uint64_t want_mask`) reduces window matching to $O(1)$ bitwise OR and `std::popcount`, improving candidate search throughput by ~4.8x (~366ms).
 **Action:** Pre-tokenize lines once using callbacks and use bitwise masks (`uint64_t`) with `std::popcount` for fast multi-token sliding window intersection scoring instead of string concatenation and vector re-tokenization.
+
+## 2026-05-30 - Zero-Allocation Line View Splitting in Unified Diff Engine
+**Learning:** `split_lines` in `src/pcc/diff.cpp` previously returned `std::vector<std::string>`, constructing a `std::string` heap allocation for every line in file A and file B being diffed. On large file diffs across commits or CAS delta computation, this caused thousands of unnecessary heap allocations per diff calculation.
+**Action:** Return `std::vector<std::string_view>` slices from line splitting functions to perform allocation-free line segmentation during diffing.
