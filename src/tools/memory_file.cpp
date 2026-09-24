@@ -49,7 +49,17 @@ static bool already_holds(const fsx::WorkspaceFs& workspace, std::string_view pa
 }
 
 void Registry::note_read_version(const std::string& abs_path, std::string_view bytes) {
-    read_versions_[abs_path] = platform::content_sha256_hex(bytes);
+    // Hash outside the lock. The insert is what segfaulted: two read_file workers in one
+    // turn both emplace into this map (signal 11, note_read_version, run
+    // r-18d8419e8555e3e8).
+    std::string hex = platform::content_sha256_hex(bytes);
+    std::lock_guard<std::mutex> lock(*read_versions_mu_);
+    read_versions_[abs_path] = std::move(hex);
+}
+
+void Registry::forget_read_version(const std::string& abs_path) {
+    std::lock_guard<std::mutex> lock(*read_versions_mu_);
+    read_versions_.erase(abs_path);
 }
 
 // The digest out of whatever the model copied off the screen.
@@ -128,6 +138,7 @@ std::string Registry::resolve_expected_version(
         supplied != nullptr && !supplied->empty()) {
         return normalize_content_version(*supplied);
     }
+    std::lock_guard<std::mutex> lock(*read_versions_mu_);
     const auto it = read_versions_.find(abs_path);
     return it == read_versions_.end() ? std::string() : it->second;
 }
@@ -166,7 +177,7 @@ CommitOutcome Registry::commit_write(const fsx::ContainedPath& path,
         if (out.write.ok()) {
             // Invalidate: a whole-file rewrite must read again before the next overwrite.
             // Failed writes leave the prior observation in place.
-            read_versions_.erase(path.absolute);
+            forget_read_version(path.absolute);
         }
         return out;
     }
@@ -186,7 +197,7 @@ CommitOutcome Registry::commit_write(const fsx::ContainedPath& path,
     const EditOutcome o = edit_sink_(intent);
     if (o.applied) {
         out.write.status = platform::FsStatus::Ok;
-        read_versions_.erase(current.absolute);
+        forget_read_version(current.absolute);
     } else {
         // Prefer Conflict when the editor names a version mismatch; otherwise IoError so
         // the existing write_failure mapping stays honest for refuse/IO cases.
