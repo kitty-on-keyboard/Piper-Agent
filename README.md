@@ -2,8 +2,8 @@
 
 A local coding agent for Apple Silicon: one native sidecar that loads a **single** Qwen3
 model in-process via [MLX](https://github.com/ml-explore/mlx) and drives a tool-using
-loop against a workspace. Two interfaces, one agent: a VS Code / Cursor extension for
-humans, and a `piper` CLI worker for cloud orchestrators / scripts.
+loop against a workspace. A parent LLM writes a slice brief; `piper packet` emits the
+task; local Piper writes the code. `piper ui` is how you watch that happen.
 
 **Scope:** Mac-local Qwen/MLX, one model loaded, no subagents, no second inference server.
 
@@ -12,74 +12,58 @@ License: [Apache-2.0](LICENSE). Credits: [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.
 
 ## Install
 
-Apple Silicon only.
-
-**From a release (easiest):** download `lm-pipe.vsix` from
-[Releases](https://github.com/kitty-on-keyboard/Piper-Agent/releases). In the editor:
-Extensions → `...` → Install from VSIX. **Reload the window**, then set `lmPipe.modelDir`.
-
-**From source.** First build of MLX from source is slow.
-
-```bash
-cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
-cd extension && npm install && npm run install-local
-```
-
-That compiles the sidecar (MLX linked statically, `mlx.metallib` staged next to it),
-packages `lm-pipe.vsix`, and installs it into every VS Code-family editor it finds
-(Cursor, VS Code, VSCodium). Override with `LMP_EDITOR_CLI` to target one.
-
-**Reload the editor window** — a newly installed extension does not activate in an
-already-open window.
-
-To package a VSIX locally: `cd extension && npm run package`, then Extensions → `...` →
-Install from VSIX.
-
-**VSIX for humans, CLI for agents.** The CLI runs the native C++ sidecar without the editor.
-Cloud models plan and review; local Piper (typically A3B) executes scoped edits. One
-MLX process at a time — do not load the sidebar and the worker together.
+Apple Silicon only. First build of MLX from source is slow.
 
 ```bash
 cmake --preset dev && cmake --build --preset dev --target lmp_sidecar -j8
 cmake --build --preset dev --target install-piper-link   # or: ./scripts/install_piper_link.sh
-piper --help
-piper init                                   # PIPER.md, parent rule, Cursor + Codex skills
-
-# Parent loop: write prompt.md, then
-piper packet --id slice-001 --cwd "$PWD" --prompt-file prompt.md --out task.json
-piper dispatch --task task.json              # attached; prints the review card
-
-# Keep-warm daemon (weights stay resident across slices):
-piper worker serve                           # listens on ~/.piper/worker.sock
-piper worker run --task /path/to/task.json   # forwards to the warm daemon
+export LMP_QWEN_DIR=/path/to/Qwen3-MLX-4bit
+piper init
 ```
 
-`install-piper-link` refreshes `/opt/homebrew/bin/piper` to this checkout's parent
-harness, `scripts/piper_worker.py` (so a rename of the tree cannot leave a dead
-symlink). `build/src/surface/piper` stays a symlink to `lmp_sidecar`; the harness
-execs that worker for `run` and `serve`. The link no-ops cleanly when Homebrew's
-bin dir is missing. Re-run it after each build (or after moving the checkout) if
-orchestrators call bare `piper`.
+`install-piper-link` points `/opt/homebrew/bin/piper` at this checkout's parent
+harness, `scripts/piper_worker.py`. The built worker stays at `build/src/surface/piper`.
+One MLX process at a time.
 
-Direct worker invocation is also supported: `lmp_sidecar --worker --task <path>` or `lmp_sidecar --worker --serve`. Parent commands (`packet`, `dispatch`, `init`, …) on that binary exec the harness.
-Override the binary with `LMP_SIDECAR`; the model with `model_dir` in the packet or `LMP_QWEN_DIR`.
+## Parent loop
+
+Write `prompt.md` (horizon, this slice, EDIT / CREATE / DO NOT TOUCH, the check).
+Do not hand-write `task.json`.
+
+```bash
+piper packet --id slice-001 --cwd "$PWD" --prompt-file prompt.md --check "pytest tests/test_slice.py"
+piper dispatch --task "$PWD/.piper/slices/slice-001/task.json"
+piper ui --cwd "$PWD"
+```
+
+`piper packet` writes `.piper/slices/<id>/task.json`, copies the brief beside it, bakes
+`model_dir` from `--model-dir` or `LMP_QWEN_DIR`, and records `.piper/active.json`.
+`piper dispatch` stays attached and prints the review card. `piper ui` follows the
+active slice.
+
+Keep weights warm across slices with `piper worker serve`, then `piper worker run --task`
+the same packet path.
+
+## Editor sidebar
+
+The VS Code / Cursor extension is optional and not the orchestration path. It loads the
+workspace into the local model, which is the wrong shape for a long task. If you still
+want it: `cd extension && npm install && npm run install-local`, then reload the window.
+Do not run the sidebar and the CLI worker at the same time.
+
+Re-run `install-piper-link` after a build or a checkout move. Direct worker invocation
+is `lmp_sidecar --worker --task <path>` or `--serve`. Parent commands on that binary
+exec the harness. Override the binary with `LMP_SIDECAR`.
 
 ## Use
 
-1. Download one of the [tested checkpoints](#tested-checkpoints) (MLX 4-bit folder with
-   `config.json`, `tokenizer.json`, and `*.safetensors`).
-2. Open the folder you want the agent to work in. The first workspace folder is the
-   sandbox root; the agent cannot write outside it.
-3. Command palette → **LM_Pipe: Choose the model directory** (or set `lmPipe.modelDir`
-   in settings). There is no default; an unset path refuses loudly.
-4. Open the **Piper Agent** sidebar and send a mission, or Command palette →
-   **LM_Pipe: Start a run**.
-5. Approvals: ordinary builds and tests can auto-run if `lmPipe.autoApproveExec` is on.
-   Destructive or opaque commands always raise a card. The run blocks until you answer.
-6. The composer **Stop** button (or Shift+Escape / command **Stop run**) stops
-   mid-generation.
+1. Download one of the [tested checkpoints](#tested-checkpoints) and set `LMP_QWEN_DIR`.
+2. From the workspace, write `prompt.md` and run the parent loop above.
+3. Open `piper ui` to watch the active slice. The page follows `.piper/active.json`.
 
-Modes: **plan** (reads only), **debug** (edits, never deletes), **agent** (full tools).
+The worker edits inside `cwd` and cannot write outside it. Modes on a packet are
+**plan** (reads only), **debug** (edits, never deletes), and **agent** (full tools).
+Default is agent.
 
 ## Tested checkpoints
 

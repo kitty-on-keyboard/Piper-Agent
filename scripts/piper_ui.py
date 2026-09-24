@@ -79,6 +79,141 @@ def read_appended(path, offset):
     return parsed, new_offset
 
 
+def read_json(path):
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_jsonl(path, limit=None):
+    rows = []
+    if not path or not os.path.isfile(path):
+        return rows
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return rows
+    if limit is not None and len(lines) > limit:
+        lines = lines[-limit:]
+    for raw in lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rows.append(json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+    return rows
+
+
+def load_active(workspace_dir):
+    data = read_json(os.path.join(workspace_dir, ".piper", "active.json"))
+    if not data:
+        return None
+    task_path = data.get("task_path")
+    result_path = data.get("result_path")
+    if not isinstance(task_path, str) or not isinstance(result_path, str):
+        return None
+    return {
+        "id": str(data.get("id") or ""),
+        "task_path": os.path.abspath(task_path),
+        "result_path": os.path.abspath(result_path),
+    }
+
+
+def list_slice_records(workspace_dir):
+    """Slice dirs under .piper/slices/. A missing root task.json is normal."""
+    root = os.path.join(workspace_dir, ".piper", "slices")
+    records = []
+    if not os.path.isdir(root):
+        return records
+    for name in sorted(os.listdir(root)):
+        directory = os.path.join(root, name)
+        task_path = os.path.join(directory, "task.json")
+        if not os.path.isfile(task_path):
+            continue
+        task = read_json(task_path) or {}
+        result_path = task.get("result_path") or os.path.join(directory, "result.json")
+        if not isinstance(result_path, str):
+            result_path = os.path.join(directory, "result.json")
+        if not os.path.isabs(result_path):
+            result_path = os.path.abspath(os.path.join(directory, result_path))
+        result = read_json(result_path)
+        if isinstance(result, dict) and result.get("status"):
+            status = str(result["status"])
+        elif os.path.isfile(os.path.join(directory, "live.jsonl")):
+            status = "running"
+        else:
+            status = "idle"
+        records.append({
+            "id": str(task.get("id") or name),
+            "dir": os.path.abspath(directory),
+            "task_path": os.path.abspath(task_path),
+            "result_path": os.path.abspath(result_path),
+            "status": status,
+            "prompt": task.get("prompt") if isinstance(task.get("prompt"), str) else "",
+        })
+    return records
+
+
+def read_progress(workspace_dir):
+    path = os.path.join(workspace_dir, ".piper", "progress.log")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return [line.rstrip("\n") for line in fh if line.strip()]
+    except OSError:
+        return []
+
+
+def resolve_watch_dir(workspace_dir):
+    """Active slice from .piper/active.json, else the last slice dir."""
+    active = load_active(workspace_dir)
+    if active and active.get("result_path"):
+        return os.path.dirname(active["result_path"]), active
+    slices = list_slice_records(workspace_dir)
+    if slices:
+        last = slices[-1]
+        return last["dir"], {
+            "id": last["id"],
+            "task_path": last["task_path"],
+            "result_path": last["result_path"],
+        }
+    return os.path.abspath(workspace_dir), None
+
+
+def collect_status(workspace_dir):
+    """Snapshot the watch UI needs. Does not require a root task.json."""
+    workspace_dir = os.path.abspath(workspace_dir)
+    watch_dir, active = resolve_watch_dir(workspace_dir)
+    task = None
+    if active and os.path.isfile(active.get("task_path") or ""):
+        task = read_json(active["task_path"])
+    if task is None:
+        task = read_json(os.path.join(watch_dir, "task.json"))
+    result_path = (active or {}).get("result_path") or os.path.join(watch_dir, "result.json")
+    result = read_json(result_path) if os.path.isfile(result_path) else None
+    return {
+        "cwd": workspace_dir,
+        "active": active,
+        "watch_dir": watch_dir,
+        "slices": list_slice_records(workspace_dir),
+        "progress": read_progress(workspace_dir),
+        "task": task,
+        "result": result,
+        "recent_live": read_jsonl(os.path.join(watch_dir, "live.jsonl")),
+        "recent_orch": read_jsonl(os.path.join(watch_dir, "orch.jsonl")),
+        "recent_events": read_jsonl(os.path.join(watch_dir, "events.jsonl"), limit=200),
+    }
+
+
 class EventBroker:
     def __init__(self):
         self._clients = set()
@@ -107,49 +242,25 @@ class EventBroker:
 
 
 class WorkspaceWatcher:
-    """Watches task.json, result.json, awaiting_user.json, answer.json, and events.jsonl."""
+    """Tails the active slice. A missing workspace-root task.json is normal."""
 
     def __init__(self, workspace_dir, broker, log_path=None):
         self.workspace_dir = os.path.abspath(workspace_dir)
         self.broker = broker
-        self.explicit_log = log_path
-        self.log_path = self._resolve_log_path(log_path)
+        self.explicit_log = os.path.abspath(log_path) if log_path else None
         self.file_mtimes = {}
-        self.log_offset = 0
-        self.extra_offsets = {}
+        self.offsets = {}
+        self.watch_dir = None
+        self.active_id = None
         self.running = True
 
-        # Position offset to read recent events
-        if os.path.exists(self.log_path):
-            self.log_offset = max(0, os.path.getsize(self.log_path) - 50000)
-
-    def _resolve_log_path(self, explicit_log=None):
-        if explicit_log and os.path.exists(explicit_log):
-            return os.path.abspath(explicit_log)
-        candidates = [
-            explicit_log,
-            os.environ.get("LMP_EVENT_LOG"),
-            os.path.join(self.workspace_dir, "packets", "events.jsonl"),
-            os.path.join(self.workspace_dir, "events.jsonl"),
-            os.path.join(self.workspace_dir, "lmp_events.jsonl"),
-        ]
-        for c in candidates:
-            if c and os.path.exists(c):
-                return os.path.abspath(c)
-
-        task_fp = os.path.join(self.workspace_dir, "task.json")
-        if os.path.exists(task_fp):
+    def _arm_offset(self, path):
+        """Start at EOF so history comes from /api/status, not a replay."""
+        if path not in self.offsets:
             try:
-                with open(task_fp, "r", encoding="utf-8") as f:
-                    tj = json.load(f)
-                    rp = tj.get("result_path")
-                    if rp:
-                        cand = os.path.join(os.path.dirname(rp), "events.jsonl")
-                        if os.path.exists(cand):
-                            return os.path.abspath(cand)
-            except Exception:
-                pass
-        return explicit_log or os.path.join(self.workspace_dir, "packets", "events.jsonl")
+                self.offsets[path] = os.path.getsize(path) if os.path.isfile(path) else 0
+            except OSError:
+                self.offsets[path] = 0
 
     def start(self):
         thread = threading.Thread(target=self._watch_loop, daemon=True)
@@ -163,94 +274,59 @@ class WorkspaceWatcher:
             return None
 
     def _watch_loop(self):
-        targets = {
-            "task.json": "task_updated",
-            "result.json": "result_updated",
-            "awaiting_user.json": "gate_requested",
-            "answer.json": "answer_updated",
-        }
-
         while self.running:
-            # 1. Watch contract files
-            for filename, event_name in list(targets.items()):
-                filepath = os.path.join(self.workspace_dir, filename) if not os.path.isabs(filename) else filename
-                if os.path.exists(filepath):
-                    try:
-                        mtime = os.path.getmtime(filepath)
-                        if self.file_mtimes.get(filename) != mtime:
-                            self.file_mtimes[filename] = mtime
-                            data = self._read_json_safe(filepath)
-                            if data:
-                                self.broker.broadcast(event_name, data)
-                                # If task was updated, check if it specifies custom result_path
-                                if filename == "task.json" and data.get("result_path"):
-                                    targets[data["result_path"]] = "result_updated"
-                    except Exception:
-                        pass
-                else:
-                    if filename in self.file_mtimes:
-                        self.file_mtimes.pop(filename, None)
+            watch_dir, active = resolve_watch_dir(self.workspace_dir)
+            active_id = (active or {}).get("id") or ""
+            if watch_dir != self.watch_dir or active_id != self.active_id:
+                self.watch_dir = watch_dir
+                self.active_id = active_id
+                self.file_mtimes = {}
+                self.offsets = {}
+                self.broker.broadcast("slice_changed", collect_status(self.workspace_dir))
 
-            # Re-resolve log path if not exists
-            if not os.path.exists(self.log_path):
-                cand = self._resolve_log_path(self.explicit_log)
-                if os.path.exists(cand):
-                    self.log_path = cand
-                    self.log_offset = 0
-
-            # 2. Tail live.jsonl and orch.jsonl before the event log.
-            # Live lines and log lines use different seq spaces. The page
-            # stops applying log tool rows once any live line has arrived,
-            # so a same-tick batch must deliver live first.
-            result_dir = None
-            task_fp = os.path.join(self.workspace_dir, "task.json")
-            if os.path.exists(task_fp):
+            journal_names = ("live.jsonl", "orch.jsonl", "events.jsonl")
+            journals = [os.path.join(watch_dir, name) for name in journal_names]
+            if self.explicit_log:
+                journals.append(self.explicit_log)
+            event_name = {
+                "live.jsonl": "live_event",
+                "orch.jsonl": "orch_event",
+                "events.jsonl": "log_event",
+            }
+            for path in journals:
+                self._arm_offset(path)
                 try:
-                    with open(task_fp, "r", encoding="utf-8") as f:
-                        tj = json.load(f)
-                        rp = tj.get("result_path")
-                        if rp:
-                            result_dir = os.path.abspath(os.path.dirname(rp))
-                except Exception:
-                    pass
-
-            live_paths = set()
-            orch_paths = set()
-            for d in [self.workspace_dir] + ([result_dir] if result_dir else []):
-                live_paths.add(os.path.join(d, "live.jsonl"))
-                orch_paths.add(os.path.join(d, "orch.jsonl"))
-
-            all_extra = live_paths | orch_paths
-            for p in all_extra:
-                if p not in self.extra_offsets:
-                    self.extra_offsets[p] = 0
-
-            for p in sorted(live_paths):
-                if p in orch_paths:
+                    objs, new_offset = read_appended(path, self.offsets.get(path, 0))
+                except OSError:
                     continue
-                offset = self.extra_offsets.get(p, 0)
-                objs, new_offset = read_appended(p, offset)
-                self.extra_offsets[p] = new_offset
+                self.offsets[path] = new_offset
+                kind = event_name.get(os.path.basename(path), "log_event")
                 for obj in objs:
-                    self.broker.broadcast("live_event", obj)
+                    self.broker.broadcast(kind, obj)
 
-            for p in sorted(orch_paths):
-                if p in live_paths:
+            contract = {}
+            if active and active.get("task_path"):
+                contract[active["task_path"]] = "task_updated"
+            else:
+                contract[os.path.join(watch_dir, "task.json")] = "task_updated"
+            result_path = (active or {}).get("result_path") or os.path.join(watch_dir, "result.json")
+            contract[result_path] = "result_updated"
+            contract[os.path.join(watch_dir, "awaiting_user.json")] = "gate_requested"
+            contract[os.path.join(watch_dir, "answer.json")] = "answer_updated"
+            for filepath, event_name_s in contract.items():
+                if not os.path.isfile(filepath):
+                    self.file_mtimes.pop(filepath, None)
                     continue
-                offset = self.extra_offsets.get(p, 0)
-                objs, new_offset = read_appended(p, offset)
-                self.extra_offsets[p] = new_offset
-                for obj in objs:
-                    self.broker.broadcast("orch_event", obj)
-
-            # 3. Tail events log (finished runs, and the fallback when no
-            # live journal is being written).
-            try:
-                events, self.log_offset = read_appended(self.log_path, self.log_offset)
-                for ev in events:
-                    self.broker.broadcast("log_event", ev)
-            except Exception:
-                pass
+                try:
+                    mtime = os.path.getmtime(filepath)
+                except OSError:
+                    continue
+                if self.file_mtimes.get(filepath) == mtime:
+                    continue
+                self.file_mtimes[filepath] = mtime
+                data = self._read_json_safe(filepath)
+                if data:
+                    self.broker.broadcast(event_name_s, data)
 
             time.sleep(0.1)
 
@@ -295,86 +371,10 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-
-                def read_j(fn):
-                    fp = os.path.join(workspace_dir, fn)
-                    if os.path.exists(fp):
-                        try:
-                            with open(fp, "r", encoding="utf-8") as fh:
-                                return json.load(fh)
-                        except Exception:
-                            return None
-                    return None
-
-                recent_events = []
-                log_file = watcher.log_path
-                if os.path.exists(log_file):
-                    try:
-                        with open(log_file, "r", encoding="utf-8", errors="replace") as lf:
-                            lines = lf.readlines()[-200:]
-                            for l in lines:
-                                l = l.strip()
-                                if l:
-                                    try:
-                                        recent_events.append(json.loads(l))
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-
-                task_data = read_j("task.json")
-                res_data = read_j("result.json")
-                if not res_data and task_data and task_data.get("result_path"):
-                    rp = task_data["result_path"]
-                    if os.path.exists(rp):
-                        try:
-                            with open(rp, "r", encoding="utf-8") as rf:
-                                res_data = json.load(rf)
-                        except Exception:
-                            pass
-
-                def read_jsonl(path):
-                    rows = []
-                    if not path or not os.path.exists(path):
-                        return rows
-                    try:
-                        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                            for raw in fh:
-                                raw = raw.strip()
-                                if not raw:
-                                    continue
-                                try:
-                                    rows.append(json.loads(raw))
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                    return rows
-
-                live_dirs = [workspace_dir]
-                if task_data and task_data.get("result_path"):
-                    live_dirs.append(os.path.dirname(os.path.abspath(task_data["result_path"])))
-                recent_live = []
-                recent_orch = []
-                seen_live_paths = set()
-                for d in live_dirs:
-                    for name, bucket in (("live.jsonl", recent_live), ("orch.jsonl", recent_orch)):
-                        fp = os.path.join(d, name)
-                        if fp in seen_live_paths:
-                            continue
-                        seen_live_paths.add(fp)
-                        bucket.extend(read_jsonl(fp))
-
-                status_data = {
-                    "cwd": workspace_dir,
-                    "task": task_data,
-                    "result": res_data,
-                    "recent_live": recent_live,
-                    "recent_orch": recent_orch,
-                    "awaiting_user": read_j("awaiting_user.json"),
-                    "answer": read_j("answer.json"),
-                    "recent_events": recent_events,
-                }
+                status_data = collect_status(workspace_dir)
+                watch_dir = status_data.get("watch_dir") or workspace_dir
+                status_data["awaiting_user"] = read_json(os.path.join(watch_dir, "awaiting_user.json"))
+                status_data["answer"] = read_json(os.path.join(watch_dir, "answer.json"))
                 self.wfile.write(json.dumps(status_data).encode("utf-8"))
                 return
 

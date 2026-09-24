@@ -59,16 +59,19 @@ Stop after 3 failed attempts at the same error. Explain the blocker in your fina
 # 1. Optional: names that exist in cwd/.mcp.json
 piper mcp-list --cwd /abs/workspace
 
-# 2. Emit task.json. Do not hand-write it.
+# 2. Emit the slice. Do not hand-write task.json. Do not pass --out.
+#    Writes <cwd>/.piper/slices/<id>/task.json, copies prompt.md, bakes model_dir.
 piper packet --id slice-001 --cwd /abs/workspace \
-  --prompt-file prompt.md --check "pytest tests/test_slice.py" \
-  --out .piper/slices/slice-001/task.json
+  --prompt-file prompt.md --check "pytest tests/test_slice.py"
 # piper packet ... --trust-mcp godoer
 
 # 3. Attached run. Prints the review card. Does not detach.
-piper dispatch --task .piper/slices/slice-001/task.json --auto-approve-irreversible
+piper dispatch --task /abs/workspace/.piper/slices/slice-001/task.json --auto-approve-irreversible
 
-# 4. Record the slice. Do not paste the log line.
+# 4. Watch. Optional; the dashboard follows .piper/active.json.
+piper ui --cwd /abs/workspace
+
+# 5. Record the slice. Do not paste the log line.
 piper progress --id slice-001 pass --note "validator + test"
 ```
 
@@ -78,7 +81,7 @@ piper progress --id slice-001 pass --note "validator + test"
 - **Lower-level attached run:** `piper run --task …` (same as `piper worker run`). Keep weights warm with `piper worker serve`, then `piper worker run`.
 - **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL.
 
-The emitter writes `id`, `cwd`, `prompt`, auto-approve flags, `timeout_s` (default 600), and `result_path`. Optional `--model-dir`, `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set.
+The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set.
 
 ### Wake
 Stay attached (`piper dispatch` / `piper run`). Detach only with a wake URL: `--orch-webhook`, task field `orch_webhook`, `LMP_ORCH_WEBHOOK`, or `.piper/orch_webhook` written by `piper_ui`. Resolve it with `piper wake-url`. Do not copy a URL from the panel. Do not poll as the primary wake.
