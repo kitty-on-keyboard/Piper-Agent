@@ -91,6 +91,53 @@ if(LMP_WITH_MLX)
   set(MLX_METAL_JIT OFF CACHE BOOL "" FORCE)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
+  # NAX is required. MLX turns it off when this probe fails, and the probe is
+  # `echo __METAL_VERSION__ | xcrun -sdk macosx metal ... | tail -1` with no pipefail.
+  # zsh then reports tail's status, so a metal that failed still exits 0 and the
+  # version comes back empty. Empty fails GREATER_EQUAL 400, MLX defines
+  # MLX_METAL_NO_NAX, and the build looks fine. Tests pass. 27B prefill drops from
+  # >1000 tok/s to about 90, including short prompts, because only the matrix path
+  # changed.
+  #
+  # Run it again here with pipefail, before FetchContent, so the failure is this
+  # message and not a STATUS line that blames the deployment target. The usual
+  # cause on Xcode 26+ is not a missing download. `xcodebuild -showComponent
+  # MetalToolchain` can say installed while the driver at
+  # XcodeDefault.xctoolchain/usr/bin/metal still fails: it forwards to
+  # usr/metal/current, and that directory is a link the component installer is
+  # supposed to create inside the Xcode bundle. Without the link it looks for
+  # usr/metal/macos/bin/metal, does not find it, and prints "missing Metal
+  # Toolchain".
+  if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS 26.2)
+    message(FATAL_ERROR
+      "CMAKE_OSX_DEPLOYMENT_TARGET is '${CMAKE_OSX_DEPLOYMENT_TARGET}'. "
+      "Piper requires >= 26.2 so MLX compiles the M5 NAX kernels. "
+      "Below that, MLX defines MLX_METAL_NO_NAX and matrix ops take the general path.")
+  endif()
+  execute_process(
+    COMMAND zsh -c
+      "set -o pipefail; echo __METAL_VERSION__ | xcrun -sdk macosx metal -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET} -E -x metal -P - | tail -1"
+    OUTPUT_VARIABLE LMP_METAL_VERSION
+    ERROR_VARIABLE LMP_METAL_PROBE_ERR
+    RESULT_VARIABLE LMP_METAL_PROBE_RC
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE)
+  if(NOT LMP_METAL_PROBE_RC EQUAL 0
+     OR NOT LMP_METAL_VERSION MATCHES "^[0-9]+$"
+     OR LMP_METAL_VERSION LESS 400)
+    message(FATAL_ERROR
+      "MLX NAX kernels need `xcrun -sdk macosx metal` to report __METAL_VERSION__ >= 400 "
+      "(probe exit ${LMP_METAL_PROBE_RC}, version '${LMP_METAL_VERSION}').\n"
+      "${LMP_METAL_PROBE_ERR}\n"
+      "The Metal component can already be installed. The driver in "
+      "XcodeDefault.xctoolchain/usr/bin/metal only forwards to usr/metal/current, "
+      "which the component installer links into the Xcode bundle. When that link is "
+      "missing, the driver reports a missing toolchain even though "
+      "`xcodebuild -showComponent MetalToolchain` says installed.\n"
+      "Repair with: xcodebuild -downloadComponent MetalToolchain\n"
+      "Then reconfigure. Piper will not build the slow general path.")
+  endif()
+
   FetchContent_Declare(
     mlx
     GIT_REPOSITORY https://github.com/ml-explore/mlx.git
@@ -116,26 +163,22 @@ if(LMP_WITH_MLX)
       INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_mlx_includes}")
   endif()
 
-  # Report whether the M5 accelerator kernels went in, by ASKING MLX rather than
-  # re-deriving its condition: MLX defines MLX_METAL_NO_NAX on the target itself when it
-  # takes the general path, and that property is the only answer that cannot drift from
-  # what was actually compiled. (Its MLX_METAL_VERSION / MACOS_SDK_VERSION live in a
-  # subdirectory scope and are not readable here, so a re-derived check would be a
-  # different question wearing the same name.)
-  #
-  # This is a loud STATUS line and not a silent success because the failure mode is
-  # invisible: a deployment target that drifts below 26.2 still builds, still passes every
-  # test, and just runs several times slower. See the top-level CMakeLists for the
-  # decision and what it costs.
+  # Ask MLX what it actually compiled. The probe above matches the check MLX
+  # makes, but MLX_METAL_VERSION and MACOS_SDK_VERSION live in a subdirectory scope
+  # and are not readable here. The define on the target is the fact that cannot drift.
+  # A STATUS line is how the slow path shipped: configure printed "NAX kernels OFF"
+  # and the build continued.
   get_target_property(_mlx_defs mlx COMPILE_DEFINITIONS)
   if(_mlx_defs MATCHES "MLX_METAL_NO_NAX")
-    message(STATUS "MLX: NAX kernels OFF (deployment target "
-                   "${CMAKE_OSX_DEPLOYMENT_TARGET} < 26.2) -- matrix ops take the "
-                   "general path. This is the slow configuration.")
+    message(FATAL_ERROR
+      "MLX configured with MLX_METAL_NO_NAX "
+      "(deployment target ${CMAKE_OSX_DEPLOYMENT_TARGET}, "
+      "Metal version ${LMP_METAL_VERSION}). "
+      "Piper does not build that configuration. Matrix ops would take the general "
+      "path and prefill would drop from >1000 tok/s to about 90.")
   else()
-    message(STATUS "MLX: NAX kernels ON (deployment target "
-                   "${CMAKE_OSX_DEPLOYMENT_TARGET}) -- M5 matrix units in use, and "
-                   "macOS ${CMAKE_OSX_DEPLOYMENT_TARGET} is this build's minimum.")
+    message(STATUS "MLX: NAX kernels ON (Metal ${LMP_METAL_VERSION}, deployment target "
+                   "${CMAKE_OSX_DEPLOYMENT_TARGET})")
   endif()
 endif()
 

@@ -633,9 +633,59 @@ def validate_trust_mcp_names(cwd, names):
     return wanted
 
 
+def default_slice_task_path(cwd, task_id):
+    """Default packet location: <cwd>/.piper/slices/<id>/task.json."""
+    sid = str(task_id or "").strip()
+    if not sid:
+        raise PacketError("id must be a non-empty string")
+    return os.path.join(
+        os.path.abspath(os.path.expanduser(cwd)), ".piper", "slices", sid, "task.json"
+    )
+
+
+def resolve_emit_model_dir(model_dir=None):
+    """Bake a model at emit time. Dispatch must not be the first failure."""
+    raw = model_dir if model_dir else os.environ.get("LMP_QWEN_DIR", "")
+    if not isinstance(raw, str) or not raw.strip():
+        raise PacketError("missing model_dir (pass --model-dir or set LMP_QWEN_DIR)")
+    path = os.path.abspath(os.path.expanduser(raw.strip()))
+    if not os.path.isdir(path):
+        raise PacketError(f"model_dir is not a directory: {path}")
+    return path
+
+
+def write_active_slice(cwd, task_id, task_path, result_path):
+    """Point the watch UI at the slice just emitted. Parents do not author this."""
+    root = os.path.abspath(os.path.expanduser(cwd))
+    path = os.path.join(root, ".piper", "active.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "id": str(task_id).strip(),
+        "task_path": os.path.abspath(task_path),
+        "result_path": os.path.abspath(result_path),
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def append_orch_event(result_path, event):
+    """Append one orch.jsonl line beside result.json. Parents do not author this."""
+    directory = os.path.dirname(os.path.abspath(result_path))
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "orch.jsonl")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+    return path
+
+
 def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
                      check=None, timeout_s=600, result_path=None,
-                     auto_approve_irreversible=True, trust_mcp=None):
+                     auto_approve_irreversible=True, trust_mcp=None,
+                     prompt_file=None):
     """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
     cwd = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
@@ -644,18 +694,18 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
         raise PacketError("id must be a non-empty string")
     if not isinstance(prompt, str) or not prompt.strip():
         raise PacketError("prompt must be a non-empty string")
+    resolved_model = resolve_emit_model_dir(model_dir)
     out_path = os.path.abspath(os.path.expanduser(out_path))
     packet = {
         "id": task_id.strip(),
         "cwd": cwd,
         "prompt": prompt,
+        "model_dir": resolved_model,
         "auto_approve_exec": True,
         "auto_approve_writes": True,
         "auto_approve_irreversible": bool(auto_approve_irreversible),
         "timeout_s": float(timeout_s),
     }
-    if model_dir:
-        packet["model_dir"] = os.path.abspath(os.path.expanduser(model_dir))
     if check:
         packet["check"] = check
     if result_path:
@@ -665,11 +715,17 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
     if trust_mcp:
         packet["trust_mcp"] = validate_trust_mcp_names(cwd, trust_mcp)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    if prompt_file:
+        src = os.path.abspath(os.path.expanduser(prompt_file))
+        dest = os.path.join(os.path.dirname(out_path), "prompt.md")
+        if src != dest:
+            shutil.copyfile(src, dest)
     tmp = out_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(packet, fh, indent=2)
         fh.write("\n")
     os.replace(tmp, out_path)
+    write_active_slice(cwd, packet["id"], out_path, packet["result_path"])
     return out_path, packet
 
 
@@ -741,7 +797,7 @@ def cmd_packet(args):
     if not prompt or not str(prompt).strip():
         print("piper packet: need --prompt or --prompt-file", file=sys.stderr)
         return EXIT_INVALID
-    out_path = args.out or os.path.join(os.getcwd(), "task.json")
+    out_path = args.out or default_slice_task_path(args.cwd, args.id)
     try:
         path, _packet = emit_task_packet(
             task_id=args.id,
@@ -754,6 +810,7 @@ def cmd_packet(args):
             result_path=args.result_path,
             auto_approve_irreversible=not args.no_auto_approve_irreversible,
             trust_mcp=getattr(args, "trust_mcp", None),
+            prompt_file=args.prompt_file,
         )
     except PacketError as exc:
         print(f"piper packet: {exc}", file=sys.stderr)
@@ -786,6 +843,21 @@ def cmd_mcp_list(args):
             return EXIT_INVALID
         for name in names:
             print(name)
+    return EXIT_OK
+
+
+def cmd_ui(args):
+    """Start the watch UI. Same process as scripts/piper_ui.py."""
+    import piper_ui
+    cwd = os.path.abspath(os.path.expanduser(getattr(args, "cwd", None) or "."))
+    if not os.path.isdir(cwd):
+        print(f"piper ui: cwd is not a directory: {cwd}", file=sys.stderr)
+        return EXIT_INVALID
+    piper_ui.run_server(
+        workspace_dir=cwd,
+        port=int(getattr(args, "port", 8765) or 8765),
+        open_browser=not getattr(args, "no_open", False),
+    )
     return EXIT_OK
 
 
@@ -996,6 +1068,11 @@ def cmd_dispatch(args):
         print(f"piper dispatch: {exc}", file=sys.stderr)
         return EXIT_INVALID
     result_path = packet["result_path"]
+    append_orch_event(result_path, {
+        "kind": "dispatch",
+        "id": packet["id"],
+        "text": f"dispatched {packet['id']}",
+    })
     run_argv = ["run", "--task", args.task]
     if getattr(args, "jsonl", False):
         run_argv.append("--jsonl")
@@ -1009,6 +1086,12 @@ def cmd_dispatch(args):
     code = main(run_argv)
     result = load_result_file(result_path)
     card = format_review_card(result, exit_code=code, result_path=result_path)
+    append_orch_event(result_path, {
+        "kind": "review",
+        "id": packet["id"],
+        "verdict": review_verdict(result, code),
+        "text": card,
+    })
     if getattr(args, "json", False):
         print(json.dumps({
             "result_path": result_path,
@@ -1416,11 +1499,11 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    ```bash
    piper mcp-list --cwd /abs/ws                 # only when the slice needs MCP
    piper packet --id slice-001 --cwd /abs/ws \\
-     --prompt-file prompt.md --check "ctest -R test_validator" \\
-     --out task.json
+     --prompt-file prompt.md --check "ctest -R test_validator"
    piper packet ... --trust-mcp godoer          # names must exist in cwd .mcp.json
+   piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
-   The emitter writes `id`, `cwd`, `prompt`, auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--model-dir` and `--check`.
+   Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
    - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
    - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
@@ -1428,11 +1511,11 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
 4. **Dispatch**
    Default parent launch. Attached: wait, then print the review card.
    ```bash
-   piper dispatch --task task.json
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json
    # Unattended irreversible tools (godot_project, delete_file, whole-file overwrite):
-   piper dispatch --task task.json --auto-approve-irreversible
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json --auto-approve-irreversible
    # Or approve exec + writes + irreversible:
-   piper dispatch --task task.json --auto-approve-all
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json --auto-approve-all
    ```
    Exit codes:
    - `0`: Completed normally.
@@ -1587,15 +1670,17 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
    Do not hand-write `task.json`. The harness owns packet shape.
 
 3. **Emit the packet**:
-   `piper packet --id slice-001 --cwd /abs/workspace --prompt-file prompt.md --check "…" --out task.json`
+   `piper packet --id slice-001 --cwd /abs/workspace --prompt-file prompt.md --check "…"`
+   Do not pass `--out`. The harness writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, bakes `model_dir` from `--model-dir` or `LMP_QWEN_DIR`, and records `.piper/active.json`.
    Optional MCP consent (still explicit): `piper mcp-list --cwd /abs/workspace` then
    `piper packet ... --trust-mcp godoer` (names must exist in workspace `.mcp.json`).
 
 4. **Dispatch**:
-   `piper dispatch --task path/to/task.json` (attached run → wait → review card).
+   `piper dispatch --task` the path `piper packet` printed (attached run → wait → review card).
+   Watch the run: `piper ui --cwd /abs/workspace`.
    Unattended irreversible: `--auto-approve-irreversible` or `--auto-approve-all`.
-   Lower-level attached run: `piper run --task path/to/task.json`.
-   Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper_ui`).
+   Lower-level attached run: `piper run --task` that same path.
+   Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper ui`).
    Resolve it with `piper wake-url`. Do not copy a URL from the panel.
 
 5. **Review**:
@@ -1984,8 +2069,14 @@ def build_parser():
     packet_p.add_argument("--cwd", required=True, help="absolute workspace cwd")
     packet_p.add_argument("--prompt", default=None, help="prompt string")
     packet_p.add_argument("--prompt-file", default=None, help="read prompt from file")
-    packet_p.add_argument("--out", default=None, help="output path (default: ./task.json)")
-    packet_p.add_argument("--model-dir", default=None, help="optional model_dir")
+    packet_p.add_argument(
+        "--out", default=None,
+        help="output path (default: <cwd>/.piper/slices/<id>/task.json)",
+    )
+    packet_p.add_argument(
+        "--model-dir", default=None,
+        help="model directory (default: LMP_QWEN_DIR; required at emit time)",
+    )
     packet_p.add_argument("--check", default=None, help="optional acceptance command")
     packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
     packet_p.add_argument("--result-path", default=None, help="optional result_path")
@@ -2077,6 +2168,16 @@ def build_parser():
     await_p.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     await_p.add_argument("--verbose", action="store_true", help="print state transitions on stderr")
 
+    ui_p = sub.add_parser(
+        "ui",
+        help="watch the active slice in a local web view",
+        description="Start the orchestration watch UI on a workspace. "
+                    "It follows .piper/active.json and .piper/slices/.",
+    )
+    ui_p.add_argument("--cwd", default=".", help="workspace to watch (default: .)")
+    ui_p.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
+    ui_p.add_argument("--no-open", action="store_true", help="do not open a browser")
+
     return parser
 
 
@@ -2107,6 +2208,8 @@ def main(argv=None):
         return cmd_status(args)
     if command == "await":
         return cmd_await(args)
+    if command == "ui":
+        return cmd_ui(args)
 
     if command == "init" or (command == "worker" and getattr(args, "worker_cmd", None) == "init"):
         return init_project(getattr(args, "target_dir", "."))
@@ -2751,6 +2854,42 @@ def self_test():
         check(loaded["id"] == "emit-1", f"emitted id, got {loaded.get('id')!r}")
         check(loaded["cwd"] == os.path.abspath(tmp), f"emitted cwd, got {loaded.get('cwd')!r}")
         check("Ship X." in loaded["prompt"], f"emitted prompt, got {loaded.get('prompt')!r}")
+        check(loaded["model_dir"] == os.path.abspath(model_dir),
+              f"emitted model_dir, got {loaded.get('model_dir')!r}")
+        with open(os.path.join(tmp, ".piper", "active.json"), encoding="utf-8") as fh:
+            active = json.load(fh)
+        check(active.get("id") == "emit-1" and active.get("task_path") == os.path.abspath(pkt_out),
+              f"active.json must point at emitted packet, got {active!r}")
+
+        # 15b. default out path, prompt copy, model from env, missing model exits 3
+        def_ws = os.path.join(tmp, "default_slice_ws")
+        os.makedirs(def_ws)
+        brief = os.path.join(def_ws, "brief.md")
+        with open(brief, "w", encoding="utf-8") as fh:
+            fh.write("## This Slice Only\nDo the thing.\n")
+        saved_model = os.environ.get("LMP_QWEN_DIR")
+        os.environ["LMP_QWEN_DIR"] = model_dir
+        def_stdout = io.StringIO()
+        with contextlib.redirect_stdout(def_stdout):
+            def_rc = main(["packet", "--id", "slice-001", "--cwd", def_ws,
+                           "--prompt-file", brief, "--check", "true"])
+        expected_task = os.path.join(def_ws, ".piper", "slices", "slice-001", "task.json")
+        check(def_rc == EXIT_OK, f"default packet path must exit 0, got {def_rc}")
+        check(def_stdout.getvalue().strip() == expected_task,
+              f"default packet path, got {def_stdout.getvalue()!r}")
+        check(os.path.isfile(os.path.join(def_ws, ".piper", "slices", "slice-001", "prompt.md")),
+              "prompt.md must be copied beside the default packet")
+        def_loaded = load_packet(expected_task)
+        check(def_loaded["model_dir"] == os.path.abspath(model_dir),
+              f"env model must be baked in, got {def_loaded.get('model_dir')!r}")
+        os.environ.pop("LMP_QWEN_DIR", None)
+        with contextlib.redirect_stderr(io.StringIO()):
+            miss_rc = main(["packet", "--id", "no-model", "--cwd", def_ws, "--prompt", "x"])
+        check(miss_rc == EXIT_INVALID, f"packet without model must exit 3, got {miss_rc}")
+        if saved_model is None:
+            os.environ.pop("LMP_QWEN_DIR", None)
+        else:
+            os.environ["LMP_QWEN_DIR"] = saved_model
 
         # 16. .piper/orch_webhook file is discovered (no panel copy)
         wake_root = os.path.join(tmp, "wake_ws")
@@ -2772,13 +2911,11 @@ def self_test():
         check(wake_stdout.getvalue().strip() == wake_url,
               f"wake-url must print file URL, got {wake_stdout.getvalue()!r}")
 
-        # 16b. wake-url --task must not require model_dir (packet emit is optional there)
+        # 16b. wake-url --task must not require model_dir (emit is not this path)
         pkt_no_model = os.path.join(tmp, "wake_task_no_model.json")
-        check(
-            main(["packet", "--id", "wake-nm", "--cwd", wake_root, "--prompt", "x",
-                  "--out", pkt_no_model]) == EXIT_OK,
-            "packet without model_dir must exit 0",
-        )
+        with open(pkt_no_model, "w", encoding="utf-8") as fh:
+            json.dump({"id": "wake-nm", "cwd": wake_root, "prompt": "x",
+                       "result_path": os.path.join(wake_root, "result.json")}, fh)
         wake_stdout2 = io.StringIO()
         with contextlib.redirect_stdout(wake_stdout2):
             wake_rc2 = main(["wake-url", "--task", pkt_no_model])
@@ -2790,11 +2927,9 @@ def self_test():
         status_root = os.path.join(tmp, "status_no_model")
         os.makedirs(status_root, exist_ok=True)
         pkt_status = os.path.join(tmp, "status_task_no_model.json")
-        check(
-            main(["packet", "--id", "status-nm", "--cwd", status_root, "--prompt", "x",
-                  "--out", pkt_status, "--result", os.path.join(status_root, "result.json")]) == EXIT_OK,
-            "packet for status --task must exit 0",
-        )
+        with open(pkt_status, "w", encoding="utf-8") as fh:
+            json.dump({"id": "status-nm", "cwd": status_root, "prompt": "x",
+                       "result_path": os.path.join(status_root, "result.json")}, fh)
         # Clear any leftover error result from earlier scenarios that share tmp.
         with open(os.path.join(status_root, "result.json"), "w", encoding="utf-8") as fh:
             json.dump({"status": "ok", "task_id": "status-nm", "message": "done"}, fh)
@@ -2935,6 +3070,19 @@ def self_test():
         check("verdict:  PASS" in disp_out, f"dispatch must print PASS card, got {disp_out!r}")
         check(os.path.isfile(os.path.join(disp_ws, "result.json")),
               "dispatch must leave result.json")
+        orch_path = os.path.join(disp_ws, "orch.jsonl")
+        check(os.path.isfile(orch_path), "dispatch must append orch.jsonl")
+        orch_lines = []
+        with open(orch_path, encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if raw:
+                    orch_lines.append(json.loads(raw))
+        check(any(line.get("kind") == "dispatch" for line in orch_lines),
+              f"orch.jsonl must record dispatch, got {orch_lines!r}")
+        check(any(line.get("kind") == "review" and line.get("verdict") == "PASS"
+                  for line in orch_lines),
+              f"orch.jsonl must record PASS review, got {orch_lines!r}")
 
         # 20. status card from awaiting_user.json / result.json (no freehand cat/jq)
         st_dir = os.path.join(tmp, "status_dir")

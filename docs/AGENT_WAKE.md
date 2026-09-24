@@ -51,11 +51,11 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    ```bash
    piper mcp-list --cwd /abs/ws                 # only when the slice needs MCP
    piper packet --id slice-001 --cwd /abs/ws \
-     --prompt-file prompt.md --check "ctest -R test_validator" \
-     --out task.json
+     --prompt-file prompt.md --check "ctest -R test_validator"
    piper packet ... --trust-mcp godoer          # names must exist in cwd .mcp.json
+   piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
-   The emitter writes `id`, `cwd`, `prompt`, auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--model-dir` and `--check`.
+   Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
    - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
    - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
@@ -63,11 +63,11 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
 4. **Dispatch**
    Default parent launch. Attached: wait, then print the review card.
    ```bash
-   piper dispatch --task task.json
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json
    # Unattended irreversible tools (godot_project, delete_file, whole-file overwrite):
-   piper dispatch --task task.json --auto-approve-irreversible
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json --auto-approve-irreversible
    # Or approve exec + writes + irreversible:
-   piper dispatch --task task.json --auto-approve-all
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json --auto-approve-all
    ```
    Exit codes:
    - `0`: Completed normally.

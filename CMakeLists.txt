@@ -23,8 +23,9 @@ cmake_minimum_required(VERSION 3.24)
 # WHAT IT DOES NOT COST: older HARDWARE. MLX checks is_nax_available() at runtime (M5-class
 # GPU) and falls back on its own, so a NAX build on an M4 is identical, not slower.
 #
-# Dropping back to "15.0" is the entire rollback, and is also the thing to compare against
-# if a NAX kernel is ever suspected of being wrong.
+# A configure that would compile MLX with MLX_METAL_NO_NAX is refused
+# (src/model/CMakeLists.txt). That path still passes the tests and drops 27B prefill
+# from >1000 tok/s to about 90. It is not a rollback.
 #
 # The guard matters: CMake always has this cache entry (empty by default), so a plain
 # set(... CACHE ...) would be silently ignored, which is how this came to be unset at all.
