@@ -18,15 +18,17 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
    Do not hand-write `task.json`. The harness owns packet shape.
 
 3. **Emit the packet**:
-   `piper packet --id slice-001 --cwd /abs/workspace --prompt-file prompt.md --check "…" --out task.json`
+   `piper packet --id slice-001 --cwd /abs/workspace --prompt-file prompt.md --check "…"`
+   Do not pass `--out`. The harness writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, bakes `model_dir` from `--model-dir` or `LMP_QWEN_DIR`, and records `.piper/active.json`.
    Optional MCP consent (still explicit): `piper mcp-list --cwd /abs/workspace` then
    `piper packet ... --trust-mcp godoer` (names must exist in workspace `.mcp.json`).
 
 4. **Dispatch**:
-   `piper dispatch --task path/to/task.json` (attached run → wait → review card).
+   `piper dispatch --task` the path `piper packet` printed (attached run → wait → review card).
+   Watch the run: `piper ui --cwd /abs/workspace`.
    Unattended irreversible: `--auto-approve-irreversible` or `--auto-approve-all`.
-   Lower-level attached run: `piper run --task path/to/task.json`.
-   Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper_ui`).
+   Lower-level attached run: `piper run --task` that same path.
+   Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper ui`).
    Resolve it with `piper wake-url`. Do not copy a URL from the panel.
 
 5. **Review**:
