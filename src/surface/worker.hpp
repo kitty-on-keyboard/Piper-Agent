@@ -293,10 +293,20 @@ struct IrreversibleAskParams {
 // Project initialization (project init).
 // ------------------------------------------------------------------
 
-// Initialize PIPER.md and .cursor/rules/piper-parent.mdc in target_dir.
-// Godoer briefs (AGENTS.md, GEMINI.md, CLAUDE.md, .mcp.json) are untouched.
-// Prints confirmation line to stdout. Returns kExitOk.
+// Run the Python parent harness `init` in target_dir. The harness writes
+// PIPER.md, the parent rule, and the orchestration skills. Godoer briefs
+// (AGENTS.md, GEMINI.md, CLAUDE.md, .mcp.json) are untouched.
+// Returns the harness exit code.
 [[nodiscard]] int init_project(const std::string& target_dir = ".");
+
+// If argv's first positional is a parent-harness command (packet, dispatch,
+// answer, progress, review, status, await, mcp-list, wake-url, init), replace
+// this process with scripts/piper_worker.py. `--worker` stays in this binary
+// so the harness can spawn the engine without recursing. `piper worker init`
+// is forwarded; `piper worker run` and `piper worker serve` are not.
+// Returns nullopt when this process should keep running. Returns an exit code
+// only when the harness was requested and exec failed.
+[[nodiscard]] std::optional<int> forward_parent_harness(int argc, char** argv);
 
 // ------------------------------------------------------------------
 // The entry point: called from main() when worker/CLI is requested.

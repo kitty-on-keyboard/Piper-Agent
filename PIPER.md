@@ -7,18 +7,18 @@ Piper is a fast headless coding worker running locally on Apple Silicon (via MLX
 
 The cloud orchestrator (Cursor, Claude, Gemini, Antigravity, or custom script) acts as the high-level brain:
 - Maintains the long-horizon plan and acceptance criteria.
-- Decomposes complex tasks into bounded packets (1–3 files per packet).
-- Directs Piper by writing task packets (`task.json`).
-- Verifies outcomes (diffs, test execution, acceptance checks).
+- Decomposes complex tasks into bounded slices (1–3 files per slice).
+- Directs Piper with a slice brief (`prompt.md`). The harness emits `task.json`.
+- Verifies outcomes with the review card, the packet `check`, and `result.json`.
 - Loops until the entire mission is verified complete.
 
 ## The Long-Horizon Execution Loop
 ```
-┌─────────────────────────┐         task.json            ┌──────────────────────────┐
+┌─────────────────────────┐    prompt.md → task.json    ┌──────────────────────────┐
 │   Cloud Orchestrator    │ ───────────────────────────► │       Piper Worker       │
 │  (Cursor, Claude, etc.) │                              │  (MLX on Apple Silicon)  │
 │                         │ ◄─────────────────────────── │                          │
-│ plan · review · verify  │     result.json + diff       │  edits · tools · loop    │
+│ plan · review · verify  │   review card + result.json  │  edits · tools · loop    │
 └─────────────────────────┘                              └──────────────────────────┘
              │                                                         │
              └────────── repeat until horizon acceptance passes ───────┘
@@ -28,84 +28,84 @@ The cloud orchestrator (Cursor, Claude, Gemini, Antigravity, or custom script) a
 
 | Who | Owns | Does not own |
 |---|---|---|
-| **Cloud Orchestrator** | Goal decomposition, file-level direction, acceptance criteria, high-level review, troubleshooting, "are we done?" | Bulk code generation tokens, local tool thrash |
+| **Cloud Orchestrator** | Goal decomposition, file-level direction, acceptance criteria, high-level review, troubleshooting, "are we done?" | Packet JSON shape, bulk code generation tokens, local tool thrash |
 | **Piper Worker** | Edits, tool execution, test commands, local iteration inside `cwd` | Long-horizon judgment, multi-repo strategy |
 
-Local models work best on scoped packets: **packets must be specific**, and **every turn gets an orchestrator review**. Trust outcomes (diff + tests + `result.json`), not vibes.
+Local models work best on scoped slices: **the brief must be specific**, and **every slice gets an orchestrator review**. Trust the review card, the `check`, and `result.json`.
 
 ### Step-by-Step Procedure
 
 1. **Frame the Horizon**
    Define the overarching objective and an acceptance checklist (e.g. unit tests pass, new command works, UI renders).
 
-2. **Slice into Discrete Packets**
-   Pick the smallest incremental step towards the goal.
-   - Scope each slice to 1–3 files.
-   - Explicitly list which files to EDIT, CREATE, and DO NOT TOUCH.
+2. **Write `prompt.md` for this slice**
+   Pick the smallest incremental step. Scope it to 1–3 files. The cloud writes this file only:
+   - Horizon context (short).
+   - This slice only — one outcome.
+   - Files: EDIT, CREATE, and DO NOT TOUCH.
+   - The acceptance command.
+   - When to stop if stuck.
 
-3. **Write `task.json`**
-   Write a task packet in the workspace or a task directory:
-   ```json
-   {
-     "id": "slice-001",
-     "cwd": "/absolute/path/to/workspace",
-     "mode": "agent",
-     "model_dir": "/Users/dev/Desktop/Models/Qwen3.6-35B-A3B-MLX-4bit",
-     "prompt": "## Horizon Context\nBuilding feature X.\n\n## This Slice Only\nAdd validator in src/validator.cpp and test in tests/test_validator.cpp.\n\n## Files\n- EDIT: src/validator.cpp\n- CREATE: tests/test_validator.cpp\n- DO NOT TOUCH: src/core.cpp\n\n## Done When\n- Unit test passes with `ctest -R test_validator`",
-     "auto_approve_exec": true,
-     "auto_approve_writes": true,
-     "auto_approve_irreversible": true,
-     "timeout_s": 600,
-     "max_iterations": 30,
-     "check": "ctest -R test_validator",
-     "result_path": "/absolute/path/to/result.json"
-   }
-   ```
-   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise in the packet for long slices — no rebuild.
-   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
-
-4. **Dispatch Piper**
-   Run the CLI command:
+3. **Emit `task.json`**
+   Do not hand-write the packet. The harness owns the shape.
    ```bash
-   piper run --task /path/to/task.json
-   # or equivalently:
-   piper worker run --task /path/to/task.json
-   # For autonomous unattended execution without prompts or pauses:
-   piper run --task /path/to/task.json --auto-approve-irreversible
-   # Or approve all (exec + writes + irreversible):
-   piper run --task /path/to/task.json --auto-approve-all
+   piper mcp-list --cwd /abs/ws                 # only when the slice needs MCP
+   piper packet --id slice-001 --cwd /abs/ws \
+     --prompt-file prompt.md --check "ctest -R test_validator"
+   piper packet ... --trust-mcp godoer          # names must exist in cwd .mcp.json
+   piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
-   - **Attached mode (standard)**: Process waits and exits when the slice completes.
-     - `0`: Completed normally.
-     - `1`: Worker error.
-     - `2`: Execution timed out (`timeout_s`).
-     - `3`: Invalid task packet or missing wake URL for detached run.
-   - **Detached mode**: If launching in the background (nohup, screen), you MUST pass `--orch-webhook <URL>`. Silent background launches without a webhook are refused.
-   - **Irreversible tools**: Destructive tools or project managers (like `godot_project`, `delete_file`, or whole-file overwrites) escalate to `gate: irreversible`. Set `"auto_approve_irreversible": true` or pass `--auto-approve-irreversible` / `--auto-approve-all` for unattended runs; otherwise Piper pauses and writes `awaiting_user.json` for `answer.json`.
+   Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
+   - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
 
-5. **Review `result.json` & Inspect Changes**
-   Piper writes a structured result upon completion:
-   ```json
-   {
-     "task_id": "slice-001",
-     "status": "ok",
-     "message": "Implemented validation logic and verified with unit test.",
-     "files_touched": ["src/validator.cpp", "tests/test_validator.cpp"],
-     "diff_stat": "+52 -2",
-     "git_diff_path": "/path/to/slice.diff"
-   }
+4. **Dispatch**
+   Default parent launch. Attached: wait, then print the review card.
+   ```bash
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json
+   # Unattended irreversible tools (godot_project, delete_file, whole-file overwrite):
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json --auto-approve-irreversible
+   # Or approve exec + writes + irreversible:
+   piper dispatch --task /abs/ws/.piper/slices/slice-001/task.json --auto-approve-all
    ```
+   Exit codes:
+   - `0`: Completed normally.
+   - `1`: Worker error.
+   - `2`: Execution timed out (`timeout_s`).
+   - `3`: Invalid task packet or missing wake URL for a detached run.
 
-   **Review Rubric (Keep it cheap):**
-   - **Status**: Is `status == "ok"`? If `"error"` or `"stalled"`, inspect the message. Green `test.exit_code=0` with incomplete loop is still `ok` when `check` was set.
-   - **Files Touched**: Are changes confined to expected paths? Reject drive-by edits.
-   - **Diff**: Skim git diff for regressions or unnecessary churn.
-   - **Acceptance**: Prefer `result.test` from the packet `check`; re-run only if you need a second reading.
+   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` does not detach.
 
-6. **Iterate or Complete**
-   - **Pass**: If acceptance criteria for the slice pass, dispatch the next slice.
-   - **Fail**: Send a narrowed/clarified packet, or perform that specific edit yourself.
-   - **Done**: When all acceptance checklist items are verified, complete the mission.
+   Detached or background (`--detach`, nohup, screen) requires a wake URL before start. Resolve it with `piper wake-url`. Do not copy a URL from the panel.
+   - `--orch-webhook URL`, or
+   - task field `orch_webhook`, or
+   - env `LMP_ORCH_WEBHOOK`, or
+   - file `.piper/orch_webhook` (written by `piper_ui`)
+
+   Without a URL the CLI exits before the sidecar starts.
+
+   Irreversible tools pause unless auto-approve was set. Answer with `piper answer`. Do not write `answer.json`.
+
+5. **Review**
+   Read the card `piper dispatch` printed. If you already waited some other way:
+   ```bash
+   piper review --task task.json              # or: piper review --result result.json
+   piper status --dir /path/to/slice          # idle/ask/done/stalled/error; no cat/jq
+   piper await --dir /path/to/slice           # wait for ask/done; no sleep-loop
+   ```
+   On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
+
+   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop is still `ok` when `check` was set.
+
+6. **Record and continue**
+   ```bash
+   piper progress --id slice-001 pass --note "validator + test"
+   ```
+   Verdicts: `pass`, `fail`, `stalled`, `timeout`, `died`, `skip`. The line is appended to `.piper/progress.log`.
+   - **Pass**: emit the next slice.
+   - **Fail**: a narrower brief, or do that edit yourself.
+   - **Done**: when the horizon checklist is green, stop.
 
 ---
 
@@ -124,18 +124,18 @@ know who that agent is. There is no default host. Grok, Gemini, a script,
 and a human CI job each pass their own URL.
 
 Turn-based agents cannot stay attached. They pass a wake URL or they do not
-detach.
+detach. `piper dispatch` stays attached and does not need a URL.
 
 ## How to launch
 
-Stay attached only if your process waits and reads the exit.
+Stay attached only if your process waits and reads the exit. That is `piper dispatch` and `piper run`.
 
-Otherwise, before start:
+Otherwise, before start, resolve the URL with `piper wake-url` (do not copy it from a panel):
 
 - `--orch-webhook URL`, or
 - task field `orch_webhook`, or
 - env `LMP_ORCH_WEBHOOK`, or
-- file `.piper/orch_webhook` (written by `piper_ui`)
+- file `.piper/orch_webhook` (written automatically by `piper_ui` — **do not copy a URL from the panel**)
 
 Detached with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
@@ -148,8 +148,8 @@ mission. No URL means no POST.
 
 | kind | when | parent does |
 | --- | --- | --- |
-| `ask` | `awaiting_user.json` written, or an irreversible call is paused | write `answer.json` as `{"text":"..."}`. Do not restart. `allow` or `deny` for an irreversible call. Guidance for a real question. |
-| `done` | `result.json` written and the slice completed | read the files. Send the next slice or stop. |
+| `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
+| `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
 | `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
@@ -181,6 +181,7 @@ Do not POST every turn. Do not POST tool output.
 
 ## What the parent must not do
 
+- Do not hand-write `task.json`, `answer.json`, or a progress-log line.
 - Do not poll Piper, and do not poll the cloud from Piper.
 - Do not ask the human if the sidecar is still there. The event is the notice.
 - Do not bake another agent's webhook into the binary.

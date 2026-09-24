@@ -31,7 +31,7 @@ A3B is not the smartest — **packets must be fat and scoped**, and **every turn
 1. **Frame the horizon** — one sentence goal + acceptance checklist (tests, UX, “file X exists”).
 2. **Pick the next slice** — smallest useful step; name the files; say what *not* to touch.
 3. **Write `prompt.md`** — see the shape below. Cloud burns *input* tokens on direction so Piper burns the *output* tokens locally. Do not hand-write `task.json`.
-4. **Emit** — `piper packet --id … --cwd … --prompt-file prompt.md --check "…" --out task.json`. MCP only via `piper mcp-list` then `--trust-mcp` for a name that exists.
+4. **Emit** — `piper packet --id … --cwd … --prompt-file prompt.md --check "…"`. Default path is `<cwd>/.piper/slices/<id>/task.json`. MCP only via `piper mcp-list` then `--trust-mcp` for a name that exists. Watch with `piper ui`.
 5. **Dispatch** — `piper dispatch --task task.json` (attached; prints the review card). Exit `0` ok, `1` error, `2` timeout, `3` bad packet. Keep-warm: `piper worker serve`, then `piper worker run`.
 6. **Review the card** — `status`, `files_touched`, diff size, `check`. Do not re-read every line unless something smells wrong. `piper status` / `piper await` instead of cat/jq. On `ask`: `piper answer allow|deny|--text`.
 7. **Decide**

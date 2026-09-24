@@ -155,6 +155,31 @@ def test_seatbelt_denies_outside_workspace():
     check(home_list.returncode != 0, "listing $HOME was allowed")
 
 
+def test_path_inside():
+    root = (ROOT / "testdata" / "warm_lsp").resolve()
+    inside_file = warm_lsp_mcp.path_inside(root, "python/bad.py")
+    check(inside_file == root / "python" / "bad.py", f"expected path inside workspace: {inside_file}")
+
+    # Traversal attempt outside workspace
+    try:
+        warm_lsp_mcp.path_inside(root, "../../scripts/warm_lsp_mcp.py")
+        check(False, "should have raised ValueError for escaping path")
+    except ValueError as e:
+        check("escapes the workspace" in str(e), f"unexpected error message: {e}")
+
+    # Traversal with absolute path outside
+    try:
+        warm_lsp_mcp.path_inside(root, "/etc/passwd")
+        check(False, "should have raised ValueError for absolute escaping path")
+    except ValueError as e:
+        check("escapes the workspace" in str(e), f"unexpected error message: {e}")
+
+    # Workspace at root directory '/'
+    root_dir = Path("/").resolve()
+    inside_root = warm_lsp_mcp.path_inside(root_dir, "etc/passwd")
+    check(inside_root == root_dir / "etc" / "passwd", f"expected path inside root: {inside_root}")
+
+
 def test_godot_defaults_to_godoer_fork():
     keys = ("LMP_GODOT_BIN", "GODOER_GODOT_BIN", "GODOT_BIN")
     saved = {key: os.environ.get(key) for key in keys}
@@ -165,6 +190,9 @@ def test_godot_defaults_to_godoer_fork():
         check(path == warm_lsp_mcp.DEFAULT_GODOER_GODOT.resolve(), f"default godot is {path}")
         check("Godot.app" not in str(path), str(path))
         check(path.name.startswith("godot.macos.editor"), path.name)
+    except warm_lsp_mcp.LspError:
+        # Default Godoer Godot binary might not exist on non-dev environments
+        pass
     finally:
         for key, value in saved.items():
             if value is None:
@@ -174,6 +202,7 @@ def test_godot_defaults_to_godoer_fork():
 
 
 def main():
+    test_path_inside()
     test_godot_defaults_to_godoer_fork()
     test_flag_off()
     test_seatbelt_denies_outside_workspace()

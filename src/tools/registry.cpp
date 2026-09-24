@@ -1243,7 +1243,8 @@ Registry::Registry(WorkspaceContext ctx)
                         if (line.find(needle) != std::string_view::npos) {
                             char num_buf[32];
                             auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line_number);
-                            const std::string_view num_str(num_buf, ptr - num_buf);
+                            const std::string_view num_str(
+                                num_buf, static_cast<std::size_t>(ptr - num_buf));
 
                             std::size_t hit_size = path.size() + 1 + num_str.size() + 1 + line.size() + 1;
 
@@ -1402,7 +1403,7 @@ Registry::Registry(WorkspaceContext ctx)
                             auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line_number);
                             candidates += path;
                             candidates += ':';
-                            candidates.append(num_buf, ptr - num_buf);
+                            candidates.append(num_buf, static_cast<std::size_t>(ptr - num_buf));
                             candidates += ':';
                             candidates.append(line);
                             candidates += '\n';

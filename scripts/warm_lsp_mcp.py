@@ -149,8 +149,8 @@ def path_inside(root: Path, raw: str) -> Path:
     if not candidate.is_absolute():
         candidate = root / candidate
     resolved = candidate.resolve()
-    root_s = str(root)
-    if resolved != root and not str(resolved).startswith(root_s + os.sep):
+    # Security: Ensure path resides strictly inside root to prevent path traversal attacks
+    if not resolved.is_relative_to(root.resolve()):
         raise ValueError(f"path escapes the workspace: {raw}")
     return resolved
 
