@@ -2617,6 +2617,118 @@ void Agent::maybe_warm_stable_prefix(const model::InferenceTask& task,
                             {"ms", std::to_string(wr.ttft_ms)}});
 }
 
+GatePolicy Agent::run_tiny_gate_t1(const char* when) {
+    if (!config_.tiny_gate) {
+        return GatePolicy::Fallback;
+    }
+
+    GateFeatures feats;
+    feats.consec = static_cast<int>(inert_turns_);
+    feats.streak = static_cast<int>(inert_turns_);
+    feats.prompt_tok = static_cast<int>(last_prompt_tokens_);
+    feats.reread_max = 0;
+    feats.think = 0;
+    feats.text = 0;
+    feats.tool_tok = 0;
+    const std::string_view w = when == nullptr ? "" : when;
+    if (w == "loop_cut" || w.find("loop") != std::string_view::npos) {
+        feats.why = "loop_cut";
+    } else if (w == "no_progress" || w.find("progress") != std::string_view::npos) {
+        feats.why = "no_progress";
+    } else if (w == "degenerate_text" || w.find("degenerate") != std::string_view::npos ||
+               w.find("length_capped") != std::string_view::npos ||
+               w.find("text_only") != std::string_view::npos) {
+        feats.why = "degenerate";
+    } else {
+        feats.why = "none";
+    }
+
+    if (const std::optional<GatePolicy> stage0 = stage0_gate_policy(feats)) {
+        const GatePolicy policy = *stage0;
+        emit("gate",
+             {{"when", when == nullptr ? "t1_degenerate" : when},
+              {"questions", "force_tool,nudge"},
+              {"choice", std::string(gate_policy_name(policy))},
+              {"letter", ""},
+              {"encoding", "stage0"},
+              {"order", ""},
+              {"p", "1"},
+              {"p_force", "0"},
+              {"p_vec", ""},
+              {"p_min", std::to_string(config_.tiny_gate_p_min)},
+              {"policy", std::string(gate_policy_name(policy))},
+              {"stage0", "1"},
+              {"latency_ms", "0"},
+              {"model", config_.tiny_gate_model_dir},
+              {"ok", "1"},
+              {"error", ""}});
+        return policy;
+    }
+
+    GateMicroResult micro;
+    if (config_.tiny_gate_probe) {
+        if (std::optional<GateMicroResult> probed = config_.tiny_gate_probe()) {
+            micro = std::move(*probed);
+        } else {
+            micro.error = "tiny_gate_probe returned nullopt";
+        }
+    } else {
+        const std::uint64_t shuffle_seed =
+            (static_cast<std::uint64_t>(turns_generated_) << 32U) ^
+            static_cast<std::uint64_t>(inert_turns_) ^
+            static_cast<std::uint64_t>(last_prompt_tokens_);
+        const GateChoiceOrder order = shuffle_gate_t1_choices(shuffle_seed);
+        const std::string prefix = gate_t1_forced_prefix(order, feats);
+        const std::string req = build_gate_request_json(prefix, order);
+        micro = query_gate_http(config_.tiny_gate_url, req);
+        if (micro.order.empty()) {
+            std::string order_str;
+            for (std::size_t i = 0; i < order.size(); ++i) {
+                if (i > 0) {
+                    order_str += ',';
+                }
+                order_str += gate_choice_name(order[i]);
+            }
+            micro.order = std::move(order_str);
+        }
+        if (micro.model.empty()) {
+            micro.model = config_.tiny_gate_model_dir;
+        }
+    }
+
+    const GatePolicy policy = apply_gate_policy(micro, config_.tiny_gate_p_min);
+
+    std::string questions = micro.order;
+    if (questions.empty()) {
+        questions = "force_tool,nudge";
+    }
+    std::string p_vec_str;
+    for (std::size_t i = 0; i < micro.p_vec.size(); ++i) {
+        if (i > 0) {
+            p_vec_str += ',';
+        }
+        p_vec_str += std::to_string(micro.p_vec[i]);
+    }
+    emit("gate",
+         {{"when", when == nullptr ? "t1_degenerate" : when},
+          {"questions", questions},
+          {"choice", micro.ok ? micro.choice_name : ""},
+          {"letter", micro.ok ? std::string(1, micro.letter) : ""},
+          {"encoding", micro.encoding.empty() ? "letter" : micro.encoding},
+          {"order", micro.order},
+          {"p", std::to_string(micro.p)},
+          {"p_force", std::to_string(micro.p_force)},
+          {"p_vec", p_vec_str},
+          {"p_min", std::to_string(config_.tiny_gate_p_min)},
+          {"policy", std::string(gate_policy_name(policy))},
+          {"stage0", "0"},
+          {"latency_ms", std::to_string(micro.latency_ms)},
+          {"model", micro.model.empty() ? config_.tiny_gate_model_dir : micro.model},
+          {"ok", micro.ok ? "1" : "0"},
+          {"error", micro.error}});
+    return policy;
+}
+
 // Takes whatever the user has said since the last turn boundary into the context.
 //
 // Everything downstream falls out of ContextStore::add_user_message: the text enters the
@@ -3267,7 +3379,23 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                                          : (turn.cut_for_looping ? "loop_cut"
                                                                  : "no_tool_recovery");
 
-            if (inert_turns_ <= allowed) {
+            // Tiny gate T1: after degenerate / TextOnly where #150 would nudge. Selects
+            // among harness actions only; P-below-floor / transport failure falls back to
+            // the existing path below. Spun (no_progress tool) turns keep the heuristic
+            // path — T1 is text pressure. Default OFF (`LMP_TINY_GATE`).
+            GatePolicy gate_act = GatePolicy::Fallback;
+            if (config_.tiny_gate && !spun) {
+                gate_act = run_tiny_gate_t1(why_detail);
+            }
+            const bool gate_stall_now =
+                gate_act == GatePolicy::Stall && !policy_.conversational;
+
+            if (inert_turns_ <= allowed && !gate_stall_now) {
+                if (gate_act == GatePolicy::Compact) {
+                    // Gate Stage-0 chose context pressure relief; compact then still
+                    // nudge so the model gets an action cue on the next turn.
+                    compact_to_budget();
+                }
                 // THE NOTE SAYS WHICH FAILURE THIS IS. "Call a tool now" is the wrong
                 // advice for a model that just called one and got back bytes it already
                 // had -- and it is exactly what the old single note told it, which is how
@@ -3293,6 +3421,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 const bool degenerate_babble = !spun && turn.degenerate_text;
                 const bool length_capped_no_tool =
                     !spun && turn.outcome == Outcome::LengthCapped;
+                const bool gate_force_tool = gate_act == GatePolicy::ForceTool;
                 // THE FILE NOTE IS FOR FILES. r-18d29b4a83a4a1b0 stalled on four identical
                 // `execute_blender_code` calls; each nudge told it the file was
                 // byte-identical and not to re-read -- advice for a state it was not in,
@@ -3334,7 +3463,11 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 }
                 context::TurnRecord note;
                 note.observation =
-                    display_only_turn || spun
+                    gate_force_tool
+                        ? "[Note: Tiny gate selected force_tool. Stop narrating and call ONE "
+                          "tool this turn (`read_file`, `replace_in_file`, `shell`, or "
+                          "`ask_user` if blocked). Text without a tool call ends the run.]"
+                    : display_only_turn || spun
                     ? spun_note
                     : loop_cut
                         ? "[Note: That turn was cut because the same stretch of reasoning "
@@ -3386,7 +3519,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                                 {"why_detail", why_detail},
                                 {"consecutive", std::to_string(inert_turns_)},
                                 {"cap", std::to_string(allowed)},
-                                {"degenerate", turn.degenerate_text ? "1" : "0"}});
+                                {"degenerate", turn.degenerate_text ? "1" : "0"},
+                                {"gate_policy", std::string(gate_policy_name(gate_act))}});
                 continue;
             }
             if (policy_.conversational) {

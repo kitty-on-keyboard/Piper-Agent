@@ -66,6 +66,7 @@ test_speculative
 test_spsc_channel
 test_syntax_check
 test_think_blocks
+test_tiny_gate
 test_token_stream_gate
 test_toolcall_enum_mask
 test_transcript
