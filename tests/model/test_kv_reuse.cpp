@@ -197,3 +197,78 @@ TEST(classify_reuse_reason_names_reset_causes) {
     CHECK_EQ(std::string(classify_reuse_reason(ReuseMode::Reset, 5, 1, 4, true, 6)),
              std::string("ledger_mismatch"));
 }
+
+// --- HS1: honest fat-prefix suffix-only reuse --------------------------------
+//
+// The harness in lmp_diag reuse builds an explicit shared prefix of exactly P tokens,
+// checkpoints at P, then appends S on turn 2. After turn 1 the ledger holds P plus the
+// generated tail; turn 2's prompt is P+S and diverges after P. That must Restore to P
+// so generate() reports prefill_reused_tokens == P (reuse_frac = 1.0 against P_shared).
+//
+// The 2026-09-03 failure (reused=11 every time) was checkpointing at a chat-template
+// message boundary (~system header), not at the end of a fat shared body. The second
+// test pins that false-friend so it cannot be mistaken for a pass.
+
+TEST(hs1_fat_prefix_of_P_then_suffix_S_restores_exactly_P) {
+    constexpr int P = 64;
+    constexpr int S = 16;
+    std::vector<TokenId> shared;
+    shared.reserve(static_cast<std::size_t>(P));
+    for (int i = 0; i < P; ++i) {
+        shared.push_back(static_cast<TokenId>(1000 + i));
+    }
+    // Turn 1 ledger: shared prefix + generated junk past the checkpoint.
+    std::vector<TokenId> ledger_ids = shared;
+    ledger_ids.push_back(42);
+    ledger_ids.push_back(43);
+    KvCacheLedger ledger;
+    ledger.append(ledger_ids);
+
+    std::vector<TokenId> turn2 = shared;
+    for (int i = 0; i < S; ++i) {
+        turn2.push_back(static_cast<TokenId>(2000 + i));
+    }
+
+    const TurnReuse r = plan_turn_reuse(ledger, turn2, /*checkpoint_len=*/shared.size(),
+                                       /*checkpoint_valid=*/true);
+    CHECK(r.mode == ReuseMode::Restore);
+    CHECK_EQ(r.prefill_from, shared.size());
+    // generate() records prefill_reused_tokens = prefill_from, so reuse_frac vs P_shared
+    // is exactly 1.0 when the algebra is honest.
+    const double reuse_frac =
+        static_cast<double>(r.prefill_from) / static_cast<double>(shared.size());
+    CHECK(reuse_frac >= 0.95);
+}
+
+TEST(hs1_checkpoint_at_chat_header_only_reuses_header_not_fat_body) {
+    // False-friend of the 2026-09-03 sweep: a short "header" checkpoint (~11 tokens)
+    // with a long body after it. Restore then only reuses the header; the fat body is
+    // re-prefilled. That must NOT be reported as a fat-prefix win.
+    constexpr int kHeader = 11;
+    constexpr int kBody = 64;
+    std::vector<TokenId> turn1;
+    for (int i = 0; i < kHeader + kBody; ++i) {
+        turn1.push_back(static_cast<TokenId>(3000 + i));
+    }
+    std::vector<TokenId> ledger_ids = turn1;
+    ledger_ids.push_back(7); // generated
+    KvCacheLedger ledger;
+    ledger.append(ledger_ids);
+
+    // Turn 2 shares the header+body, then appends a short suffix -- but checkpoints only
+    // at the header, the way a chat-template "start of last message" offset would.
+    std::vector<TokenId> turn2 = turn1;
+    turn2.push_back(4000);
+    turn2.push_back(4001);
+
+    const TurnReuse r = plan_turn_reuse(ledger, turn2, /*checkpoint_len=*/kHeader,
+                                       /*checkpoint_valid=*/true);
+    CHECK(r.mode == ReuseMode::Restore);
+    CHECK_EQ(r.prefill_from, static_cast<std::size_t>(kHeader));
+    // Against a claimed P_shared of the fat body+header, this is the ~11/75 failure mode.
+    const double false_frac =
+        static_cast<double>(r.prefill_from) /
+        static_cast<double>(kHeader + kBody);
+    CHECK(false_frac < 0.95);
+}
+
