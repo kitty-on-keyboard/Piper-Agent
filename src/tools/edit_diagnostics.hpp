@@ -123,17 +123,38 @@ struct Candidate {
     }
     const std::size_t win = std::min(std::max(old_lines, std::size_t{1}), std::size_t{12});
 
+    // First non-empty line of the want — used to break Jaccard ties when an earlier
+    // window only catches the want mid-window (e.g. `return 1` + blank + `def beta`
+    // ties `def beta` + `return 2`, and ascending line pick would prefer the wrong one).
+    std::vector<std::string_view> want_anchor;
+    {
+        std::vector<std::string_view> want_lines;
+        detail::split_lines(old_text, want_lines);
+        for (std::string_view wl : want_lines) {
+            std::vector<std::string_view> toks = detail::tokenize(wl);
+            if (!toks.empty()) {
+                want_anchor = std::move(toks);
+                break;
+            }
+        }
+    }
+
     // Fast path: Pre-tokenize lines once using callback and record token counts / bitmask matches.
     // Re-allocating window strings and re-tokenizing vector strings across sliding windows was O(N * win).
     struct LineInfo {
         std::size_t token_count = 0;
         std::uint64_t want_mask = 0; // bit m set if want[m] is in this line (for m < 64)
         std::vector<std::size_t> extra_want_indices; // fallback if want.size() > 64
+        std::uint64_t anchor_mask = 0; // bit a set if want_anchor[a] is in this line (for a < 64)
+        std::size_t anchor_hits = 0; // fallback if want_anchor.size() > 64
     };
 
     const std::size_t n_lines = lines.size();
     const std::size_t want_size = want.size();
     const bool use_mask = (want_size <= 64);
+
+    const std::size_t anchor_size = want_anchor.size();
+    const bool use_anchor_mask = (anchor_size <= 64);
 
     std::vector<LineInfo> line_info(n_lines);
     for (std::size_t k = 0; k < n_lines; ++k) {
@@ -148,22 +169,30 @@ struct Candidate {
                     }
                 }
             }
-        });
-    }
-
-    // First non-empty line of the want — used to break Jaccard ties when an earlier
-    // window only catches the want mid-window (e.g. `return 1` + blank + `def beta`
-    // ties `def beta` + `return 2`, and ascending line pick would prefer the wrong one).
-    std::vector<std::string_view> want_anchor;
-    {
-        std::vector<std::string_view> want_lines;
-        detail::split_lines(old_text, want_lines);
-        for (std::string_view wl : want_lines) {
-            std::vector<std::string_view> toks = detail::tokenize(wl);
-            if (!toks.empty()) {
-                want_anchor = std::move(toks);
-                break;
+            if (anchor_size > 0) {
+                if (use_anchor_mask) {
+                    for (std::size_t a = 0; a < anchor_size; ++a) {
+                        if (want_anchor[a] == tok) {
+                            line_info[k].anchor_mask |= (std::uint64_t{1} << a);
+                        }
+                    }
+                }
             }
+        });
+        if (anchor_size > 64 && line_info[k].token_count > 0) {
+            std::size_t hits = 0;
+            for (std::string_view wt : want_anchor) {
+                bool hit = false;
+                detail::tokenize_cb(lines[k], [&](std::string_view tok) {
+                    if (tok == wt) {
+                        hit = true;
+                    }
+                });
+                if (hit) {
+                    ++hits;
+                }
+            }
+            line_info[k].anchor_hits = hits;
         }
     }
 
@@ -216,23 +245,18 @@ struct Candidate {
         double anchor = 0.0;
         bool start_aligned = false;
         if (!want_anchor.empty()) {
+            const double want_anchor_denom = static_cast<double>(want_anchor.size());
             for (std::size_t j = i; j < end_j; ++j) {
                 if (line_info[j].token_count == 0) {
                     continue;
                 }
                 std::size_t hits = 0;
-                for (std::string_view wt : want_anchor) {
-                    bool hit = false;
-                    detail::tokenize_cb(lines[j], [&](std::string_view tok) {
-                        if (tok == wt) {
-                            hit = true;
-                        }
-                    });
-                    if (hit) {
-                        ++hits;
-                    }
+                if (use_anchor_mask) {
+                    hits = static_cast<std::size_t>(std::popcount(line_info[j].anchor_mask));
+                } else {
+                    hits = line_info[j].anchor_hits;
                 }
-                anchor = static_cast<double>(hits) / static_cast<double>(want_anchor.size());
+                anchor = static_cast<double>(hits) / want_anchor_denom;
                 // Prefer the window that opens on the matching line over one that
                 // only reaches it after a leading blank (same Jaccard + same anchor).
                 start_aligned = (j == i && anchor > 0.0);
