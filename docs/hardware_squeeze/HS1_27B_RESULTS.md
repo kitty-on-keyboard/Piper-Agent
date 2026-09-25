@@ -1,10 +1,20 @@
 # HS1_27B — fat-prefix suffix-only prefill results
 
-**Status:** harness green for Benchbot · Mac wall numbers **pending** (AE does not burn Mac)  
+**Status:** **KEEP** — full 4-arm PASS on Mac wall (Benchbot)  
 **Living 1-pager:** Research `HS1_27B_SUFFIX_ONLY_PREFILL_2026-09-25` (supersedes A3B plan)  
-**Branch:** `hs1-suffix-prefill` · draft PR only · **do not merge**  
+**Branch:** `hs1-suffix-prefill` · draft PR #227 · **do not merge**  
+**Tip SHA:** `4f132ec`  
+**Suite TS:** `20260925-085953`  
 **Model:** dense **Qwen3.8-27B-MLX-4bit** — **not A3B**, no dual-load  
 **GJF PR #226:** completely separate queue; this branch must not touch grammar jump-forward.
+
+## Verdict
+
+**KEEP.** Bars met at P=2048 and P=8192. Tip Extend/Restore algebra already delivers
+suffix-only prefill on the honest harness. **Hold `LMP_SUFFIX_PREFILL` — not needed**
+(measure-only; do not implement).
+
+All four trap arms: `END ec=0 DIED_EARLY=0`.
 
 ## Tip env name (confirmed)
 
@@ -14,11 +24,9 @@ Harness reads **`LMP_QWEN_DIR`** (`tests/model/diag_common.hpp` → `qwen_dir()`
 export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit
 ```
 
-(Confirm the folder exists on the Mac wall; abort if another MLX holder is live.)
-
 ## Product change
 
-**Measure-only KEEP-seed (B0).** No product patch and **no `LMP_SUFFIX_PREFILL`** unless B0 fails the pass bar. If a fix is required later: minimal planner/ledger/cache-append change behind **`LMP_SUFFIX_PREFILL` default 0** (`=1` to enforce). No MLX fork, dual KV, middle-drop, GEMM, MoE, or GJF edits.
+**None.** Measure-only KEEP. No product patch and **no `LMP_SUFFIX_PREFILL`**.
 
 ## P_shared definition
 
@@ -31,56 +39,29 @@ Harness construction (honest; avoids the 2026-09-03 `reused≈11` failure):
 3. That vector is the leading P tokens of **both** turns.
 4. `checkpoint_at = P`.
 
-Do **not** wrap this in `ChatTemplate` and call it HS1 — that was the system-header false-friend.
-
 `reuse_frac = prefill_reused_tokens / P_shared`.
 
 ## Exact binary path + Benchbot commands
-
-After build on the Mac checkout (AE does **not** burn wall):
 
 ```text
 /Users/dev/Desktop/seans_projects_local/LM_Pipe_2/build/tests/model/lmp_diag
 ```
 
-(If the checkout path differs, use `<repo>/build/tests/model/lmp_diag` from `cmake --preset dev`.)
+Prefer each arm **FOREGROUND under the trap as direct parent** (see Dig note below):
 
 ```bash
-# Abort if another MLX holder is live. One model only.
 export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit
-
-cmake --preset dev
-cmake --build --preset dev --target lmp_diag -j8
 cd /Users/dev/Desktop/seans_projects_local/LM_Pipe_2/build/tests/model
 
-# B0 live KV — turn2 should reuse ≈ P
-./lmp_diag reuse 3 2048 128 32
-./lmp_diag reuse 3 8192 128 32
-
-# Alias
-./lmp_diag suffix 3 2048 128 32
-
-# Optional stretch if RAM allows on 48GB with 27B resident:
-# ./lmp_diag reuse 3 32768 128 32
-
-# Cold contrast — full KV reset each run; TTFT = full prefill of P+S
-./lmp_diag reuse --cold 3 2048 128 32
-./lmp_diag reuse --cold 3 8192 128 32
+../../scripts/lmp_diag_trap.sh ./lmp_diag reuse 3 2048 128 32
+../../scripts/lmp_diag_trap.sh ./lmp_diag reuse 3 8192 128 32
+../../scripts/lmp_diag_trap.sh ./lmp_diag reuse --cold 3 2048 128 32
+../../scripts/lmp_diag_trap.sh ./lmp_diag reuse --cold 3 8192 128 32
 ```
 
-Per turn prints: TTFT ms, `prefill_reused_tokens`, `reuse_frac` vs `P_shared`, reuse mode/reason, decode tok/s.
+Raw logs: `piper-bench/results/hardware_squeeze/hs1-27b-*.txt` (suite TS `20260925-085953`).
 
-### Raw logs
-
-Prefer (when tree is live):
-
-```text
-piper-bench/results/hardware_squeeze/hs1-27b-*.txt
-```
-
-One-row verdict lands in **this file** (`HS1_27B_RESULTS.md`) on first burn.
-
-## Pass bar (Mac wall = Benchbot on 27B dense)
+## Pass bar
 
 At **P=2048 and P=8192**, S=128, max_new=32, runs≥3 on **Qwen3.8-27B-MLX-4bit**:
 
@@ -89,71 +70,43 @@ At **P=2048 and P=8192**, S=128, max_new=32, runs≥3 on **Qwen3.8-27B-MLX-4bit*
 | median `reuse_frac` | ≥ 0.95 of `P_shared` |
 | turn2 TTFT (live) vs cold full prefill of P+S | ≥ 5% better |
 
-Primary P∈{2048,8192}. Optional P=512 / P=32768 for characterization only.
+## B0 medians (suite `20260925-085953`, tip `4f132ec`)
 
-## B0 medians (stub — Benchbot fills)
+| P | arm | median TTFT ms | median reuse_frac | vs cold | PASS/FAIL |
+|---|-----|----------------|-------------------|---------|-----------|
+| 2048 | live turn2 | 407.4 | 1.0 | ~94.5% better than cold | **PASS** |
+| 2048 | cold P+S | 7371.1 | — | — | (contrast) |
+| 8192 | live turn2 | 458.8 | 1.0 | ~98.3% better than cold | **PASS** |
+| 8192 | cold P+S | 27571.0 | — | — | (contrast) |
 
-| P | arm | median TTFT ms | median reused | median reuse_frac | mode/reason | PASS/FAIL |
-|---|-----|----------------|---------------|-------------------|-------------|-----------|
-| 2048 | live turn2 | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| 2048 | cold P+S | _TBD_ | 0 | — | Reset | _TBD_ |
-| 8192 | live turn2 | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| 8192 | cold P+S | _TBD_ | 0 | — | Reset | _TBD_ |
-
-- **SHA:** _TBD after Benchbot run_
+- **SHA:** `4f132ec` (`hs1-suffix-prefill`)
 - **Model:** Qwen3.8-27B-MLX-4bit
-- **Verdict:** _PENDING measure-only_
+- **Trap:** all arms `END ec=0 DIED_EARLY=0`
+- **Verdict:** **KEEP** — bars met; hold `LMP_SUFFIX_PREFILL`
+
+## Dig note (brief)
+
+Earlier suite `DIED_EARLY` was **parent/nohup process-group pressure**, not a product
+decode hang. Lone `reuse 2` and `reuse 3` both PASS with full plain-path breadcrumbs
+(`decode_begin speculative=0` → `decode_first_token`). Suite fix: run each arm
+**FOREGROUND under `scripts/lmp_diag_trap.sh` as the direct parent** (not nohup’d into a
+shared process group).
+
+Plain-path breadcrumbs (measure-only, tip `4f132ec`):
+
+- `decode_begin speculative=0 mtp=%d prompt=%zu`
+- `decode_first_token ttft_ms=%.1f`
 
 ## CPU unit tests (gate; no Mac)
 
-`tests/model/test_kv_reuse.cpp`:
-
-- fat prefix P + suffix S → Restore at P, reuse_frac ≥ 0.95
-- checkpoint at chat-header-only → pins ≈11-token false-friend
+`tests/model/test_kv_reuse.cpp` — fat-prefix Restore-at-P + chat-header false-friend.
 
 ```bash
 ctest --preset gate -R test_kv_reuse --output-on-failure
 ```
 
-## Dig instrumentation (measure-only, 2026-09-25)
-
-B0 `reuse 3 2048` died early after `mem at=prefill_done` with no `run 0 turn1:` line
-(hypothesis ~0.65: first **plain-decode GPU** after Extend prefill + `clear_cache`, not
-runs>1). Speculative-path breadcrumbs already existed; plain path was uncovered.
-
-**Landed (no product flag / no `LMP_SUFFIX_PREFILL`):**
-
-1. Plain-path stderr breadcrumbs (same format as speculative):
-   - `decode_begin speculative=0 mtp=%d prompt=%zu`
-   - `decode_first_token ttft_ms=%.1f`
-2. `fflush(stdout)` after `cmd_reuse` per-run prints + turn begin lines before each
-   `generate()` (`run N turn1 begin` / `turn2 begin` / `cold begin`).
-3. Parent death trap: `scripts/lmp_diag_trap.sh` — records END + ec/signal (137 ⇒ SIGKILL).
-
-### Lone Benchbot probe (AE does not burn Mac wall)
-
-```bash
-export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit
-# rebuild tip of hs1-suffix-prefill → build/tests/model/lmp_diag
-cmake --preset dev && cmake --build --preset dev --target lmp_diag -j8
-cd /Users/dev/Desktop/seans_projects_local/LM_Pipe_2/build/tests/model
-
-# ONE lone probe under the trap (+ optional /usr/bin/time -l). No full 4-arm suite.
-../../scripts/lmp_diag_trap.sh ./lmp_diag reuse 2 2048 128 32
-# or: ../../scripts/lmp_diag_trap.sh ./lmp_diag reuse 3 2048 128 32
-```
-
-Reading the dig:
-
-| Last breadcrumb seen | Likely death locus |
-|----------------------|--------------------|
-| `prefill_done`, no `decode_begin speculative=0` | before plain decode entry |
-| `decode_begin speculative=0`, no `decode_first_token` | first-token sample from prefill logits |
-| `decode_first_token` then silence | at/after first plain decode GPU |
-| trap `END ec=137 signal=SIGKILL` | external/jetsam kill |
-
-Raw dig logs: `piper-bench/results/hardware_squeeze/hs1-27b-dig-*.txt` when that tree is live.
-
 ## Out of scope / parked
 
-QuantizedKV (HS2), MTP draft_cost_ratio, parsephony FF, **GJF PR #226** (separate Mac micro queue), warm LSP, Pulse/OpenJev/tiny-gate, **A3B**, second heavy model, GEMM, MLX fork, dual KV, middle-drop.
+`LMP_SUFFIX_PREFILL` (not needed), QuantizedKV (HS2), MTP draft_cost_ratio, parsephony FF,
+**GJF PR #226** (separate Mac micro queue), warm LSP, Pulse/OpenJev/tiny-gate, **A3B**,
+second heavy model, GEMM, MLX fork, dual KV, middle-drop.
