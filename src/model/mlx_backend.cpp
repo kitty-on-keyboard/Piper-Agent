@@ -70,9 +70,6 @@ std::size_t prefill_chunk() {
     return 2048;
 }
 
-// Forward: defined later; decode_speculative needs it at begin/end for HS2 A/B attribution.
-void log_mlx_mem(const char* at, std::size_t tokens = 0);
-
 // MLX's wired limit defaults to 0: nothing is kept resident, so a 19 GB checkpoint is
 // re-made-resident by the OS around GPU dispatches. That is invisible to any op-level
 // benchmark -- a microbenchmark touches a small hot set and never pays it -- but it
@@ -578,6 +575,19 @@ class MlxSpecForward final : public SpecForward {
     std::vector<float> mtp_h_host_;
 };
 
+// Last line on a SIGKILL still has to be on disk. stderr is the only channel that
+// survives an OS kill of the sidecar; the event log is written after generate() returns.
+// Defined here (anon ns, before first use) so decode_speculative and the outer
+// MlxBackend::* call sites share one unambiguous symbol — not a forward decl in
+// lmp::model plus a later anon-ns definition (ambiguous on Mac clang).
+void log_mlx_mem(const char* at, std::size_t tokens = 0) {
+    const MemoryReport m = mlx_memory_report();
+    std::fprintf(stderr,
+                 "mem at=%s tokens=%zu active=%zu cache=%zu peak=%zu sum=%zu\n", at,
+                 tokens, m.active, m.cache, m.peak, m.active + m.cache);
+    std::fflush(stderr);
+}
+
 // The speculative decode loop. Separate from generate() so the plain path keeps the exact
 // shape it was tuned and measured in: the two share a prefill and diverge completely
 // after it, and interleaving them would put a branch in the hot decode step for the
@@ -917,16 +927,6 @@ const char* reuse_mode_name(ReuseMode mode) {
             return "reset";
     }
     return "unknown";
-}
-
-// Last line on a SIGKILL still has to be on disk. stderr is the only channel that
-// survives an OS kill of the sidecar; the event log is written after generate() returns.
-void log_mlx_mem(const char* at, std::size_t tokens) {
-    const MemoryReport m = mlx_memory_report();
-    std::fprintf(stderr,
-                 "mem at=%s tokens=%zu active=%zu cache=%zu peak=%zu sum=%zu\n", at,
-                 tokens, m.active, m.cache, m.peak, m.active + m.cache);
-    std::fflush(stderr);
 }
 
 // Chunked prefill of task.prompt[start, end). `boundary` (if inside the range) is a
