@@ -178,7 +178,8 @@ struct Candidate {
                 if (line_info[j].want_mask != 0) {
                     std::uint64_t m = line_info[j].want_mask;
                     while (m) {
-                        int idx = std::countr_zero(m);
+                        const auto idx =
+                            static_cast<std::size_t>(std::countr_zero(m));
                         found[idx] = true;
                         m &= m - 1;
                     }
