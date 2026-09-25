@@ -48,6 +48,9 @@ lmp_add_test(test_malformed_call_museum SOURCES test_malformed_call_museum.cpp L
 # Phase C: enum_values masking in ToolCallGuard (invalid token never in mask).
 lmp_add_test(test_toolcall_enum_mask SOURCES test_toolcall_enum_mask.cpp LABELS gate
              LINK parsephony)
+# Grammar jump-forward v0: card==1 span planner over ToolCallGuard (CPU museum).
+lmp_add_test(test_grammar_jump_forward SOURCES test_grammar_jump_forward.cpp LABELS gate
+             LINK lmp_model)
 lmp_add_test(test_mini_vocab SOURCES test_mini_vocab.cpp LABELS gate LINK lmp_model)
 add_dependencies(test_mini_vocab lmp_mini_vocab lmp_refused_vocabs)
 target_compile_definitions(test_mini_vocab PRIVATE

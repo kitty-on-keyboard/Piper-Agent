@@ -93,6 +93,11 @@ struct InferenceTask {
     // so the next turn can roll back to it instead of re-prefilling the whole context
     // (S5.10). 0 disables it. Ignored by backends without a KV cache.
     std::size_t checkpoint_at = 0;
+    // Grammar jump-forward (v0). Default off. When true (or LMP_GRAMMAR_JUMP_FORWARD=1),
+    // the plain decode loop may skip per-token Metal forwards over contiguous
+    // ToolCallGuard card==1 spans ≥8 bytes via one append-N. Speculative decode
+    // ignores this so guard checkpoint/rollback stays correct under MTP drafts.
+    bool grammar_jump_forward = false;
 };
 
 // Receives each sampled id as it is produced. Returns false to stop generation -- this is

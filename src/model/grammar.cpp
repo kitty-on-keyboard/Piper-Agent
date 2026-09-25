@@ -1,5 +1,7 @@
 #include "src/model/grammar.hpp"
 
+#include "src/model/grammar_jump_forward.hpp"
+
 #include <array>
 #include <cstdlib>
 #include <unordered_map>
@@ -310,6 +312,19 @@ const TokenMask& TurnGrammar::mask() const {
         it = cache_->structural.find(key);
     }
     return it->second;
+}
+
+std::vector<TokenId> TurnGrammar::propose_forced_jump() const {
+    // Flag gating is the caller's job (mlx plain decode / tests). Speculative
+    // decode must not call this — see MaskSource note.
+    if (phase_ != TurnPhase::ToolCall || guard_ == nullptr) {
+        return {};
+    }
+    const std::string span = collect_forced_span(*guard_);
+    if (!should_grammar_jump(span)) {
+        return {};
+    }
+    return tokens_for_forced_span(tok_, span);
 }
 
 // --- ThinkCapMask ------------------------------------------------------------

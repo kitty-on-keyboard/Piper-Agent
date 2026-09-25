@@ -7,6 +7,7 @@ add_library(lmp_model
   backend.cpp
   chat_template.cpp
   grammar.cpp
+  grammar_jump_forward.cpp
   image_decode.cpp
   image_preprocess.cpp
   kv_cache.cpp
