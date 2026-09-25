@@ -28,6 +28,7 @@
 #include <string>
 
 #include "src/context/context.hpp"
+#include "src/loop/pulse.hpp"
 #include "src/loop/turn.hpp"
 #include "src/model/backend.hpp"
 #include "src/model/chat_template.hpp"
@@ -254,6 +255,20 @@ struct AgentConfig {
     // use kRunNudgesBeforeEnding (agent) / kPlanNudgesBeforeEnding (plan).
     // `LMP_DEGENERATE_NUDGE_CAP=N` (positive integer) overrides when set.
     std::size_t degenerate_nudge_cap = 0;
+
+    // Pulse T1 degenerate gate (schema-only Choice over option logprobs). Default OFF.
+    // `LMP_PULSE=0|1` overrides when set. Tests set this field; they do not race on
+    // setenv. Product stays off until Mac labeled set KEEP.
+    bool pulse = false;
+
+    // Argmax only when P[choice] >= this floor; else fall back to #150 / stall heuristics.
+    // `LMP_PULSE_P_MIN` (float) overrides when set. Default 0.55.
+    float pulse_p_min = 0.55F;
+
+    // Test / probe seam: when set and pulse is on, T1 uses this instead of
+    // backend.pulse_decode(). Returning nullopt → policy Fallback (existing path).
+    // Production leaves this empty.
+    PulseProbe pulse_probe;
 };
 
 // How many of `max_new_tokens` stay reserved for the tool call after think ends.
@@ -486,6 +501,10 @@ class Agent {
     // No-op unless `config_.shadow_compact` and `kv_invalidated_by_compact_`.
     void maybe_warm_stable_prefix(const model::InferenceTask& task,
                                   const model::CancelToken& cancel);
+    // T1 Pulse gate at the #150 nudge seam. Journals `pulse`; returns the policy action
+    // (Fallback means keep existing nudge/stall heuristics).
+    [[nodiscard]] PulsePolicy run_pulse_t1(const model::CancelToken& cancel,
+                                           const char* when);
     // Drains the steer source into the context. Returns how many instructions landed.
     [[nodiscard]] std::size_t take_steering();
     [[nodiscard]] TurnResult::PlanOutcome apply_plan(
@@ -600,6 +619,10 @@ class Agent {
     // where the tokenizer has just produced it; read by the duplicate collapse, which pays
     // a full re-prefill and so must know whether the context is short of room first.
     std::size_t last_prompt_tokens_ = 0;
+    // Full prompt ids from the last step(), for Pulse T1 Extend (append questionnaire
+    // suffix without Reset when the ledger still agrees). Cleared on backend error.
+    std::vector<model::TokenId> last_prompt_ids_;
+    std::size_t last_checkpoint_at_ = 0;
     // Paths this run has written. A whole-file rewrite of one of them is the run editing
     // its OWN output, not destroying the operator's data -- see the approval gate.
     std::set<std::string> run_wrote_;

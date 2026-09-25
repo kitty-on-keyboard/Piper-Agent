@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -5523,6 +5524,164 @@ TEST(nudge_count_never_exceeds_configured_cap) {
 
     CHECK(report.nudged_count() <= 1);
     CHECK(report.iterations <= 2);
+}
+
+// Pulse flag-off (default): identical to #150 baseline — no `pulse` journal events.
+TEST(pulse_flag_off_matches_baseline_degenerate_path) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::string babble;
+    for (int i = 0; i < 10; ++i) {
+        babble += "x\n";
+    }
+    REQUIRE(loop::looks_degenerate(loop::shape_of(babble)));
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(text_turn(tok, "x", babble));
+    }
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = root + "/events.jsonl";
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_recovery = true;
+    config.degenerate_nudge_cap = 2;
+    config.pulse = false; // product default
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+    log.flush();
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK_EQ(report.nudged_count(), std::size_t{2});
+
+    const platform::FileContents tf = platform::read_file_whole(opts.path, 1U << 22);
+    REQUIRE(tf.ok());
+    CHECK(tf.bytes.find("\"kind\":\"pulse\"") == std::string::npos);
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+// Pulse on + high-confidence stall probe: end immediately (no remaining nudge budget).
+TEST(pulse_t1_stall_probe_ends_without_extra_nudges) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::string babble;
+    for (int i = 0; i < 10; ++i) {
+        babble += "x\n";
+    }
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 4; ++i) {
+        backend.enqueue_response(text_turn(tok, "x", babble));
+    }
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = root + "/events.jsonl";
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_recovery = true;
+    config.degenerate_nudge_cap = 3;
+    config.pulse = true;
+    config.pulse_p_min = 0.55F;
+    config.pulse_probe = []() -> std::optional<loop::PulseMicroResult> {
+        loop::PulseMicroResult r;
+        r.ok = true;
+        r.choice = loop::PulseChoice::Stall;
+        r.choice_name = "stall";
+        r.p = 0.92F;
+        r.p_vec = {0.02F, 0.03F, 0.92F, 0.03F};
+        r.latency_ms = 1.0;
+        r.kv_reuse = "probe";
+        return r;
+    };
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+    log.flush();
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    // Stall on first inert turn — no nudge notes spent.
+    CHECK_EQ(report.nudged_count(), std::size_t{0});
+    CHECK(report.iterations <= 2);
+
+    const platform::FileContents tf = platform::read_file_whole(opts.path, 1U << 22);
+    REQUIRE(tf.ok());
+    CHECK(tf.bytes.find("\"kind\":\"pulse\"") != std::string::npos);
+    CHECK(tf.bytes.find("\"policy\":\"stall\"") != std::string::npos);
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+// Pulse on but probe abstains → Fallback → same nudge path as flag-off.
+TEST(pulse_t1_fallback_keeps_heuristic_nudge) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    std::string babble;
+    for (int i = 0; i < 10; ++i) {
+        babble += "x\n";
+    }
+
+    model::ScriptedBackend backend;
+    for (int i = 0; i < 8; ++i) {
+        backend.enqueue_response(text_turn(tok, "x", babble));
+    }
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("do the work");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = root + "/events.jsonl";
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.degenerate_recovery = true;
+    config.degenerate_nudge_cap = 2;
+    config.pulse = true;
+    config.pulse_probe = []() -> std::optional<loop::PulseMicroResult> {
+        return std::nullopt; // abstain → Fallback
+    };
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+    log.flush();
+
+    CHECK_EQ(report.termination_reason, std::string("stalled"));
+    CHECK_EQ(report.nudged_count(), std::size_t{2});
+
+    const platform::FileContents tf = platform::read_file_whole(opts.path, 1U << 22);
+    REQUIRE(tf.ok());
+    CHECK(tf.bytes.find("\"kind\":\"pulse\"") != std::string::npos);
+    CHECK(tf.bytes.find("\"policy\":\"fallback\"") != std::string::npos);
+    (void)::system(("rm -rf " + root).c_str());
 }
 
 // A capped CREATE must name append_file and the path. The old observation only offered
