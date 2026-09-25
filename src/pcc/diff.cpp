@@ -152,14 +152,14 @@ void render_hunk(std::string& out, const std::vector<Op>& ops, const Hunk& hunk,
     std::size_t a_start = 0;
     std::size_t b_start = 0;
     for (std::size_t k = 0; k < hunk.begin; ++k) {
-        a_start += ops[k].tag != Tag::Insert ? 1 : 0;
-        b_start += ops[k].tag != Tag::Delete ? 1 : 0;
+        a_start += ops[k].tag != Tag::Insert ? std::size_t(1) : std::size_t(0);
+        b_start += ops[k].tag != Tag::Delete ? std::size_t(1) : std::size_t(0);
     }
     std::size_t a_count = 0;
     std::size_t b_count = 0;
     for (std::size_t k = hunk.begin; k < hunk.end; ++k) {
-        a_count += ops[k].tag != Tag::Insert ? 1 : 0;
-        b_count += ops[k].tag != Tag::Delete ? 1 : 0;
+        a_count += ops[k].tag != Tag::Insert ? std::size_t(1) : std::size_t(0);
+        b_count += ops[k].tag != Tag::Delete ? std::size_t(1) : std::size_t(0);
     }
     // An empty range is numbered by the line it follows, not by the line after it -- the
     // unified-diff convention, and what makes a pure insertion at the top read `-0,0`.

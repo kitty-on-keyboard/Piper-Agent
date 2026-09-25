@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+#include "src/tools/text_view.hpp"
+
 namespace edit_diagnostics {
 
 namespace detail {
@@ -229,7 +231,7 @@ struct Candidate {
         const std::size_t begin = s.line;
         const std::size_t end = std::min(lines.size(), begin + win - 1);
         for (std::size_t ln = begin; ln <= end; ++ln) {
-            c.snippet += std::to_string(ln);
+            lmp::tools::append_num(c.snippet, ln);
             c.snippet += '\t';
             c.snippet.append(lines[ln - 1].data(), lines[ln - 1].size());
             c.snippet += '\n';
@@ -255,13 +257,13 @@ struct Candidate {
     out += " — diagnostics only; similarity does not authorize a write]:\n";
     for (std::size_t i = 0; i < cands.size(); ++i) {
         out += "candidate ";
-        out += std::to_string(i + 1);
+        lmp::tools::append_num(out, i + 1);
         out += " (line ";
-        out += std::to_string(cands[i].line);
+        lmp::tools::append_num(out, cands[i].line);
         out += ", overlap ";
         // one decimal
         const int pct = static_cast<int>(cands[i].score * 100.0 + 0.5);
-        out += std::to_string(pct);
+        lmp::tools::append_num(out, pct);
         out += "%):\n```\n";
         out += cands[i].snippet;
         out += "```\n";
@@ -315,12 +317,12 @@ inline constexpr std::size_t kHunkMaxChars = 4000;
 inline void append_hunk_line(std::string& out, char sign, std::size_t number,
                              std::string_view text) {
     out += sign;
-    out += std::to_string(number);
+    lmp::tools::append_num(out, number);
     out += '\t';
     if (text.size() > kHunkMaxLineChars) {
         out.append(text.data(), kHunkMaxLineChars);
         out += "  ... (+";
-        out += std::to_string(text.size() - kHunkMaxLineChars);
+        lmp::tools::append_num(out, text.size() - kHunkMaxLineChars);
         out += " chars)";
     } else {
         out.append(text.data(), text.size());
@@ -384,7 +386,7 @@ inline void append_hunk_line(std::string& out, char sign, std::size_t number,
         if (want(emitted)) {
             detail::append_hunk_line(h.text, '-', p + i + 1, bl[p + i]);
         } else if (emitted == head) {
-            h.text += "   ... (" + std::to_string(changed - head - tail) + " more changed lines)\n";
+            h.text += "   ... ("; lmp::tools::append_num(h.text, changed - head - tail); h.text += " more changed lines)\n";
         }
         ++emitted;
     }
@@ -392,7 +394,7 @@ inline void append_hunk_line(std::string& out, char sign, std::size_t number,
         if (want(emitted)) {
             detail::append_hunk_line(h.text, '+', p + i + 1, al[p + i]);
         } else if (emitted == head) {
-            h.text += "   ... (" + std::to_string(changed - head - tail) + " more changed lines)\n";
+            h.text += "   ... ("; lmp::tools::append_num(h.text, changed - head - tail); h.text += " more changed lines)\n";
         }
         ++emitted;
     }
@@ -420,11 +422,11 @@ inline void append_hunk_line(std::string& out, char sign, std::size_t number,
         return out;
     }
     out += " at line ";
-    out += std::to_string(h.line);
+    lmp::tools::append_num(out, h.line);
     out += " (-";
-    out += std::to_string(h.removed);
+    lmp::tools::append_num(out, h.removed);
     out += "/+";
-    out += std::to_string(h.added);
+    lmp::tools::append_num(out, h.added);
     out += " lines). Applied hunk, with the file's CURRENT line numbers -- this is the "
            "whole change, so you do not need to read the file back to see it:\n";
     out += h.text;
