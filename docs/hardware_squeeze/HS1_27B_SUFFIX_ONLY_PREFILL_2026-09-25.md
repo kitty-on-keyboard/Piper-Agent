@@ -49,19 +49,23 @@ Then KILL HS1 codepath; keep harness; Research pivots (QuantizedKV or GJF micro)
 
 ```bash
 # Abort if another MLX holder is live. One model only.
-export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit   # confirm path on Mac
+# Tip env name (confirmed): LMP_QWEN_DIR  — see tests/model/diag_common.hpp
+export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit
 cd /Users/dev/Desktop/seans_projects_local/LM_Pipe_2/build/tests/model
+# Binary: ./lmp_diag   (cmake --preset dev && cmake --build --preset dev --target lmp_diag -j8)
 
-# After AE says harness green (exact subcommand per AE README):
+# B0 live KV (AE hands these; AE does not burn Mac wall):
 ./lmp_diag reuse 3 2048 128 32
 ./lmp_diag reuse 3 8192 128 32
 # Optional stretch if RAM OK:
 # ./lmp_diag reuse 3 32768 128 32
 
-# Cold contrast at same P+S — AE documents flag/subcommand.
+# Cold contrast at same P+S (full KV reset each run):
+./lmp_diag reuse --cold 3 2048 128 32
+./lmp_diag reuse --cold 3 8192 128 32
 ```
 
-Write raw logs under a results path AE/Benchbot agree (prefer `piper-bench/results/hardware_squeeze/hs1-27b-*.txt` if that tree is live again, else Research mirror). One-row verdict → `HS1_27B_RESULTS.md` (create on first burn).
+Raw logs: `piper-bench/results/hardware_squeeze/hs1-27b-*.txt` when that tree is live (else Research mirror). One-row verdict → `docs/hardware_squeeze/HS1_27B_RESULTS.md`. **GJF PR #226 stays a separate queue.**
 
 ## AE slice
 
