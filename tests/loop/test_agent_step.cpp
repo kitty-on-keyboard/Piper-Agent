@@ -21,6 +21,7 @@
 #include "src/loop/agent.hpp"
 #include "src/loop/token_stream.hpp"
 #include "src/model/backend.hpp"
+#include "src/model/kv_cache.hpp"
 #include "src/model/qwen_tokenizer.hpp"
 #include "src/platform/clock.hpp"
 #include "src/platform/event_log.hpp"
@@ -5568,6 +5569,140 @@ TEST(a_capped_write_file_is_told_to_append_the_rest) {
     }
     CHECK(told_to_append);
     CHECK(named_the_path);
+}
+
+// HS1 plan B: agent-shaped multi-turn prompts must checkpoint the honest fat stable
+// prefix (persona + tools + mission + history), not the ~11-token chat-header stump.
+// Algebra is checked with plan_turn_reuse (no GPU); ScriptedBackend does not own KV.
+TEST(hs1_agent_fat_history_plans_reuse_far_past_chat_header) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    // Distinctive fat shared body so a header-only checkpoint cannot accidentally pass.
+    const std::string mission =
+        "HS1_FAT_MISSION_MARKER unique agent wire prove string. "
+        "Build the module, run the check, and keep editing until green. "
+        "Shared history must sit inside checkpoint_at, not after a chat-header stump.";
+    const std::string write_body =
+        "<function=write_file>\n<parameter=path>\nhs1_probe.txt\n</parameter>\n"
+        "<parameter=content>\nHS1_FAT_WRITE_BODY_IN_HISTORY\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, write_body, "writing probe"));
+    backend.enqueue_response(text_turn(tok, "done think", "mission complete"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx(mission);
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+
+    REQUIRE(backend.received().size() >= 2);
+    const model::InferenceTask& turn1 = backend.received()[0];
+    const model::InferenceTask& turn2 = backend.received()[1];
+
+    // Product wire: checkpoint is fat on both generates (≫ chat-header false-friend).
+    CHECK(turn1.checkpoint_at > 11);
+    CHECK(turn2.checkpoint_at > 11);
+    CHECK(turn1.checkpoint_at <= turn1.prompt.size());
+    CHECK(turn2.checkpoint_at <= turn2.prompt.size());
+    CHECK(turn2.checkpoint_at > turn1.checkpoint_at);
+
+    const std::string t1_prefix(
+        tok.decode(std::vector<model::TokenId>(
+            turn1.prompt.begin(),
+            turn1.prompt.begin() + static_cast<std::ptrdiff_t>(turn1.checkpoint_at))));
+    CHECK(t1_prefix.find("HS1_FAT_MISSION_MARKER") != std::string::npos);
+    // Tools ride on the system message via the template — part of the fat prefix.
+    CHECK(t1_prefix.find("write_file") != std::string::npos ||
+          agent.tools_guidance().find("write_file") != std::string::npos);
+
+    const std::string t2_prefix(
+        tok.decode(std::vector<model::TokenId>(
+            turn2.prompt.begin(),
+            turn2.prompt.begin() + static_cast<std::ptrdiff_t>(turn2.checkpoint_at))));
+    CHECK(t2_prefix.find("HS1_FAT_MISSION_MARKER") != std::string::npos);
+    CHECK(t2_prefix.find("HS1_FAT_WRITE_BODY_IN_HISTORY") != std::string::npos);
+
+    // After turn 1 the live ledger is prompt + generated tail. Turn 2 inserts history
+    // before live-state and diverges after the fat shared prefix — Restore, not ~11.
+    model::KvCacheLedger ledger;
+    ledger.append(turn1.prompt);
+    ledger.append(tok.encode_content("gen_tail_a"));
+    ledger.append(tok.encode_content("gen_tail_b"));
+
+    const model::TurnReuse planned =
+        model::plan_turn_reuse(ledger, turn2.prompt, turn1.checkpoint_at,
+                               /*checkpoint_valid=*/true);
+    // New turn records land before live-state, so the ledger diverges after the fat
+    // shared prefix — Restore (not Extend, and never a header-sized stump).
+    CHECK(planned.mode == model::ReuseMode::Restore);
+    CHECK(planned.prefill_from > 11);
+    CHECK_EQ(planned.prefill_from, turn1.checkpoint_at);
+    const double reuse_frac = static_cast<double>(planned.prefill_from) /
+                              static_cast<double>(turn1.checkpoint_at);
+    CHECK(reuse_frac >= 0.95);
+}
+
+// Contrast: a header-only checkpoint on the same agent prompts is the ~11 false-friend.
+// Pins that fat history does not excuse a stump boundary (HS1 KEEP / plan B).
+TEST(hs1_agent_header_only_checkpoint_is_the_false_friend) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+
+    const std::string mission =
+        "HS1_HEADER_FALSE_FRIEND_MISSION body that must NOT count as reused when the "
+        "checkpoint stops at the chat header stump only.";
+    const std::string write_body =
+        "<function=list_dir>\n<parameter=path>\n.\n</parameter>\n</function>\n";
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(tok, write_body, "listing"));
+    backend.enqueue_response(text_turn(tok, "t", "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx(mission);
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    (void)agent.run(cancel);
+    REQUIRE(backend.received().size() >= 2);
+
+    const model::InferenceTask& turn1 = backend.received()[0];
+    const model::InferenceTask& turn2 = backend.received()[1];
+    REQUIRE(turn1.checkpoint_at > 11);
+
+    // Deliberately wrong: stump at 11 (or the true system-message start if somehow tiny).
+    const std::size_t header_only = 11;
+    REQUIRE(header_only < turn1.checkpoint_at);
+
+    model::KvCacheLedger ledger;
+    ledger.append(turn1.prompt);
+    ledger.append(model::TokenId{7});
+
+    const model::TurnReuse false_friend =
+        model::plan_turn_reuse(ledger, turn2.prompt, header_only,
+                               /*checkpoint_valid=*/true);
+    CHECK(false_friend.mode == model::ReuseMode::Restore);
+    CHECK_EQ(false_friend.prefill_from, header_only);
+    const double false_frac = static_cast<double>(false_friend.prefill_from) /
+                              static_cast<double>(turn1.checkpoint_at);
+    CHECK(false_frac < 0.95);
 }
 
 // After a write_file lands, the next turn's KV checkpoint is AT OR AFTER that call, so
