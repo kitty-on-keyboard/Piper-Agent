@@ -86,6 +86,15 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_AUTHORIZATION=secret_authz",
+        "XDG_AUTHENTICATION=secret_authn",
+        "LC_AUTHTOKEN=secret_authtoken",
+        "XDG_APITOKEN=secret_apitoken",
+        "LC_ACCESSKEY=secret_accesskey",
+        "XDG_CLIENTSECRET=secret_clientsecret",
+        "LC_REFRESHTOKEN=secret_refreshtoken",
+        "XDG_IDTOKEN=secret_idtoken",
+        "LC_SESSIONTOKEN=secret_sessiontoken",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +125,15 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_AUTHENTICATION"));
+    CHECK(!has_key(env, "LC_AUTHTOKEN"));
+    CHECK(!has_key(env, "XDG_APITOKEN"));
+    CHECK(!has_key(env, "LC_ACCESSKEY"));
+    CHECK(!has_key(env, "XDG_CLIENTSECRET"));
+    CHECK(!has_key(env, "LC_REFRESHTOKEN"));
+    CHECK(!has_key(env, "XDG_IDTOKEN"));
+    CHECK(!has_key(env, "LC_SESSIONTOKEN"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +199,15 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_AUTHORIZATION=secret",
+        "XDG_AUTHENTICATION=secret",
+        "LC_AUTHTOKEN=secret",
+        "XDG_APITOKEN=secret",
+        "LC_ACCESSKEY=secret",
+        "XDG_CLIENTSECRET=secret",
+        "LC_REFRESHTOKEN=secret",
+        "XDG_IDTOKEN=secret",
+        "LC_SESSIONTOKEN=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +244,15 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_AUTHENTICATION"));
+    CHECK(!has_key(env, "LC_AUTHTOKEN"));
+    CHECK(!has_key(env, "XDG_APITOKEN"));
+    CHECK(!has_key(env, "LC_ACCESSKEY"));
+    CHECK(!has_key(env, "XDG_CLIENTSECRET"));
+    CHECK(!has_key(env, "LC_REFRESHTOKEN"));
+    CHECK(!has_key(env, "XDG_IDTOKEN"));
+    CHECK(!has_key(env, "LC_SESSIONTOKEN"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
