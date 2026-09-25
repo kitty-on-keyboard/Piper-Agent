@@ -151,9 +151,29 @@ struct Candidate {
         });
     }
 
+    // First non-empty line of the want — used to break Jaccard ties when an earlier
+    // window only catches the want mid-window (e.g. `return 1` + blank + `def beta`
+    // ties `def beta` + `return 2`, and ascending line pick would prefer the wrong one).
+    std::vector<std::string_view> want_anchor;
+    {
+        std::vector<std::string_view> want_lines;
+        detail::split_lines(old_text, want_lines);
+        for (std::string_view wl : want_lines) {
+            std::vector<std::string_view> toks = detail::tokenize(wl);
+            if (!toks.empty()) {
+                want_anchor = std::move(toks);
+                break;
+            }
+        }
+    }
+
     struct Scored {
         std::size_t line;
         double score;
+        double anchor; // fraction of want's first non-empty line covered by the
+                       // window's first non-empty line (tie-break only)
+        bool start_aligned; // true when the window's first line is that match
+                            // (beats blank-led windows with the same anchor)
     };
     std::vector<Scored> scored;
     scored.reserve(n_lines);
@@ -193,17 +213,50 @@ struct Candidate {
             }
         }
 
+        double anchor = 0.0;
+        bool start_aligned = false;
+        if (!want_anchor.empty()) {
+            for (std::size_t j = i; j < end_j; ++j) {
+                if (line_info[j].token_count == 0) {
+                    continue;
+                }
+                std::size_t hits = 0;
+                for (std::string_view wt : want_anchor) {
+                    bool hit = false;
+                    detail::tokenize_cb(lines[j], [&](std::string_view tok) {
+                        if (tok == wt) {
+                            hit = true;
+                        }
+                    });
+                    if (hit) {
+                        ++hits;
+                    }
+                }
+                anchor = static_cast<double>(hits) / static_cast<double>(want_anchor.size());
+                // Prefer the window that opens on the matching line over one that
+                // only reaches it after a leading blank (same Jaccard + same anchor).
+                start_aligned = (j == i && anchor > 0.0);
+                break;
+            }
+        }
+
         if (b_size > 0 || want_size > 0) {
             const std::size_t uni = want_size + b_size - inter;
             const double score = (uni == 0) ? 0.0 : static_cast<double>(inter) / static_cast<double>(uni);
             if (score >= 0.35) {
-                scored.push_back(Scored{i + 1, score});
+                scored.push_back(Scored{i + 1, score, anchor, start_aligned});
             }
         }
     }
     std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
         if (a.score != b.score) {
             return a.score > b.score;
+        }
+        if (a.anchor != b.anchor) {
+            return a.anchor > b.anchor;
+        }
+        if (a.start_aligned != b.start_aligned) {
+            return a.start_aligned;
         }
         return a.line < b.line;
     });
