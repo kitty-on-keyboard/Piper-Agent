@@ -1149,6 +1149,14 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
                                   logits_host, r, t0, cfg);
     }
 
+    // Same breadcrumbs as decode_speculative, with speculative=0. HS1 Extend+plain
+    // decode is the uncovered path: if we die after prefill_done, these tell Benchbot
+    // whether the kill landed before the plain loop, at first-token sample, or after
+    // (SIGKILL cannot flush itself — fflush here is the whole point).
+    std::fprintf(stderr, "decode_begin speculative=0 mtp=%d prompt=%zu\n",
+                 impl_->model.has_mtp() ? 1 : 0, task.prompt.size());
+    std::fflush(stderr);
+
     Sampler sampler(task.sampling);
     std::vector<TokenId> recent;
     bool first_token = true;
@@ -1183,6 +1191,11 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             r.ttft_ms = ms_between(t0, clock_.mono());
             t_decode_start = clock_.mono();
             first_token = false;
+            // Mirrors decode_speculative: places a hang on either side of first token
+            // without a 27B CI job. On the plain path the first token is sampled from
+            // prefill logits; the next forward_logits below is the first decode GPU step.
+            std::fprintf(stderr, "decode_first_token ttft_ms=%.1f\n", r.ttft_ms);
+            std::fflush(stderr);
         }
         ++r.tokens_generated;
         recent.push_back(pick.id);
