@@ -9,6 +9,7 @@
 #include "qwen35_moe_config.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -1010,6 +1011,17 @@ private:
         if (kv_quant_bits() > 0 && !qcache.active() && L == 1 &&
             cache.offset >= kv_quant_after()) {
             qcache.adopt_from(cache, /*gs=*/64, kv_quant_bits());
+            // Once-per-session breadcrumb so Benchbot B1 cannot be a silent no-op:
+            // adopt runs per full-attention layer; grep the line, not a per-layer flood.
+            if (qcache.active()) {
+                static std::atomic<bool> kv_quant_adopt_logged{false};
+                bool expected = false;
+                if (kv_quant_adopt_logged.compare_exchange_strong(expected, true)) {
+                    std::fprintf(stderr, "kv_quant adopt bits=%d after=%d offset=%d gs=64\n",
+                                 kv_quant_bits(), kv_quant_after(), cache.offset);
+                    std::fflush(stderr);
+                }
+            }
             // Drop the bf16 copy. Keeping it would leave the cache costing 20 KB/token
             // AND 10.6 KB/token on a host where the KV budget is what decides how long a
             // run can get -- the bandwidth win would be real and the memory win lost.
