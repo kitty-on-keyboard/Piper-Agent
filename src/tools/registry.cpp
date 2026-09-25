@@ -761,17 +761,22 @@ ToolResult Registry::read_one_file(const std::string& path) {
             head = head.substr(0, nl);
         }
         const std::size_t shown_lines = count_lines(head);
+        std::string msg = number_lines(head, 1) + "\n[TRUNCATED: showing lines 1-";
+        lmp::tools::append_num(msg, shown_lines);
+        msg += " of ";
+        lmp::tools::append_num(msg, total_lines);
+        msg += ". " + path + " is ";
+        lmp::tools::append_num(msg, f.bytes.size());
+        msg += " bytes, over the ";
+        lmp::tools::append_num(msg, ctx_.max_model_read_bytes);
+        msg += "-byte prompt budget. Read on with read_slice(" + path + ", ";
+        lmp::tools::append_num(msg, shown_lines + 1);
+        msg += ", ";
+        lmp::tools::append_num(msg, total_lines);
+        msg += "). You have NOT seen this whole file, so write_file will refuse it -- "
+               "change it with replace_in_file on the section you are editing.]";
         return measured_read(
-            ToolResult::okay(
-                number_lines(head, 1) + "\n[TRUNCATED: showing lines 1-" +
-                std::to_string(shown_lines) + " of " + std::to_string(total_lines) +
-                ". " + path + " is " + std::to_string(f.bytes.size()) +
-                " bytes, over the " + std::to_string(ctx_.max_model_read_bytes) +
-                "-byte prompt budget. Read on with read_slice(" + path + ", " +
-                std::to_string(shown_lines + 1) + ", " +
-                std::to_string(total_lines) +
-                "). You have NOT seen this whole file, so write_file will refuse it -- "
-                "change it with replace_in_file on the section you are editing.]"),
+            ToolResult::okay(std::move(msg)),
             head.size());
     }
     // An empty file is a FACT, and it has to be stated. Returning "" makes a
@@ -890,10 +895,14 @@ Registry::Registry(WorkspaceContext ctx)
             }
             // The summary says what it COST, because that is the part the model cannot
             // see and the part that competes with everything else in the context.
-            ToolResult r = ToolResult::okay(
-                "(" + path + ": " + std::to_string(img.width) + "x" +
-                std::to_string(img.height) + " image, shown to you as " +
-                std::to_string(pre.token_count()) + " tokens)");
+            std::string msg = "(" + path + ": ";
+            lmp::tools::append_num(msg, img.width);
+            msg += "x";
+            lmp::tools::append_num(msg, img.height);
+            msg += " image, shown to you as ";
+            lmp::tools::append_num(msg, pre.token_count());
+            msg += " tokens)";
+            ToolResult r = ToolResult::okay(std::move(msg));
             r.images.push_back(path);
             r.bytes_read = img.rgb.size();
             return r;
@@ -1432,11 +1441,10 @@ Registry::Registry(WorkspaceContext ctx)
                 rank_symbol_hits(candidates, sym, 40, suppressed);
             std::string out;
             for (const SymbolHit& h : hits) {
-                out += h.path + ":" + std::to_string(h.line) + ":" + h.text + "\n";
+                out += h.path; out += ":"; lmp::tools::append_num(out, h.line); out += ":"; out += h.text; out += "\n";
             }
             if (suppressed > 0) {
-                out += "[" + std::to_string(suppressed) +
-                       " lower-ranked match(es) not shown]\n";
+                out += "["; lmp::tools::append_num(out, suppressed); out += " lower-ranked match(es) not shown]\n";
             }
             return ToolResult::okay(std::move(out));
         });
@@ -1733,7 +1741,7 @@ Registry::Registry(WorkspaceContext ctx)
                     std::size_t next_nl = f.bytes.find('\n', at);
                     std::size_t stop = (next_nl == std::string::npos) ? f.bytes.size() : next_nl + 1;
                     if (curr_line >= start_line) {
-                        snippet += std::to_string(curr_line) + "\t";
+                        lmp::tools::append_num(snippet, curr_line); snippet += "\t";
                         snippet.append(f.bytes, at, stop - at);
                     }
                     if (next_nl == std::string::npos) break;
