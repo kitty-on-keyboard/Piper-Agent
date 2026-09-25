@@ -108,6 +108,10 @@ class TurnGrammar final : public MaskSource {
     // Only a structural id moves the phase, so only a structural id ends the block.
     [[nodiscard]] bool is_block_boundary(TokenId id) const final { return is_structural(id); }
 
+    // See MaskSource::propose_forced_jump. Uses ToolCallGuard card==1 spans only
+    // inside ToolCall phase; never FreeText.
+    [[nodiscard]] std::vector<TokenId> propose_forced_jump() const final;
+
     [[nodiscard]] TurnPhase phase() const noexcept { return phase_; }
     [[nodiscard]] const std::vector<TokenId>& think_ids() const noexcept { return think_; }
     [[nodiscard]] const std::vector<TokenId>& text_ids() const noexcept { return text_; }
@@ -242,6 +246,10 @@ class ThinkCapMask final : public MaskSource {
         return g_.is_block_boundary(id);
     }
 
+    [[nodiscard]] std::vector<TokenId> propose_forced_jump() const final {
+        return g_.propose_forced_jump();
+    }
+
   private:
     [[nodiscard]] bool at_cap() const noexcept {
         return cap_ > 0 && g_.phase() == TurnPhase::Think && g_.think_ids().size() >= cap_;
@@ -289,6 +297,10 @@ class ToolCapMask final : public MaskSource {
     bool probe_advance(TokenId id) final { return inner_.probe_advance(id); }
     [[nodiscard]] bool is_block_boundary(TokenId id) const final {
         return inner_.is_block_boundary(id);
+    }
+
+    [[nodiscard]] std::vector<TokenId> propose_forced_jump() const final {
+        return inner_.propose_forced_jump();
     }
 
   private:

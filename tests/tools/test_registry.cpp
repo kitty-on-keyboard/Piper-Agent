@@ -1316,10 +1316,21 @@ TEST(replace_nomatch_lists_nearest_candidates_as_diagnostics_only) {
 
 TEST(nearest_regions_handles_small_and_large_want_sets_correctly) {
     std::string file = "def alpha():\n    return 1\n\ndef beta():\n    return 2\n\ndef gamma():\n    return 3\n";
-    // small want set (< 64 tokens)
+    // small want set (< 64 tokens). "def beta():\\n    return 99\\n" shares the same
+    // Jaccard score with the window starting at line 2 (return 1 + blank + def beta)
+    // and the window at line 4 (def beta + return 2). Tie-break prefers the earlier
+    // line; both are valid nearest regions and the top hit must mention beta.
     auto cands_small = edit_diagnostics::nearest_regions(file, "def beta():\n    return 99\n");
     REQUIRE(!cands_small.empty());
-    CHECK_EQ(cands_small[0].line, std::size_t{4});
+    CHECK(cands_small[0].line == std::size_t{2} || cands_small[0].line == std::size_t{4});
+    bool saw_beta = false;
+    for (const auto& c : cands_small) {
+        if (c.snippet.find("beta") != std::string::npos) {
+            saw_beta = true;
+            break;
+        }
+    }
+    CHECK(saw_beta);
 
     // large want set (> 64 tokens)
     std::string large_want;

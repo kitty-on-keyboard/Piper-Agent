@@ -13,6 +13,7 @@
 
 #include "src/loop/parallel_calls.hpp"
 #include "src/loop/token_stream.hpp"
+#include "src/model/grammar_jump_forward.hpp"
 #include "src/model/mlx_backend.hpp"
 #include "src/platform/fs.hpp"
 #include "src/tools/apply_patch.hpp"
@@ -1172,6 +1173,9 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     task.checkpoint_at = stable < offsets.size() ? offsets[stable] : 0;
     task.max_new_tokens = config_.max_new_tokens;
     task.sampling = config_.sampling;
+    // Exact `1` enables grammar jump-forward (default off). Same discipline as
+    // LMP_ENUM_MASK / LMP_SHADOW_COMPACT.
+    task.grammar_jump_forward = model::grammar_jump_forward_enabled();
     // config_.seed stays authoritative over the sampling block's own field: it is the
     // one the run is reproducible from -- but it is the seed of the RUN, not of the turn,
     // and handing the same value to every generation is what made stuck runs unbreakable.

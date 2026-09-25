@@ -14,7 +14,9 @@
 
 #include "parsephony/parsephony.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -69,6 +71,25 @@ struct ByteSet {
         return c < 64 ? (lo >> c) & 1 : (hi >> (c - 64)) & 1;
     }
     bool empty() const noexcept { return lo == 0 && hi == 0 && !non_ascii; }
+
+    // ASCII bits set, plus a large constant when non_ascii is open so cardinality
+    // == 1 is unreachable there (grammar jump-forward never treats FreeText/UTF-8
+    // bodies as unique).
+    size_t count() const noexcept {
+        size_t c = static_cast<size_t>(__builtin_popcountll(lo) + __builtin_popcountll(hi));
+        if (non_ascii) c += 128;
+        return c;
+    }
+
+    // The sole allowed next ASCII byte when cardinality == 1; nullopt otherwise.
+    std::optional<unsigned char> unique_byte() const noexcept {
+        if (non_ascii) return std::nullopt;
+        if (static_cast<size_t>(__builtin_popcountll(lo) + __builtin_popcountll(hi)) != 1) {
+            return std::nullopt;
+        }
+        if (lo != 0) return static_cast<unsigned char>(__builtin_ctzll(lo));
+        return static_cast<unsigned char>(64 + __builtin_ctzll(hi));
+    }
 };
 
 // ---------------------------------------------------------------------------

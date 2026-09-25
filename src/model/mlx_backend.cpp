@@ -13,6 +13,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/model/grammar_jump_forward.hpp"
 #include "src/model/sampler.hpp"
 
 #ifdef LMP_HAVE_MLX
@@ -1153,6 +1154,10 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     std::vector<TokenId> recent;
     bool first_token = true;
     auto t_decode_start = clock_.mono();
+    // Jump-forward only on the plain path (not speculative) so ToolCallGuard
+    // checkpoint/rollback under MTP/SuffixProposer drafts stays untouched.
+    const bool jump_forward =
+        task.grammar_jump_forward || grammar_jump_forward_enabled();
 
     while (r.tokens_generated < task.max_new_tokens) {
         if (cancel.cancelled()) {
@@ -1163,6 +1168,69 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             r.status = GenStatus::LengthCapped;
             break;
         }
+
+        // Zero-entropy grammar jump: one append-N over a card==1 span ≥8 bytes
+        // instead of per-token Metal forwards. Encode failure → fall through.
+        if (jump_forward && task.mask != nullptr) {
+            const std::vector<TokenId> jump_ids = task.mask->propose_forced_jump();
+            if (jump_ids.size() >= 1) {
+                // Cap so we do not overrun max_new_tokens mid-span.
+                std::vector<TokenId> take;
+                take.reserve(jump_ids.size());
+                for (TokenId id : jump_ids) {
+                    if (r.tokens_generated + static_cast<std::int32_t>(take.size()) >=
+                        task.max_new_tokens) {
+                        break;
+                    }
+                    take.push_back(id);
+                }
+                if (take.size() >= 1) {
+                    if (first_token) {
+                        r.ttft_ms = ms_between(t0, clock_.mono());
+                        t_decode_start = clock_.mono();
+                        first_token = false;
+                    }
+                    const auto t_f0 = clock_.mono();
+                    // Existing append-N seam: forward_logits consumes the whole
+                    // span in one eval and leaves logits for the next sample.
+                    mx::array ids = mx::array(take.data(),
+                                              {1, static_cast<int>(take.size())},
+                                              mx::int32);
+                    mx::array logits = impl_->model.forward_logits(ids);
+                    mx::eval(logits);
+                    const auto t_f1 = clock_.mono();
+                    logits_to_host(logits, logits_host);
+                    const auto t_f2 = clock_.mono();
+                    r.forward_ms += ms_between(t_f0, t_f1);
+                    r.logits_copy_ms += ms_between(t_f1, t_f2);
+                    ledger_.append(take);
+
+                    bool stop = false;
+                    for (TokenId id : take) {
+                        ++r.tokens_generated;
+                        recent.push_back(id);
+                        if (recent.size() > kPenaltyWindow) {
+                            recent.erase(recent.begin());
+                        }
+                        if (!sink.on_token(id)) {
+                            r.status = GenStatus::Complete;
+                            stop = true;
+                            break;
+                        }
+                        if (task.mask != nullptr && task.mask->budget_exhausted()) {
+                            r.status = GenStatus::LengthCapped;
+                            stop = true;
+                            break;
+                        }
+                    }
+                    if (stop) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
         const auto t_s0 = clock_.mono();
         // ONE mask lookup per step, not one predicate call per vocabulary id.
         const TokenMask* mask = task.mask != nullptr ? &task.mask->mask() : nullptr;

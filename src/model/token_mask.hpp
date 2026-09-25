@@ -170,6 +170,14 @@ class MaskSource {
         (void)id;
         return true;
     }
+
+    // Grammar jump-forward (v0): when LMP_GRAMMAR_JUMP_FORWARD=1 and the tool-XML
+    // guard has a contiguous card==1 non-FreeText span of ≥8 bytes, return the
+    // token ids that spell that span for one KV append-N. Empty = no jump (flag
+    // off, FreeText, card>1, short span, or encode failure). Default never.
+    // Speculative decode must not call this — checkpoint/rollback of the guard
+    // stays on the ordinary draft path.
+    [[nodiscard]] virtual std::vector<TokenId> propose_forced_jump() const { return {}; }
 };
 
 } // namespace lmp::model
