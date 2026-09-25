@@ -19,7 +19,7 @@
 //                           calls on one live KV with an EXPLICIT byte-identical shared
 //                           prefix of exactly P tokens, then suffix S on turn 2.
 //                           --cold: full KV reset each run (cold prefill of P+S).
-//                           See docs/hardware_squeeze/HS1_RESULTS.md.
+//                           See docs/hardware_squeeze/HS1_27B_RESULTS.md.
 //   lmp_diag graph [prompt] the decode step's graph as dot, unevaluated -- the only
 //                           subcommand here that is not a timing. Diff its primitive
 //                           histogram against mlx-lm's with scripts/graph_histogram.py
