@@ -115,6 +115,45 @@ Primary P∈{2048,8192}. Optional P=512 / P=32768 for characterization only.
 ctest --preset gate -R test_kv_reuse --output-on-failure
 ```
 
+## Dig instrumentation (measure-only, 2026-09-25)
+
+B0 `reuse 3 2048` died early after `mem at=prefill_done` with no `run 0 turn1:` line
+(hypothesis ~0.65: first **plain-decode GPU** after Extend prefill + `clear_cache`, not
+runs>1). Speculative-path breadcrumbs already existed; plain path was uncovered.
+
+**Landed (no product flag / no `LMP_SUFFIX_PREFILL`):**
+
+1. Plain-path stderr breadcrumbs (same format as speculative):
+   - `decode_begin speculative=0 mtp=%d prompt=%zu`
+   - `decode_first_token ttft_ms=%.1f`
+2. `fflush(stdout)` after `cmd_reuse` per-run prints + turn begin lines before each
+   `generate()` (`run N turn1 begin` / `turn2 begin` / `cold begin`).
+3. Parent death trap: `scripts/lmp_diag_trap.sh` — records END + ec/signal (137 ⇒ SIGKILL).
+
+### Lone Benchbot probe (AE does not burn Mac wall)
+
+```bash
+export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit
+# rebuild tip of hs1-suffix-prefill → build/tests/model/lmp_diag
+cmake --preset dev && cmake --build --preset dev --target lmp_diag -j8
+cd /Users/dev/Desktop/seans_projects_local/LM_Pipe_2/build/tests/model
+
+# ONE lone probe under the trap (+ optional /usr/bin/time -l). No full 4-arm suite.
+../../scripts/lmp_diag_trap.sh ./lmp_diag reuse 2 2048 128 32
+# or: ../../scripts/lmp_diag_trap.sh ./lmp_diag reuse 3 2048 128 32
+```
+
+Reading the dig:
+
+| Last breadcrumb seen | Likely death locus |
+|----------------------|--------------------|
+| `prefill_done`, no `decode_begin speculative=0` | before plain decode entry |
+| `decode_begin speculative=0`, no `decode_first_token` | first-token sample from prefill logits |
+| `decode_first_token` then silence | at/after first plain decode GPU |
+| trap `END ec=137 signal=SIGKILL` | external/jetsam kill |
+
+Raw dig logs: `piper-bench/results/hardware_squeeze/hs1-27b-dig-*.txt` when that tree is live.
+
 ## Out of scope / parked
 
 QuantizedKV (HS2), MTP draft_cost_ratio, parsephony FF, **GJF PR #226** (separate Mac micro queue), warm LSP, Pulse/OpenJev/tiny-gate, **A3B**, second heavy model, GEMM, MLX fork, dual KV, middle-drop.

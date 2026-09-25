@@ -42,3 +42,11 @@ piper run --task /path/to/bowling_seed7_task.json \
 ```
 
 Mission: Aider polyglot bowling, seed 7. Confirm hang: after a Restore prefill that jumps prompt by ~4k tokens (batched file reads), stderr shows `prefill_done` and then neither `decode_begin` nor `[spec]` until timeout. Fixed build should print `decode_begin` then `decode_first_token` and `[spec]` stats.
+
+## Plain-path breadcrumbs (HS1 dig, 2026-09-25)
+
+The speculative loop already printed `decode_begin speculative=1 …` and
+`decode_first_token ttft_ms=…`. Extend + **plain** decode (speculation off) was
+uncovered — HS1 B0 deaths after `prefill_done` left no placement. The plain path now
+emits the same pair with `speculative=0` (see `MlxBackend::generate_impl`). Still
+measure-only; does not change decode behavior.

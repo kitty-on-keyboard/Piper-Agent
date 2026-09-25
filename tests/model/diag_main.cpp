@@ -1388,6 +1388,7 @@ std::size_t shared_prefix_len(const std::vector<TokenId>& a, const std::vector<T
 int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool cold) {
     if (runs < 1 || prefix_tokens < 1 || suffix_tokens < 1 || max_new < 1) {
         std::printf("reuse: runs, P, S, max_new must all be >= 1\n");
+        std::fflush(stdout);
         return 2;
     }
 
@@ -1395,6 +1396,7 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
     LoadStatus st = tok.load(std::string(qwen_dir()) + "/tokenizer.json", Family::Qwen3);
     if (!st.ok) {
         std::printf("tok fail: %s\n", st.error.c_str());
+        std::fflush(stdout);
         return 1;
     }
 
@@ -1404,16 +1406,22 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
     st = backend.load({qwen_dir(), draft_dir()});
     if (!st.ok) {
         std::printf("model load fail: %s\n", st.error.c_str());
+        std::fflush(stdout);
         return 1;
     }
     std::printf("model load: %.1f s  [%s]\n", ms(t_load0, Clock::now()) / 1000.0,
                 draft_dir()[0] != '\0' ? "MTP draft head loaded" : "plain decode");
+    std::fflush(stdout);
     std::printf("HS1 reuse%s: runs=%d P=%d S=%d max_new=%d\n", cold ? " --cold" : "", runs,
                 prefix_tokens, suffix_tokens, max_new);
+    std::fflush(stdout);
     std::printf("P_shared := length of byte-identical leading token span of turn1/turn2 "
                 "prompts\n");
+    std::fflush(stdout);
     std::printf("         (constructed as exactly P content tokens; checkpoint_at = P)\n");
+    std::fflush(stdout);
     std::printf("model_dir=%s\n", qwen_dir());
+    std::fflush(stdout);
 
     const std::vector<TokenId> shared = exact_n_tokens(tok, prefix_tokens, "HS1_PREFIX");
     const std::vector<TokenId> suffix = exact_n_tokens(tok, suffix_tokens, "HS1_SUFFIX");
@@ -1452,6 +1460,9 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
             task.sampling.seed = 7;
             CapSink sink(max_new);
             CancelToken cancel;
+            std::printf("  run %d cold begin: prompt=%zu P_shared=%zu\n", run,
+                        task.prompt.size(), shared.size());
+            std::fflush(stdout);
             const GenResult r = backend.generate(task, sink, cancel);
             const std::size_t p_shared = shared.size(); // definitionally P
             std::printf("  run %d cold: prompt=%zu P_shared=%zu reused=%zu reuse_frac=%.3f "
@@ -1464,9 +1475,11 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
                         r.ttft_ms, r.prefill_tok_per_s, r.decode_tok_per_s,
                         r.reuse_mode.c_str(), r.reuse_reason.c_str(), r.tokens_generated,
                         static_cast<int>(r.status));
+            std::fflush(stdout);
             if (r.prefill_reused_tokens != 0) {
                 std::printf("  FAIL: cold arm expected prefill_reused_tokens==0, got %zu\n",
                             r.prefill_reused_tokens);
+                std::fflush(stdout);
             }
             cold_ttft.add(r.ttft_ms);
             continue;
@@ -1483,6 +1496,9 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
         task1.sampling.seed = 7;
         CapSink sink1(max_new);
         CancelToken cancel;
+        std::printf("  run %d turn1 begin: prompt=%zu checkpoint_at=%zu\n", run,
+                    task1.prompt.size(), task1.checkpoint_at);
+        std::fflush(stdout);
         const GenResult r1 = backend.generate(task1, sink1, cancel);
         std::printf("  run %d turn1: prompt=%zu reused=%zu ttft=%.0fms "
                     "prefill=%.1f decode=%.1f mode=%s reason=%s tokens=%d status=%d\n",
@@ -1490,9 +1506,11 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
                     r1.prefill_tok_per_s, r1.decode_tok_per_s, r1.reuse_mode.c_str(),
                     r1.reuse_reason.c_str(), r1.tokens_generated,
                     static_cast<int>(r1.status));
+        std::fflush(stdout);
         if (r1.prefill_reused_tokens != 0) {
             std::printf("  FAIL: turn1 expected prefill_reused_tokens==0 (cold), got %zu\n",
                         r1.prefill_reused_tokens);
+            std::fflush(stdout);
         }
 
         InferenceTask task2;
@@ -1502,6 +1520,9 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
         task2.sampling.temperature = 0.0F;
         task2.sampling.seed = 7;
         CapSink sink2(max_new);
+        std::printf("  run %d turn2 begin: prompt=%zu checkpoint_at=%zu\n", run,
+                    task2.prompt.size(), task2.checkpoint_at);
+        std::fflush(stdout);
         const GenResult r2 = backend.generate(task2, sink2, cancel);
 
         const std::size_t p_shared = shared_prefix_len(task1.prompt, task2.prompt);
@@ -1516,13 +1537,16 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
                     r2.ttft_ms, r2.prefill_tok_per_s, r2.decode_tok_per_s,
                     r2.reuse_mode.c_str(), r2.reuse_reason.c_str(), r2.tokens_generated,
                     static_cast<int>(r2.status));
+        std::fflush(stdout);
         if (p_shared != shared.size()) {
             std::printf("  FAIL: P_shared=%zu != constructed P=%zu -- prefix construction "
                         "bug\n",
                         p_shared, shared.size());
+            std::fflush(stdout);
         }
         if (r2.prefill_reused_tokens == 0) {
             std::printf("  FAIL: turn2 reused==0 -- suffix-only prefill did not fire\n");
+            std::fflush(stdout);
         }
 
         t1_ttft.add(r1.ttft_ms);
@@ -1534,12 +1558,16 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
 
     if (cold) {
         std::printf("\nHS1 cold full prefill of P+S, %d runs:\n", runs);
+        std::fflush(stdout);
         cold_ttft.print("cold ttft", "ms", 0.0);
         std::printf("Compare median cold ttft to live turn2 ttft from:\n");
+        std::fflush(stdout);
         std::printf("  ./lmp_diag reuse %d %d %d %d\n", runs, prefix_tokens, suffix_tokens,
                     max_new);
+        std::fflush(stdout);
     } else {
         std::printf("\nHS1 live suffix-only, %d runs (P_shared=%d):\n", runs, prefix_tokens);
+        std::fflush(stdout);
         t1_ttft.print("t1 ttft", "ms", 0.0);
         t2_ttft.print("t2 ttft", "ms", 0.0);
         t2_reused.print("t2 reused", "tok", 0.0);
@@ -1547,9 +1575,12 @@ int cmd_reuse(int runs, int prefix_tokens, int suffix_tokens, int max_new, bool 
         t2_decode.print("t2 decode", "tok/s", 0.0);
         std::printf("Pass bar (Benchbot on Qwen3.8-27B-MLX-4bit): median reuse_frac >= 0.95 "
                     "at P=2048 and P=8192,\n");
+        std::fflush(stdout);
         std::printf("and turn2 ttft >=5%% better than cold full prefill of P+S:\n");
+        std::fflush(stdout);
         std::printf("  ./lmp_diag reuse --cold %d %d %d %d\n", runs, prefix_tokens,
                     suffix_tokens, max_new);
+        std::fflush(stdout);
     }
     return 0;
 }
