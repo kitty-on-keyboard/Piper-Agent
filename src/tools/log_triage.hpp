@@ -823,26 +823,35 @@ inline void parse_counts(std::string_view log, StructuredTriage& t) {
         } else if (starts_with(log.substr(j), "passed") && t.passed < 0) {
             t.passed = n;
         }
-        i = j;
+        // Fast path: stop scanning once both test counts are found.
+        if (t.failed >= 0 && t.passed >= 0) {
+            break;
+        }
+        if (j > 0) {
+            i = j - 1;
+        }
     }
     // ctest: "92% tests passed, 1 tests failed out of 13"
-    const std::size_t ctest = log.find("tests failed out of");
-    if (ctest != std::string_view::npos) {
-        // walk back for "N tests failed"
-        std::size_t k = ctest;
-        while (k > 0 && !is_digit(log[k - 1])) {
-            --k;
-        }
-        std::size_t end = k;
-        while (k > 0 && is_digit(log[k - 1])) {
-            --k;
-        }
-        if (end > k) {
-            int n = 0;
-            for (std::size_t p = k; p < end; ++p) {
-                n = n * 10 + (log[p] - '0');
+    // Skip ctest string search if failure count is already populated.
+    if (t.failed < 0) {
+        const std::size_t ctest = log.find("tests failed out of");
+        if (ctest != std::string_view::npos) {
+            // walk back for "N tests failed"
+            std::size_t k = ctest;
+            while (k > 0 && !is_digit(log[k - 1])) {
+                --k;
             }
-            t.failed = n;
+            std::size_t end = k;
+            while (k > 0 && is_digit(log[k - 1])) {
+                --k;
+            }
+            if (end > k) {
+                int n = 0;
+                for (std::size_t p = k; p < end; ++p) {
+                    n = n * 10 + (log[p] - '0');
+                }
+                t.failed = n;
+            }
         }
     }
 }
