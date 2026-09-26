@@ -12,7 +12,8 @@
 
 **KEEP.** Bars met at P=2048 and P=8192. Tip Extend/Restore algebra already delivers
 suffix-only prefill on the honest harness. **Hold `LMP_SUFFIX_PREFILL` — not needed**
-(measure-only; do not implement).
+(measure-only; do not implement). Product follow-up is plan B (honest agent
+`checkpoint_at`): [`HS1_FAT_CHECKPOINT_PRODUCT.md`](./HS1_FAT_CHECKPOINT_PRODUCT.md).
 
 All four trap arms: `END ec=0 DIED_EARLY=0`.
 
@@ -26,7 +27,11 @@ export LMP_QWEN_DIR=/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit
 
 ## Product change
 
-**None.** Measure-only KEEP. No product patch and **no `LMP_SUFFIX_PREFILL`**.
+**Plan B shipped separately:** honest fat `checkpoint_at` on live agent turns so the KEEP
+algebra is the product path. See
+[`HS1_FAT_CHECKPOINT_PRODUCT.md`](./HS1_FAT_CHECKPOINT_PRODUCT.md).
+
+This RESULTS note itself remains the **measure-only KEEP** record. **No `LMP_SUFFIX_PREFILL`.**
 
 ## P_shared definition
 

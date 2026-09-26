@@ -1166,8 +1166,17 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
     // re-renders and re-tokenizes the whole context, and a batched turn would do it four
     // times to answer a question this number already answers.
     last_prompt_tokens_ = task.prompt.size();
-    // Everything except the live-state block, which changes every turn. The backend
-    // snapshots here so the next turn rolls back instead of re-prefilling the context.
+    // HS1 plan B — honest fat checkpoint_at (product path).
+    //
+    // Snapshot at the end of the STABLE message prefix: system (persona / reasoning /
+    // mode / tools-via-template / workspace) + mission + uncompacted history. The
+    // live-state block is excluded because it mutates every turn. `offsets[stable]` is
+    // that boundary because render_with_offsets records the START of each message.
+    //
+    // Do NOT substitute offsets[1] / "start of last user message" / a chat-header stump.
+    // That was the 2026-09-03 false-friend (~11 reused tokens) the honest lmp_diag
+    // harness and tests/model/test_kv_reuse.cpp pin. plan_turn_reuse then Extend|Restore
+    // at this fat P; never force Extend past an id mismatch (no LMP_SUFFIX_PREFILL).
     const std::size_t stable = ctx_.stable_message_count("");
     task.checkpoint_at = stable < offsets.size() ? offsets[stable] : 0;
     task.max_new_tokens = config_.max_new_tokens;

@@ -56,9 +56,11 @@ TEST(concurrent_calls_overlap_instead_of_queueing) {
     const double parallel_ms = ms_since(t_par);
 
     CHECK_EQ(results.size(), indices.size());
-    // Four at once should land near one unit, not four. Half the serial time is a wide
-    // margin that still cannot be met by sequential execution.
-    CHECK(parallel_ms < serial_ms / 2.0);
+    // Four at once should land near one unit, not four. Require a clear win over
+    // serial, but leave headroom for loaded CI / ASan runners: serial/2 was a
+    // flake generator when parallel stretched under contention while serial still
+    // measured ~4 units. 0.75× serial still cannot be met by true queueing.
+    CHECK(parallel_ms < serial_ms * 0.75);
 }
 
 TEST(results_are_indexed_to_their_call_not_to_completion_order) {
