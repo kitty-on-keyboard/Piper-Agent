@@ -47,7 +47,11 @@ ctest --preset gate -R 'hs1_agent_fat_history|hs1_checkpoint_at_chat_header|hs1_
 - `hs1_agent_header_only_checkpoint_is_the_false_friend` — stump@11 on the same prompts
 - `tests/model/test_kv_reuse.cpp` — algebra fat-P Restore + header false-friend
 
-## HS1-LIVE prove (Mac — document only; after HS2)
+## HS1-LIVE prove (Mac — document only; waits on Research/Sean GO)
+
+**HS2 QuantizedKV is INFRA HOLD (2026-09-25)** — not a Mac wall for HS1. Mac is **free
+for HS1-LIVE** when Research/Sean GO. Do **not** wait on QuantizedKV remounts / B1
+MTLCompiler deaths.
 
 - **Model:** Qwen3.8-27B-MLX-4bit only  
 - **Shape:** ≥4 agent generates, multi-tool edit/Godoer-class, **medium** think — **not**
@@ -57,9 +61,7 @@ ctest --preset gate -R 'hs1_agent_fat_history|hs1_checkpoint_at_chat_header|hs1_
   `kv_reuse`), and reused **≫ 11**; mode Extend|Restore when prefix should be stable; no
   Reset storm; mission OK  
 - **Optional A0:** `LMP_FORCE_KV_RESET=1` if present — TTFT ≥5% worse than B path  
-- **Kill:** still ~11 reuse after ≤1 B fix, or forced-Extend wrong-answer bugs  
-
-Mac wall sits behind HS2 #228 unless reordered.
+- **Kill:** still ~11 reuse after ≤1 B fix, or forced-Extend wrong-answer bugs
 
 ## Cross-links
 
