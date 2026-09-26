@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/pcc/recall.hpp"
@@ -1978,6 +1979,38 @@ TEST(commit_think_block_sandbox_and_overwrite_gates_match_write_file) {
     CHECK(clobber.summary.find("read_file") != std::string::npos);
     CHECK_EQ(lmp::platform::read_file_whole(root + "/a.txt", 1024).bytes,
              std::string("one\n"));
+}
+
+TEST(batched_reads_record_every_version) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    constexpr int kN = 8;
+    for (int i = 0; i < kN; ++i) {
+        std::ofstream(root + "/f" + std::to_string(i) + ".txt") << "body " << i << "\n";
+    }
+    std::vector<std::thread> threads;
+    std::vector<ToolResult> reads(static_cast<std::size_t>(kN));
+    for (int i = 0; i < kN; ++i) {
+        threads.emplace_back([&reg, &reads, i] {
+            reads[static_cast<std::size_t>(i)] = reg.execute(
+                "read_file", args({{"path", "f" + std::to_string(i) + ".txt"}}), 1);
+        });
+    }
+    for (std::thread& th : threads) {
+        th.join();
+    }
+    for (int i = 0; i < kN; ++i) {
+        CHECK(reads[static_cast<std::size_t>(i)].ok());
+        const ToolResult wrote = reg.execute(
+            "write_file",
+            args({{"path", "f" + std::to_string(i) + ".txt"}, {"content", "next\n"}}), 1);
+        CHECK(wrote.ok());
+    }
+    const ToolResult many = reg.execute(
+        "read_many", args({{"paths", "f0.txt\nf1.txt"}}), 1);
+    CHECK(many.ok());
+    CHECK(many.summary.find("f0.txt") != std::string::npos);
+    CHECK(many.summary.find("f1.txt") != std::string::npos);
 }
 
 TEST(append_file_description_says_it_chunks_a_file_that_will_not_fit) {
