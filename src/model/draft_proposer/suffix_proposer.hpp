@@ -90,7 +90,6 @@ class SuffixProposer {
                                    std::size_t max_tokens) const;
 
     [[nodiscard]] std::size_t indexed_tokens() const noexcept;
-    [[nodiscard]] std::size_t sequence_count() const noexcept;
     void clear() noexcept;
 
   private:
