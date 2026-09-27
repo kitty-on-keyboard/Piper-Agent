@@ -47,14 +47,6 @@ nlohmann::json resource_link(std::string_view uri, std::string_view name,
     return j;
 }
 
-nlohmann::json embedded_text_resource(std::string_view uri, std::string_view body,
-                                      std::string_view mime_type) {
-    return nlohmann::json{
-        {"type", "resource"},
-        {"resource",
-         {{"uri", std::string(uri)}, {"text", std::string(body)}, {"mimeType", std::string(mime_type)}}}};
-}
-
 } // namespace content
 
 nlohmann::json Tool::to_json() const {
