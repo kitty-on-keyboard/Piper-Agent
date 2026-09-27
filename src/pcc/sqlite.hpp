@@ -136,8 +136,4 @@ class Transaction {
     bool done_ = false;
 };
 
-// Convenience for the many single-value lookups: returns nullopt when no row matched.
-[[nodiscard]] std::optional<std::int64_t> query_int(const Db& db, std::string_view sql,
-                                                    std::string_view arg);
-
 } // namespace lmp::pcc
