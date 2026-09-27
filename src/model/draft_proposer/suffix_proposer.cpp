@@ -256,7 +256,6 @@ Proposal SuffixProposer::propose(std::span<const TokenId> context,
 }
 
 std::size_t SuffixProposer::indexed_tokens() const noexcept { return impl_->total_; }
-std::size_t SuffixProposer::sequence_count() const noexcept { return impl_->history_.size(); }
 
 void SuffixProposer::clear() noexcept {
     impl_->nodes_.clear();
