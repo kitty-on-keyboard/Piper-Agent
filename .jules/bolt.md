@@ -61,3 +61,7 @@
 ## 2026-05-29 - Pre-Tokenization Callback and Bitmask Popcount Matching in Edit Diagnostics
 **Learning:** `nearest_regions` in `src/tools/edit_diagnostics.hpp` previously created temporary `std::string` windows and re-tokenized token vectors across sliding line windows, leading to $O(N \times win)$ string allocations, copies, and linear token searches ($1.75\text{s}$ per 10k lines). Pre-tokenizing lines once via zero-allocation callback `tokenize_cb` into per-line token counts and a 64-bit target token presence mask (`uint64_t want_mask`) reduces window matching to $O(1)$ bitwise OR and `std::popcount`, improving candidate search throughput by ~4.8x (~366ms).
 **Action:** Pre-tokenize lines once using callbacks and use bitwise masks (`uint64_t`) with `std::popcount` for fast multi-token sliding window intersection scoring instead of string concatenation and vector re-tokenization.
+
+## 2026-05-30 - Protocol Serialization Zero-Allocation Fast Path
+**Learning:** The C++ protocol generator in `scripts/gen_protocol.py` previously generated `append_value(std::string&, int64_t/double)` using `std::to_string(v)`, triggering a heap allocation for every scalar number serialized into JSON protocol messages. For large arrays or telemetry dumps, this caused thousands of unnecessary heap operations.
+**Action:** Use `std::to_chars` with a stack buffer directly in the inline `append_value` serialization stubs to format numbers without heap allocations, mirroring the `lmp::tools::number_lines` zero-allocation fast path.
