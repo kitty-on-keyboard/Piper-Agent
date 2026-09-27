@@ -182,19 +182,6 @@ void registry_release(const std::string& path) {
 
 // --- pure core -------------------------------------------------------------
 
-bool is_valid_utf8(std::string_view in) noexcept {
-    const auto* p = reinterpret_cast<const unsigned char*>(in.data());
-    std::size_t i = 0;
-    while (i < in.size()) {
-        const int len = decode_len(p + i, in.size() - i);
-        if (len == 0) {
-            return false;
-        }
-        i += static_cast<std::size_t>(len);
-    }
-    return true;
-}
-
 bool append_json_string(std::string& out, std::string_view in) {
     bool valid = true;
     out.push_back('"');
