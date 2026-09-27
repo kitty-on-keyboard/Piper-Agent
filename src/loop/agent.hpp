@@ -71,12 +71,10 @@ struct HitlThresholds {
 // Irreversibility is a PROPERTY, not a quantity. Everything else stays scored.
 [[nodiscard]] bool is_irreversible(const tools::RiskHint& hint) noexcept;
 
-// Hint-level properties that must not be waved through by score alone.
-// Irreversible capabilities and Unparseable status always force. PartiallyParsed
-// alone also reports true here (status-only hints cannot hide), but the command gate
-// narrows Partial via `opaque_script_command` so toolchain drivers the classifier
-// marks Partial (`swift build`, `cmake --build`) stay low-friction under T1.
-[[nodiscard]] bool forces_escalation(const tools::RiskHint& hint) noexcept;
+// What the command gate actually forces after auto_approve_exec. Narrower than
+// is_irreversible() for Partial: toolchain Partial is not an opaque script.
+[[nodiscard]] bool command_forces_escalation(const std::string& command,
+                                             const tools::RiskHint& hint) noexcept;
 
 // True for interpreter+script / source / eval / local script-path shapes whose body
 // is not in the command string. The Seatbelt wipe hole: `bash wipe.sh` is Partial

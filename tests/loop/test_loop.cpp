@@ -570,20 +570,19 @@ TEST(risk_routing_is_a_pure_function) {
     destructive.caps.escalates_privileges = true;
     CHECK(route_approval(destructive, t) == Approval::Reject);
 
-        // Status-only PartiallyParsed scores 0.20 and auto-approves under the default
-    // threshold -- that is the hole forces_escalation() closes. The old fixture compounded
-    // Partial with destroy+network caps, which escalated on score alone and never proved
-    // the property.
+    // Status-only PartiallyParsed scores 0.20 and auto-approves under the default
+    // threshold -- that is the hole command_forces_escalation() closes for opaque scripts.
     tools::RiskHint unseeable;
     unseeable.status = blast_radius::ParseStatus::PartiallyParsed;
     CHECK(risk_score(unseeable) < t.auto_approve_below_risk);
     CHECK(route_approval(unseeable, t) == Approval::AutoApprove);
-    CHECK(forces_escalation(unseeable));
+    CHECK(command_forces_escalation("bash script.sh", unseeable));
+    CHECK(!command_forces_escalation("swift build", unseeable));
     CHECK(!allowlist_may_auto_approve(unseeable));
 
     tools::RiskHint opaque;
     opaque.status = blast_radius::ParseStatus::Unparseable;
-    CHECK(forces_escalation(opaque));
+    CHECK(command_forces_escalation("something", opaque));
     CHECK(!allowlist_may_auto_approve(opaque));
 }
 
@@ -591,21 +590,22 @@ TEST(persistent_allowlist_cannot_auto_approve_opaque_or_destructive_hints) {
     tools::RiskHint partial;
     partial.status = blast_radius::ParseStatus::PartiallyParsed;
     CHECK(!allowlist_may_auto_approve(partial));
-    CHECK(forces_escalation(partial)); // status-only property
     CHECK(opaque_script_command("bash unknown.sh"));
     CHECK(opaque_script_command("source unknown.sh"));
     CHECK(!opaque_script_command("swift build")); // toolchain Partial, not a script shape
+    CHECK(command_forces_escalation("bash unknown.sh", partial));
+    CHECK(!command_forces_escalation("swift build", partial));
 
     tools::RiskHint destroy;
     destroy.status = blast_radius::ParseStatus::Parsed;
     destroy.caps.destroys_data = true;
     CHECK(!allowlist_may_auto_approve(destroy));
-    CHECK(forces_escalation(destroy));
+    CHECK(command_forces_escalation("rm -rf foo", destroy));
 
     tools::RiskHint ordinary;
     ordinary.status = blast_radius::ParseStatus::Parsed;
     CHECK(allowlist_may_auto_approve(ordinary));
-    CHECK(!forces_escalation(ordinary));
+    CHECK(!command_forces_escalation("ls", ordinary));
 }
 
 // THE BUTTON MUST NOT PROMISE WHAT THE MATCHER WILL NOT HONOUR.
