@@ -84,6 +84,5 @@ struct RunSummary {
 
 // Field helpers shared with the sidecar emitter.
 [[nodiscard]] std::string field_or(const platform::Event& ev, std::string_view key);
-void set_field(std::vector<platform::EventField>& fields, std::string key, std::string value);
 
 } // namespace lmp::context

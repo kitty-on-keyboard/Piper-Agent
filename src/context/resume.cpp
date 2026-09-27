@@ -40,16 +40,6 @@ std::string field_or(const platform::Event& ev, std::string_view key) {
     return {};
 }
 
-void set_field(std::vector<platform::EventField>& fields, std::string key, std::string value) {
-    for (platform::EventField& f : fields) {
-        if (f.key == key) {
-            f.value = std::move(value);
-            return;
-        }
-    }
-    fields.push_back({std::move(key), std::move(value)});
-}
-
 ResumeGate can_auto_resume(const ResumeIdentity& checkpoint, const ResumeIdentity& current,
                            bool edit_in_flight) {
     if (edit_in_flight) {
