@@ -285,7 +285,7 @@ double risk_score(const tools::RiskHint& hint) {
     // Capability miss weights (write_out, destroy, priv) match tests/testdata/blast_radius:
     // worth three ordinary capabilities. Partial parse is itself risk -- it is the
     // signal that says "sandbox this regardless of the flags". The score alone is not
-    // enough: see forces_escalation(), which is the property override.
+    // enough: see command_forces_escalation(), which is the property override.
     const auto& c = hint.caps;
     double score = 0.0;
     score += c.writes_outside_workspace ? 0.30 : 0.0;
@@ -308,14 +308,6 @@ bool is_irreversible(const tools::RiskHint& hint) noexcept {
     const auto& c = hint.caps;
     return c.destroys_data || c.writes_outside_workspace || c.escalates_privileges ||
            c.rewrites_vcs_history;
-}
-
-bool forces_escalation(const tools::RiskHint& hint) noexcept {
-    if (is_irreversible(hint)) {
-        return true;
-    }
-    return hint.status == blast_radius::ParseStatus::PartiallyParsed ||
-           hint.status == blast_radius::ParseStatus::Unparseable;
 }
 
 bool opaque_script_command(const std::string& command) noexcept {
@@ -341,9 +333,9 @@ bool allowlist_may_auto_approve(const tools::RiskHint& hint) noexcept {
 }
 
 // What the command gate actually forces after auto_approve_exec. Narrower than
-// forces_escalation() for Partial: toolchain Partial is not an opaque script.
-[[nodiscard]] bool command_forces_escalation(const std::string& command,
-                                             const tools::RiskHint& hint) noexcept {
+// is_irreversible() for Partial: toolchain Partial is not an opaque script.
+bool command_forces_escalation(const std::string& command,
+                               const tools::RiskHint& hint) noexcept {
     if (is_irreversible(hint)) {
         return true;
     }
