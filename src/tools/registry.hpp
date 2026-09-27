@@ -469,11 +469,6 @@ class Registry {
 [[nodiscard]] const std::string* get(const std::vector<ToolParamValue>& params,
                                      const char* name);
 
-// Compatibility helper shared by tests and policy code. It opens `root`, validates
-// existing components without following symlinks, and returns the canonical absolute
-// spelling. Registry operations use its already-open WorkspaceFs instead.
-[[nodiscard]] std::string resolve_contained(const std::string& root, const std::string& rel);
-
 // True when `rel` names an existing, non-empty file inside `root`.
 //
 // The one question the loop's write gate has to ask, and the reason it exists:
