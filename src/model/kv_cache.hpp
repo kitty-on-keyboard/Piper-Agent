@@ -48,8 +48,6 @@
 
 namespace lmp::model {
 
-[[nodiscard]] std::uint64_t hash_ids(const std::vector<TokenId>& ids) noexcept;
-
 struct ReuseDecision {
     // Number of leading tokens of `prompt` that are already in cache and VERIFIED
     // identical. The backend prefills from this offset.

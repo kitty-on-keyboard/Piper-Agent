@@ -125,13 +125,16 @@ TEST(kv_reuse_is_verified_id_by_id) {
 TEST(kv_hash_tracks_content_not_length) {
     KvCacheLedger a;
     KvCacheLedger b;
+    KvCacheLedger c;
     a.append({1, 2, 3});
     b.append({1, 2, 4});
+    c.append({1, 2, 3});
     CHECK(a.content_hash() != b.content_hash());
-    CHECK_EQ(a.content_hash(), hash_ids({1, 2, 3}));
+    CHECK_EQ(a.content_hash(), c.content_hash());
+    const KvCacheLedger empty_ledger;
     a.clear();
     CHECK_EQ(a.size(), std::size_t{0});
-    CHECK_EQ(a.content_hash(), hash_ids({}));
+    CHECK_EQ(a.content_hash(), empty_ledger.content_hash());
 }
 
 // --- sampler (S5.9, mask-first) ---------------------------------------------
