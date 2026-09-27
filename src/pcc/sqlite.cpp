@@ -224,16 +224,4 @@ void Transaction::commit() {
     done_ = true;
 }
 
-// --- helpers ----------------------------------------------------------------
-
-std::optional<std::int64_t> query_int(const Db& db, std::string_view sql,
-                                      std::string_view arg) {
-    Stmt stmt(db, sql);
-    stmt.bind(1, arg);
-    if (!stmt.step()) {
-        return std::nullopt;
-    }
-    return stmt.column_int(0);
-}
-
 } // namespace lmp::pcc
