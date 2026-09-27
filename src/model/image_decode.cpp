@@ -171,25 +171,6 @@ bool decode_image_file(const std::string& path, long long max_pixels, ImageRGB& 
     return decode_source(src.get(), max_pixels, out, error);
 }
 
-bool decode_image_bytes(const std::uint8_t* data, std::size_t size, long long max_pixels,
-                        ImageRGB& out, std::string& error) {
-    if (data == nullptr || size == 0) {
-        error = "empty image buffer";
-        return false;
-    }
-    CFRef<CFDataRef> cf(CFDataCreate(nullptr, data, static_cast<CFIndex>(size)));
-    if (!cf) {
-        error = "could not wrap the image bytes";
-        return false;
-    }
-    CFRef<CGImageSourceRef> src(CGImageSourceCreateWithData(cf.get(), nullptr));
-    if (!src) {
-        error = "the bytes are not a recognised image format";
-        return false;
-    }
-    return decode_source(src.get(), max_pixels, out, error);
-}
-
 #else // !__APPLE__
 
 // Not a stub that returns an empty image: a caller that gets `true` and no pixels would
@@ -198,12 +179,6 @@ bool decode_image_file(const std::string& path, long long, ImageRGB&, std::strin
     (void)path;
     error = "image decoding needs Apple's ImageIO, which this platform does not have "
             "(and without MLX there is no model to show an image to)";
-    return false;
-}
-
-bool decode_image_bytes(const std::uint8_t*, std::size_t, long long, ImageRGB&,
-                        std::string& error) {
-    error = "image decoding needs Apple's ImageIO, which this platform does not have";
     return false;
 }
 

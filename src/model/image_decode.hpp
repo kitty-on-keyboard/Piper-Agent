@@ -40,10 +40,4 @@ namespace lmp::model {
 [[nodiscard]] bool decode_image_file(const std::string& path, long long max_pixels,
                                      ImageRGB& out, std::string& error);
 
-// The same, for bytes already in memory -- the path a pasted or dragged image will take
-// once the surface can carry one.
-[[nodiscard]] bool decode_image_bytes(const std::uint8_t* data, std::size_t size,
-                                      long long max_pixels, ImageRGB& out,
-                                      std::string& error);
-
 } // namespace lmp::model
