@@ -27,12 +27,6 @@ nlohmann::json image(std::string_view base64_data, std::string_view mime_type) {
                           {"mimeType", std::string(mime_type)}};
 }
 
-nlohmann::json audio(std::string_view base64_data, std::string_view mime_type) {
-    return nlohmann::json{{"type", "audio"},
-                          {"data", std::string(base64_data)},
-                          {"mimeType", std::string(mime_type)}};
-}
-
 nlohmann::json resource_link(std::string_view uri, std::string_view name,
                              std::string_view description, std::string_view mime_type) {
     nlohmann::json j{{"type", "resource_link"},
