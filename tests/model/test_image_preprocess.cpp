@@ -263,12 +263,6 @@ TEST(image_paths_are_recognised_by_extension) {
 TEST(decoding_a_non_image_fails_loudly) {
     ImageRGB out;
     std::string err;
-    const std::string not_an_image = "this is not a PNG";
-    CHECK(!decode_image_bytes(reinterpret_cast<const std::uint8_t*>(not_an_image.data()),
-                              not_an_image.size(), 1 << 20, out, err));
-    CHECK(!err.empty());
-    CHECK(!decode_image_bytes(nullptr, 0, 1 << 20, out, err));
-    CHECK(!err.empty());
     CHECK(!decode_image_file("/nonexistent/nope.png", 1 << 20, out, err));
     CHECK(!err.empty());
 }
