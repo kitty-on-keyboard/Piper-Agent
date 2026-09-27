@@ -89,7 +89,6 @@ class SuffixProposer {
     [[nodiscard]] Proposal propose(std::span<const TokenId> context,
                                    std::size_t max_tokens) const;
 
-    [[nodiscard]] std::size_t indexed_tokens() const noexcept;
     [[nodiscard]] std::size_t sequence_count() const noexcept;
     void clear() noexcept;
 
