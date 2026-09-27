@@ -33,20 +33,6 @@ nlohmann::json audio(std::string_view base64_data, std::string_view mime_type) {
                           {"mimeType", std::string(mime_type)}};
 }
 
-nlohmann::json resource_link(std::string_view uri, std::string_view name,
-                             std::string_view description, std::string_view mime_type) {
-    nlohmann::json j{{"type", "resource_link"},
-                     {"uri", std::string(uri)},
-                     {"name", std::string(name)}};
-    if (!description.empty()) {
-        j["description"] = std::string(description);
-    }
-    if (!mime_type.empty()) {
-        j["mimeType"] = std::string(mime_type);
-    }
-    return j;
-}
-
 nlohmann::json embedded_text_resource(std::string_view uri, std::string_view body,
                                       std::string_view mime_type) {
     return nlohmann::json{
