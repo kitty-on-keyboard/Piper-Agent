@@ -86,6 +86,11 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_NETRC=/tmp/.netrc",
+        "XDG_KEYCHAIN=/tmp/keychain",
+        "LC_SALT=salt123",
+        "XDG_PIN=1234",
+        "LC_PINCODE=5678",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +121,11 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_NETRC"));
+    CHECK(!has_key(env, "XDG_KEYCHAIN"));
+    CHECK(!has_key(env, "LC_SALT"));
+    CHECK(!has_key(env, "XDG_PIN"));
+    CHECK(!has_key(env, "LC_PINCODE"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +191,11 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_NETRC=secret",
+        "XDG_KEYCHAIN=secret",
+        "LC_SALT=secret",
+        "XDG_PIN=secret",
+        "LC_PINCODE=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +232,11 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_NETRC"));
+    CHECK(!has_key(env, "XDG_KEYCHAIN"));
+    CHECK(!has_key(env, "LC_SALT"));
+    CHECK(!has_key(env, "XDG_PIN"));
+    CHECK(!has_key(env, "LC_PINCODE"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
