@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-09-29 - Expand spawn environment suffix filtering for secret keys and client credentials
+**Vulnerability:** Parent environment variables carrying secret keys or client credentials under allowlisted prefixes without underscore separators or with pass phrases (such as `LC_SECRETKEY`, `XDG_AUTHKEY`, `LC_ACCESSKEY`, `XDG_PASS_PHRASE`, `LC_AUTHTOKEN`, `XDG_ACCESSTOKEN`, `LC_CLIENTSECRET`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Concise credential compound terms like `SECRETKEY`, `AUTHKEY`, `ACCESSKEY`, `PASS_PHRASE`, `AUTHTOKEN`, `ACCESSTOKEN`, and `CLIENTSECRET` do not match `_KEY`, `_SECRET`, or `_TOKEN` trailing underscores and must be explicitly included in suffix filtering rules to prevent sensitive authentication secrets from being inherited by subprocesses.
+**Prevention:** Added `SECRETKEY`, `AUTHKEY`, `ACCESSKEY`, `PASS_PHRASE`, `AUTHTOKEN`, `ACCESSTOKEN`, and `CLIENTSECRET` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
