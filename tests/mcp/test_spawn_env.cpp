@@ -181,6 +181,13 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_SECRETKEY=secret",
+        "XDG_AUTHKEY=secret",
+        "LC_ACCESSKEY=secret",
+        "XDG_PASS_PHRASE=secret",
+        "LC_AUTHTOKEN=secret",
+        "XDG_ACCESSTOKEN=secret",
+        "LC_CLIENTSECRET=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +224,13 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_SECRETKEY"));
+    CHECK(!has_key(env, "XDG_AUTHKEY"));
+    CHECK(!has_key(env, "LC_ACCESSKEY"));
+    CHECK(!has_key(env, "XDG_PASS_PHRASE"));
+    CHECK(!has_key(env, "LC_AUTHTOKEN"));
+    CHECK(!has_key(env, "XDG_ACCESSTOKEN"));
+    CHECK(!has_key(env, "LC_CLIENTSECRET"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
