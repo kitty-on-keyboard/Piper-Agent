@@ -12,7 +12,7 @@ Piper is a headless local coding worker running on Apple Silicon via MLX (typica
 - **Piper Worker (Local MLX Hands):** Writes code, modifies files, runs local tools/tests inside `cwd`.
 - **Harness:** Owns `task.json` shape, `answer.json`, and the progress-log line. Parents call the helpers. They do not hand-author those files.
 - **Core Loop:** `Cloud directs → Piper writes → Cloud verifies → Repeat`.
-- **Concurrency Rule:** Never run IDE Piper and CLI Piper worker simultaneously (one MLX process per system to avoid unified memory contention).
+- **Concurrency Rule:** Never run multiple cold MLX processes simultaneously (avoid unified memory contention and swap crashes). Keep resident weights warm with `piper worker serve` (`~/.piper/worker.sock`) and use single-flight socket-forwarding commands like `piper distill`.
 
 ---
 
@@ -79,6 +79,7 @@ piper progress --id slice-001 pass --note "validator + test"
 - **Ask:** `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not freehand `answer.json`. Do not restart the process.
 - **Already finished:** `piper review --task …`. Status without cat/jq: `piper status --dir …` / `piper await --dir …`.
 - **Lower-level attached run:** `piper run --task …` (same as `piper worker run`). Keep weights warm with `piper worker serve`, then `piper worker run`.
+- **Telemetry / Flight-Recorder Distillation:** `piper distill --input <path>` (e.g. `.godoer/incidents.json` or stdin). Queries the model via `~/.piper/worker.sock` with zero RAM overhead and single-flight lock protection (`/tmp/piper_distill.lock`).
 - **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL.
 
 The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set.

@@ -9,6 +9,7 @@ This recipe guides agent workers when modifying or debugging Godot 4.x game proj
 
 ## 1. Environment & Tools
 - When the `godoer` MCP server is connected (via `trust_mcp: ["godoer"]`), use the structured MCP tools to inspect scene trees, evaluate scripts, and run node checks.
+- Check `.godoer/incidents.json` in the game directory when a run fails or exhibits unexpected behavior. Godoer extracts exact timestamps, node paths, and stack traces into this file.
 - If MCP is absent, fallback to `exec_command` with headless Godot commands:
   - Check GDScript syntax: `godot --headless --check-only -s path/to/script.gd`
   - Run test harness: `godot --headless -s addons/gut/gut_cmdln.gd` (or project test runner).
@@ -26,10 +27,17 @@ This recipe guides agent workers when modifying or debugging Godot 4.x game proj
 ## 4. Common Pitfalls & Traps
 - **Indentation**: Godot standard GDScript uses tabs. Never mix tabs and spaces.
 - **@onready vs _ready()**: Do not access child nodes during `_init()`; use `@onready var child = $Child` or fetch them in `_ready()`.
-- **Cyclic Class Dependencies**: Using `class_name` across mutually dependent scripts can trigger parse failures during headless validation.
+- **Cyclic Class Dependencies**: Using `class_name` across mutually dependent scripts or recursive `preload()` triggers parse failures during headless validation.
 - **Node Paths**: Hardcoded paths like `$"../UI/Label"` break easily during scene refactoring; prefer unique scene names (`%Label`) or `@export var label: Label`.
+- **False-Success Traps (Steered by Godoer Gate)**:
+  1. *Missing Node*: `get_node()` on nonexistent node path.
+  2. *Cyclic Reference*: circular dependencies preventing script initialization.
+  3. *Unhandled Input*: swallowed events or missing input map actions.
+  4. *Nil Instance Call*: calling methods on `null` instances.
+  Always inspect `.godoer/incidents.json` when the gate rejects an action.
 
 ## 5. Verification Checklist
 - Run headless parse checks on all touched scripts.
 - Ensure all `@export` references and signals resolve without warnings.
+- Check `.godoer/incidents.json` to verify no runtime script errors were triggered during play/test runs.
 - Run project unit tests with `godot --headless` before concluding the slice.

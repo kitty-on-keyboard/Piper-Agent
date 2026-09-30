@@ -109,6 +109,24 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
 
 ---
 
+## Telemetry Distiller (`piper distill`)
+
+Fast flight-recorder and incident analysis for engine logs, test runs, and runtime telemetry (e.g. Godoer `.godoer/incidents.json`):
+
+```bash
+# Analyze runtime incidents using keep-warm daemon socket (zero extra RAM overhead)
+piper distill --input .godoer/incidents.json
+
+# Analyze raw log stream via stdin
+cat engine_run.log | piper distill
+```
+
+- **Keep-Warm Daemon Forwarding**: Connects directly to `~/.piper/worker.sock` (from `piper worker serve`) to reuse loaded resident weights with zero memory allocation.
+- **Fail-Safe Offline Guard**: If the daemon is offline, `piper distill` safely exits with code 0 to protect system memory (override with `--allow-cold` only for explicit single-shot runs).
+- **Single-Flight Lock Protection**: Protected by mutex `/tmp/piper_distill.lock` (`fcntl.flock`), ensuring only one generation process can execute on the system at a time to prevent swap exhaustion and crashes.
+
+---
+
 ## Piper worker wake standard
 
 Any agent that starts Piper is the parent. Piper does not come find you.
