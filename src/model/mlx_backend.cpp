@@ -575,6 +575,19 @@ class MlxSpecForward final : public SpecForward {
     std::vector<float> mtp_h_host_;
 };
 
+// Last line on a SIGKILL still has to be on disk. stderr is the only channel that
+// survives an OS kill of the sidecar; the event log is written after generate() returns.
+// Defined here (anon ns, before first use) so decode_speculative and the outer
+// MlxBackend::* call sites share one unambiguous symbol — not a forward decl in
+// lmp::model plus a later anon-ns definition (ambiguous on Mac clang).
+void log_mlx_mem(const char* at, std::size_t tokens = 0) {
+    const MemoryReport m = mlx_memory_report();
+    std::fprintf(stderr,
+                 "mem at=%s tokens=%zu active=%zu cache=%zu peak=%zu sum=%zu\n", at,
+                 tokens, m.active, m.cache, m.peak, m.active + m.cache);
+    std::fflush(stderr);
+}
+
 // The speculative decode loop. Separate from generate() so the plain path keeps the exact
 // shape it was tuned and measured in: the two share a prefill and diverge completely
 // after it, and interleaving them would put a branch in the hot decode step for the
@@ -603,6 +616,10 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
     std::fprintf(stderr, "decode_begin speculative=1 mtp=%d prompt=%zu\n",
                  model.has_mtp() ? 1 : 0, task.prompt.size());
     std::fflush(stderr);
+    // Real MLX allocator bytes only (active/cache/peak). tokens= is current context
+    // length (ledger), so B0/B1 long-context A/B can attribute KV growth without inventing
+    // process RSS or Metal APIs that do not exist in this tree.
+    log_mlx_mem("decode_begin", ledger.size());
 
     const auto is_special = [&task](TokenId id) {
         return task.mask != nullptr && task.mask->is_block_boundary(id);
@@ -779,6 +796,7 @@ GenResult decode_speculative(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
                  static_cast<double>(p.forward_last_positions) / nb, p.mtp_logits_ms / nb,
                  static_cast<double>(p.mtp_logits_calls) / nb, p.mtp_step_ms / nb,
                  p.hidden_ms / nb, p.checkpoint_ms / nb, p.restore_ms / nb);
+    log_mlx_mem("decode_end", ledger.size());
     return r;
 }
 
@@ -909,16 +927,6 @@ const char* reuse_mode_name(ReuseMode mode) {
             return "reset";
     }
     return "unknown";
-}
-
-// Last line on a SIGKILL still has to be on disk. stderr is the only channel that
-// survives an OS kill of the sidecar; the event log is written after generate() returns.
-void log_mlx_mem(const char* at, std::size_t tokens = 0) {
-    const MemoryReport m = mlx_memory_report();
-    std::fprintf(stderr,
-                 "mem at=%s tokens=%zu active=%zu cache=%zu peak=%zu sum=%zu\n", at,
-                 tokens, m.active, m.cache, m.peak, m.active + m.cache);
-    std::fflush(stderr);
 }
 
 // Chunked prefill of task.prompt[start, end). `boundary` (if inside the range) is a
@@ -1161,6 +1169,10 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     std::vector<TokenId> recent;
     bool first_token = true;
     auto t_decode_start = clock_.mono();
+    std::fprintf(stderr, "decode_begin speculative=0 mtp=%d prompt=%zu\n",
+                 impl_->model.has_mtp() ? 1 : 0, task.prompt.size());
+    std::fflush(stderr);
+    log_mlx_mem("decode_begin", ledger_.size());
 
     while (r.tokens_generated < task.max_new_tokens) {
         if (cancel.cancelled()) {
@@ -1230,6 +1242,7 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     const double decode_ms = ms_between(t_decode_start, clock_.mono());
     r.decode_tok_per_s =
         decode_ms > 0 ? static_cast<double>(r.tokens_generated) / (decode_ms / 1000.0) : 0.0;
+    log_mlx_mem("decode_end", ledger_.size());
     return r;
 }
 

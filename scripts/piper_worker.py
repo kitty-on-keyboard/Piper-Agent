@@ -1105,6 +1105,274 @@ def cmd_dispatch(args):
     return code
 
 
+def _default_worker_socket():
+    env = os.environ.get("LMP_WORKER_SOCKET", "").strip()
+    if env:
+        return env
+    home = os.environ.get("HOME", "")
+    if home:
+        return os.path.join(home, ".piper", "worker.sock")
+    return "/tmp/piper_worker.sock"
+
+
+def _is_daemon_alive(socket_path):
+    if not socket_path or not os.path.exists(socket_path):
+        return False
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect(socket_path)
+        s.sendall(b'{"method":"ping"}\n')
+        resp = s.recv(1024)
+        s.close()
+        data = json.loads(resp.decode("utf-8"))
+        return data.get("status") == "ok"
+    except Exception:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return False
+
+
+def _forward_task_to_daemon(sock_path, task_path):
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    req = {
+        "method": "run",
+        "task": os.path.abspath(task_path),
+        "auto_approve_irreversible": True,
+        "auto_approve_all": True,
+    }
+    s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+    accum = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        accum += chunk
+    s.close()
+    return accum.decode("utf-8", errors="replace")
+
+
+def cmd_distill(args):
+    """Distill telemetry incidents into root-cause diagnosis using local MLX model."""
+    incidents_path = os.path.abspath(args.incidents)
+    if not os.path.isfile(incidents_path):
+        print(f"piper distill: incidents file not found: {incidents_path}", file=sys.stderr)
+        return EXIT_INVALID
+
+    try:
+        with open(incidents_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"piper distill: invalid incidents JSON: {exc}", file=sys.stderr)
+        return EXIT_INVALID
+
+    incidents = data.get("incidents", [])
+    if not incidents:
+        print("piper distill: zero incidents recorded. All systems green.")
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump({"status": "clean", "diagnoses": []}, f, indent=2)
+        return EXIT_OK
+
+    sock_path = getattr(args, "socket", None) or _default_worker_socket()
+    daemon_online = _is_daemon_alive(sock_path)
+
+    allow_cold = getattr(args, "allow_cold", False)
+    if not daemon_online and not allow_cold:
+        msg = (
+            f"piper distill: keep-warm daemon is not active on {sock_path}.\n"
+            f"Start the warm daemon with: piper worker serve\n"
+            f"Or pass '--allow-cold' to explicitly permit cold loading weights into RAM."
+        )
+        print(msg, file=sys.stderr)
+        out_path = args.out or os.path.join(os.path.dirname(incidents_path), "distilled_diagnosis.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "status": "skipped_daemon_offline",
+                "message": msg,
+                "diagnoses": [],
+            }, f, indent=2)
+        return EXIT_OK
+
+    model_dir = args.model_dir or os.environ.get("LMP_QWEN_DIR") or "/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit"
+    if not daemon_online and not os.path.isdir(model_dir):
+        fallback = "/Users/dev/Desktop/Models/Qwen3.6-35B-A3B-MLX-4bit"
+        if os.path.isdir(fallback):
+            model_dir = fallback
+        else:
+            print(f"piper distill: model directory not found: {model_dir}", file=sys.stderr)
+            return EXIT_INVALID
+
+    mlx_python = None
+    if not daemon_online:
+        for cand in [sys.executable, "/Users/dev/.local/share/godoer-venv/bin/python", shutil.which("python3")]:
+            if cand and os.path.isfile(cand):
+                try:
+                    res = subprocess.run([cand, "-c", "import mlx_lm"], capture_output=True, text=True)
+                    if res.returncode == 0:
+                        mlx_python = cand
+                        break
+                except Exception:
+                    continue
+
+        if not mlx_python:
+            print("piper distill: mlx_lm python environment not found", file=sys.stderr)
+            return EXIT_ERROR
+
+    lock_file = None
+    if not daemon_online:
+        import fcntl
+        lock_path = "/tmp/piper_distill.lock"
+        try:
+            lock_file = open(lock_path, "w")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            print("piper distill: another distillation process is active; skipping cold load to prevent memory contention.", file=sys.stderr)
+            if lock_file:
+                lock_file.close()
+            return EXIT_OK
+
+    mode_label = f"warm daemon ({sock_path})" if daemon_online else f"cold {os.path.basename(model_dir)}"
+    print(f"piper distill: analyzing {len(incidents)} incident(s) via {mode_label}...")
+
+    diagnoses = []
+    try:
+        for inc in incidents:
+            inc_id = inc.get("id", "INC-UNK")
+            kind = inc.get("kind", "UNKNOWN")
+            msg = inc.get("message", "")
+            file_path = inc.get("file", "")
+            line = inc.get("line", "")
+            ctx = inc.get("source_context", "")
+
+            prompt = f"""<|im_start|>system
+You are a senior Godot 4 engine expert and flight-recorder analyst.
+Your task is to analyze factual runtime telemetry incidents and provide a grounded root-cause diagnosis.
+CRITICAL RULES:
+1. You must cite the exact incident ID [{inc_id}].
+2. Do NOT invent, assume, or hallucinate bugs not listed in the incident.
+3. Provide:
+   - Root Cause: exactly why the line threw this error in Godot 4.
+   - Recommended Fix: the concrete GDScript code replacement or configuration change.
+<|im_end|>
+<|im_start|>user
+INCIDENT:
+- ID: {inc_id}
+- Kind: {kind}
+- Error: {msg}
+- File: {file_path} (Line {line})
+
+SOURCE CODE CONTEXT:
+```gdscript
+{ctx}
+```
+
+Diagnose [{inc_id}] and provide the exact fix.
+<|im_end|>
+<|im_start|>assistant
+"""
+            raw_output = ""
+            if daemon_online:
+                temp_slice_dir = tempfile.mkdtemp(prefix="piper_distill_")
+                task_file = os.path.join(temp_slice_dir, "task.json")
+                res_file = os.path.join(temp_slice_dir, "result.json")
+                task_data = {
+                    "id": f"distill-{inc_id.lower()}",
+                    "cwd": os.path.dirname(incidents_path),
+                    "prompt": prompt,
+                    "model_dir": model_dir,
+                    "auto_approve_exec": True,
+                    "auto_approve_writes": True,
+                    "auto_approve_irreversible": True,
+                    "timeout_s": 300,
+                    "result_path": res_file,
+                }
+                with open(task_file, "w", encoding="utf-8") as f:
+                    json.dump(task_data, f, indent=2)
+
+                _forward_task_to_daemon(sock_path, task_file)
+
+                if os.path.isfile(res_file):
+                    try:
+                        with open(res_file, encoding="utf-8") as f:
+                            res_obj = json.load(f)
+                        raw_output = str(res_obj.get("message") or res_obj.get("error") or "").strip()
+                    except Exception as exc:
+                        raw_output = f"Error reading daemon result: {exc}"
+                else:
+                    raw_output = "Daemon finished but no result.json was produced"
+                shutil.rmtree(temp_slice_dir, ignore_errors=True)
+            else:
+                code = f"""
+import json, sys
+from mlx_lm import load, generate
+
+model, tok = load({json.dumps(model_dir)})
+out = generate(model, tok, prompt={json.dumps(prompt)}, max_tokens={args.max_tokens}, verbose=False)
+print(out)
+"""
+                run = subprocess.run([mlx_python, "-c", code], capture_output=True, text=True)
+                if run.returncode != 0:
+                    print(f"piper distill: error analyzing {inc_id}: {run.stderr}", file=sys.stderr)
+                    diagnoses.append({
+                        "incident_id": inc_id,
+                        "status": "error",
+                        "diagnosis": run.stderr.strip()
+                    })
+                    continue
+                raw_output = run.stdout.strip()
+
+            clean_diagnosis = raw_output
+            if "</think>" in raw_output:
+                clean_diagnosis = raw_output.split("</think>")[-1].strip()
+
+            diagnoses.append({
+                "incident_id": inc_id,
+                "kind": kind,
+                "file": file_path,
+                "line": line,
+                "error": msg,
+                "diagnosis": clean_diagnosis,
+                "raw_output": raw_output,
+            })
+    finally:
+        if lock_file:
+            import fcntl
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
+
+    report = {
+        "status": "diagnosed",
+        "incidents_count": len(incidents),
+        "model": "warm-daemon" if daemon_online else os.path.basename(model_dir),
+        "diagnoses": diagnoses,
+    }
+
+    out_path = args.out or os.path.join(os.path.dirname(incidents_path), "distilled_diagnosis.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    print("\n" + "=" * 65)
+    print(f" PIPER FLIGHT-RECORDER DISTILLATION CARD ({report['model']})")
+    print("=" * 65)
+    for d in diagnoses:
+        print(f"\n[{d['incident_id']}] {d.get('file', '')}:{d.get('line', '')} - {d.get('error', '')}")
+        print("-" * 65)
+        print(d.get("diagnosis", ""))
+    print("=" * 65)
+    print(f"Saved distilled report to: {out_path}\n")
+
+    return EXIT_OK
+
+
 def empty_test_block():
     return {"ran": False, "exit_code": None, "command": None, "output_tail": None}
 
@@ -2178,6 +2446,18 @@ def build_parser():
     ui_p.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
     ui_p.add_argument("--no-open", action="store_true", help="do not open a browser")
 
+    distill_p = sub.add_parser(
+        "distill",
+        help="distill runtime telemetry incidents into a grounded root-cause diagnosis",
+        description="Ingest an incidents.json packet and synthesize root-cause diagnoses using the local model with strict citations.",
+    )
+    distill_p.add_argument("--incidents", required=True, help="path to incidents.json")
+    distill_p.add_argument("--model-dir", default=None, help="path to local MLX model directory (or LMP_QWEN_DIR)")
+    distill_p.add_argument("--out", default=None, help="output path for distilled diagnosis JSON")
+    distill_p.add_argument("--max-tokens", type=int, default=1500, help="max tokens per diagnosis")
+    distill_p.add_argument("--socket", default=None, help="unix domain socket path for keep-warm daemon")
+    distill_p.add_argument("--allow-cold", action="store_true", help="allow loading model cold into RAM if daemon is not running")
+
     return parser
 
 
@@ -2210,6 +2490,8 @@ def main(argv=None):
         return cmd_await(args)
     if command == "ui":
         return cmd_ui(args)
+    if command == "distill":
+        return cmd_distill(args)
 
     if command == "init" or (command == "worker" and getattr(args, "worker_cmd", None) == "init"):
         return init_project(getattr(args, "target_dir", "."))
