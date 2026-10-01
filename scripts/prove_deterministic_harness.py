@@ -98,8 +98,9 @@ def main():
         if rev_rc != w.EXIT_OK:
             return fail(f"piper review rc={rev_rc}")
         card = buf.getvalue()
-        if "verdict:  PASS" not in card or "prove-1" not in card:
-            return fail(f"review card missing PASS/prove-1: {card!r}")
+        # No check ran, so the model's own "ok" is UNVERIFIED, never PASS.
+        if "verdict:  UNVERIFIED" not in card or "prove-1" not in card:
+            return fail(f"review card missing UNVERIFIED/prove-1: {card!r}")
 
         # 6. shared answer writer + UI synonym (approved → allow)
         if w.build_answer_payload(action="approved") != {"text": "allow"}:

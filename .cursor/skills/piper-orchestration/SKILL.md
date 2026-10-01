@@ -102,12 +102,16 @@ Stay attached (`piper dispatch` / `piper run`). Piper never guesses detach from 
 
 Use the card from `piper dispatch` or `piper review`. Do not re-read every line when the card is green.
 
+- `verdict: UNVERIFIED` means the model finished but nothing checked it. It is not a pass: review the diff, or re-dispatch with `--check`.
+- On anything but `PASS` the card already carries `error:`, the failing check's tail (`check:`) and the worker's `piper:` notices (`worker:`). Read those before opening `result.json`.
+- Worker telemetry is in `worker.stderr.log` beside `result.json`; a `DIED` card shows its tail.
+
 | Check | Pass signal | On failure |
 |---|---|---|
 | **Status** | `status == "ok"` | `"stalled"` is not done. Read `error` or the card. |
 | **Touched files** | `files_touched` ⊆ the brief | Revert the surprise, tighten DO NOT TOUCH, re-slice. |
 | **Diff** | Proportional to the slice | Reject a drive-by rewrite. |
-| **Acceptance** | `check` exit code 0 | New slice aimed at `test.output_tail`. |
+| **Acceptance** | `check` exit code 0 (`UNVERIFIED` = no check ran) | New slice aimed at the card's `check:` lines (`test.output_tail`). |
 | **Summary** | `result.message` matches the goal | If the card is ambiguous, read the log. |
 
 ---

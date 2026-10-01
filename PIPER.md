@@ -100,6 +100,8 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
 
    The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
 
+   Verdicts: `PASS` (ok and a green check), `UNVERIFIED` (the model finished but no check ran — review the diff yourself or re-dispatch with `--check`; never treat it as a pass), `FAIL`, `STALLED`, `DIED`. On anything but `PASS` the card carries the evidence: `error:`, the failing check's last lines (`check:`), and the worker's own `piper:` notices (`worker:`, e.g. an ask question). Worker telemetry goes to `worker.stderr.log` beside `result.json` (the previous run's is `worker.stderr.prev.log`), not into the dispatch output; a `DIED` card shows that log's tail. `LMP_WORKER_STDERR=inherit` keeps it inline for a human at a terminal.
+
 6. **Record and continue**
    ```bash
    piper progress --id slice-001 pass --note "validator + test"

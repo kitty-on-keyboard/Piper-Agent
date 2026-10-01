@@ -465,6 +465,39 @@ def post_orch_webhook(url, payload, timeout=5.0):
 
 # --- Deterministic harness helpers (no paste / no freehand JSON) ------------
 
+# Worker telemetry (MLX breadcrumbs, heartbeats, `piper:` notices) goes to a per-slice
+# file beside result.json, not into the parent's output: ~1 KB per model turn pushed
+# the review card past tool-output caps. One file per run, the previous run's kept.
+WORKER_STDERR_LOG = "worker.stderr.log"
+WORKER_STDERR_PREV_LOG = "worker.stderr.prev.log"
+
+
+def worker_stderr_log_path(result_path):
+    return os.path.join(os.path.dirname(os.path.abspath(result_path)), WORKER_STDERR_LOG)
+
+
+def open_worker_stderr_log(result_path):
+    """Fresh log fd for this run, or None to inherit stderr.
+
+    The previous run's log is rotated to worker.stderr.prev.log rather than appended
+    to, so a card never mixes two runs. The engine writes the fd directly, so its
+    last breadcrumb survives a SIGKILL. LMP_WORKER_STDERR=inherit keeps the old
+    behaviour for a human watching `piper run` in a terminal.
+    """
+    if os.environ.get("LMP_WORKER_STDERR", "").strip().lower() == "inherit":
+        return None
+    path = worker_stderr_log_path(result_path)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path):
+            os.replace(path, os.path.join(os.path.dirname(path), WORKER_STDERR_PREV_LOG))
+        return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND, 0o644)
+    except OSError as exc:
+        print(f"piper: cannot open worker log {path}: {exc}; worker stderr stays inline",
+              file=sys.stderr)
+        return None
+
+
 ORCH_WEBHOOK_RELPATH = os.path.join(".piper", "orch_webhook")
 
 DETACHED_NO_WAKE_MSG = (
@@ -963,12 +996,19 @@ def load_result_file(result_path):
 
 
 def review_verdict(result, exit_code):
-    """Cheap parent verdict: PASS / FAIL / STALLED / DIED."""
+    """Cheap parent verdict: PASS / UNVERIFIED / FAIL / STALLED / DIED.
+
+    UNVERIFIED: the model finished but nothing checked it (no `--check`). A model's
+    own "done" is not a pass.
+    """
     if result is None:
         return "DIED"
     status = str(result.get("status") or "").lower()
     if status == "ok" and exit_code == EXIT_OK:
-        return "PASS"
+        test = result.get("test")
+        if isinstance(test, dict) and test.get("ran"):
+            return "PASS"
+        return "UNVERIFIED"
     if status == "stalled":
         return "STALLED"
     return "FAIL"
@@ -983,14 +1023,60 @@ def format_diff_stat(diff_stat):
     return f"+{ins} -{dels} ({files} files)"
 
 
+CARD_CHECK_LINES = 8
+CARD_LOG_PIPER_LINES = 3
+CARD_DIED_LOG_LINES = 8
+CARD_LINE_CAP = 160
+
+
+def _card_clip(line, cap=CARD_LINE_CAP):
+    line = line.rstrip()
+    return line if len(line) <= cap else line[:cap - 3] + "..."
+
+
+def _last_nonempty_lines(text, limit):
+    lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
+    return lines[-limit:] if limit > 0 else []
+
+
+def _read_log_lines(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
+
+def _card_block(label, lines):
+    """`label` on the first line, the rest aligned under it, each behind `| `."""
+    out = ""
+    for i, line in enumerate(lines):
+        head = f"{label:<10}" if i == 0 else " " * 10
+        out += f"{head}| {_card_clip(line)}\n"
+    return out
+
+
 def format_review_card(result, *, exit_code, result_path):
-    """Deterministic review card — parents should not freehand the rubric."""
+    """Deterministic review card — parents should not freehand the rubric.
+
+    Compact but complete: on anything but PASS it carries the evidence (error, the
+    failing check's tail, the worker's own `piper:` notices) so the parent does not
+    have to open result.json or the log to learn why.
+    """
     verdict = review_verdict(result, exit_code)
+    log_path = worker_stderr_log_path(result_path) if result_path else ""
     if result is None:
-        return (
+        card = (
             "── piper review ─────────────────────────\n"
             f"result:   {result_path or '(none)'}\n"
             f"exit:     {exit_code}\n"
+        )
+        log_lines = _read_log_lines(log_path) if log_path else []
+        if log_lines:
+            card += f"log:      {log_path}\n"
+            card += _card_block("log tail:", _last_nonempty_lines("\n".join(log_lines),
+                                                                   CARD_DIED_LOG_LINES))
+        return card + (
             f"verdict:  {verdict}  (no result.json)\n"
             "─────────────────────────────────────────"
         )
@@ -1000,8 +1086,11 @@ def format_review_card(result, *, exit_code, result_path):
     else:
         files_s = str(files)
     test = result.get("test") or {}
+    check_lines = []
     if isinstance(test, dict) and test.get("ran"):
         test_s = f"exit={test.get('exit_code')} cmd={test.get('command')!r}"
+        if test.get("exit_code") != 0:
+            check_lines = _last_nonempty_lines(test.get("output_tail"), CARD_CHECK_LINES)
     elif isinstance(test, dict):
         test_s = "not run"
     else:
@@ -1010,20 +1099,38 @@ def format_review_card(result, *, exit_code, result_path):
     if len(msg) > 160:
         msg = msg[:157] + "..."
     loop_s = format_loop_line(result)
+    passed = verdict == "PASS"
+    error_s = str(result.get("error") or "").strip().replace("\n", " ")
+    notices = []
+    if not passed and log_path:
+        notices = [ln for ln in _read_log_lines(log_path) if ln.startswith("piper:")]
+        notices = notices[-CARD_LOG_PIPER_LINES:]
     return (
         "── piper review ─────────────────────────\n"
         f"task:     {result.get('task_id') or '(unknown)'}\n"
         f"status:   {result.get('status')}\n"
         f"exit:     {exit_code}\n"
+        + (f"error:    {_card_clip(error_s)}\n" if error_s and not passed else "")
+        + f"run:      {format_run_line(result)}\n"
         f"message:  {msg or '(empty)'}\n"
         f"files:    {files_s}\n"
         f"diff:     {format_diff_stat(result.get('diff_stat'))}\n"
         f"test:     {test_s}\n"
+        + _card_block("check:", check_lines)
         + (f"loop:     {loop_s}\n" if loop_s else "")
+        + _card_block("worker:", notices)
         + f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
         f"verdict:  {verdict}\n"
         "─────────────────────────────────────────"
     )
+
+
+def format_run_line(result):
+    turns = result.get("turns")
+    turns_s = str(turns) if isinstance(turns, int) and not isinstance(turns, bool) else "?"
+    wall = result.get("wall_seconds")
+    wall_s = f"{wall:.0f}s" if isinstance(wall, (int, float)) and not isinstance(wall, bool) else "?"
+    return f"turns={turns_s} wall={wall_s}"
 
 
 def format_loop_line(result):
@@ -1845,6 +1952,8 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
 
    The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
 
+   Verdicts: `PASS` (ok and a green check), `UNVERIFIED` (the model finished but no check ran — review the diff yourself or re-dispatch with `--check`; never treat it as a pass), `FAIL`, `STALLED`, `DIED`. On anything but `PASS` the card carries the evidence: `error:`, the failing check's last lines (`check:`), and the worker's own `piper:` notices (`worker:`, e.g. an ask question). Worker telemetry goes to `worker.stderr.log` beside `result.json` (the previous run's is `worker.stderr.prev.log`), not into the dispatch output; a `DIED` card shows that log's tail. `LMP_WORKER_STDERR=inherit` keeps it inline for a human at a terminal.
+
 6. **Record and continue**
    ```bash
    piper progress --id slice-001 pass --note "validator + test"
@@ -2595,8 +2704,10 @@ def cmd_run(args, *, attached_only=False):
         print(DETACHED_NO_WAKE_MSG, file=sys.stderr)
         return EXIT_INVALID
 
-    sys.stderr.write(PARENT_CONTRACT_BANNER)
-    sys.stderr.flush()
+    if not attached_only:
+        # dispatch prints the card instead; the banner is noise in the parent's output.
+        sys.stderr.write(PARENT_CONTRACT_BANNER)
+        sys.stderr.flush()
     os.environ["LMP_BANNER_PRINTED"] = "1"
 
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -2628,7 +2739,12 @@ def cmd_run(args, *, attached_only=False):
         # detached it already forked above. Pin that so an inherited
         # LMP_DAEMONIZE=1 cannot make the engine refuse an attached run.
         child_env = dict(os.environ, LMP_DAEMONIZE="0")
-        proc = subprocess.Popen(cmd, env=child_env)
+        stderr_fd = open_worker_stderr_log(result_path)
+        try:
+            proc = subprocess.Popen(cmd, env=child_env, stderr=stderr_fd)
+        finally:
+            if stderr_fd is not None:
+                os.close(stderr_fd)
 
         def _forward_sig(signum, frame):
             try:
@@ -2786,6 +2902,27 @@ with open(result_path, "w", encoding="utf-8") as fh:
 """
 
 
+# Stand-in engine that writes MLX-style breadcrumbs to stderr every "turn", like
+# src/model/mlx_backend.cpp does (~1 KB per turn), then a green result.
+FAKE_CPP_NOISY = r"""#!%s
+import json, os, sys
+task = sys.argv[sys.argv.index("--task") + 1]
+with open(task, encoding="utf-8") as fh:
+    packet = json.load(fh)
+for turn in range(30):
+    for at in ("generate_enter", "prefill_start", "prefill_chunk_begin", "prefill_chunk_end",
+               "prefill_done", "decode_begin", "decode_end"):
+        sys.stderr.write("mem at=%%s tokens=%%d active=16716315128 cache=507924 "
+                         "peak=19684121116 sum=16716823052\n" %% (at, 5000 + turn))
+sys.stderr.write("piper: task %%s finished with status 'ok' (exit 0, 1.0s, 30 turns)\n" %% packet["id"])
+with open(packet["result_path"], "w", encoding="utf-8") as fh:
+    json.dump({"task_id": packet["id"], "status": "ok", "message": "done", "turns": 30,
+               "wall_seconds": 1.0, "files_touched": ["a.py"],
+               "diff_stat": {"insertions": 1, "deletions": 0, "files": 1},
+               "test": {"ran": True, "exit_code": 0, "command": "true", "output_tail": ""}}, fh)
+"""
+
+
 def _write_exec(path, template):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(template % sys.executable)
@@ -2826,7 +2963,7 @@ def self_test():
     a `.piper/orch_webhook` used to change what `--detach` did. Detach is never
     pinned off here: the stdio cases below must see the real launch policy.
     """
-    scrubbed = ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK")
+    scrubbed = ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK", "LMP_WORKER_STDERR")
     saved_env = {key: os.environ.get(key) for key in scrubbed}
     saved_cwd = os.getcwd()
     for key in scrubbed:
@@ -3091,7 +3228,9 @@ def _self_test_scenarios():
                 check(proc.returncode == EXIT_OK, f"{label} must exit 0, got {proc.returncode}: {disp_text!r}")
                 check(elapsed >= 1.0, f"{label} must wait for the run, returned after {elapsed:.2f}s")
                 check("detached pid=" not in disp_text, f"{label} must not detach: {disp_text!r}")
-                check("verdict:  PASS" in disp_text, f"{label} must print the card at exit: {disp_text!r}")
+                # The .py fallback never runs a check, so its pass is UNVERIFIED.
+                want_verdict = "verdict:  PASS" if engine_name == "cpp" else "verdict:  UNVERIFIED"
+                check(want_verdict in disp_text, f"{label} must print the card at exit: {disp_text!r}")
                 kinds = [p.get("kind") for p in received_payloads if p.get("task_id") == task_id]
                 check("died" not in kinds, f"{label} must not POST died, got {kinds!r}")
                 if engine_name == "py" and url_source != "none":
@@ -3535,7 +3674,8 @@ def _self_test_scenarios():
             rev_rc = main(["review", "--result", rev_path])
         check(rev_rc == EXIT_OK, f"review must exit 0, got {rev_rc}")
         rev_out = rev_stdout.getvalue()
-        check("verdict:  PASS" in rev_out, f"review card must PASS, got {rev_out!r}")
+        check("verdict:  UNVERIFIED" in rev_out,
+              f"an ok result with no check must be UNVERIFIED, got {rev_out!r}")
         check("rev-1" in rev_out and "a.py" in rev_out, f"review card must show task/files, got {rev_out!r}")
         check("loop:" not in rev_out, f"a normal ending must not print a loop line, got {rev_out!r}")
 
@@ -3563,6 +3703,116 @@ def _self_test_scenarios():
         check(build_answer_payload(action="denied") == {"text": "deny"},
               "denied must normalize to deny")
 
+        # 18c. non-PASS cards carry their evidence; PASS stays short
+        ev_dir = os.path.join(tmp, "evidence")
+        os.makedirs(ev_dir)
+        ev_path = os.path.join(ev_dir, "result.json")
+        with open(os.path.join(ev_dir, WORKER_STDERR_LOG), "w", encoding="utf-8") as fh:
+            fh.write("mem at=decode_end tokens=5396 active=1\n"
+                     "piper: awaiting_user.json written (seq 7). Question: which file?\n"
+                     "mem at=decode_end tokens=5400 active=1\n"
+                     "piper: task ev finished with status 'error' (exit 1, 9.0s, 4 turns)\n")
+        base = result_shell(task_id="ev", cwd=ev_dir, model_dir=model_dir, status="ok",
+                            message="All done, tests pass.", turns=4, wall_seconds=9.0)
+        red = dict(base, status="error", error="check command failed (exit code 1)",
+                   test={"ran": True, "exit_code": 1, "command": "python3 test_calc.py",
+                         "output_tail": "Traceback (most recent call last):\n"
+                                        "  File \"test_calc.py\", line 3, in <module>\n"
+                                        "    assert add(2, 3) == 5\n"
+                                        "AssertionError: expected 5, got None\n"})
+        red_card = format_review_card(red, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("error:    check command failed (exit code 1)" in red_card,
+              f"red card must carry the error, got {red_card!r}")
+        check("check:    | Traceback" in red_card and "| AssertionError: expected 5, got None" in red_card,
+              f"red card must carry the failing check's tail, got {red_card!r}")
+        check("run:      turns=4 wall=9s" in red_card, f"card must carry turns/wall, got {red_card!r}")
+        check("worker:   | piper: awaiting_user.json written" in red_card
+              and "| piper: task ev finished" in red_card,
+              f"non-PASS card must bring back the worker's piper: notices, got {red_card!r}")
+        check("mem at=" not in red_card, f"telemetry must stay off the card, got {red_card!r}")
+        check("verdict:  FAIL" in red_card, f"red card must FAIL, got {red_card!r}")
+        check(len(red_card.splitlines()) <= 25, f"card must stay compact, got {len(red_card.splitlines())} lines")
+
+        timeout_res = dict(red, error="check command failed (exit code -1)",
+                           test={"ran": True, "exit_code": -1, "command": "make test",
+                                 "output_tail": "running 312 tests\n\n[timeout after 60.000000s]"})
+        to_card = format_review_card(timeout_res, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("| [timeout after 60.000000s]" in to_card,
+              f"a timed-out check must show its timeout marker, got {to_card!r}")
+
+        stalled_res = dict(base, status="stalled", error="agent did not complete (max_turns)",
+                           termination_reason="max_turns", turns=30,
+                           test={"ran": True, "exit_code": 2, "command": "make test",
+                                 "output_tail": "FAILED test_x"})
+        st_card = format_review_card(stalled_res, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("error:    agent did not complete (max_turns)" in st_card,
+              f"stalled card must say why, got {st_card!r}")
+        check("verdict:  STALLED" in st_card, f"stalled card must be STALLED, got {st_card!r}")
+
+        green = dict(base, test={"ran": True, "exit_code": 0, "command": "make test",
+                                 "output_tail": "ok"})
+        pass_card = format_review_card(green, exit_code=EXIT_OK, result_path=ev_path)
+        check("verdict:  PASS" in pass_card, f"green card must PASS, got {pass_card!r}")
+        check("error:" not in pass_card and "check:" not in pass_card and "worker:" not in pass_card,
+              f"PASS card must not carry failure evidence, got {pass_card!r}")
+
+        # DIED: no result.json, so the log is the only evidence. Only this run's log,
+        # never the previous run's (rotated to worker.stderr.prev.log).
+        died_dir = os.path.join(tmp, "died")
+        os.makedirs(died_dir)
+        died_result = os.path.join(died_dir, "result.json")
+        with open(os.path.join(died_dir, WORKER_STDERR_PREV_LOG), "w", encoding="utf-8") as fh:
+            fh.write("piper: task old finished with status 'ok' (exit 0, 3.0s, 2 turns)\n")
+        with open(os.path.join(died_dir, WORKER_STDERR_LOG), "w", encoding="utf-8") as fh:
+            fh.write("mem at=generate_enter tokens=9000 active=1\n"
+                     "libc++abi: terminating due to uncaught exception: [metal] OOM\n")
+        died_card = format_review_card(None, exit_code=-9, result_path=died_result)
+        check("verdict:  DIED" in died_card, f"no result must be DIED, got {died_card!r}")
+        check(f"log:      {os.path.join(died_dir, WORKER_STDERR_LOG)}" in died_card,
+              f"DIED card must name the log, got {died_card!r}")
+        check("[metal] OOM" in died_card, f"DIED card must show the crash breadcrumbs, got {died_card!r}")
+        check("task old finished" not in died_card,
+              f"DIED card must not show the previous run's log, got {died_card!r}")
+
+        # 18d. dispatch output stays a card: telemetry lands in worker.stderr.log,
+        # and each run starts a fresh log (the previous one is rotated, not appended).
+        noisy = os.path.join(tmp, "fake_cpp_noisy")
+        _write_exec(noisy, FAKE_CPP_NOISY)
+        nws = os.path.join(tmp, "noisy_ws")
+        os.makedirs(nws)
+        ntask = os.path.join(nws, "task.json")
+        _write_json(ntask, {"id": "noisy", "cwd": nws, "model_dir": model_dir,
+                            "prompt": "Add hello() to a.py.", "timeout_s": 30,
+                            "result_path": os.path.join(nws, "result.json")})
+        noisy_env = {k: v for k, v in os.environ.items()
+                     if k not in ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK", "LMP_WORKER_STDERR")}
+        noisy_env.update(LMP_SIDECAR=noisy, LMP_USE_CPP_WORKER="1")
+        for attempt in (1, 2):
+            nout = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "dispatch", "--task", ntask],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=noisy_env, cwd=nws, timeout=60,
+            )
+            check(nout.returncode == EXIT_OK, f"noisy dispatch #{attempt} must exit 0, got {nout.returncode}")
+            check(len(nout.stdout) < 1500,
+                  f"dispatch output must be a compact card, got {len(nout.stdout)} bytes: {nout.stdout[:300]!r}")
+            check(b"verdict:  PASS" in nout.stdout, f"noisy dispatch must PASS, got {nout.stdout!r}")
+        nlog = _read_log_lines(os.path.join(nws, WORKER_STDERR_LOG))
+        check(sum(1 for ln in nlog if ln.startswith("mem at=")) == 210,
+              f"telemetry must land in worker.stderr.log, got {len(nlog)} lines")
+        check(sum(1 for ln in nlog if ln.startswith("piper: task noisy finished")) == 1,
+              "each run must start a fresh worker.stderr.log")
+        check(os.path.isfile(os.path.join(nws, WORKER_STDERR_PREV_LOG)),
+              "the previous run's log must be kept as worker.stderr.prev.log")
+        inherit_env = dict(noisy_env, LMP_WORKER_STDERR="inherit")
+        iout = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "dispatch", "--task", ntask],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=inherit_env, cwd=nws, timeout=60,
+        )
+        check(iout.stdout.count(b"mem at=") == 210,
+              "LMP_WORKER_STDERR=inherit must keep worker stderr inline")
+
         # 19. dispatch → wait → review card (fake sidecar)
         disp_ws = os.path.join(tmp, "dispatch_ws")
         os.makedirs(disp_ws)
@@ -3584,7 +3834,8 @@ def _self_test_scenarios():
             disp_rc = main(["dispatch", "--task", disp_task])
         check(disp_rc == EXIT_OK, f"dispatch must exit 0, got {disp_rc}")
         disp_out = disp_stdout.getvalue()
-        check("verdict:  PASS" in disp_out, f"dispatch must print PASS card, got {disp_out!r}")
+        check("verdict:  UNVERIFIED" in disp_out,
+              f"dispatch of a no-check packet must print an UNVERIFIED card, got {disp_out!r}")
         check(os.path.isfile(os.path.join(disp_ws, "result.json")),
               "dispatch must leave result.json")
         orch_path = os.path.join(disp_ws, "orch.jsonl")
@@ -3597,9 +3848,9 @@ def _self_test_scenarios():
                     orch_lines.append(json.loads(raw))
         check(any(line.get("kind") == "dispatch" for line in orch_lines),
               f"orch.jsonl must record dispatch, got {orch_lines!r}")
-        check(any(line.get("kind") == "review" and line.get("verdict") == "PASS"
+        check(any(line.get("kind") == "review" and line.get("verdict") == "UNVERIFIED"
                   for line in orch_lines),
-              f"orch.jsonl must record PASS review, got {orch_lines!r}")
+              f"orch.jsonl must record the review verdict, got {orch_lines!r}")
 
         # 20. status card from awaiting_user.json / result.json (no freehand cat/jq)
         st_dir = os.path.join(tmp, "status_dir")
