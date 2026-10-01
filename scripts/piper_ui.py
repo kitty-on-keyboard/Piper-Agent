@@ -112,21 +112,6 @@ def read_jsonl(path, limit=None):
     return rows
 
 
-def load_active(workspace_dir):
-    data = read_json(os.path.join(workspace_dir, ".piper", "active.json"))
-    if not data:
-        return None
-    task_path = data.get("task_path")
-    result_path = data.get("result_path")
-    if not isinstance(task_path, str) or not isinstance(result_path, str):
-        return None
-    return {
-        "id": str(data.get("id") or ""),
-        "task_path": os.path.abspath(task_path),
-        "result_path": os.path.abspath(result_path),
-    }
-
-
 def list_slice_records(workspace_dir):
     """Slice dirs under .piper/slices/. A missing root task.json is normal."""
     root = os.path.join(workspace_dir, ".piper", "slices")
@@ -174,10 +159,16 @@ def read_progress(workspace_dir):
 
 
 def resolve_watch_dir(workspace_dir):
-    """Active slice from .piper/active.json, else the last slice dir."""
-    active = load_active(workspace_dir)
-    if active and active.get("result_path"):
-        return os.path.dirname(active["result_path"]), active
+    """Active slice (the same resolver `piper status` uses), else the last slice dir."""
+    import piper_worker as pw
+
+    active = pw.find_active_slice(workspace_dir)
+    if active is not None:
+        return os.path.dirname(active["result_path"]), {
+            "id": str(active.get("id") or ""),
+            "task_path": active.get("task_path"),
+            "result_path": active["result_path"],
+        }
     slices = list_slice_records(workspace_dir)
     if slices:
         last = slices[-1]
@@ -417,31 +408,6 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b'{"status":"ok"}')
-                return
-
-            if path == "/api/answer":
-                # Gate approval/denial — same write_answer_file path as `piper answer`
-                try:
-                    import piper_worker as pw
-                    payload = json.loads(body.decode("utf-8"))
-                    if isinstance(payload.get("text"), str):
-                        body_out = pw.build_answer_payload(text=payload["text"])
-                    elif "answer" in payload:
-                        body_out = pw.build_answer_payload(action=payload["answer"])
-                    elif "action" in payload:
-                        body_out = pw.build_answer_payload(action=payload["action"])
-                    else:
-                        raise ValueError("answer body needs text, answer, or action")
-                    answer_path = pw.write_answer_file(workspace_dir, body_out)
-                    broker.broadcast("answer_updated", body_out)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"status": "ok", "path": answer_path}).encode("utf-8"))
-                except Exception as e:
-                    self.send_response(500)
-                    self.end_headers()
-                    self.wfile.write(str(e).encode("utf-8"))
                 return
 
             self.send_response(404)

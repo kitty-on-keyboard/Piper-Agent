@@ -585,14 +585,66 @@ def build_answer_payload(action=None, text=None):
     return {"text": text}
 
 
-def resolve_answer_dir(dir_arg=None, task_arg=None):
+def find_active_slice(start_dir=None):
+    """The nearest `.piper/active.json` walking up from start_dir (default: cwd).
+
+    `piper packet` records the slice it emitted there; bare answer/status/await/review
+    and `piper ui` follow it instead of guessing the process cwd.
+    """
+    directory = os.path.abspath(os.path.expanduser(start_dir or os.getcwd()))
+    while True:
+        record = read_json_object(os.path.join(directory, ".piper", "active.json"))
+        if record is not None and isinstance(record.get("result_path"), str) \
+                and record["result_path"].strip():
+            out = dict(record)
+            out["result_path"] = os.path.abspath(os.path.join(directory, record["result_path"]))
+            if isinstance(record.get("task_path"), str):
+                out["task_path"] = os.path.abspath(os.path.join(directory, record["task_path"]))
+            out["root"] = directory
+            return out
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def resolve_slice_dir(dir_arg=None, task_arg=None):
+    """The one place answer/status/await/review find a slice's directory.
+
+    Order: explicit --dir, then --task's result_path, then the nearest
+    `.piper/active.json` walking up from cwd, then cwd. Slices live in
+    `.piper/slices/<id>/`, so falling straight back to cwd read the wrong folder.
+    """
     if dir_arg:
         return os.path.abspath(os.path.expanduser(dir_arg))
     if task_arg:
         packet, _roots = read_task_roots(task_arg)
         task_path = resolve_task_json_path(task_arg)
         return os.path.dirname(result_path_from_light_packet(packet, task_path))
+    active = find_active_slice()
+    if active is not None:
+        return os.path.dirname(active["result_path"])
     return os.path.abspath(".")
+
+
+def ask_is_live(awaiting):
+    """An awaiting_user.json speaks for a run only while the process that wrote it lives.
+
+    The worker records its pid; a file from a crashed or killed run is not an ask.
+    Files without a pid (older writers) are taken at their word.
+    """
+    pid = awaiting.get("pid") if isinstance(awaiting, dict) else None
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def write_answer_file(directory, payload):
@@ -819,11 +871,21 @@ def cmd_answer(args):
                 print("piper answer: need allow|deny or --text", file=sys.stderr)
                 return EXIT_INVALID
             payload = build_answer_payload(action=action)
-        directory = resolve_answer_dir(getattr(args, "dir", None), getattr(args, "task", None))
-        path = write_answer_file(directory, payload)
+        directory = resolve_slice_dir(getattr(args, "dir", None), getattr(args, "task", None))
     except (ValueError, PacketError) as exc:
         print(f"piper answer: {exc}", file=sys.stderr)
         return EXIT_INVALID
+    info = collect_run_status(directory)
+    if info.get("state") != "ask":
+        # Nothing is waiting: an answer written now would sit until some later run's
+        # first, unrelated question and answer that instead.
+        print(f"piper answer: no open ask in {directory} (state: {info.get('state')}); "
+              "nothing to answer", file=sys.stderr)
+        return EXIT_INVALID
+    # Bind the answer to the ask it answers. The worker applies only an answer whose
+    # run_id and seq match the open ask, and discards any other.
+    payload = dict(payload, run_id=info.get("run_id"), seq=info.get("seq"))
+    path = write_answer_file(directory, payload)
     print(path)
     return EXIT_OK
 
@@ -1204,6 +1266,9 @@ def resolve_result_path(result_arg=None, task_arg=None):
         packet, _roots = read_task_roots(task_arg)
         task_path = resolve_task_json_path(task_arg)
         return result_path_from_light_packet(packet, task_path)
+    active = find_active_slice()
+    if active is not None:
+        return active["result_path"]
     return os.path.abspath("result.json")
 
 def cmd_review(args):
@@ -1995,6 +2060,7 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper await --dir /path/to/slice           # wait for ask/done; no sleep-loop
    ```
    On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
+   Bare `piper answer` / `status` / `await` / `review` act on the slice `piper packet` recorded in the nearest `.piper/active.json` (walking up from the current directory); `--dir` or `--task` picks another. `piper answer` refuses (exit 3) when no ask is open, and binds the answer to that ask (`run_id`, `seq`): the worker applies only a matching answer and discards any other. A run clears the previous run's `awaiting_user.json` / `answer.json` / `result.json` at start and removes its own ask when the wait ends, so `piper status` never reports a finished or dead run as asking.
 
    The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
 
@@ -2257,17 +2323,6 @@ def resolve_task_json_path(task_arg):
     return path
 
 
-def resolve_status_dir(dir_arg=None, task_arg=None):
-    """Directory that holds awaiting_user.json / result.json / answer.json."""
-    if dir_arg:
-        return os.path.abspath(os.path.expanduser(dir_arg))
-    if task_arg:
-        packet, _roots = read_task_roots(task_arg)
-        task_path = resolve_task_json_path(task_arg)
-        return os.path.dirname(result_path_from_light_packet(packet, task_path))
-    return os.path.abspath(".")
-
-
 def read_json_object(path):
     if not path or not os.path.isfile(path):
         return None
@@ -2282,7 +2337,10 @@ def read_json_object(path):
 def collect_run_status(directory):
     """Deterministic workspace status — parents should not freehand cat/jq.
 
-    Priority: ask (awaiting_user.json) > finished (result.json) > idle.
+    Priority: finished (result.json) > live ask (awaiting_user.json) > idle. A run
+    clears its result at start and its ask before writing the result, so a result
+    beside an ask file means the ask is left over, and an ask whose writer is gone
+    (pid) is no ask at all.
     """
     directory = os.path.abspath(directory)
     awaiting_path = os.path.join(directory, "awaiting_user.json")
@@ -2291,7 +2349,7 @@ def collect_run_status(directory):
     awaiting = read_json_object(awaiting_path)
     result = read_json_object(result_path)
     answer_present = os.path.isfile(answer_path)
-    if awaiting is not None:
+    if result is None and awaiting is not None and ask_is_live(awaiting):
         question = str(awaiting.get("question") or "").strip()
         return {
             "state": "ask",
@@ -2392,7 +2450,7 @@ def status_exit_code(info):
 
 def cmd_status(args):
     try:
-        directory = resolve_status_dir(getattr(args, "dir", None), getattr(args, "task", None))
+        directory = resolve_slice_dir(getattr(args, "dir", None), getattr(args, "task", None))
     except PacketError as exc:
         print(f"piper status: {exc}", file=sys.stderr)
         return EXIT_INVALID
@@ -2407,7 +2465,7 @@ def cmd_status(args):
 def cmd_await(args):
     """Poll until ask/done/stalled/error/timeout — no hand-rolled sleep loops."""
     try:
-        directory = resolve_status_dir(getattr(args, "dir", None), getattr(args, "task", None))
+        directory = resolve_slice_dir(getattr(args, "dir", None), getattr(args, "task", None))
     except PacketError as exc:
         print(f"piper await: {exc}", file=sys.stderr)
         return EXIT_INVALID
@@ -3493,19 +3551,40 @@ def _self_test_scenarios():
         # 14. piper answer writes known-right answer.json (no freehand paste)
         ans_dir = os.path.join(tmp, "answer_dir")
         os.makedirs(ans_dir)
+        # Nothing is asking: an answer now would answer some later, unrelated question.
+        with contextlib.redirect_stderr(io.StringIO()):
+            check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_INVALID,
+                  "answer with no open ask must exit 3")
+        check(not os.path.exists(os.path.join(ans_dir, "answer.json")),
+              "answer with no open ask must not write answer.json")
+        # An ask whose writer is gone is not open either.
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        _write_json(os.path.join(ans_dir, "awaiting_user.json"),
+                    {"question": "q", "options": "allow,deny", "run_id": "r-st", "seq": 5,
+                     "pid": dead.pid})
+        with contextlib.redirect_stderr(io.StringIO()):
+            check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_INVALID,
+                  "answer to a dead run's ask must exit 3")
+        # A live ask (this process stands in for the waiting worker): the answer is
+        # bound to that ask's run_id and seq.
+        _write_json(os.path.join(ans_dir, "awaiting_user.json"),
+                    {"question": "q", "options": "allow,deny", "run_id": "r-st", "seq": 5,
+                     "pid": os.getpid()})
+        bound = {"run_id": "r-st", "seq": 5}
         check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_OK, "answer allow must exit 0")
         with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
             ans_body = json.load(fh)
-        check(ans_body == {"text": "allow"}, f"answer allow payload, got {ans_body!r}")
+        check(ans_body == dict(bound, text="allow"), f"answer allow payload, got {ans_body!r}")
         check(main(["answer", "deny", "--dir", ans_dir]) == EXIT_OK, "answer deny must exit 0")
         with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
             ans_body = json.load(fh)
-        check(ans_body == {"text": "deny"}, f"answer deny payload, got {ans_body!r}")
+        check(ans_body == dict(bound, text="deny"), f"answer deny payload, got {ans_body!r}")
         check(main(["answer", "--text", "use option B", "--dir", ans_dir]) == EXIT_OK,
               "answer --text must exit 0")
         with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
             ans_body = json.load(fh)
-        check(ans_body == {"text": "use option B"}, f"answer text payload, got {ans_body!r}")
+        check(ans_body == dict(bound, text="use option B"), f"answer text payload, got {ans_body!r}")
         check(main(["answer", "--dir", ans_dir]) == EXIT_INVALID,
               "answer without action/text must exit 3")
 
@@ -3642,12 +3721,23 @@ def _self_test_scenarios():
         check("state:    done" in aw_out.getvalue(),
               f"await --task card must show done, got {aw_out.getvalue()!r}")
 
-        # 16d. answer --task must not require model_dir
+        # 16d. answer --task must not require model_dir (and a finished slice has no
+        # open ask to answer)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            done_ans_rc = main(["answer", "allow", "--task", pkt_status])
+        check(done_ans_rc == EXIT_INVALID, f"answer to a finished slice must exit 3, got {done_ans_rc}")
+        ask_root = os.path.join(tmp, "ask_task_root")
+        os.makedirs(ask_root)
+        ask_pkt = os.path.join(ask_root, "task.json")
+        _write_json(ask_pkt, {"id": "ask-task", "cwd": ask_root, "prompt": "x"})
+        _write_json(os.path.join(ask_root, "awaiting_user.json"),
+                    {"question": "q", "options": "allow,deny", "run_id": "r-t", "seq": 2,
+                     "pid": os.getpid()})
         ans_out = io.StringIO()
         with contextlib.redirect_stdout(ans_out):
-            ans_rc = main(["answer", "allow", "--task", pkt_status])
+            ans_rc = main(["answer", "allow", "--task", ask_pkt])
         check(ans_rc == EXIT_OK, f"answer --task without model_dir must exit 0, got {ans_rc}")
-        ans_path = os.path.join(status_root, "answer.json")
+        ans_path = os.path.join(ask_root, "answer.json")
         check(os.path.isfile(ans_path), "answer --task must write answer.json beside result")
 
         # 16e. relative result_path joins to task.json dir (not process cwd)
@@ -3988,6 +4078,70 @@ def _self_test_scenarios():
         check(done_rc == EXIT_OK, f"status done must exit 0, got {done_rc}")
         check("state:    done" in done_stdout.getvalue(),
               f"status done card, got {done_stdout.getvalue()!r}")
+
+        # 20b. a finished run's result outranks a leftover ask; a dead run's ask is no ask
+        with open(os.path.join(st_dir, "result.json"), "w", encoding="utf-8") as fh:
+            json.dump(result_shell(task_id="st-2", cwd=st_dir, model_dir=model_dir,
+                                   status="timeout", message="timeout awaiting user answer (600s)"), fh)
+        _write_json(os.path.join(st_dir, "awaiting_user.json"),
+                    {"question": "stale?", "options": "", "run_id": "r1", "seq": 7, "pid": os.getpid()})
+        stale_out = io.StringIO()
+        with contextlib.redirect_stdout(stale_out):
+            stale_rc = main(["status", "--dir", st_dir])
+        check("state:    timeout" in stale_out.getvalue() and stale_rc == EXIT_TIMEOUT,
+              f"a timeout result must outrank a leftover ask, got {stale_out.getvalue()!r}")
+        os.remove(os.path.join(st_dir, "result.json"))
+        _write_json(os.path.join(st_dir, "awaiting_user.json"),
+                    {"question": "orphan?", "options": "", "run_id": "r1", "seq": 7, "pid": dead.pid})
+        check(collect_run_status(st_dir)["state"] == "idle",
+              "an ask whose worker is gone must not read as an open ask")
+        os.remove(os.path.join(st_dir, "awaiting_user.json"))
+
+        # 20c. bare status/await/answer/review from the workspace root reach the slice
+        # `piper packet` recorded in .piper/active.json, not the root itself
+        bare_ws = os.path.join(tmp, "bare_ws")
+        os.makedirs(bare_ws)
+        with contextlib.redirect_stdout(io.StringIO()):
+            check(main(["packet", "--id", "bare-1", "--cwd", bare_ws, "--prompt", "X.",
+                        "--model-dir", model_dir]) == EXIT_OK, "bare packet must emit")
+        bare_slice = os.path.join(bare_ws, ".piper", "slices", "bare-1")
+        _write_json(os.path.join(bare_slice, "awaiting_user.json"),
+                    {"question": "Which file?", "options": "", "run_id": "r-b", "seq": 3,
+                     "pid": os.getpid()})
+        bare_sub = os.path.join(bare_ws, "src", "deep")
+        os.makedirs(bare_sub)
+        here = os.getcwd()
+        try:
+            for start in (bare_ws, bare_sub):
+                os.chdir(start)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = main(["status"])
+                check(rc == EXIT_OK and "state:    ask" in out.getvalue() and bare_slice in out.getvalue(),
+                      f"bare status from {start} must find the active slice, got {out.getvalue()!r}")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = main(["await", "--timeout-s", "1", "--interval-s", "0.05"])
+                check(rc == EXIT_OK and "Which file?" in out.getvalue(),
+                      f"bare await from {start} must find the active slice, got {out.getvalue()!r}")
+            os.chdir(bare_ws)
+            with contextlib.redirect_stdout(io.StringIO()):
+                check(main(["answer", "--text", "a.py"]) == EXIT_OK, "bare answer must exit 0")
+            check(os.path.isfile(os.path.join(bare_slice, "answer.json")),
+                  "bare answer must land in the active slice")
+            check(not os.path.exists(os.path.join(bare_ws, "answer.json")),
+                  "bare answer must not land in the workspace root")
+            os.remove(os.path.join(bare_slice, "awaiting_user.json"))
+            with open(os.path.join(bare_slice, "result.json"), "w", encoding="utf-8") as fh:
+                json.dump(result_shell(task_id="bare-1", cwd=bare_ws, model_dir=model_dir,
+                                       status="ok", message="Done."), fh)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = main(["review"])
+            check(rc == EXIT_OK and "task:     bare-1" in out.getvalue(),
+                  f"bare review must read the active slice's result, got {out.getvalue()!r}")
+        finally:
+            os.chdir(here)
 
         # 21. await returns when ask appears (no hand-rolled sleep snippet)
         await_dir = os.path.join(tmp, "await_dir")

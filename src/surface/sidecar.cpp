@@ -1935,6 +1935,10 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     std::filesystem::path result_dir = std::filesystem::path(packet.result_path).parent_path();
     std::filesystem::create_directories(result_dir, ec);
     archive_prior_events(result_dir.string());
+    // Daemon and CLI runs alike: nothing the previous run left in the slice dir may
+    // speak for this one (a stale ask outranked the result; a stale answer answered
+    // the next run's first question).
+    const bool discarded_stale_answer = clear_stale_run_files(packet.result_path);
     std::string durable_log = durable_events_path(result_dir.string());
 
     platform::EventLogWriter log;
@@ -1967,6 +1971,13 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
             (void)::write(client_fd, s.data(), s.size());
         }
         return kExitError;
+    }
+
+    if (discarded_stale_answer) {
+        platform::Event ev;
+        ev.kind = "answer_discarded";
+        ev.fields = {{"why", "answer.json from a previous run at run start"}};
+        log.append(ev, clock);
     }
 
     model::CancelToken cancel;
@@ -2186,7 +2197,17 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
                     final_report.termination_reason = "timeout_awaiting_user";
                     break;
                 }
-                auto ans = read_and_consume_answer(answer_path, awaiting_path);
+                std::string rejected;
+                auto ans = read_and_consume_answer(answer_path, awaiting_path,
+                                                   session.run_id, info.seq, &rejected);
+                if (!rejected.empty()) {
+                    platform::Event ev;
+                    ev.kind = "answer_discarded";
+                    ev.fields = {{"why", rejected}};
+                    log.append(ev, clock);
+                    std::fprintf(stderr, "piper: %s\n", rejected.c_str());
+                    std::fflush(stderr);
+                }
                 if (ans.has_value()) {
                     answer_text = std::move(*ans);
                     previous_answers[question] = answer_text;
@@ -2205,6 +2226,8 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
             }
 
             if (!got_answer) {
+                std::error_code rm_ec;
+                std::filesystem::remove(awaiting_path, rm_ec);
                 if (final_report.termination_reason != "timeout_awaiting_user") {
                     final_report.termination_reason = cancel.cancelled() ? "cancelled" : "timeout_awaiting_user";
                 }
@@ -2304,6 +2327,11 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         result.files_touched,
         result.error);
 
+    {
+        // No ask outlives its run, whichever way the run ended.
+        std::error_code rm_ec;
+        std::filesystem::remove(awaiting_path, rm_ec);
+    }
     write_result(packet.result_path, result);
     log.close();
 

@@ -97,6 +97,7 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper await --dir /path/to/slice           # wait for ask/done; no sleep-loop
    ```
    On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
+   Bare `piper answer` / `status` / `await` / `review` act on the slice `piper packet` recorded in the nearest `.piper/active.json` (walking up from the current directory); `--dir` or `--task` picks another. `piper answer` refuses (exit 3) when no ask is open, and binds the answer to that ask (`run_id`, `seq`): the worker applies only a matching answer and discards any other. A run clears the previous run's `awaiting_user.json` / `answer.json` / `result.json` at start and removes its own ask when the wait ends, so `piper status` never reports a finished or dead run as asking.
 
    The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
 

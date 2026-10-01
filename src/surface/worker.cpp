@@ -1418,7 +1418,9 @@ void write_awaiting_user(const std::string& path, const AwaitingUserInfo& info) 
         {"question", info.question},
         {"options", info.options},
         {"run_id", info.run_id},
-        {"seq", info.seq}
+        {"seq", info.seq},
+        // Who is waiting. A reader treats the ask as live only while this pid is.
+        {"pid", static_cast<long long>(::getpid())}
     };
     std::string tmp_path = path + ".tmp";
     {
@@ -1433,7 +1435,11 @@ void write_awaiting_user(const std::string& path, const AwaitingUserInfo& info) 
     }
 }
 
-std::optional<std::string> read_and_consume_answer(const std::string& answer_path, const std::string& awaiting_path) {
+std::optional<std::string> read_and_consume_answer(const std::string& answer_path,
+                                                   const std::string& awaiting_path,
+                                                   const std::string& run_id,
+                                                   uint64_t seq,
+                                                   std::string* rejected) {
     std::error_code ec;
     if (!std::filesystem::exists(answer_path, ec) || ec) {
         return std::nullopt;
@@ -1456,8 +1462,31 @@ std::optional<std::string> read_and_consume_answer(const std::string& answer_pat
         return std::nullopt;
     }
 
-    std::string answer;
     auto j = nlohmann::json::parse(raw, nullptr, false);
+
+    // An answer is for ONE ask: this run, this seq. Anything else -- a previous run's
+    // answer, a late answer to an earlier ask, a freehand file -- is removed unread,
+    // never applied to the question that happens to be open now.
+    const bool bound = !j.is_discarded() && j.is_object() &&
+                       j.contains("run_id") && j["run_id"].is_string() &&
+                       j["run_id"].get<std::string>() == run_id &&
+                       j.contains("seq") && j["seq"].is_number_integer() &&
+                       j["seq"].get<int64_t>() >= 0 &&
+                       static_cast<uint64_t>(j["seq"].get<int64_t>()) == seq;
+    if (!bound) {
+        std::filesystem::remove(answer_path, ec);
+        if (rejected != nullptr) {
+            std::string got = "unbound";
+            if (!j.is_discarded() && j.is_object() && j.contains("run_id") && j.contains("seq")) {
+                got = "run " + j["run_id"].dump() + " seq " + j["seq"].dump();
+            }
+            *rejected = "answer.json (" + got + ") does not match the open ask (run \"" +
+                        run_id + "\" seq " + std::to_string(seq) + "); discarded";
+        }
+        return std::nullopt;
+    }
+
+    std::string answer;
     if (!j.is_discarded()) {
         if (j.is_object()) {
             if (j.contains("text") && j["text"].is_string()) {
@@ -1487,6 +1516,16 @@ std::optional<std::string> read_and_consume_answer(const std::string& answer_pat
     }
 
     return answer;
+}
+
+bool clear_stale_run_files(const std::string& result_path) {
+    const std::filesystem::path dir = std::filesystem::path(result_path).parent_path();
+    std::error_code ec;
+    const bool had_answer = std::filesystem::exists(dir / "answer.json", ec);
+    std::filesystem::remove(dir / "awaiting_user.json", ec);
+    std::filesystem::remove(dir / "answer.json", ec);
+    std::filesystem::remove(result_path, ec);
+    return had_answer;
 }
 
 std::string read_orch_webhook_file(const std::vector<std::string>& roots) {
@@ -1777,18 +1816,32 @@ IrreversibleAskResult handle_irreversible_ask(const IrreversibleAskParams& param
         std::fflush(stderr);
     }
 
+    // The ask file lives exactly as long as this wait. Left behind, it outranked the
+    // run's result in `piper status` and answered the NEXT run's `piper await`.
+    const auto close_ask = [&params]() {
+        std::error_code ec;
+        std::filesystem::remove(params.awaiting_path, ec);
+    };
     auto last_heartbeat = std::chrono::steady_clock::now();
     while (true) {
         if (params.is_cancelled && params.is_cancelled()) {
+            close_ask();
             return IrreversibleAskResult::Cancelled;
         }
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(now - params.wall_start).count();
         if (params.timeout_s > 0.0 && elapsed >= params.timeout_s) {
+            close_ask();
             return IrreversibleAskResult::Timeout;
         }
 
-        auto ans = read_and_consume_answer(params.answer_path, params.awaiting_path);
+        std::string rejected;
+        auto ans = read_and_consume_answer(params.answer_path, params.awaiting_path,
+                                           params.run_id, params.seq, &rejected);
+        if (!rejected.empty()) {
+            std::fprintf(stderr, "piper: %s\n", rejected.c_str());
+            std::fflush(stderr);
+        }
         if (ans.has_value()) {
             if (params.on_answer_received) {
                 params.on_answer_received(*ans);

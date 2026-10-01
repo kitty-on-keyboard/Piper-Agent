@@ -78,7 +78,7 @@ piper progress --id slice-001 pass --note "validator + test"
 ```
 
 - **Unattended irreversible tools:** `--auto-approve-irreversible` or `--auto-approve-all` on `piper dispatch`.
-- **Ask:** `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not freehand `answer.json`. Do not restart the process.
+- **Ask:** `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not freehand `answer.json`. Do not restart the process. Bare `piper answer`/`status`/`await`/`review` act on the active slice (`.piper/active.json`). `piper answer` exits 3 when no ask is open; the answer is bound to the open ask and a stale one is discarded.
 - **Already finished:** `piper review --task …`. Status without cat/jq: `piper status --dir …` / `piper await --dir …`.
 - **Lower-level attached run:** `piper run --task …` (same as `piper worker run`). Keep weights warm with `piper worker serve`, then `piper worker run`.
 - **Telemetry / Flight-Recorder Distillation:** `piper distill --input <path>` (e.g. `.godoer/incidents.json` or stdin). Queries the model via `~/.piper/worker.sock` with zero RAM overhead and single-flight lock protection (`/tmp/piper_distill.lock`).

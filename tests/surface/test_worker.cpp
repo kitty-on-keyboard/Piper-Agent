@@ -465,6 +465,8 @@ TEST(write_awaiting_user_writes_valid_json) {
     CHECK_EQ(j["options"].get<std::string>(), "yes,no");
     CHECK_EQ(j["run_id"].get<std::string>(), "r-test");
     CHECK_EQ(j["seq"].get<uint64_t>(), uint64_t{42});
+    // The waiting process, so `piper status` can tell a live ask from a dead one.
+    CHECK_EQ(j["pid"].get<long long>(), static_cast<long long>(::getpid()));
 
     std::filesystem::remove_all(tmp_dir);
 }
@@ -475,58 +477,98 @@ TEST(read_and_consume_answer_reads_formats_and_deletes_files) {
     std::string ans_file = (tmp_dir / "answer.json").string();
     std::string await_file = (tmp_dir / "awaiting_user.json").string();
 
-    // 1. Missing answer.json returns nullopt
-    CHECK(!read_and_consume_answer(ans_file, await_file).has_value());
+    // 1. Missing answer.json returns nullopt and rejects nothing
+    std::string rejected;
+    CHECK(!read_and_consume_answer(ans_file, await_file, "r-1", 4, &rejected).has_value());
+    CHECK(rejected.empty());
 
-    // 2. Object with "text"
+    // 2. Bound object with "text"
     {
         std::ofstream af(await_file);
         af << "{\"question\":\"q\"}";
         std::ofstream f(ans_file);
-        f << "{\"text\":\"Proceed with option A\"}";
+        f << "{\"text\":\"Proceed with option A\",\"run_id\":\"r-1\",\"seq\":4}";
     }
-    auto ans1 = read_and_consume_answer(ans_file, await_file);
+    auto ans1 = read_and_consume_answer(ans_file, await_file, "r-1", 4);
     REQUIRE(ans1.has_value());
     CHECK_EQ(*ans1, "Proceed with option A");
     CHECK(!std::filesystem::exists(ans_file));
     CHECK(!std::filesystem::exists(await_file));
 
-    // 3. Object with "answer"
+    // 3. Bound object with "answer"
     {
         std::ofstream af(await_file);
         af << "{\"question\":\"q\"}";
         std::ofstream f(ans_file);
-        f << "{\"answer\":\"Proceed with option B\"}";
+        f << "{\"answer\":\"Proceed with option B\",\"run_id\":\"r-1\",\"seq\":4}";
     }
-    auto ans2 = read_and_consume_answer(ans_file, await_file);
+    auto ans2 = read_and_consume_answer(ans_file, await_file, "r-1", 4);
     REQUIRE(ans2.has_value());
     CHECK_EQ(*ans2, "Proceed with option B");
     CHECK(!std::filesystem::exists(ans_file));
     CHECK(!std::filesystem::exists(await_file));
 
-    // 4. Raw JSON string
-    {
-        std::ofstream af(await_file);
-        af << "{\"question\":\"q\"}";
-        std::ofstream f(ans_file);
-        f << "\"Direct JSON string answer\"";
+    // 4. Unbound forms (a bare JSON string, plain text, an object with no run/seq)
+    // are not this ask's answer: deleted unread, reported, the ask stays open.
+    for (const char* body : {"\"Direct JSON string answer\"",
+                             "Plain text reply from orchestrator\n",
+                             "{\"text\":\"allow\"}"}) {
+        {
+            std::ofstream af(await_file);
+            af << "{\"question\":\"q\"}";
+            std::ofstream f(ans_file);
+            f << body;
+        }
+        rejected.clear();
+        CHECK(!read_and_consume_answer(ans_file, await_file, "r-1", 4, &rejected).has_value());
+        CHECK(!rejected.empty());
+        CHECK(!std::filesystem::exists(ans_file));
+        CHECK(std::filesystem::exists(await_file));
     }
-    auto ans3 = read_and_consume_answer(ans_file, await_file);
-    REQUIRE(ans3.has_value());
-    CHECK_EQ(*ans3, "Direct JSON string answer");
-    CHECK(!std::filesystem::exists(ans_file));
-
-    // 5. Raw plain text
-    {
-        std::ofstream f(ans_file);
-        f << "Plain text reply from orchestrator\n";
-    }
-    auto ans4 = read_and_consume_answer(ans_file, await_file);
-    REQUIRE(ans4.has_value());
-    CHECK_EQ(*ans4, "Plain text reply from orchestrator");
-    CHECK(!std::filesystem::exists(ans_file));
 
     std::filesystem::remove_all(tmp_dir);
+}
+
+// The stale-answer chain: an answer written for an earlier ask (or an earlier run)
+// must never answer the question that happens to be open now.
+TEST(read_and_consume_answer_ignores_an_answer_for_another_ask) {
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_worker_consume_seq";
+    std::filesystem::create_directories(tmp_dir);
+    std::string ans_file = (tmp_dir / "answer.json").string();
+    std::string await_file = (tmp_dir / "awaiting_user.json").string();
+
+    for (const char* body : {"{\"text\":\"allow\",\"run_id\":\"r-1\",\"seq\":3}",
+                             "{\"text\":\"allow\",\"run_id\":\"r-0\",\"seq\":4}"}) {
+        {
+            std::ofstream af(await_file);
+            af << "{\"question\":\"q\",\"run_id\":\"r-1\",\"seq\":4}";
+            std::ofstream f(ans_file);
+            f << body;
+        }
+        std::string rejected;
+        CHECK(!read_and_consume_answer(ans_file, await_file, "r-1", 4, &rejected).has_value());
+        CHECK(rejected.find("does not match the open ask") != std::string::npos);
+        CHECK(!std::filesystem::exists(ans_file));
+        CHECK(std::filesystem::exists(await_file));
+    }
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(clear_stale_run_files_removes_the_previous_runs_ask_answer_and_result) {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "test_worker_stale_files";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string result = (dir / "result.json").string();
+    CHECK(!clear_stale_run_files(result));
+    for (const char* name : {"awaiting_user.json", "answer.json", "result.json", "events.jsonl"}) {
+        std::ofstream((dir / name).string()) << "{}";
+    }
+    CHECK(clear_stale_run_files(result));
+    CHECK(!std::filesystem::exists(dir / "awaiting_user.json"));
+    CHECK(!std::filesystem::exists(dir / "answer.json"));
+    CHECK(!std::filesystem::exists(dir / "result.json"));
+    CHECK(std::filesystem::exists(dir / "events.jsonl"));  // archive_prior_events owns that
+    std::filesystem::remove_all(dir);
 }
 
 TEST(find_last_ask_user_handles_missing_or_empty_log) {
@@ -1000,7 +1042,7 @@ TEST(handle_irreversible_ask_allow_path) {
     // Pre-populate answer.json so handle_irreversible_ask consumes it immediately
     {
         std::ofstream f(ans_file);
-        f << "{\"text\":\"allow\"}\n";
+        f << "{\"text\":\"allow\",\"run_id\":\"r-test-allow\",\"seq\":7}\n";
     }
 
     IrreversibleAskParams params;
@@ -1034,7 +1076,7 @@ TEST(handle_irreversible_ask_deny_path) {
 
     {
         std::ofstream f(ans_file);
-        f << "{\"answer\":\"deny\"}\n";
+        f << "{\"answer\":\"deny\",\"run_id\":\"r-test-deny\",\"seq\":10}\n";
     }
 
     IrreversibleAskParams params;
@@ -1081,13 +1123,9 @@ TEST(handle_irreversible_ask_timeout_path) {
     IrreversibleAskResult res = handle_irreversible_ask(params);
     CHECK(res == IrreversibleAskResult::Timeout);
 
-    // On timeout, awaiting_user.json was written and NOT deleted
-    CHECK(std::filesystem::exists(await_file));
-    std::ifstream f(await_file);
-    auto j = nlohmann::json::parse(f, nullptr, false);
-    CHECK(!j.is_discarded());
-    CHECK_EQ(j["run_id"].get<std::string>(), "r-test-timeout");
-    CHECK_EQ(j["seq"].get<uint64_t>(), uint64_t{12});
+    // The ask ends with the wait: a timed-out ask must not survive to outrank the
+    // run's result in `piper status` or answer the next run's `piper await`.
+    CHECK(!std::filesystem::exists(await_file));
 
     std::filesystem::remove_all(tmp_dir);
 }
@@ -1114,6 +1152,7 @@ TEST(handle_irreversible_ask_cancelled_path) {
 
     IrreversibleAskResult res = handle_irreversible_ask(params);
     CHECK(res == IrreversibleAskResult::Cancelled);
+    CHECK(!std::filesystem::exists(await_file));
 
     std::filesystem::remove_all(tmp_dir);
 }

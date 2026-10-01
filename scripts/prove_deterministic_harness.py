@@ -39,13 +39,17 @@ def fail(msg):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="piper-det-harness-") as tmp:
-        # 1. answer
+        # 1. answer: bound to the open ask (this process stands in for the worker)
+        with open(os.path.join(tmp, "awaiting_user.json"), "w", encoding="utf-8") as fh:
+            json.dump({"question": "Allow?", "options": "allow,deny", "run_id": "r-prove",
+                       "seq": 1, "pid": os.getpid()}, fh)
         if w.main(["answer", "allow", "--dir", tmp]) != w.EXIT_OK:
             return fail("piper answer allow")
         with open(os.path.join(tmp, "answer.json"), encoding="utf-8") as fh:
             body = json.load(fh)
-        if body != {"text": "allow"}:
+        if body != {"text": "allow", "run_id": "r-prove", "seq": 1}:
             return fail(f"answer payload {body!r}")
+        os.remove(os.path.join(tmp, "awaiting_user.json"))
 
         # 2. wake file discovery (no panel copy)
         url = "http://127.0.0.1:8765/wake"

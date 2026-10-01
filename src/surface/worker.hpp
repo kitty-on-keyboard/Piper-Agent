@@ -267,14 +267,22 @@ struct AwaitingUserInfo {
 [[nodiscard]] std::optional<AwaitingUserInfo> find_last_ask_user(
     const std::string& log_path, const std::string& run_id);
 
-// Write awaiting_user.json atomically next to result.json.
+// Write awaiting_user.json atomically next to result.json (with the waiting pid).
 void write_awaiting_user(const std::string& path, const AwaitingUserInfo& info);
 
-// Check for and consume answer.json in the result directory, deleting both
-// answer.json and awaiting_user.json so stale questions cannot be answered twice.
-// Returns the answer text if present, nullopt otherwise.
+// Check for and consume answer.json in the result directory. Only an answer bound to
+// the open ask -- its run_id and seq, as `piper answer` copies them from
+// awaiting_user.json -- is applied; then both files are deleted so a question cannot
+// be answered twice. Any other answer.json is deleted unread and described in
+// `*rejected` (when non-null) so the caller can log it. nullopt when nothing applies.
 [[nodiscard]] std::optional<std::string> read_and_consume_answer(
-    const std::string& answer_path, const std::string& awaiting_path);
+    const std::string& answer_path, const std::string& awaiting_path,
+    const std::string& run_id, uint64_t seq, std::string* rejected = nullptr);
+
+// Run start: remove the previous run's awaiting_user.json, answer.json and result
+// file from the slice dir, so a stale ask cannot shadow this run and a stale answer
+// cannot answer its first question. Returns true when an answer.json was discarded.
+bool clear_stale_run_files(const std::string& result_path);
 
 // ------------------------------------------------------------------
 // Cloud wake-up webhook (orchestrator wake).
