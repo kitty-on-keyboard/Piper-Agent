@@ -86,6 +86,11 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_AUTHORIZATION=Bearer secret",
+        "XDG_AUTH_HEADER=Bearer secret",
+        "LC_DATABASE_URL=postgres://user:pass@localhost/db",
+        "XDG_CONN_STRING=Server=myServerAddress;Database=myDataBase;Uid=myUsername;Pwd=myPassword;",
+        "LC_CONNECTION_STRING=mongodb://root:example@localhost:27017/",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +121,11 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_AUTH_HEADER"));
+    CHECK(!has_key(env, "LC_DATABASE_URL"));
+    CHECK(!has_key(env, "XDG_CONN_STRING"));
+    CHECK(!has_key(env, "LC_CONNECTION_STRING"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +191,11 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_AUTHORIZATION=secret",
+        "XDG_AUTH_HEADER=secret",
+        "LC_DATABASE_URL=secret",
+        "XDG_CONN_STRING=secret",
+        "LC_CONNECTION_STRING=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +232,11 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_AUTH_HEADER"));
+    CHECK(!has_key(env, "LC_DATABASE_URL"));
+    CHECK(!has_key(env, "XDG_CONN_STRING"));
+    CHECK(!has_key(env, "LC_CONNECTION_STRING"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
