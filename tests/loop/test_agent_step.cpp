@@ -3943,6 +3943,75 @@ TEST(an_enumerated_summary_in_agent_mode_without_question_does_not_ask) {
     CHECK(!asked);
 }
 
+// A working mode never turns its own text into a blocking ask. The '?' gate this replaced
+// promoted the most ordinary closing summary there is -- numbered work, then an offer --
+// and a worker dispatch then waited on answer.json until timeout_s and came back FAIL.
+// The text is nudged (it is not the ending yet) and the run ends on the model's `finish`.
+TEST(an_enumerated_summary_with_a_question_in_agent_mode_does_not_ask) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(text_turn(
+        tok, "summary",
+        "Done:\n1. Added X\n2. Added tests\n\nWould you like me to add more edge cases?"));
+    const std::string finish_body =
+        "<function=finish>\n<parameter=summary>\nadded X and its tests\n</parameter>\n</function>\n";
+    backend.enqueue_response(call_turn(tok, finish_body, "wrapping up"));
+    // Queued deliberately: a run that stopped for the wrong reason, or not at all, shows
+    // up in the iteration count.
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("add X");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Agent;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    CHECK_EQ(report.iterations, 2);
+    for (const context::TurnRecord& t : ctx.recent()) {
+        CHECK(t.tool_name != "ask_user");
+    }
+}
+
+// The '?' need not even be a question: a Swift optional in a numbered note is not one.
+TEST(an_enumerated_note_with_an_optional_type_in_debug_mode_does_not_ask) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(
+        text_turn(tok, "fixed", "1. Made `x` a `Foo?`\n2. Rebuilt"));
+    const std::string finish_body =
+        "<function=finish>\n<parameter=summary>\nx is optional now\n</parameter>\n</function>\n";
+    backend.enqueue_response(call_turn(tok, finish_body, "wrapping up"));
+    backend.enqueue_response(text_turn(tok, "again", "Still done."));
+
+    tools::Registry registry(workspace("/tmp"));
+    context::ContextStore ctx("fix the crash");
+    platform::EventLogWriter log;
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.mode = loop::Mode::Debug;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK(report.termination_reason != std::string("awaiting_user"));
+    for (const context::TurnRecord& t : ctx.recent()) {
+        CHECK(t.tool_name != "ask_user");
+    }
+}
+
 // The other half of the same contract: a text turn the model FOLLOWS with a tool call is
 // not an ending at all, and must not consume the run's patience. The counter resets on any
 // executed call, so narrate/act/narrate/act continues indefinitely -- which is what a run

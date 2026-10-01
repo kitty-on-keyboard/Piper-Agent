@@ -2863,7 +2863,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // silence.
         last_progress = clock_.mono();
 
-        // A MULTIPLE-CHOICE QUESTION WRITTEN AS PROSE IS STILL A QUESTION.
+        // A MULTIPLE-CHOICE QUESTION WRITTEN AS PROSE IS STILL A QUESTION -- in a
+        // conversational mode.
         //
         // Measured on a plan-mode run: two TextOnly turns
         // of four A)/B)/C) design axes, never an `ask_user` call. The view streamed the
@@ -2873,11 +2874,15 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // card path already parses this shape out of `question` (questionFromText); the
         // hole was that a TextOnly turn never took that path, and the nudge kept the run
         // generating instead of yielding.
-        const bool is_question_candidate =
-            (config_.mode == Mode::Plan) ||
-            (turn.assistant_text.find('?') != std::string::npos);
+        //
+        // Only where ModePolicy::conversational says a text turn yields to the operator.
+        // In a working mode (Agent, Debug) text is the model's final answer and the run
+        // ends `ended`; a working run asks with the `ask_user` tool. Gating on a '?'
+        // instead turned ordinary closing summaries ("1. Added X 2. Added tests -- want
+        // more edge cases?"), and mid-run narration with a `Foo?` in it, into a blocking
+        // ask that stalled an attached dispatch until timeout_s.
         const int enum_lines =
-            turn.outcome == Outcome::TextOnly && !turn.cut_for_looping && is_question_candidate
+            policy_.conversational && turn.outcome == Outcome::TextOnly && !turn.cut_for_looping
                 ? enumerated_choice_lines(turn.assistant_text)
                 : 0;
         if (enum_lines >= 2) {
