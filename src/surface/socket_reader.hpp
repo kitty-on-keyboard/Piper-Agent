@@ -28,9 +28,12 @@ struct DaemonConfig {
 // Forward a task packet to the running daemon and wait for completion.
 // Returns std::nullopt only if no connection could be made. After connecting,
 // transport failure returns kExitError: the task may have run and must not replay.
+// `on_ask` is the launcher's --on-ask (empty when not given); `on_ask_default` is what
+// the launcher's attachment implies when neither it nor the packet chose.
 [[nodiscard]] std::optional<int> forward_to_daemon(
     const std::string& socket_path, const std::string& task_path, bool jsonl,
-    bool auto_approve_irreversible = false, bool auto_approve_all = false);
+    bool auto_approve_irreversible = false, bool auto_approve_all = false,
+    const std::string& on_ask = "", const std::string& on_ask_default = "wait");
 
 class DaemonListener {
   public:

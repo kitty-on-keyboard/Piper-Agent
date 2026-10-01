@@ -1995,6 +1995,13 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     const std::string answer_path = (result_dir / "answer.json").string();
     std::unordered_set<std::string> denied_commands;
     bool timed_out_awaiting_user = false;
+    // on_ask (resolved at launch): whether a question waits for answer.json, gets the
+    // one unattended reply, or ends the run as needs_input.
+    const std::string on_ask = packet.on_ask.empty() ? "wait" : packet.on_ask;
+    std::vector<AskRecord> asks;
+    bool needs_input = false;
+    std::string pending_question;
+    int unattended_replies = 0;
 
     std::string plan_accum;
     LiveJournal journal(result_dir / "live.jsonl");
@@ -2032,7 +2039,8 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     };
     hooks.approver = [&denied_commands, &timed_out_awaiting_user, &stopped_on_unanswered_ask,
                       &denied_irreversible_detail, &cancel, &log, &clock, &packet, &session,
-                      &awaiting_path, &answer_path, wall_start]
+                      &awaiting_path, &answer_path, wall_start, &on_ask, &asks, &needs_input,
+                      &pending_question]
         (const std::string& tool, const std::string& command, const std::string& preview, const tools::RiskHint& hint) -> bool {
         if (loop::is_irreversible(hint)) {
             const std::string cmd = command.empty() ? preview : command;
@@ -2049,6 +2057,21 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
                 ev.kind = "approval";
                 ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd}, {"answer", "denied"}, {"why", "previously denied"}};
                 log.append(ev, clock);
+                return false;
+            }
+
+            if (on_ask != "wait") {
+                // Nobody attached can approve it, and waiting would only run out the
+                // clock. End now with the question on the result.
+                needs_input = true;
+                pending_question = format_irreversible_question(tool, cmd);
+                asks.push_back({pending_question, "allow,deny", ""});
+                platform::Event ev;
+                ev.kind = "approval";
+                ev.fields = {{"gate", "irreversible"}, {"tool", tool}, {"command", cmd},
+                             {"answer", "needs_input"}, {"on_ask", on_ask}};
+                log.append(ev, clock);
+                cancel.cancel();
                 return false;
             }
 
@@ -2131,6 +2154,34 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         if (it != previous_answers.end()) {
             // Requirement 6: A repeated identical question still gets the previous answer, not a second wake-up.
             answer_text = it->second;
+        } else if (on_ask == "continue" && unattended_replies == 0) {
+            // No operator is attached. The first question gets the eval harness's
+            // unattended reply, and the card says it was answered that way, so an
+            // assumption the model made does not pass silently.
+            ++unattended_replies;
+            answer_text = kUnattendedReply;
+            asks.push_back({question, options, "unattended"});
+            platform::Event ev;
+            ev.kind = "ask_unattended";
+            ev.fields = {{"seq", std::to_string(seq)}, {"on_ask", on_ask}};
+            log.append(ev, clock);
+            std::fprintf(stderr, "piper: no operator attached; answered unattended: %s\n",
+                         question.c_str());
+            std::fflush(stderr);
+        } else if (on_ask != "wait") {
+            // A second question, or any under on_ask=end: end now with it, instead of
+            // waiting out timeout_s on an answer nobody attached can give.
+            needs_input = true;
+            pending_question = question;
+            asks.push_back({question, options, ""});
+            platform::Event ev;
+            ev.kind = "needs_input";
+            ev.fields = {{"seq", std::to_string(seq)}, {"on_ask", on_ask}};
+            log.append(ev, clock);
+            std::fprintf(stderr, "piper: needs input (on_ask=%s): %s\n", on_ask.c_str(),
+                         question.c_str());
+            std::fflush(stderr);
+            break;
         } else {
             AwaitingUserInfo info;
             info.question = question;
@@ -2211,6 +2262,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
                 if (ans.has_value()) {
                     answer_text = std::move(*ans);
                     previous_answers[question] = answer_text;
+                    asks.push_back({question, options, "operator"});
                     got_answer = true;
                     break;
                 }
@@ -2306,7 +2358,10 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
     facts.irreversible_unanswered = stopped_on_unanswered_ask;
     facts.irreversible_detail = denied_irreversible_detail;
     facts.timeout_s = packet.timeout_s;
+    facts.needs_input = needs_input;
+    facts.pending_question = pending_question;
     const Finalized fin = finalize_run(facts, result.test);
+    result.asks = asks;
     result.status = fin.status;
     result.error = fin.error;
     result.termination_reason = final_report.termination_reason;
@@ -2346,7 +2401,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         hook_payload.result_path = packet.result_path;
         hook_payload.seq = 0;
         hook_payload.status = (final_report.termination_reason == "timeout_awaiting_user") ? "timeout_awaiting_user" : result.status;
-        hook_payload.question = "";
+        hook_payload.question = needs_input ? pending_question : "";
         post_orch_webhook(packet.orch_webhook, hook_payload);
     }
 
@@ -2380,7 +2435,8 @@ void handle_daemon_sig(int sig) {
 static constexpr const char* kParentContractBanner =
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
     "Detach only with --detach plus a wake URL. No default URL. Events:\n"
-    "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
+    "ask (piper answer allow|deny|--text), done, stalled (not success),\n"
+    "needs_input (answer it in the next brief), died (do not relaunch).\n"
     "See PIPER.md if present.\n";
 
 static constexpr const char* kWorkerHelpText =
@@ -2396,15 +2452,18 @@ static constexpr const char* kWorkerHelpText =
     "  --task <path>                   task.json path or directory containing task.json\n"
     "  --auto-approve-irreversible     Auto-approve irreversible tool calls (destroys data / overwrite)\n"
     "  --auto-approve-all              Auto-approve all tool calls (exec + writes + irreversible)\n"
-    "  --orch-webhook <url>            Webhook URL to wake parent orchestrator (ask/done/stalled/died)\n"
+    "  --orch-webhook <url>            Webhook URL to wake parent orchestrator (ask/done/stalled/needs_input/died)\n"
     "  --detach                        Detach from launch session (requires --orch-webhook)\n"
+    "  --on-ask <wait|continue|end>    What a model question does (default: wait when detached or\n"
+    "                                  --jsonl, else continue: answer the first one unattended and\n"
+    "                                  end on the next with status needs_input, exit 4)\n"
     "  --jsonl                         Stream JSONL notifications on stdout\n"
     "  --quiet                         Suppress progress logs on stderr\n"
     "  --no-daemon                     Do not attempt connecting to daemon\n\n"
     "Flags for serve:\n"
     "  --socket <path>                 Unix domain socket path\n"
     "  --idle-timeout <seconds>        Idle timeout in seconds (default: 3600)\n\n"
-    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
+    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/needs_input/died; pass --orch-webhook or stay attached. "
     "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
     "explicitly with --detach (or LMP_DAEMONIZE=1) plus a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook. "
     "Piper never infers detach from stdio: nohup/screen/background launches must pass --detach. "
@@ -2427,6 +2486,7 @@ int worker_main(int argc, char** argv) {
     std::string subcommand;
     std::string task_arg;
     std::string cli_orch_webhook;
+    std::string cli_on_ask;
     std::string init_target_dir = ".";
     bool jsonl = false;
     bool quiet = false;
@@ -2463,6 +2523,12 @@ int worker_main(int argc, char** argv) {
             if (subcommand.empty()) subcommand = "init";
         } else if (arg == "--orch-webhook" && i + 1 < argc) {
             cli_orch_webhook = argv[++i];
+        } else if (arg == "--on-ask" && i + 1 < argc) {
+            cli_on_ask = argv[++i];
+            if (!is_valid_on_ask(cli_on_ask)) {
+                std::fprintf(stderr, "piper: --on-ask must be one of wait, continue, end\n");
+                return kExitInvalid;
+            }
         } else if (arg == "--auto-approve-irreversible") {
             cli_auto_approve_irreversible = true;
         } else if (arg == "--auto-approve-all") {
@@ -2580,6 +2646,15 @@ int worker_main(int argc, char** argv) {
                     } else if (req.value("auto_approve_irreversible", false)) {
                         pkt->auto_approve_irreversible = true;
                     }
+                    {
+                        // The client knows its own attachment; an older client that
+                        // sends neither field keeps the old behaviour (wait).
+                        std::string req_on_ask = req.value("on_ask", std::string());
+                        if (!is_valid_on_ask(req_on_ask)) req_on_ask.clear();
+                        const bool client_can_answer =
+                            req.value("on_ask_default", std::string("wait")) != "continue";
+                        pkt->on_ask = resolve_on_ask(req_on_ask, pkt->on_ask, client_can_answer);
+                    }
                     execute_task_packet(*pkt, session, clock, cli_jsonl, quiet, client_fd);
                     ::shutdown(client_fd, SHUT_RDWR);
                     ::close(client_fd);
@@ -2608,7 +2683,9 @@ int worker_main(int argc, char** argv) {
     if (!no_daemon && is_daemon_alive(resolved_sock)) {
         std::error_code ec;
         std::string abs_task = std::filesystem::absolute(task_arg, ec).string();
-        auto code = forward_to_daemon(resolved_sock, abs_task, jsonl, cli_auto_approve_irreversible, cli_auto_approve_all);
+        auto code = forward_to_daemon(resolved_sock, abs_task, jsonl, cli_auto_approve_irreversible,
+                                      cli_auto_approve_all, cli_on_ask,
+                                      (cli_detach || jsonl) ? "wait" : "continue");
         if (code.has_value()) {
             return *code;
         }
@@ -2644,6 +2721,9 @@ int worker_main(int argc, char** argv) {
     if (!cli_orch_webhook.empty()) {
         packet_opt->orch_webhook = cli_orch_webhook;
     }
+    // A detached run (answered over the wake URL) or a --jsonl reader can answer an
+    // ask; a plain attached caller is blocked in the very call that would answer it.
+    packet_opt->on_ask = resolve_on_ask(cli_on_ask, packet_opt->on_ask, cli_detach || jsonl);
 
     const bool is_detached = is_detached_launch(cli_detach);
     if (is_detached && packet_opt->orch_webhook.empty()) {

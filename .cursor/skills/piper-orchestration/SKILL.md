@@ -82,7 +82,8 @@ piper progress --id slice-001 pass --note "validator + test"
 - **Already finished:** `piper review --task …`. Status without cat/jq: `piper status --dir …` / `piper await --dir …`.
 - **Lower-level attached run:** `piper run --task …` (same as `piper worker run`). Keep weights warm with `piper worker serve`, then `piper worker run`.
 - **Telemetry / Flight-Recorder Distillation:** `piper distill --input <path>` (e.g. `.godoer/incidents.json` or stdin). Queries the model via `~/.piper/worker.sock` with zero RAM overhead and single-flight lock protection (`/tmp/piper_distill.lock`).
-- **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL.
+- **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL, `4` needs input (the model asked; the question is on the card).
+- **Questions (`--on-ask`):** a plain attached dispatch answers the model's first question unattended (card line `asks:` shows what it assumed) and ends on the next as `needs_input`. `--on-ask wait` blocks for `piper answer`; `--on-ask end` ends on the first question. `--jsonl` and `--detach` default to `wait`.
 
 The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set; raise it with `--max-iterations N`.
 
@@ -94,6 +95,7 @@ Stay attached (`piper dispatch` / `piper run`). Piper never guesses detach from 
 | `ask` | `piper answer`. Do not relaunch. |
 | `done` | Read the review card. Next slice or stop. |
 | `stalled` | Not success. Narrow the brief or stop. |
+| `needs_input` | Exit 4. Read `question:` on the card and answer it in the next brief. |
 | `died` | No `result.json`. Tell the user. Do not relaunch blindly. |
 
 ---
@@ -119,6 +121,7 @@ Use the card from `piper dispatch` or `piper review`. Do not re-read every line 
 ## 5. Failure Playbook
 
 - **Timeout (`exit 2` or `status: "timeout"`):** Smaller slice, or a higher `timeout_s` on the next `piper packet`.
+- **`needs_input` (`exit 4`):** The model asked something nobody attached could answer. Put the answer to the card's `question:` in the next brief. A bigger timeout will not help.
 - **`died` / no result:** Kill a stale `lmp_sidecar`, clear the lock, retry the same packet once.
 - **Thrash:** `mode` is not on the emitter. For a read-only diagnosis, say so in `prompt.md` and keep the slice to one file. Then a pinpoint edit slice.
 - **Model ceiling:** Orchestrator writes the hard logic, then hands tests and boilerplate back to Piper.

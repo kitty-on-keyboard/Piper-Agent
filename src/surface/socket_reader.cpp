@@ -104,7 +104,8 @@ bool is_daemon_alive(const std::string& socket_path) {
 
 std::optional<int> forward_to_daemon(
     const std::string& socket_path, const std::string& task_path, bool jsonl,
-    bool auto_approve_irreversible, bool auto_approve_all) {
+    bool auto_approve_irreversible, bool auto_approve_all,
+    const std::string& on_ask, const std::string& on_ask_default) {
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return std::nullopt;
 
@@ -128,7 +129,9 @@ std::optional<int> forward_to_daemon(
         {"task", task_path},
         {"jsonl", jsonl},
         {"auto_approve_irreversible", auto_approve_irreversible},
-        {"auto_approve_all", auto_approve_all}
+        {"auto_approve_all", auto_approve_all},
+        {"on_ask", on_ask},
+        {"on_ask_default", on_ask_default}
     };
     std::string req_str = req.dump() + "\n";
     size_t sent = 0;

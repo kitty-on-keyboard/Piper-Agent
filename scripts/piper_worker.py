@@ -32,6 +32,10 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_TIMEOUT = 2
 EXIT_INVALID = 3
+# The model asked something nobody attached could answer (on_ask); the question is on
+# the card and in result.json. Answer it in the next brief.
+EXIT_NEEDS_INPUT = 4
+ON_ASK_POLICIES = ("wait", "continue", "end")
 MESSAGE_CAP = 2000
 MODES = ("plan", "debug", "agent")
 
@@ -151,6 +155,10 @@ def load_packet(task_arg):
         raise PacketError("trust_mcp must be an array of server names")
     trust_mcp = [str(x) for x in trust_mcp if isinstance(x, str) and x.strip()]
 
+    on_ask = data.get("on_ask", "")
+    if on_ask and on_ask not in ON_ASK_POLICIES:
+        raise PacketError(f"on_ask must be one of {ON_ASK_POLICIES}, got {on_ask!r}")
+
     return {
         "id": task_id.strip(),
         "cwd": os.path.abspath(cwd),
@@ -166,6 +174,7 @@ def load_packet(task_arg):
         "trust_mcp": trust_mcp,
         "commit_think": as_bool(data.get("commit_think"), True),
         "shadow_compact": as_bool(data.get("shadow_compact"), True),
+        "on_ask": on_ask or "",
         "task_path": task_path,
         "task_dir": task_dir,
         "raw_bytes": raw.encode("utf-8"),
@@ -770,7 +779,8 @@ def append_orch_event(result_path, event):
 def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
                      check=None, timeout_s=600, result_path=None,
                      auto_approve_irreversible=True, trust_mcp=None,
-                     prompt_file=None, max_iterations=None, check_timeout_s=None):
+                     prompt_file=None, max_iterations=None, check_timeout_s=None,
+                     on_ask=None):
     """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
     cwd = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
@@ -793,6 +803,10 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
     }
     if check:
         packet["check"] = check
+    if on_ask:
+        if on_ask not in ON_ASK_POLICIES:
+            raise PacketError(f"on_ask must be one of {ON_ASK_POLICIES}")
+        packet["on_ask"] = on_ask
     if check_timeout_s is not None:
         if isinstance(check_timeout_s, bool) or not isinstance(check_timeout_s, (int, float)) \
                 or check_timeout_s <= 0:
@@ -839,11 +853,12 @@ def format_progress_line(slice_id, verdict, note=""):
         "stalled": "stalled", "stall": "stalled",
         "timeout": "timeout", "timedout": "timeout", "timed-out": "timeout",
         "died": "died", "skip": "skip", "skipped": "skip",
+        "needs_input": "needs_input", "needs-input": "needs_input",
     }
     if ver not in aliases:
         raise ValueError(
             f"unknown progress verdict {verdict!r}; "
-            "use pass|fail|stalled|timeout|died|skip"
+            "use pass|fail|stalled|timeout|needs_input|died|skip"
         )
     note_s = " ".join(str(note or "").strip().split())
     if note_s:
@@ -918,6 +933,7 @@ def cmd_packet(args):
             prompt_file=args.prompt_file,
             max_iterations=getattr(args, "max_iterations", None),
             check_timeout_s=getattr(args, "check_timeout_s", None),
+            on_ask=getattr(args, "on_ask", None),
         )
     except PacketError as exc:
         print(f"piper packet: {exc}", file=sys.stderr)
@@ -1064,7 +1080,7 @@ def load_result_file(result_path):
 
 
 def review_verdict(result, exit_code):
-    """Cheap parent verdict: PASS / UNVERIFIED / FAIL / STALLED / DIED.
+    """Cheap parent verdict: PASS / UNVERIFIED / FAIL / STALLED / NEEDS_INPUT / DIED.
 
     UNVERIFIED: the model finished but nothing checked it (no `--check`). A model's
     own "done" is not a pass.
@@ -1079,6 +1095,8 @@ def review_verdict(result, exit_code):
         return "UNVERIFIED"
     if status == "stalled":
         return "STALLED"
+    if status == "needs_input":
+        return "NEEDS_INPUT"
     return "FAIL"
 
 
@@ -1160,21 +1178,31 @@ def format_review_card(result, *, exit_code, result_path):
         test_s = f"{format_check_outcome(test)} cmd={test.get('command')!r}"
         if test.get("exit_code") != 0 or test.get("timed_out") or test.get("could_not_run"):
             triage_lines = format_triage_lines(test)
-            check_lines = _last_nonempty_lines(test.get("output_tail"),
-                                               CARD_CHECK_LINES - len(triage_lines))
+            check_lines = _last_nonempty_lines(
+                test.get("output_tail"),
+                max(2, CARD_CHECK_LINES - len(triage_lines) - len(format_ask_lines(result))))
     elif isinstance(test, dict):
         test_s = "not run"
     else:
         test_s = str(test)
     msg = str(result.get("message") or "").strip().replace("\n", " ")
+    if msg and msg == str(result.get("error") or "").strip().replace("\n", " ") \
+            and str(result.get("status") or "").lower() == "needs_input":
+        msg = "(no narration; see question)"
     if len(msg) > 160:
         msg = msg[:157] + "..."
     loop_s = format_loop_line(result)
     passed = verdict == "PASS"
+    ask_lines = format_ask_lines(result)
     error_s = str(result.get("error") or "").strip().replace("\n", " ")
+    if str(result.get("status") or "").lower() == "needs_input" and ask_lines:
+        error_s = ""  # the `question:` line says it in full
     notices = []
     if not passed and log_path:
         notices = [ln for ln in _read_log_lines(log_path) if ln.startswith("piper:")]
+        if ask_lines:  # the card already carries the question in full
+            notices = [ln for ln in notices
+                       if not ln.startswith(("piper: needs input", "piper: no operator attached"))]
         notices = notices[-CARD_LOG_PIPER_LINES:]
     return (
         "── piper review ─────────────────────────\n"
@@ -1190,11 +1218,38 @@ def format_review_card(result, *, exit_code, result_path):
         + _card_block("check:", check_lines)
         + "".join(triage_lines)
         + (f"loop:     {loop_s}\n" if loop_s else "")
+        + "".join(ask_lines)
         + _card_block("worker:", notices)
         + f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
         f"verdict:  {verdict}\n"
         "─────────────────────────────────────────"
     )
+
+
+def format_ask_lines(result):
+    """Questions the model asked that the card must not hide.
+
+    An unattended answer means the model went on under its own assumption; an open
+    question (needs_input) is what the next brief has to answer.
+    """
+    asks = [a for a in (result.get("asks") or []) if isinstance(a, dict)]
+    lines = []
+    unattended = [a for a in asks if a.get("answered_by") == "unattended"]
+    if unattended:
+        q = " ".join(str(unattended[0].get("question") or "").split())
+        lines.append(f"asks:     answered unattended, model chose: {_card_clip(q, 140)}\n")
+    still_open = [a for a in asks if not a.get("answered_by")]
+    if still_open:
+        last = still_open[-1]
+        q = " ".join(str(last.get("question") or "").split())
+        lines.append(f"question: {_card_clip(q, 300)}\n")
+        # Models write options one per line; the card keeps one line per field.
+        options = [" ".join(o.split()).lstrip("-*• ").strip()
+                   for o in str(last.get("options") or "").splitlines()]
+        options = [o for o in options if o]
+        if options:
+            lines.append(f"options:  {_card_clip(' | '.join(options), 300)}\n")
+    return lines
 
 
 def format_check_outcome(test):
@@ -1288,6 +1343,8 @@ def cmd_review(args):
         exit_code = EXIT_OK
     elif str(result.get("status") or "").lower() == "timeout":
         exit_code = EXIT_TIMEOUT
+    elif str(result.get("status") or "").lower() == "needs_input":
+        exit_code = EXIT_NEEDS_INPUT
     else:
         exit_code = EXIT_ERROR
     card = format_review_card(result, exit_code=exit_code, result_path=result_path)
@@ -1325,6 +1382,7 @@ def cmd_dispatch(args):
         auto_approve_irreversible=bool(getattr(args, "auto_approve_irreversible", False))
         and not bool(getattr(args, "auto_approve_all", False)),
         detach=False,
+        on_ask=getattr(args, "on_ask", None),
     )
     # Attached by construction: dispatch owns the wait and prints the card, so
     # neither LMP_DAEMONIZE=1 nor how this process's stdio happens to be wired
@@ -1946,7 +2004,7 @@ class WorkerParser(argparse.ArgumentParser):
 
 
 HELP_CONTRACT = (
-    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
+    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/needs_input/died; pass --orch-webhook or stay attached. "
     "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
     "explicitly with --detach (or LMP_DAEMONIZE=1) plus a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook. "
     "Piper never infers detach from stdio: nohup/screen/background launches must pass --detach. "
@@ -1957,7 +2015,8 @@ HELP_CONTRACT = (
 PARENT_CONTRACT_BANNER = (
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
     "Detach only with --detach plus a wake URL. No default URL. Events:\n"
-    "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
+    "ask (piper answer allow|deny|--text), done, stalled (not success),\n"
+    "needs_input (answer it in the next brief), died (do not relaunch).\n"
     "See PIPER.md if present.\n"
 )
 
@@ -2037,6 +2096,9 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    - `1`: Worker error.
    - `2`: Execution timed out (`timeout_s`).
    - `3`: Invalid task packet or missing wake URL for a detached run.
+   - `4`: Needs input: the model asked something nobody attached could answer. The question is on the card (`question:`) and in `result.json` (`asks`). Answer it in the next brief; a bigger timeout will not help.
+
+   Questions (`on_ask`, set with `--on-ask` on `piper packet`, `dispatch` or `run`): `wait` blocks for `piper answer`; `continue` answers the model's first question with a fixed unattended reply (the card's `asks:` line shows the assumption) and ends on the next one as `needs_input`; `end` ends on the first. Default by attachment, never by wake URL: a plain attached `piper dispatch`/`run` uses `continue`; `--jsonl` and `--detach` use `wait`.
 
    Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` never detaches: it is attached by construction, whatever its stdio or `LMP_DAEMONIZE` say.
 
@@ -2122,6 +2184,7 @@ mission. No URL means no POST.
 | `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
 | `stalled` | `result.json` written, the harness stopped the run (`stalled`, `max_turns`, not completed), and the check did not pass | read what landed. Do not treat it as success. Next slice or stop. |
+| `needs_input` | `result.json` written with `status: "needs_input"` (exit 4): the model asked and `on_ask` would not wait | read `question:` on the card. Answer it in the next brief. Do not raise the timeout. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
@@ -2223,7 +2286,8 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
 7. **Parent Contract & Events**:
    - Stay attached and read the exit code and the review card.
    - Events: `ask` → `piper answer allow|deny|--text` (do not freehand `answer.json`);
-     `done`, `stalled` (not success), `died` (do not relaunch blindly).
+     `done`, `stalled` (not success), `needs_input` (exit 4: answer the card's question in
+     the next brief), `died` (do not relaunch blindly).
    - See `PIPER.md` for the full specification.
 """
 
@@ -2371,6 +2435,8 @@ def collect_run_status(directory):
             state = "stalled"
         elif status == "timeout":
             state = "timeout"
+        elif status == "needs_input":
+            state = "needs_input"
         else:
             state = "error"
         return {
@@ -2418,7 +2484,7 @@ def format_status_card(info):
             lines.append(f"options:  {info.get('options')}")
         lines.append(f"awaiting: {info.get('awaiting_path')}")
         lines.append("next:     piper answer allow|deny|--text ...")
-    elif state in ("done", "stalled", "timeout", "error"):
+    elif state in ("done", "stalled", "timeout", "error", "needs_input"):
         lines.append(f"task:     {info.get('task_id') or '(unknown)'}")
         lines.append(f"status:   {info.get('status')}")
         msg = str(info.get("message") or "").strip().replace("\n", " ")
@@ -2426,7 +2492,12 @@ def format_status_card(info):
             msg = msg[:157] + "..."
         lines.append(f"message:  {msg or '(empty)'}")
         lines.append(f"result:   {info.get('result_path')}")
-        lines.append("next:     piper review --result …")
+        if state == "needs_input":
+            lines.extend(line.rstrip("\n") for line in format_ask_lines(info.get("result") or {})
+                         if line.startswith(("question:", "options:")))
+            lines.append("next:     answer the question in the next brief")
+        else:
+            lines.append("next:     piper review --result …")
     else:
         lines.append("next:     piper dispatch --task …  (or wait for a run)")
     lines.append("─────────────────────────────────────────")
@@ -2443,6 +2514,8 @@ def status_exit_code(info):
         return EXIT_OK
     if state == "timeout":
         return EXIT_TIMEOUT
+    if state == "needs_input":
+        return EXIT_NEEDS_INPUT
     if state in ("stalled", "error"):
         return EXIT_ERROR
     return EXIT_ERROR
@@ -2477,7 +2550,7 @@ def cmd_await(args):
     if interval_s <= 0:
         print("piper await: --interval-s must be > 0", file=sys.stderr)
         return EXIT_INVALID
-    terminal = {"ask", "done", "stalled", "error", "timeout"}
+    terminal = {"ask", "done", "stalled", "error", "timeout", "needs_input"}
     deadline = time.time() + timeout_s
     last_state = None
     while True:
@@ -2505,6 +2578,13 @@ def cmd_await(args):
 
 
 
+ON_ASK_HELP = (
+    "what a model question does: wait for `piper answer`, continue (answer the first "
+    "unattended, end on the next as needs_input, exit 4), or end at once. "
+    "Default: wait when detached or --jsonl, else continue"
+)
+
+
 def build_parser():
     parser = WorkerParser(
         prog="piper",
@@ -2527,6 +2607,7 @@ def build_parser():
                        help="auto-approve all tool calls (exec + writes + irreversible)")
         p.add_argument("--detach", action="store_true",
                        help="detach from launch session (requires --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook)")
+        p.add_argument("--on-ask", choices=ON_ASK_POLICIES, default=None, help=ON_ASK_HELP)
 
     def add_serve_flags(p):
         p.add_argument("--socket", default=None, help="unix domain socket path")
@@ -2603,6 +2684,8 @@ def build_parser():
         help="post-run check clock (default 300, the same clock as the in-loop check)",
     )
     packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
+    packet_p.add_argument("--on-ask", choices=ON_ASK_POLICIES, default=None,
+                          help=ON_ASK_HELP)
     packet_p.add_argument(
         "--max-iterations", type=int, default=None,
         help="turn budget (default 30, or 60 with --trust-mcp)",
@@ -2630,7 +2713,7 @@ def build_parser():
     )
     progress_p.add_argument("--id", required=True, help="slice / task id")
     progress_p.add_argument("verdict",
-                            help="slice outcome: pass|fail|stalled|timeout|died|skip")
+                            help="slice outcome: pass|fail|stalled|timeout|needs_input|died|skip")
     progress_p.add_argument("--note", default="", help="optional short note")
     progress_p.add_argument("--dir", default=None,
                             help="workspace root for .piper/progress.log (default: cwd)")
@@ -2672,6 +2755,7 @@ def build_parser():
                             help="auto-approve all tool calls (exec + writes + irreversible)")
     dispatch_p.add_argument("--json", action="store_true",
                             help="emit machine-readable JSON including the review card")
+    dispatch_p.add_argument("--on-ask", choices=ON_ASK_POLICIES, default=None, help=ON_ASK_HELP)
 
     status_p = sub.add_parser(
         "status",
@@ -2775,6 +2859,20 @@ def main(argv=None):
     return cmd_run(args)
 
 
+def resolve_on_ask(args, packet, is_detached):
+    """--on-ask, else the packet's on_ask, else by attachment -- never by wake URL.
+
+    A detached run is answered over its wake URL and a --jsonl reader sees the ask
+    event, so they wait. A plain attached caller (dispatch, run in a terminal or an
+    agent tool) is blocked in the very call that would have to answer: it continues
+    past the first question unattended and ends as needs_input on the next.
+    """
+    chosen = getattr(args, "on_ask", None) or packet.get("on_ask") or ""
+    if chosen:
+        return chosen
+    return "wait" if is_detached or getattr(args, "jsonl", False) else "continue"
+
+
 def cmd_run(args, *, attached_only=False):
     """Run one packet. Attached unless the caller explicitly asked to detach.
 
@@ -2842,6 +2940,7 @@ def cmd_run(args, *, attached_only=False):
             cmd.append("--auto-approve-all")
         if webhook_url:
             cmd.extend(["--orch-webhook", webhook_url])
+        cmd.extend(["--on-ask", resolve_on_ask(args, packet, is_detached)])
 
         # The engine is always attached to this harness; when the harness itself
         # detached it already forked above. Pin that so an inherited
@@ -3028,6 +3127,35 @@ with open(packet["result_path"], "w", encoding="utf-8") as fh:
                "wall_seconds": 1.0, "files_touched": ["a.py"],
                "diff_stat": {"insertions": 1, "deletions": 0, "files": 1},
                "test": {"ran": True, "exit_code": 0, "command": "true", "output_tail": ""}}, fh)
+"""
+
+
+# Stand-in engine for the on_ask contract: records the --on-ask it was launched with
+# and answers like the C++ worker would for a model that asks one question.
+FAKE_CPP_ASK = r"""#!%s
+import json, sys
+task = sys.argv[sys.argv.index("--task") + 1]
+on_ask = sys.argv[sys.argv.index("--on-ask") + 1] if "--on-ask" in sys.argv else ""
+with open(task, encoding="utf-8") as fh:
+    packet = json.load(fh)
+q = {"question": "Which config file should I edit?", "options": "a.toml,b.toml"}
+out = {"task_id": packet["id"], "message": "", "turns": 3, "wall_seconds": 1.0,
+       "seen_on_ask": on_ask, "files_touched": [],
+       "diff_stat": {"insertions": 0, "deletions": 0, "files": 0}}
+if on_ask == "continue":
+    out.update(status="ok", message="Edited a.toml.", asks=[dict(q, answered_by="unattended")],
+               test={"ran": True, "exit_code": 0, "command": "true", "output_tail": ""})
+    code = 0
+elif on_ask == "end":
+    out.update(status="needs_input", error="needs input: " + q["question"],
+               asks=[dict(q, answered_by=None)], test={"ran": False})
+    code = 4
+else:
+    out.update(status="timeout", error="timeout awaiting user answer (30s)", test={"ran": False})
+    code = 2
+with open(packet["result_path"], "w", encoding="utf-8") as fh:
+    json.dump(out, fh)
+sys.exit(code)
 """
 
 
@@ -4006,6 +4134,71 @@ def _self_test_scenarios():
         )
         check(iout.stdout.count(b"mem at=") == 210,
               "LMP_WORKER_STDERR=inherit must keep worker stderr inline")
+
+        # 18e. on_ask: an attached dispatch never waits on a question nobody can answer.
+        # Default by attachment (never by wake URL): plain attached -> continue, --jsonl
+        # or detached -> wait; the flag and the packet field override.
+        fake_ask = os.path.join(tmp, "fake_cpp_ask")
+        _write_exec(fake_ask, FAKE_CPP_ASK)
+        aws = os.path.join(tmp, "ask_ws")
+        os.makedirs(aws)
+        atask = os.path.join(aws, "task.json")
+        _write_json(atask, {"id": "ask-1", "cwd": aws, "model_dir": model_dir, "prompt": "x",
+                            "timeout_s": 30, "result_path": os.path.join(aws, "result.json")})
+        ask_env = {k: v for k, v in os.environ.items()
+                   if k not in ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK", "LMP_WORKER_STDERR")}
+        ask_env.update(LMP_SIDECAR=fake_ask, LMP_USE_CPP_WORKER="1")
+        # A leftover wake file (piper ui) must not flip an attached run to "wait".
+        write_orch_webhook_file(aws, webhook_url)
+
+        def _dispatch_ask(*extra):
+            proc = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "dispatch", "--task", atask, *extra],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=ask_env, cwd=aws, timeout=60, text=True,
+            )
+            return proc.returncode, proc.stdout, load_result_file(os.path.join(aws, "result.json")) or {}
+
+        rc, out, res = _dispatch_ask()
+        check(res.get("seen_on_ask") == "continue", f"attached dispatch must default to continue, got {res!r}")
+        check(rc == EXIT_OK and "verdict:  PASS" in out, f"continued ask must finish, got {rc}: {out!r}")
+        check("asks:     answered unattended, model chose: Which config file should I edit?" in out,
+              f"an unattended answer must be on the card, got {out!r}")
+        rc, out, res = _dispatch_ask("--jsonl")
+        check(res.get("seen_on_ask") == "wait", f"--jsonl dispatch must wait (a reader sees the ask), got {res!r}")
+        rc, out, res = _dispatch_ask("--on-ask", "end")
+        check(res.get("seen_on_ask") == "end", f"--on-ask end must reach the engine, got {res!r}")
+        check(rc == EXIT_NEEDS_INPUT, f"needs_input dispatch must exit 4, got {rc}: {out!r}")
+        check("verdict:  NEEDS_INPUT" in out and "question: Which config file should I edit?" in out
+              and "options:  a.toml,b.toml" in out,
+              f"needs_input card must carry the question, got {out!r}")
+        check(out.count("Which config file should I edit?") == 1,
+              f"the question must appear once on the card, got {out!r}")
+        ml = {"status": "needs_input", "error": "needs input: Pick one?", "message": "needs input: Pick one?",
+              "asks": [{"question": "Pick one?", "options": "- Yes, plain a + b\n- No, numbers only\n",
+                        "answered_by": None}], "test": {"ran": False}}
+        ml_card = format_review_card(ml, exit_code=EXIT_NEEDS_INPUT, result_path=os.path.join(aws, "result.json"))
+        check("options:  Yes, plain a + b | No, numbers only\n" in ml_card,
+              f"multi-line options must stay on one card line, got {ml_card!r}")
+        st = collect_run_status(aws)
+        check(st["state"] == "needs_input" and status_exit_code(st) == EXIT_NEEDS_INPUT,
+              f"status must read needs_input with exit 4, got {st['state']!r}")
+        check("question: Which config file should I edit?" in format_status_card(st),
+              f"status card must carry the open question, got {format_status_card(st)!r}")
+        _write_json(atask, {"id": "ask-1", "cwd": aws, "model_dir": model_dir, "prompt": "x",
+                            "timeout_s": 30, "result_path": os.path.join(aws, "result.json"),
+                            "on_ask": "end"})
+        rc, out, res = _dispatch_ask()
+        check(res.get("seen_on_ask") == "end", f"packet on_ask must apply when no flag is given, got {res!r}")
+        detached_args = argparse.Namespace(on_ask=None, jsonl=False)
+        check(resolve_on_ask(detached_args, {"on_ask": ""}, True) == "wait",
+              "a detached run must default to wait")
+        check(format_progress_line("ask-1", "needs_input") == "ask-1 | needs_input",
+              "progress must accept needs_input")
+        # One unattended reply, one text: the C++ worker's copy is pinned to this one.
+        with open(os.path.join(ROOT, "src", "surface", "worker.hpp"), encoding="utf-8") as fh:
+            check(json.dumps(ae.UNATTENDED_REPLY) in fh.read(),
+                  "kUnattendedReply in worker.hpp must equal agent_eval.UNATTENDED_REPLY")
 
         # 19. dispatch → wait → review card (fake sidecar)
         disp_ws = os.path.join(tmp, "dispatch_ws")

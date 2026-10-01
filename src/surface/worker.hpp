@@ -28,6 +28,13 @@ inline constexpr int kExitOk = 0;
 inline constexpr int kExitError = 1;
 inline constexpr int kExitTimeout = 2;
 inline constexpr int kExitInvalid = 3;
+// The model asked something nobody attached to the run could answer; the question is
+// in result.json. Answer it in the next brief, not with a bigger timeout.
+inline constexpr int kExitNeedsInput = 4;
+
+// The reply an attached run gives its model's FIRST question under on_ask=continue.
+// scripts/agent_eval.py UNATTENDED_REPLY is the same text (pinned by its self-test).
+inline constexpr const char* kUnattendedReply = "(unattended run) No operator is available to answer. Decide yourself, on the best reading of the code, state the assumption in one line, and continue. If it genuinely cannot be settled, finish with your best complete attempt.";
 
 // ------------------------------------------------------------------
 // Packet: what the orchestrator hands us.
@@ -70,7 +77,23 @@ struct TaskPacket {
 
     // Skills to preload into the context store on start (by id).
     std::vector<std::string> preload_skills;
+
+    // What a question from the model does: "wait" for answer.json (a detached run or a
+    // --jsonl reader can answer), "continue" (answer the first one unattended, end on
+    // the next), or "end" (end at once). Empty in task.json = decided at launch by
+    // attachment, see resolve_on_ask.
+    std::string on_ask;
 };
+
+[[nodiscard]] bool is_valid_on_ask(const std::string& policy);
+
+// The run's on_ask: the launcher's flag, else the packet's field, else by attachment.
+// A parent that can answer (detached with a wake URL, or reading --jsonl) gets "wait";
+// a plain attached parent is blocked in the same call that would have to answer, so it
+// gets "continue". Never keyed on whether a wake URL exists: `piper ui` leaves
+// .piper/orch_webhook behind and cannot answer anything.
+[[nodiscard]] std::string resolve_on_ask(const std::string& cli, const std::string& packet_field,
+                                         bool parent_can_answer);
 
 // Parse task.json (+ optional sibling prompt.md). Returns the packet on success
 // or nullopt with `error` filled. Does NOT touch the model or the sidecar.
@@ -130,6 +153,15 @@ struct TestBlock {
     std::optional<CheckTriage> triage;    // red checks only
 };
 
+// One question the model asked during the run, and who answered it: "operator"
+// (answer.json), "unattended" (on_ask=continue), or "" (nobody: the run ended
+// needs_input with this question open).
+struct AskRecord {
+    std::string question;
+    std::string options;
+    std::string answered_by;
+};
+
 struct RunResult {
     std::string task_id;
     std::string status;                   // "ok" | "error" | "timeout" | "stalled"
@@ -149,6 +181,7 @@ struct RunResult {
     // status rests on the operator check alone because the loop itself did not finish.
     std::string termination_reason;
     bool promoted_by_check = false;
+    std::vector<AskRecord> asks;
     // Tier-A loop hygiene copied from RunReport when the worker path has one.
     std::size_t degenerate_text_count = 0;
     std::size_t text_only_turns = 0;
@@ -167,19 +200,22 @@ struct RunFacts {
     bool irreversible_unanswered = false; // an irreversible ask ended without an answer
     std::string irreversible_detail;      // the command that was held
     double timeout_s = 0.0;               // packet.timeout_s, for the error text
+    bool needs_input = false;             // on_ask ended the run on a question
+    std::string pending_question;         // that question
 };
 
 struct Finalized {
-    std::string status;                   // "ok" | "error" | "timeout" | "stalled"
+    std::string status;                   // "ok" | "error" | "timeout" | "stalled" | "needs_input"
     std::string error;                    // empty when status is "ok"
     int exit_code = kExitError;
-    std::string wake_kind;                // "done" exactly when status is "ok", else "stalled"
+    std::string wake_kind;                // "done" iff ok, "needs_input" iff needs_input, else "stalled"
     bool promoted_by_check = false;       // ok only because a green check vouched for it
 };
 
 // THE one place that decides status, exit code and wake kind. Ordered policy:
 //   1. not started                         -> error, exit 1
 //   2. timeout_awaiting_user / wall_clock  -> timeout, exit 2, never promoted
+//   2b. a question on_ask would not wait on -> needs_input, exit 4, never promoted
 //   3. irreversible ask left unanswered    -> error, exit 1, never promoted
 //   4. completed or plan_ready             -> ok; a red check demotes it to error
 //   5. max_turns, stalled, ended && !completed (incomplete loop stops)
@@ -289,7 +325,7 @@ bool clear_stale_run_files(const std::string& result_path);
 // ------------------------------------------------------------------
 
 struct WebhookPayload {
-    std::string kind;        // "ask" | "done" | "stalled" | "died"
+    std::string kind;        // "ask" | "done" | "stalled" | "needs_input" | "died"
     std::string task_id;
     std::string run_id;
     std::string cwd;

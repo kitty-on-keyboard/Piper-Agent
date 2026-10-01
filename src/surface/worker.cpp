@@ -423,6 +423,14 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
         packet.max_iterations = static_cast<int>(mi_raw);
     }
 
+    if (j.contains("on_ask")) {
+        if (!j["on_ask"].is_string() || !is_valid_on_ask(j["on_ask"].get<std::string>())) {
+            error = "on_ask must be one of wait, continue, end";
+            return std::nullopt;
+        }
+        packet.on_ask = j["on_ask"].get<std::string>();
+    }
+
     if (j.contains("trust_mcp")) {
         if (!j["trust_mcp"].is_array()) {
             error = "trust_mcp must be an array of server names";
@@ -507,6 +515,17 @@ std::optional<TaskPacket> load_packet(const std::string& path_in, std::string& e
     return packet;
 }
 
+bool is_valid_on_ask(const std::string& policy) {
+    return policy == "wait" || policy == "continue" || policy == "end";
+}
+
+std::string resolve_on_ask(const std::string& cli, const std::string& packet_field,
+                           bool parent_can_answer) {
+    if (!cli.empty()) return cli;
+    if (!packet_field.empty()) return packet_field;
+    return parent_can_answer ? "wait" : "continue";
+}
+
 int resolve_max_iterations(const TaskPacket& packet) {
     if (packet.max_iterations > 0) return packet.max_iterations;
     return packet.trust_mcp.empty() ? kDefaultMaxIterations
@@ -544,6 +563,14 @@ Finalized finalize_run(const RunFacts& facts, const TestBlock& test) {
         out.status = "timeout";
         out.error = "wall clock exceeded (" + std::to_string(facts.timeout_s) + "s)";
         out.exit_code = kExitTimeout;
+    } else if (facts.needs_input) {
+        // Nobody attached can answer. Say so now, with the question, instead of
+        // waiting out timeout_s; no check can stand in for the answer.
+        std::string q = facts.pending_question;
+        if (q.size() > 300) q = q.substr(0, 297) + "...";
+        out.status = "needs_input";
+        out.error = "needs input: " + q;
+        out.exit_code = kExitNeedsInput;
     } else if (facts.irreversible_unanswered) {
         // Before the stall rows: an ask the orchestrator never answered is an
         // escalation, whatever the loop's own stop was, and no check can answer it.
@@ -581,7 +608,9 @@ Finalized finalize_run(const RunFacts& facts, const TestBlock& test) {
         out.error = "agent did not complete (" + shown + ")";
         out.exit_code = kExitError;
     }
-    out.wake_kind = out.status == "ok" ? "done" : "stalled";
+    out.wake_kind = out.status == "ok"            ? "done"
+                    : out.status == "needs_input" ? "needs_input"
+                                                  : "stalled";
     return out;
 }
 
@@ -1260,6 +1289,13 @@ void write_result(const std::string& path, const RunResult& result) {
         {"files", result.diff_stat.files}
     };
 
+    nlohmann::json asks = nlohmann::json::array();
+    for (const AskRecord& a : result.asks) {
+        asks.push_back({{"question", a.question},
+                        {"options", a.options},
+                        {"answered_by", a.answered_by.empty() ? nlohmann::json(nullptr)
+                                                              : nlohmann::json(a.answered_by)}});
+    }
     const TestBlock& tb = result.test;
     nlohmann::json triage = nullptr;
     if (tb.ran && tb.triage.has_value()) {
@@ -1307,6 +1343,7 @@ void write_result(const std::string& path, const RunResult& result) {
                                    ? nlohmann::json(nullptr)
                                    : nlohmann::json(result.termination_reason)},
         {"promoted_by_check", result.promoted_by_check},
+        {"asks", asks},
         {"loop_metrics",
          {{"degenerate_text_count", result.degenerate_text_count},
           {"text_only_turns", result.text_only_turns},

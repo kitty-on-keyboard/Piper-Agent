@@ -45,5 +45,6 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
 7. **Parent Contract & Events**:
    - Stay attached and read the exit code and the review card.
    - Events: `ask` → `piper answer allow|deny|--text` (do not freehand `answer.json`);
-     `done`, `stalled` (not success), `died` (do not relaunch blindly).
+     `done`, `stalled` (not success), `needs_input` (exit 4: answer the card's question in
+     the next brief), `died` (do not relaunch blindly).
    - See `PIPER.md` for the full specification.

@@ -74,6 +74,9 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    - `1`: Worker error.
    - `2`: Execution timed out (`timeout_s`).
    - `3`: Invalid task packet or missing wake URL for a detached run.
+   - `4`: Needs input: the model asked something nobody attached could answer. The question is on the card (`question:`) and in `result.json` (`asks`). Answer it in the next brief; a bigger timeout will not help.
+
+   Questions (`on_ask`, set with `--on-ask` on `piper packet`, `dispatch` or `run`): `wait` blocks for `piper answer`; `continue` answers the model's first question with a fixed unattended reply (the card's `asks:` line shows the assumption) and ends on the next one as `needs_input`; `end` ends on the first. Default by attachment, never by wake URL: a plain attached `piper dispatch`/`run` uses `continue`; `--jsonl` and `--detach` use `wait`.
 
    Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` never detaches: it is attached by construction, whatever its stdio or `LMP_DAEMONIZE` say.
 
@@ -177,6 +180,7 @@ mission. No URL means no POST.
 | `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
 | `stalled` | `result.json` written, the harness stopped the run (`stalled`, `max_turns`, not completed), and the check did not pass | read what landed. Do not treat it as success. Next slice or stop. |
+| `needs_input` | `result.json` written with `status: "needs_input"` (exit 4): the model asked and `on_ask` would not wait | read `question:` on the card. Answer it in the next brief. Do not raise the timeout. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.

@@ -1357,6 +1357,10 @@ TEST(load_packet_parses_auto_approve_irreversible) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+namespace {
+std::string g_forwarded_request;
+} // namespace
+
 TEST(forward_to_daemon_exits_on_result_without_hanging) {
     std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_fwd_daemon";
     std::filesystem::remove_all(tmp_dir);
@@ -1380,7 +1384,9 @@ TEST(forward_to_daemon_exits_on_result_without_hanging) {
         // Read request
         char buf[1024];
         ssize_t n = ::read(client, buf, sizeof(buf));
-        (void)n;
+        if (n > 0) {
+            g_forwarded_request.assign(buf, static_cast<std::size_t>(n));
+        }
 
         // Send intermediate jsonl line then final result with exit_code: 0
         std::string line1 = "{\"kind\":\"status\",\"step\":1}\n";
@@ -1396,12 +1402,17 @@ TEST(forward_to_daemon_exits_on_result_without_hanging) {
     });
 
     auto start_t = std::chrono::steady_clock::now();
-    auto res = forward_to_daemon(sock_path, "/tmp/task.json", false);
+    auto res = forward_to_daemon(sock_path, "/tmp/task.json", false, false, false, "end", "continue");
     auto end_t = std::chrono::steady_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(end_t - start_t).count();
 
     CHECK(res.has_value());
     CHECK_EQ(*res, 0);
+    // The daemon gets the launcher's on_ask and what its attachment implies.
+    const auto req = nlohmann::json::parse(g_forwarded_request, nullptr, false);
+    CHECK(!req.is_discarded());
+    CHECK_EQ(req.value("on_ask", std::string()), "end");
+    CHECK_EQ(req.value("on_ask_default", std::string()), "continue");
     // Client should have returned immediately upon reading exit_code, well before the 500ms delay!
     CHECK(elapsed_ms < 350.0);
 
@@ -1942,6 +1953,88 @@ TEST(run_check_names_a_timeout_and_a_command_that_never_ran) {
 TEST(post_run_check_shares_the_in_loop_shell_clock) {
     TaskPacket packet;
     CHECK_EQ(packet.check_timeout_s, static_cast<double>(lmp::tools::kShellWallClockSeconds));
+}
+
+// on_ask: the launcher's flag, then the packet, then attachment. Never the wake URL.
+TEST(resolve_on_ask_prefers_flag_then_packet_then_attachment) {
+    CHECK(is_valid_on_ask("wait"));
+    CHECK(is_valid_on_ask("continue"));
+    CHECK(is_valid_on_ask("end"));
+    CHECK(!is_valid_on_ask(""));
+    CHECK(!is_valid_on_ask("ask"));
+    CHECK_EQ(resolve_on_ask("end", "wait", true), "end");
+    CHECK_EQ(resolve_on_ask("", "end", false), "end");
+    CHECK_EQ(resolve_on_ask("", "", true), "wait");       // detached, or a --jsonl reader
+    CHECK_EQ(resolve_on_ask("", "", false), "continue");  // plain attached: nobody can answer
+}
+
+TEST(finalize_run_ends_a_question_nobody_can_answer_as_needs_input) {
+    RunFacts facts;
+    facts.termination_reason = "awaiting_user";
+    facts.needs_input = true;
+    facts.pending_question = "Which config file should I edit?";
+    for (const Check c : {Check::None, Check::Green, Check::Red}) {
+        const Finalized f = finalize_run(facts, check_block(c));
+        CHECK_EQ(f.status, "needs_input");
+        CHECK_EQ(f.exit_code, kExitNeedsInput);
+        CHECK_EQ(f.wake_kind, "needs_input");
+        CHECK(!f.promoted_by_check);
+        CHECK_EQ(f.error, "needs input: Which config file should I edit?");
+    }
+    // The run's own clock still wins: a timeout is a timeout.
+    facts.termination_reason = "wall_clock";
+    CHECK_EQ(finalize_run(facts, check_block(Check::None)).status, "timeout");
+}
+
+TEST(load_packet_parses_and_validates_on_ask) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_worker_on_ask_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "cwd");
+    std::filesystem::create_directories(dir / "model");
+    const auto write = [&](const nlohmann::json& extra) {
+        nlohmann::json j = {{"id", "oa"}, {"cwd", (dir / "cwd").string()},
+                            {"model_dir", (dir / "model").string()}, {"prompt", "x"}};
+        j.update(extra);
+        std::ofstream((dir / "task.json").string()) << j.dump();
+    };
+    std::string error;
+    write(nlohmann::json::object());
+    auto none = load_packet((dir / "task.json").string(), error);
+    REQUIRE(none.has_value());
+    CHECK(none->on_ask.empty());
+    write({{"on_ask", "end"}});
+    auto end = load_packet((dir / "task.json").string(), error);
+    REQUIRE(end.has_value());
+    CHECK_EQ(end->on_ask, "end");
+    write({{"on_ask", "sometimes"}});
+    CHECK(!load_packet((dir / "task.json").string(), error).has_value());
+    CHECK(error.find("on_ask") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(write_result_records_every_ask_and_who_answered) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_worker_asks_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "result.json").string();
+    RunResult result;
+    result.status = "needs_input";
+    result.asks = {{"Use tabs?", "", "unattended"}, {"Which file?", "a,b", ""}};
+    write_result(path, result);
+    std::ifstream in(path);
+    const nlohmann::json j = nlohmann::json::parse(in);
+    REQUIRE(j.at("asks").is_array());
+    REQUIRE(j.at("asks").size() == 2);
+    CHECK_EQ(j["asks"][0]["answered_by"].get<std::string>(), "unattended");
+    CHECK(j["asks"][1]["answered_by"].is_null());
+    CHECK_EQ(j["asks"][1]["options"].get<std::string>(), "a,b");
+    std::filesystem::remove_all(dir);
+}
+
+TEST(unattended_reply_matches_the_eval_harness) {
+    // scripts/agent_eval.py pins its copy against this header; this pins the text.
+    CHECK(std::string(kUnattendedReply).rfind("(unattended run) No operator is available", 0) == 0);
 }
 
 TEST(write_result_records_termination_reason_and_promotion) {
