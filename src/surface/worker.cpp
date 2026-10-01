@@ -451,12 +451,64 @@ int resolve_max_iterations(const TaskPacket& packet) {
                                     : kTrustMcpDefaultMaxIterations;
 }
 
-bool is_incomplete_agent_stop(const RunResult& result) {
-    // Sidecar labels harness incompleteness this way; hard failures (timeout,
-    // start failure, irreversible deny) use different error strings and must
-    // not be promoted by a green check.
-    return result.status == "error" &&
-           result.error.rfind("agent did not complete", 0) == 0;
+Finalized finalize_run(const RunFacts& facts, const TestBlock& test) {
+    Finalized out;
+    const std::string& reason = facts.termination_reason;
+    const bool check_green = test.ran && test.exit_code == 0;
+    const bool check_red = test.ran && test.exit_code != 0;
+
+    if (!facts.started) {
+        out.status = "error";
+        out.error = "mission failed to start (check model_dir or settings)";
+        out.exit_code = kExitError;
+    } else if (reason == "timeout_awaiting_user") {
+        out.status = "timeout";
+        out.error = "timeout awaiting user answer (" +
+                    std::to_string(static_cast<int>(facts.timeout_s)) + "s)";
+        out.exit_code = kExitTimeout;
+    } else if (reason == "wall_clock") {
+        out.status = "timeout";
+        out.error = "wall clock exceeded (" + std::to_string(facts.timeout_s) + "s)";
+        out.exit_code = kExitTimeout;
+    } else if (facts.irreversible_unanswered) {
+        // Before the stall rows: an ask the orchestrator never answered is an
+        // escalation, whatever the loop's own stop was, and no check can answer it.
+        out.status = "error";
+        out.error = "irreversible tool denied (orchestrator must escalate): " +
+                    facts.irreversible_detail;
+        out.exit_code = kExitError;
+    } else if (facts.completed || reason == "plan_ready") {
+        if (check_red) {
+            out.status = "error";
+            out.error = "check command failed (exit code " + std::to_string(test.exit_code) + ")";
+            out.exit_code = kExitError;
+        } else {
+            out.status = "ok";
+            out.exit_code = kExitOk;
+        }
+    } else if (reason == "max_turns" || reason == "stalled" || reason == "ended") {
+        // The loop stopped short of finishing but nothing broke. The operator's check
+        // is authoritative: green means the workspace met the packet, and the card
+        // says the pass rests on the check alone (promoted_by_check).
+        if (check_green) {
+            out.status = "ok";
+            out.exit_code = kExitOk;
+            out.promoted_by_check = true;
+        } else {
+            out.status = reason == "ended" ? "error" : "stalled";
+            out.error = "agent did not complete (" + reason + ")";
+            out.exit_code = kExitError;
+        }
+    } else {
+        // A crash, a cancel, a loop that never reported an ending, or the hang
+        // detector. A green check here only says the workspace was already green.
+        const std::string shown = reason.empty() ? "no_run_end" : reason;
+        out.status = reason == "stalled_no_turn" ? "stalled" : "error";
+        out.error = "agent did not complete (" + shown + ")";
+        out.exit_code = kExitError;
+    }
+    out.wake_kind = out.status == "ok" ? "done" : "stalled";
+    return out;
 }
 
 std::string build_start_message(const TaskPacket& packet, const std::string& request_id) {
@@ -882,12 +934,6 @@ void merge_files_touched(std::vector<std::string>& dest,
     }
 }
 
-bool is_stalled_termination(const std::string& termination_reason) {
-    return termination_reason == "max_turns" ||
-           termination_reason == "stalled" ||
-           termination_reason == "stalled_no_turn";
-}
-
 std::string compose_result_message(
     const std::string& finish_summary,
     const std::string& answer_accum,
@@ -1060,23 +1106,6 @@ void run_check(const TaskPacket& packet, RunResult& result) {
         out = out.substr(out.size() - 2000);
     }
     result.test.output_tail = out;
-
-    if (code == 0) {
-        // Operator acceptance wins. A green check means the workspace met the
-        // packet criteria — max_turns / unfinished checklist without a finish
-        // call is not a crash when the check already says the slice is good.
-        if (is_incomplete_agent_stop(result)) {
-            result.status = "ok";
-            if (result.message.empty() ||
-                result.message.rfind("agent did not complete", 0) == 0) {
-                result.message = "check passed";
-            }
-            result.error.clear();
-        }
-    } else if (result.status == "ok") {
-        result.status = "error";
-        result.error = "check command failed (exit code " + std::to_string(code) + ")";
-    }
 }
 
 void write_result(const std::string& path, const RunResult& result) {
@@ -1114,6 +1143,10 @@ void write_result(const std::string& path, const RunResult& result) {
         {"test", test},
         {"log_path", result.log_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(result.log_path)},
         {"error", result.error.empty() ? nlohmann::json(nullptr) : nlohmann::json(result.error)},
+        {"termination_reason", result.termination_reason.empty()
+                                   ? nlohmann::json(nullptr)
+                                   : nlohmann::json(result.termination_reason)},
+        {"promoted_by_check", result.promoted_by_check},
         {"loop_metrics",
          {{"degenerate_text_count", result.degenerate_text_count},
           {"text_only_turns", result.text_only_turns},

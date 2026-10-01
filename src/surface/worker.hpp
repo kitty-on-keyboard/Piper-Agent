@@ -118,6 +118,10 @@ struct RunResult {
     TestBlock test;
     std::string log_path;
     std::string error;                    // empty on success
+    // How the agent loop stopped (RunReport::termination_reason), and whether the
+    // status rests on the operator check alone because the loop itself did not finish.
+    std::string termination_reason;
+    bool promoted_by_check = false;
     // Tier-A loop hygiene copied from RunReport when the worker path has one.
     std::size_t degenerate_text_count = 0;
     std::size_t text_only_turns = 0;
@@ -127,10 +131,37 @@ struct RunResult {
     std::size_t nudged_no_tool_recovery = 0;
 };
 
-// True when result.status/error is an incomplete agent-loop stop (max_turns,
-// stalled, ended without checklist clear, …) that a green operator check may
-// promote to status=ok. Timeouts, start failures, and irreversible denials stay.
-[[nodiscard]] bool is_incomplete_agent_stop(const RunResult& result);
+// What the run did, gathered once at the end of execute_task_packet. Facts only:
+// finalize_run turns them (plus the check reading) into the verdict.
+struct RunFacts {
+    std::string termination_reason;       // RunReport::termination_reason; "" if none
+    bool completed = false;               // RunReport::completed
+    bool started = true;                  // the mission produced a run at all
+    bool irreversible_unanswered = false; // an irreversible ask ended without an answer
+    std::string irreversible_detail;      // the command that was held
+    double timeout_s = 0.0;               // packet.timeout_s, for the error text
+};
+
+struct Finalized {
+    std::string status;                   // "ok" | "error" | "timeout" | "stalled"
+    std::string error;                    // empty when status is "ok"
+    int exit_code = kExitError;
+    std::string wake_kind;                // "done" exactly when status is "ok", else "stalled"
+    bool promoted_by_check = false;       // ok only because a green check vouched for it
+};
+
+// THE one place that decides status, exit code and wake kind. Ordered policy:
+//   1. not started                         -> error, exit 1
+//   2. timeout_awaiting_user / wall_clock  -> timeout, exit 2, never promoted
+//   3. irreversible ask left unanswered    -> error, exit 1, never promoted
+//   4. completed or plan_ready             -> ok; a red check demotes it to error
+//   5. max_turns, stalled, ended && !completed (incomplete loop stops)
+//                                          -> ok when the check is green (promoted),
+//                                             else stalled (max_turns/stalled) or error
+//   6. anything else (backend_error, cancelled, loop_exit, no run end,
+//      stalled_no_turn)                    -> error/stalled, exit 1, never promoted
+// Pure: no I/O, so every row is covered by a gate test.
+[[nodiscard]] Finalized finalize_run(const RunFacts& facts, const TestBlock& test);
 
 // Write result.json atomically (write .tmp, rename).
 void write_result(const std::string& path, const RunResult& result);
@@ -172,9 +203,6 @@ void merge_files_touched(std::vector<std::string>& dest,
 void collect_git(const std::string& cwd, const std::string& out_dir,
                  RunResult& result);
 
-// max_turns / stalled / stalled_no_turn → result.status "stalled" (wake contract).
-[[nodiscard]] bool is_stalled_termination(const std::string& termination_reason);
-
 // Prefer last finish summary; else short first/last of assistant text when the
 // run did not complete; never dump a whole mid-turn diary into result.message.
 [[nodiscard]] std::string compose_result_message(
@@ -188,7 +216,8 @@ void collect_git(const std::string& cwd, const std::string& out_dir,
     const std::vector<std::string>& files_touched,
     const std::string& error);
 
-// Run the check command in cwd, populate result.test.
+// Run the check command in cwd and populate result.test. Reports only; the status
+// decision is finalize_run's.
 void run_check(const TaskPacket& packet, RunResult& result);
 
 // ------------------------------------------------------------------

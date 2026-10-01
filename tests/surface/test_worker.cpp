@@ -2,6 +2,7 @@
 #include "src/surface/socket_reader.hpp"
 
 #include <arpa/inet.h>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -306,17 +307,6 @@ TEST(merge_files_touched_unions_git_paths_for_mcp) {
     merge_files_touched(touched, {"b.gd", "c.json"});
     CHECK_EQ(touched.size(), std::size_t{3});
     CHECK_EQ(touched[2], "c.json");
-}
-
-TEST(is_stalled_termination_covers_max_turns_and_no_progress) {
-    // P2: result.status must be "stalled" for these reasons.
-    CHECK(is_stalled_termination("max_turns"));
-    CHECK(is_stalled_termination("stalled"));
-    CHECK(is_stalled_termination("stalled_no_turn"));
-    CHECK(!is_stalled_termination("ended"));
-    CHECK(!is_stalled_termination("wall_clock"));
-    CHECK(!is_stalled_termination("backend_error"));
-    CHECK(!is_stalled_termination(""));
 }
 
 TEST(compose_result_message_prefers_finish_and_trims_incomplete) {
@@ -1597,8 +1587,9 @@ TEST(worker_check_timeout_survives_early_output_close) {
     CHECK(seconds < 1.0);
     CHECK(result.test.ran);
     CHECK(result.test.exit_code != 0);
-    CHECK_EQ(result.status, "error");
     CHECK(result.test.output_tail.find("timeout") != std::string::npos);
+    // run_check reports; it never decides the status.
+    CHECK_EQ(result.status, "ok");
 }
 
 TEST(worker_check_retains_output_and_exit_status) {
@@ -1608,84 +1599,176 @@ TEST(worker_check_retains_output_and_exit_status) {
     for (const int exit_code : {0, 7}) {
         packet.check_command = "printf check-output; exit " + std::to_string(exit_code);
         RunResult result;
-        result.status = "ok";
+        result.status = "stalled";
+        result.error = "agent did not complete (max_turns)";
         run_check(packet, result);
+        CHECK(result.test.ran);
         CHECK_EQ(result.test.exit_code, exit_code);
         CHECK_EQ(result.test.output_tail, "check-output");
-        CHECK_EQ(result.status, exit_code == 0 ? "ok" : "error");
+        CHECK_EQ(result.status, "stalled");
+        CHECK_EQ(result.error, "agent did not complete (max_turns)");
     }
 }
 
-TEST(is_incomplete_agent_stop_matches_sidecar_error_shape) {
-    RunResult incomplete;
-    incomplete.status = "error";
-    incomplete.error = "agent did not complete (max_turns)";
-    CHECK(is_incomplete_agent_stop(incomplete));
-
-    RunResult stalled;
-    stalled.status = "error";
-    stalled.error = "agent did not complete (stalled)";
-    CHECK(is_incomplete_agent_stop(stalled));
-
-    RunResult timeout;
-    timeout.status = "timeout";
-    timeout.error = "wall clock exceeded (600s)";
-    CHECK(!is_incomplete_agent_stop(timeout));
-
-    RunResult start_fail;
-    start_fail.status = "error";
-    start_fail.error = "mission failed to start (check model_dir or settings)";
-    CHECK(!is_incomplete_agent_stop(start_fail));
-
-    RunResult irr;
-    irr.status = "error";
-    irr.error = "irreversible tool denied (orchestrator must escalate): rm -rf";
-    CHECK(!is_incomplete_agent_stop(irr));
-}
-
-TEST(worker_check_promotes_incomplete_max_turns_when_green) {
-    // lt-004-class: check green + completed=false must not look like a crash.
+TEST(worker_check_without_command_does_not_run) {
     TaskPacket packet;
     packet.cwd = std::filesystem::temp_directory_path().string();
-    packet.check_command = "printf green; exit 0";
-    packet.check_timeout_s = 2.0;
+    RunResult result;
+    run_check(packet, result);
+    CHECK(!result.test.ran);
+    CHECK_EQ(result.test.exit_code, -1);
+}
+
+namespace {
+
+enum class Check { None, Green, Red };
+
+TestBlock check_block(Check c) {
+    TestBlock t;
+    if (c == Check::None) return t;
+    t.ran = true;
+    t.command = "make test";
+    t.exit_code = c == Check::Green ? 0 : 1;
+    return t;
+}
+
+struct FinalizeRow {
+    const char* reason;
+    bool completed;
+    bool started;
+    Check check;
+    const char* status;
+    int exit_code;
+    bool promoted;
+};
+
+} // namespace
+
+// lt-004 was the motivating case: max_turns with a green check came back STALLED
+// because promotion keyed on an error string the sidecar no longer wrote, while a
+// backend crash on an already-green workspace came back PASS. Every row here is a
+// path execute_task_packet can take; the irreversible flag is crossed with all of
+// them below.
+TEST(finalize_run_decides_status_exit_wake_and_promotion_in_one_place) {
+    const FinalizeRow rows[] = {
+        // Not started: nothing ran, so nothing can pass.
+        {"", false, false, Check::None, "error", kExitError, false},
+        {"", false, false, Check::Green, "error", kExitError, false},
+        // Timeouts are never promoted.
+        {"wall_clock", false, true, Check::None, "timeout", kExitTimeout, false},
+        {"wall_clock", false, true, Check::Green, "timeout", kExitTimeout, false},
+        {"wall_clock", false, true, Check::Red, "timeout", kExitTimeout, false},
+        {"timeout_awaiting_user", false, true, Check::Green, "timeout", kExitTimeout, false},
+        // Completed: ok unless the check is red.
+        {"ended", true, true, Check::None, "ok", kExitOk, false},
+        {"ended", true, true, Check::Green, "ok", kExitOk, false},
+        {"ended", true, true, Check::Red, "error", kExitError, false},
+        {"plan_ready", false, true, Check::None, "ok", kExitOk, false},
+        {"plan_ready", false, true, Check::Red, "error", kExitError, false},
+        // Incomplete loop stops: a green check promotes, and says so.
+        {"max_turns", false, true, Check::None, "stalled", kExitError, false},
+        {"max_turns", false, true, Check::Green, "ok", kExitOk, true},
+        {"max_turns", false, true, Check::Red, "stalled", kExitError, false},
+        {"stalled", false, true, Check::None, "stalled", kExitError, false},
+        {"stalled", false, true, Check::Green, "ok", kExitOk, true},
+        {"stalled", false, true, Check::Red, "stalled", kExitError, false},
+        {"ended", false, true, Check::None, "error", kExitError, false},
+        {"ended", false, true, Check::Green, "ok", kExitOk, true},
+        {"ended", false, true, Check::Red, "error", kExitError, false},
+        // Crashes, cancels and the hang detector are never promoted.
+        {"backend_error", false, true, Check::None, "error", kExitError, false},
+        {"backend_error", false, true, Check::Green, "error", kExitError, false},
+        {"cancelled", false, true, Check::Green, "error", kExitError, false},
+        {"loop_exit", false, true, Check::Green, "error", kExitError, false},
+        {"", false, true, Check::Green, "error", kExitError, false},
+        {"stalled_no_turn", false, true, Check::None, "stalled", kExitError, false},
+        {"stalled_no_turn", false, true, Check::Green, "stalled", kExitError, false},
+    };
+    for (const FinalizeRow& row : rows) {
+        for (const bool irreversible : {false, true}) {
+            RunFacts facts;
+            facts.termination_reason = row.reason;
+            facts.completed = row.completed;
+            facts.started = row.started;
+            facts.irreversible_unanswered = irreversible;
+            facts.irreversible_detail = "rm -rf build";
+            facts.timeout_s = 600.0;
+            const Finalized f = finalize_run(facts, check_block(row.check));
+
+            // An unanswered irreversible ask outranks every loop stop but not a
+            // start failure or a timeout, and a check never answers it.
+            const bool escalated = irreversible && row.started &&
+                std::string(row.reason) != "wall_clock" &&
+                std::string(row.reason) != "timeout_awaiting_user";
+            const std::string want_status = escalated ? "error" : row.status;
+            const int want_exit = escalated ? kExitError : row.exit_code;
+            const bool want_promoted = escalated ? false : row.promoted;
+            if (f.status != want_status || f.exit_code != want_exit ||
+                f.promoted_by_check != want_promoted) {
+                std::fprintf(stderr, "  row reason=%s completed=%d started=%d check=%d irr=%d -> %s/%d/%d\n",
+                             row.reason, row.completed, row.started, static_cast<int>(row.check),
+                             irreversible, f.status.c_str(), f.exit_code, f.promoted_by_check);
+            }
+            CHECK_EQ(f.status, want_status);
+            CHECK_EQ(f.exit_code, want_exit);
+            CHECK_EQ(f.promoted_by_check, want_promoted);
+            CHECK_EQ(f.wake_kind, std::string(want_status == "ok" ? "done" : "stalled"));
+            CHECK_EQ(f.error.empty(), want_status == "ok");
+            if (escalated) {
+                CHECK(f.error.find("irreversible") != std::string::npos);
+                CHECK(f.error.find("rm -rf build") != std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(finalize_run_error_text_names_the_cause) {
+    RunFacts facts;
+    facts.timeout_s = 600.0;
+
+    facts.termination_reason = "max_turns";
+    CHECK_EQ(finalize_run(facts, check_block(Check::Red)).error,
+             "agent did not complete (max_turns)");
+
+    facts.termination_reason = "";
+    CHECK_EQ(finalize_run(facts, check_block(Check::None)).error,
+             "agent did not complete (no_run_end)");
+
+    facts.termination_reason = "timeout_awaiting_user";
+    CHECK_EQ(finalize_run(facts, check_block(Check::None)).error,
+             "timeout awaiting user answer (600s)");
+
+    facts.termination_reason = "ended";
+    facts.completed = true;
+    TestBlock red = check_block(Check::Red);
+    red.exit_code = 7;
+    CHECK_EQ(finalize_run(facts, red).error, "check command failed (exit code 7)");
+
+    facts.started = false;
+    facts.termination_reason = "";
+    facts.completed = false;
+    CHECK_EQ(finalize_run(facts, check_block(Check::Green)).error,
+             "mission failed to start (check model_dir or settings)");
+}
+
+TEST(write_result_records_termination_reason_and_promotion) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_worker_promotion_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "result.json").string();
 
     RunResult result;
-    result.status = "error";
-    result.error = "agent did not complete (max_turns)";
-    result.message = "agent did not complete (max_turns)";
-    run_check(packet, result);
+    result.task_id = "promo";
+    result.status = "ok";
+    result.termination_reason = "max_turns";
+    result.promoted_by_check = true;
+    write_result(path, result);
 
-    CHECK(result.test.ran);
-    CHECK_EQ(result.test.exit_code, 0);
-    CHECK_EQ(result.status, "ok");
-    CHECK(result.error.empty());
-    CHECK_EQ(result.message, "check passed");
-}
-
-TEST(worker_check_does_not_promote_timeout_or_irreversible) {
-    TaskPacket packet;
-    packet.cwd = std::filesystem::temp_directory_path().string();
-    packet.check_command = "exit 0";
-    packet.check_timeout_s = 2.0;
-
-    RunResult timeout;
-    timeout.status = "timeout";
-    timeout.error = "wall clock exceeded (60s)";
-    timeout.message = timeout.error;
-    run_check(packet, timeout);
-    CHECK_EQ(timeout.test.exit_code, 0);
-    CHECK_EQ(timeout.status, "timeout");
-    CHECK_EQ(timeout.error, "wall clock exceeded (60s)");
-
-    RunResult irr;
-    irr.status = "error";
-    irr.error = "irreversible tool denied (orchestrator must escalate): wipe";
-    irr.message = irr.error;
-    run_check(packet, irr);
-    CHECK_EQ(irr.test.exit_code, 0);
-    CHECK_EQ(irr.status, "error");
-    CHECK(!irr.error.empty());
+    std::ifstream in(path);
+    const nlohmann::json j = nlohmann::json::parse(in);
+    CHECK_EQ(j.at("termination_reason").get<std::string>(), "max_turns");
+    CHECK(j.at("promoted_by_check").get<bool>());
+    std::filesystem::remove_all(dir);
 }
 
 TEST(load_packet_parses_max_iterations) {

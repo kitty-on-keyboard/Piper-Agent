@@ -21,7 +21,7 @@ Local models require fat direction and thin scope: burn cloud input tokens on th
 
 - **Scope:** 1–3 files per slice. Never dispatch open-ended multi-module tasks.
 - **Explicitness:** Enumerate `EDIT`, `CREATE`, and `DO NOT TOUCH` in `prompt.md`.
-- **Acceptance:** Put an automated check in the brief and pass it to `piper packet --check`. A passing check promotes an incomplete loop stop (for example `max_turns` without an explicit finish) to `status: "ok"`.
+- **Acceptance:** Put an automated check in the brief and pass it to `piper packet --check`. A passing check promotes an incomplete loop stop (for example `max_turns` without an explicit finish) to `status: "ok"`, and the card's `loop:` line says the pass rests on the check alone. A crash, a timeout or an unanswered ask is never promoted.
 - **Stop Condition:** Say when to stop if stuck.
 
 ### `prompt.md` template

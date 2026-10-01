@@ -2251,39 +2251,6 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         }
     }
 
-    int exit_code = kExitOk;
-    if (!mission_ran && final_report.iterations == 0 && final_report.termination_reason.empty()) {
-        result.status = "error";
-        result.error = "mission failed to start (check model_dir or settings)";
-        exit_code = kExitError;
-    } else if (final_report.termination_reason == "timeout_awaiting_user") {
-        result.status = "timeout";
-        result.error = "timeout awaiting user answer (" + std::to_string(static_cast<int>(packet.timeout_s)) + "s)";
-        exit_code = kExitTimeout;
-    } else if (final_report.termination_reason == "wall_clock") {
-        result.status = "timeout";
-        result.error = "wall clock exceeded (" + std::to_string(packet.timeout_s) + "s)";
-        exit_code = kExitTimeout;
-    } else if (final_report.completed || final_report.termination_reason == "plan_ready") {
-        result.status = "ok";
-        exit_code = kExitOk;
-    } else if (is_stalled_termination(final_report.termination_reason)) {
-        // Wake contract: result.status agrees with webhook kind=stalled so parents
-        // need not parse error strings for max_turns / no_progress stalls.
-        result.status = "stalled";
-        result.error = "agent did not complete (" + final_report.termination_reason + ")";
-        exit_code = kExitError;
-    } else if (stopped_on_unanswered_ask) {
-        result.status = "error";
-        result.error = "irreversible tool denied (orchestrator must escalate): " + denied_irreversible_detail;
-        exit_code = kExitError;
-    } else {
-        result.status = "error";
-        std::string reason = final_report.termination_reason.empty() ? "no_run_end" : final_report.termination_reason;
-        result.error = "agent did not complete (" + reason + ")";
-        exit_code = kExitError;
-    }
-
     if (!plan_accum.empty()) {
         std::error_code ec_p;
         std::filesystem::path plan_file = std::filesystem::path(packet.cwd) / "PLAN.md";
@@ -2306,6 +2273,23 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         merge_files_touched(result.files_touched, collect_git_changed_paths(packet.cwd));
     }
 
+    run_check(packet, result);
+
+    RunFacts facts;
+    facts.termination_reason = final_report.termination_reason;
+    facts.completed = final_report.completed;
+    facts.started = mission_ran || final_report.iterations > 0 ||
+                    !final_report.termination_reason.empty();
+    facts.irreversible_unanswered = stopped_on_unanswered_ask;
+    facts.irreversible_detail = denied_irreversible_detail;
+    facts.timeout_s = packet.timeout_s;
+    const Finalized fin = finalize_run(facts, result.test);
+    result.status = fin.status;
+    result.error = fin.error;
+    result.termination_reason = final_report.termination_reason;
+    result.promoted_by_check = fin.promoted_by_check;
+    const int exit_code = fin.exit_code;
+
     const bool completed_ok =
         (final_report.completed || final_report.termination_reason == "plan_ready") &&
         result.status == "ok";
@@ -2320,24 +2304,14 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         result.files_touched,
         result.error);
 
-    run_check(packet, result);
-    // Green check can promote incomplete → ok; failed check demotes ok → error.
-    // Keep process exit aligned with the reconciled status.
-    if (result.status == "ok") {
-        exit_code = kExitOk;
-    } else if (result.test.ran && result.test.exit_code != 0 && exit_code == kExitOk) {
-        exit_code = kExitError;
-    }
-
     write_result(packet.result_path, result);
     log.close();
 
     if (!packet.orch_webhook.empty()) {
         WebhookPayload hook_payload;
-        // status=ok means the operator contract passed (model completed, or a
-        // green check promoted an incomplete loop stop). That is done, not stalled.
-        const bool is_completed = (result.status == "ok");
-        hook_payload.kind = is_completed ? "done" : "stalled";
+        // finalize_run decided it: done exactly when status=ok (model completed,
+        // or a green check promoted an incomplete loop stop).
+        hook_payload.kind = fin.wake_kind;
         hook_payload.task_id = packet.id;
         hook_payload.run_id = session.run_id;
         hook_payload.cwd = packet.cwd;

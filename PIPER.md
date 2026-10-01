@@ -56,8 +56,8 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
    Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
-   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
-   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` when the loop stopped short without breaking (`max_turns`, `stalled`, or a text ending with work left open); the card's `loop:` line then says the pass rests on the check alone. A crash (`backend_error`), a cancel, a timeout or an unanswered irreversible ask is never promoted. A red check turns a completed run into `error`.
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice with `piper packet --max-iterations N` — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
 
 4. **Dispatch**
@@ -96,7 +96,7 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    ```
    On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
 
-   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop is still `ok` when `check` was set.
+   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
 
 6. **Record and continue**
    ```bash
@@ -168,13 +168,14 @@ mission. No URL means no POST.
 | --- | --- | --- |
 | `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
-| `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
+| `stalled` | `result.json` written, the harness stopped the run (`stalled`, `max_turns`, not completed), and the check did not pass | read what landed. Do not treat it as success. Next slice or stop. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
 standard exists to kill. `result.json` uses the same `status: "stalled"` for
-`max_turns` / no-progress stalls so parents need not parse error strings.
+`max_turns` / no-progress stalls whose check did not pass, so parents need not
+parse error strings.
 
 Body:
 
@@ -215,6 +216,6 @@ agent copies.
 - A detached launch with no URL exits before the sidecar starts.
 - A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
   `plan_ready`, or a green packet `check` after an incomplete loop stop such as
-  `max_turns`), `stalled` if it did not.
+  `max_turns`), `stalled` if it did not. A crash or cancel is never `done`.
 - The launch parent POSTs `died` if the sidecar exits with no result.
 - An irreversible call and `ask_user` both POST `ask` and wait.

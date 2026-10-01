@@ -685,7 +685,7 @@ def append_orch_event(result_path, event):
 def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
                      check=None, timeout_s=600, result_path=None,
                      auto_approve_irreversible=True, trust_mcp=None,
-                     prompt_file=None):
+                     prompt_file=None, max_iterations=None):
     """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
     cwd = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
@@ -708,6 +708,11 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
     }
     if check:
         packet["check"] = check
+    if max_iterations is not None:
+        if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) \
+                or max_iterations < 1:
+            raise PacketError("max_iterations must be a positive integer")
+        packet["max_iterations"] = max_iterations
     if result_path:
         packet["result_path"] = os.path.abspath(os.path.expanduser(result_path))
     else:
@@ -811,6 +816,7 @@ def cmd_packet(args):
             auto_approve_irreversible=not args.no_auto_approve_irreversible,
             trust_mcp=getattr(args, "trust_mcp", None),
             prompt_file=args.prompt_file,
+            max_iterations=getattr(args, "max_iterations", None),
         )
     except PacketError as exc:
         print(f"piper packet: {exc}", file=sys.stderr)
@@ -1003,6 +1009,7 @@ def format_review_card(result, *, exit_code, result_path):
     msg = str(result.get("message") or "").strip().replace("\n", " ")
     if len(msg) > 160:
         msg = msg[:157] + "..."
+    loop_s = format_loop_line(result)
     return (
         "── piper review ─────────────────────────\n"
         f"task:     {result.get('task_id') or '(unknown)'}\n"
@@ -1012,10 +1019,29 @@ def format_review_card(result, *, exit_code, result_path):
         f"files:    {files_s}\n"
         f"diff:     {format_diff_stat(result.get('diff_stat'))}\n"
         f"test:     {test_s}\n"
-        f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
+        + (f"loop:     {loop_s}\n" if loop_s else "")
+        + f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
         f"verdict:  {verdict}\n"
         "─────────────────────────────────────────"
     )
+
+
+def format_loop_line(result):
+    """How the loop stopped, when that is not the normal ending or a check vouched for it.
+
+    A pass promoted by the check rests on the check alone, so the card says so.
+    """
+    reason = str(result.get("termination_reason") or "")
+    promoted = bool(result.get("promoted_by_check"))
+    if not promoted and reason in ("", "ended", "plan_ready"):
+        return ""
+    line = reason or "no_run_end"
+    turns = result.get("turns")
+    if isinstance(turns, int) and not isinstance(turns, bool):
+        line += f" after {turns} turn{'s' if turns != 1 else ''}"
+    if promoted:
+        line += "; ok because check passed"
+    return line
 
 
 def resolve_result_path(result_arg=None, task_arg=None):
@@ -1772,8 +1798,8 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
    Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
-   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
-   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` when the loop stopped short without breaking (`max_turns`, `stalled`, or a text ending with work left open); the card's `loop:` line then says the pass rests on the check alone. A crash (`backend_error`), a cancel, a timeout or an unanswered irreversible ask is never promoted. A red check turns a completed run into `error`.
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice with `piper packet --max-iterations N` — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
 
 4. **Dispatch**
@@ -1812,7 +1838,7 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    ```
    On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
 
-   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop is still `ok` when `check` was set.
+   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
 
 6. **Record and continue**
    ```bash
@@ -1866,13 +1892,14 @@ mission. No URL means no POST.
 | --- | --- | --- |
 | `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
-| `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
+| `stalled` | `result.json` written, the harness stopped the run (`stalled`, `max_turns`, not completed), and the check did not pass | read what landed. Do not treat it as success. Next slice or stop. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
 standard exists to kill. `result.json` uses the same `status: "stalled"` for
-`max_turns` / no-progress stalls so parents need not parse error strings.
+`max_turns` / no-progress stalls whose check did not pass, so parents need not
+parse error strings.
 
 Body:
 
@@ -1913,7 +1940,7 @@ agent copies.
 - A detached launch with no URL exits before the sidecar starts.
 - A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
   `plan_ready`, or a green packet `check` after an incomplete loop stop such as
-  `max_turns`), `stalled` if it did not.
+  `max_turns`), `stalled` if it did not. A crash or cancel is never `done`.
 - The launch parent POSTs `died` if the sidecar exits with no result.
 - An irreversible call and `ask_user` both POST `ask` and wait.
 """
@@ -2347,6 +2374,10 @@ def build_parser():
     )
     packet_p.add_argument("--check", default=None, help="optional acceptance command")
     packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
+    packet_p.add_argument(
+        "--max-iterations", type=int, default=None,
+        help="turn budget (default 30, or 60 with --trust-mcp)",
+    )
     packet_p.add_argument("--result-path", default=None, help="optional result_path")
     packet_p.add_argument("--trust-mcp", action="append", default=None,
                           help="explicit MCP server name to trust (repeatable; must exist in cwd .mcp.json)")
@@ -3142,6 +3173,25 @@ def self_test():
             active = json.load(fh)
         check(active.get("id") == "emit-1" and active.get("task_path") == os.path.abspath(pkt_out),
               f"active.json must point at emitted packet, got {active!r}")
+        with open(pkt_out, encoding="utf-8") as fh:
+            check("max_iterations" not in json.load(fh),
+                  "packet without --max-iterations must leave the default to the worker")
+        iters_out = os.path.join(tmp, "emitted_iters.json")
+        check(
+            main(["packet", "--id", "emit-iters", "--cwd", tmp, "--prompt", "Ship X.",
+                  "--out", iters_out, "--model-dir", model_dir,
+                  "--max-iterations", "45"]) == EXIT_OK,
+            "packet --max-iterations must exit 0",
+        )
+        with open(iters_out, encoding="utf-8") as fh:
+            iters_raw = json.load(fh)
+        check(iters_raw.get("max_iterations") == 45,
+              f"packet --max-iterations must emit max_iterations, got {iters_raw!r}")
+        with contextlib.redirect_stderr(io.StringIO()):
+            bad_iters = main(["packet", "--id", "emit-iters0", "--cwd", tmp, "--prompt", "X.",
+                              "--out", os.path.join(tmp, "emitted_iters0.json"),
+                              "--model-dir", model_dir, "--max-iterations", "0"])
+        check(bad_iters == EXIT_INVALID, f"--max-iterations 0 must exit 3, got {bad_iters}")
 
         # 15b. default out path, prompt copy, model from env, missing model exits 3
         def_ws = os.path.join(tmp, "default_slice_ws")
@@ -3323,6 +3373,27 @@ def self_test():
         rev_out = rev_stdout.getvalue()
         check("verdict:  PASS" in rev_out, f"review card must PASS, got {rev_out!r}")
         check("rev-1" in rev_out and "a.py" in rev_out, f"review card must show task/files, got {rev_out!r}")
+        check("loop:" not in rev_out, f"a normal ending must not print a loop line, got {rev_out!r}")
+
+        # 18b. a pass that rests on the check alone says so; a stall names its stop
+        promo = result_shell(
+            task_id="promo-1", cwd=rev_dir, model_dir=model_dir, status="ok",
+            message="Halfway there.", turns=30,
+        )
+        promo.update({"termination_reason": "max_turns", "promoted_by_check": True,
+                      "test": {"ran": True, "exit_code": 0, "command": "make test",
+                               "output_tail": "ok"}})
+        promo_card = format_review_card(promo, exit_code=EXIT_OK, result_path=rev_path)
+        check("loop:     max_turns after 30 turns; ok because check passed" in promo_card,
+              f"promoted card must carry the loop line, got {promo_card!r}")
+        check("verdict:  PASS" in promo_card, f"promoted card must PASS, got {promo_card!r}")
+        stall = dict(promo, status="stalled", promoted_by_check=False,
+                     error="agent did not complete (max_turns)")
+        stall["test"] = dict(promo["test"], exit_code=1)
+        stall_card = format_review_card(stall, exit_code=EXIT_ERROR, result_path=rev_path)
+        check("loop:     max_turns after 30 turns\n" in stall_card,
+              f"stalled card must name the stop, got {stall_card!r}")
+        check("verdict:  STALLED" in stall_card, f"stalled card must be STALLED, got {stall_card!r}")
         check(build_answer_payload(action="approved") == {"text": "allow"},
               "approved must normalize to allow")
         check(build_answer_payload(action="denied") == {"text": "deny"},
