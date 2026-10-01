@@ -718,7 +718,7 @@ def append_orch_event(result_path, event):
 def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
                      check=None, timeout_s=600, result_path=None,
                      auto_approve_irreversible=True, trust_mcp=None,
-                     prompt_file=None, max_iterations=None):
+                     prompt_file=None, max_iterations=None, check_timeout_s=None):
     """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
     cwd = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
@@ -741,6 +741,11 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
     }
     if check:
         packet["check"] = check
+    if check_timeout_s is not None:
+        if isinstance(check_timeout_s, bool) or not isinstance(check_timeout_s, (int, float)) \
+                or check_timeout_s <= 0:
+            raise PacketError("check_timeout_s must be a positive number")
+        packet["check_timeout_s"] = float(check_timeout_s)
     if max_iterations is not None:
         if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) \
                 or max_iterations < 1:
@@ -850,6 +855,7 @@ def cmd_packet(args):
             trust_mcp=getattr(args, "trust_mcp", None),
             prompt_file=args.prompt_file,
             max_iterations=getattr(args, "max_iterations", None),
+            check_timeout_s=getattr(args, "check_timeout_s", None),
         )
     except PacketError as exc:
         print(f"piper packet: {exc}", file=sys.stderr)
@@ -1087,10 +1093,13 @@ def format_review_card(result, *, exit_code, result_path):
         files_s = str(files)
     test = result.get("test") or {}
     check_lines = []
+    triage_lines = []
     if isinstance(test, dict) and test.get("ran"):
-        test_s = f"exit={test.get('exit_code')} cmd={test.get('command')!r}"
-        if test.get("exit_code") != 0:
-            check_lines = _last_nonempty_lines(test.get("output_tail"), CARD_CHECK_LINES)
+        test_s = f"{format_check_outcome(test)} cmd={test.get('command')!r}"
+        if test.get("exit_code") != 0 or test.get("timed_out") or test.get("could_not_run"):
+            triage_lines = format_triage_lines(test)
+            check_lines = _last_nonempty_lines(test.get("output_tail"),
+                                               CARD_CHECK_LINES - len(triage_lines))
     elif isinstance(test, dict):
         test_s = "not run"
     else:
@@ -1117,12 +1126,49 @@ def format_review_card(result, *, exit_code, result_path):
         f"diff:     {format_diff_stat(result.get('diff_stat'))}\n"
         f"test:     {test_s}\n"
         + _card_block("check:", check_lines)
+        + "".join(triage_lines)
         + (f"loop:     {loop_s}\n" if loop_s else "")
         + _card_block("worker:", notices)
         + f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
         f"verdict:  {verdict}\n"
         "─────────────────────────────────────────"
     )
+
+
+def format_check_outcome(test):
+    """exit=N, or what stopped the check when it never produced a real exit code."""
+    seconds = test.get("seconds")
+    if test.get("timed_out"):
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            return f"timed out after {seconds:.0f}s"
+        return "timed out"
+    if test.get("could_not_run"):
+        return f"could not run (exit {test.get('exit_code')})"
+    return f"exit={test.get('exit_code')}"
+
+
+def format_triage_lines(test):
+    """At most three lines from the check's log_triage block: failing tests, the first
+    located primary diagnostic, and where the full log is."""
+    lines = []
+    triage = test.get("triage")
+    if isinstance(triage, dict):
+        failing = [str(t) for t in (triage.get("failing_tests") or []) if t]
+        if failing:
+            lines.append(f"failing:  {_card_clip(', '.join(failing))}\n")
+        for diag in triage.get("primary") or []:
+            if not isinstance(diag, dict) or not diag.get("path"):
+                continue
+            where = str(diag["path"])
+            line_no = diag.get("line")
+            if isinstance(line_no, int) and not isinstance(line_no, bool) and line_no > 0:
+                where += f":{line_no}"
+            message = str(diag.get("message") or "").strip()
+            lines.append(f"at:       {_card_clip(where + (': ' + message if message else ''))}\n")
+            break
+    if test.get("output_path"):
+        lines.append(f"log:      {test['output_path']}\n")
+    return lines
 
 
 def format_run_line(result):
@@ -1908,7 +1954,7 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
    Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
-   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` when the loop stopped short without breaking (`max_turns`, `stalled`, or a text ending with work left open); the card's `loop:` line then says the pass rests on the check alone. A crash (`backend_error`), a cancel, a timeout or an unanswered irreversible ask is never promoted. A red check turns a completed run into `error`.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` when the loop stopped short without breaking (`max_turns`, `stalled`, or a text ending with work left open); the card's `loop:` line then says the pass rests on the check alone. A crash (`backend_error`), a cancel, a timeout or an unanswered irreversible ask is never promoted. A red check turns a completed run into `error`. The post-run check runs on the same 300 s clock as the in-loop check (`piper packet --check-timeout-s N` to change it). A check that timed out or could not run (exit 126/127) is reported as such (`test.timed_out`, `test.could_not_run`) and never counts as green. `test.output_tail` is a log_triage digest of the output (failing locators kept), `test.triage` names the runner, failing tests and primary diagnostics, and `test.output_path` points at the full log (`check.log`) when the digest dropped anything.
    - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice with `piper packet --max-iterations N` — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
 
@@ -2494,6 +2540,10 @@ def build_parser():
         help="model directory (default: LMP_QWEN_DIR; required at emit time)",
     )
     packet_p.add_argument("--check", default=None, help="optional acceptance command")
+    packet_p.add_argument(
+        "--check-timeout-s", type=float, default=None,
+        help="post-run check clock (default 300, the same clock as the in-loop check)",
+    )
     packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
     packet_p.add_argument(
         "--max-iterations", type=int, default=None,
@@ -3495,6 +3545,13 @@ def _self_test_scenarios():
                               "--out", os.path.join(tmp, "emitted_iters0.json"),
                               "--model-dir", model_dir, "--max-iterations", "0"])
         check(bad_iters == EXIT_INVALID, f"--max-iterations 0 must exit 3, got {bad_iters}")
+        clock_out = os.path.join(tmp, "emitted_clock.json")
+        check(main(["packet", "--id", "emit-clock", "--cwd", tmp, "--prompt", "X.", "--out", clock_out,
+                    "--model-dir", model_dir, "--check", "true", "--check-timeout-s", "900"]) == EXIT_OK,
+              "packet --check-timeout-s must exit 0")
+        with open(clock_out, encoding="utf-8") as fh:
+            check(json.load(fh).get("check_timeout_s") == 900.0,
+                  "packet --check-timeout-s must emit check_timeout_s")
 
         # 15b. default out path, prompt copy, model from env, missing model exits 3
         def_ws = os.path.join(tmp, "default_slice_ws")
@@ -3755,6 +3812,53 @@ def _self_test_scenarios():
         check("verdict:  PASS" in pass_card, f"green card must PASS, got {pass_card!r}")
         check("error:" not in pass_card and "check:" not in pass_card and "worker:" not in pass_card,
               f"PASS card must not carry failure evidence, got {pass_card!r}")
+        check(pass_card == (
+            "── piper review ─────────────────────────\n"
+            "task:     ev\n"
+            "status:   ok\n"
+            "exit:     0\n"
+            "run:      turns=4 wall=9s\n"
+            "message:  All done, tests pass.\n"
+            "files:    (none)\n"
+            "diff:     +0 -0 (0 files)\n"
+            "test:     exit=0 cmd='make test'\n"
+            "git_diff: (none)\n"
+            "verdict:  PASS\n"
+            "─────────────────────────────────────────"
+        ), f"PASS card must stay byte-stable, got {pass_card!r}")
+
+        # A red check's log_triage block: failing tests, the first located primary
+        # diagnostic, and the spooled full log -- at most three lines.
+        triaged = dict(red, test=dict(red["test"], output_path=os.path.join(ev_dir, "check.log"),
+                                      seconds=4.2, timed_out=False, could_not_run=False,
+                                      triage={"runner": "pytest", "passed": 3, "failed": 1,
+                                              "failing_tests": ["tests/test_calc.py::test_add"],
+                                              "primary": [{"path": "", "line": 0, "message": "noise"},
+                                                          {"path": "calc.py", "line": 2,
+                                                           "message": "AssertionError: expected 5"}],
+                                              "paths": ["calc.py"]}))
+        tri_card = format_review_card(triaged, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("failing:  tests/test_calc.py::test_add\n" in tri_card,
+              f"red card must name failing tests, got {tri_card!r}")
+        check("at:       calc.py:2: AssertionError: expected 5\n" in tri_card,
+              f"red card must name the first located diagnostic, got {tri_card!r}")
+        check(f"log:      {os.path.join(ev_dir, 'check.log')}\n" in tri_card,
+              f"red card must point at the full check log, got {tri_card!r}")
+        check(len(tri_card.splitlines()) <= 25, f"triaged card must stay compact, got {tri_card!r}")
+        timed = dict(red, error="check timed out after 300s",
+                     test={"ran": True, "exit_code": -1, "command": "make test", "timed_out": True,
+                           "could_not_run": False, "seconds": 300.1,
+                           "output_tail": "running\n[timeout after 300.000000s]"})
+        timed_card = format_review_card(timed, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("test:     timed out after 300s cmd='make test'" in timed_card,
+              f"a timed-out check must say so, not exit=-1, got {timed_card!r}")
+        never = dict(red, error="check could not run (exit 127)",
+                     test={"ran": True, "exit_code": 127, "command": "maek test", "timed_out": False,
+                           "could_not_run": True, "seconds": 0.01,
+                           "output_tail": "sh: maek: command not found"})
+        never_card = format_review_card(never, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("test:     could not run (exit 127) cmd='maek test'" in never_card,
+              f"a check that never ran must say so, got {never_card!r}")
 
         # DIED: no result.json, so the log is the only evidence. Only this run's log,
         # never the previous run's (rotated to worker.stderr.prev.log).

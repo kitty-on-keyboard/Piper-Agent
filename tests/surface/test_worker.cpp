@@ -363,7 +363,10 @@ TEST(write_result_writes_atomic_json) {
     r.generated_tokens = 450;
     r.files_touched = {"a.py", "b.py"};
     r.diff_stat = {15, 2, 2};
-    r.test = {true, 0, "pytest", "tests passed"};
+    r.test.ran = true;
+    r.test.exit_code = 0;
+    r.test.command = "pytest";
+    r.test.output_tail = "tests passed";
 
     write_result(res_file, r);
 
@@ -1755,13 +1758,151 @@ TEST(finalize_run_error_text_names_the_cause) {
     facts.completed = true;
     TestBlock red = check_block(Check::Red);
     red.exit_code = 7;
-    CHECK_EQ(finalize_run(facts, red).error, "check command failed (exit code 7)");
+    CHECK_EQ(finalize_run(facts, red).error, "check failed (exit 7)");
 
     facts.started = false;
     facts.termination_reason = "";
     facts.completed = false;
     CHECK_EQ(finalize_run(facts, check_block(Check::Green)).error,
              "mission failed to start (check model_dir or settings)");
+}
+
+// A check that timed out or never ran is not a green check and not an ordinary red one:
+// it can never promote, and the error names what happened.
+TEST(finalize_run_never_promotes_a_timed_out_or_never_run_check) {
+    RunFacts facts;
+    facts.termination_reason = "max_turns";
+
+    TestBlock timed_out;
+    timed_out.ran = true;
+    timed_out.exit_code = 0;  // whatever the code says, the deadline killed it
+    timed_out.timed_out = true;
+    timed_out.seconds = 300.2;
+    Finalized f = finalize_run(facts, timed_out);
+    CHECK_EQ(f.status, "stalled");
+    CHECK(!f.promoted_by_check);
+
+    facts.termination_reason = "ended";
+    facts.completed = true;
+    f = finalize_run(facts, timed_out);
+    CHECK_EQ(f.status, "error");
+    CHECK_EQ(f.error, "check timed out after 300s");
+
+    TestBlock never;
+    never.ran = true;
+    never.exit_code = 127;
+    never.could_not_run = true;
+    f = finalize_run(facts, never);
+    CHECK_EQ(f.status, "error");
+    CHECK_EQ(f.error, "check could not run (exit 127)");
+}
+
+namespace {
+
+std::filesystem::path check_scratch(const char* tag) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        (std::string("test_worker_check_") + tag + "_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+} // namespace
+
+// The corpus log whose primary locator a raw 2000-byte tail loses: the digest keeps it,
+// triage names it, and the full capture is spooled because the digest dropped bytes.
+TEST(run_check_digests_a_red_build_log_with_log_triage) {
+    const char* root = std::getenv("LMP_REPO_ROOT");
+    REQUIRE(root != nullptr);
+    const std::string log =
+        std::string(root) + "/tests/testdata/log_triage/logs/build_missing_semi_early.log";
+    REQUIRE(std::filesystem::is_regular_file(log));
+
+    const auto dir = check_scratch("triage");
+    TaskPacket packet;
+    packet.cwd = dir.string();
+    packet.result_path = (dir / "result.json").string();
+    packet.check_command = "cat '" + log + "'; exit 2";
+    packet.check_timeout_s = 10.0;
+    RunResult result;
+    run_check(packet, result);
+
+    CHECK_EQ(result.test.exit_code, 2);
+    CHECK(!result.test.timed_out);
+    CHECK(!result.test.could_not_run);
+    CHECK(result.test.output_tail.size() <= 2000);
+    CHECK(result.test.output_tail.find("config.cpp:4:21") != std::string::npos);
+    REQUIRE(result.test.triage.has_value());
+    bool located = false;
+    for (const CheckDiagnostic& d : result.test.triage->primary) {
+        if (d.path.find("config.cpp") != std::string::npos && d.line == 4) located = true;
+    }
+    CHECK(located);
+    CHECK_EQ(result.test.output_path, (dir / "check.log").string());
+    CHECK(std::filesystem::file_size(dir / "check.log") > 20000);
+    std::filesystem::remove_all(dir);
+}
+
+// Past the 1 MB head the verdict line used to be gone from every artifact.
+TEST(run_check_keeps_the_last_error_of_an_output_over_the_head_cap) {
+    const auto dir = check_scratch("bigout");
+    TaskPacket packet;
+    packet.cwd = dir.string();
+    packet.result_path = (dir / "result.json").string();
+    packet.check_command =
+        "i=0; while [ $i -lt 30000 ]; do echo \"noise line $i of the build output padding\"; "
+        "i=$((i+1)); done; echo 'src/x.cpp:7:3: error: use of undeclared identifier boom'; exit 1";
+    packet.check_timeout_s = 60.0;
+    RunResult result;
+    run_check(packet, result);
+
+    CHECK_EQ(result.test.exit_code, 1);
+    CHECK(result.test.output_tail.find("undeclared identifier boom") != std::string::npos);
+    REQUIRE(!result.test.output_path.empty());
+    std::ifstream in(result.test.output_path);
+    const std::string spooled((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(spooled.find("bytes not captured") != std::string::npos);
+    CHECK(spooled.find("undeclared identifier boom") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(run_check_names_a_timeout_and_a_command_that_never_ran) {
+    const auto dir = check_scratch("taxonomy");
+    TaskPacket packet;
+    packet.cwd = dir.string();
+    packet.result_path = (dir / "result.json").string();
+
+    packet.check_command = "sleep 2";
+    packet.check_timeout_s = 1.0;
+    RunResult slow;
+    run_check(packet, slow);
+    CHECK(slow.test.timed_out);
+    CHECK(!slow.test.could_not_run);
+    CHECK(slow.test.output_tail.find("[timeout after") != std::string::npos);
+    CHECK(describe_check_failure(slow.test).rfind("check timed out after ", 0) == 0);
+
+    packet.check_command = "exit 127";
+    packet.check_timeout_s = 5.0;
+    RunResult never;
+    run_check(packet, never);
+    CHECK(never.test.could_not_run);
+    CHECK(!never.test.timed_out);
+    CHECK_EQ(describe_check_failure(never.test), "check could not run (exit 127)");
+
+    // Green and short: no triage, no spool, and a stale check.log is not left behind.
+    { std::ofstream((dir / "check.log").string()) << "stale\n"; }
+    packet.check_command = "printf ok";
+    RunResult green;
+    run_check(packet, green);
+    CHECK(!green.test.triage.has_value());
+    CHECK(green.test.output_path.empty());
+    CHECK(!std::filesystem::exists(dir / "check.log"));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(post_run_check_shares_the_in_loop_shell_clock) {
+    TaskPacket packet;
+    CHECK_EQ(packet.check_timeout_s, static_cast<double>(lmp::tools::kShellWallClockSeconds));
 }
 
 TEST(write_result_records_termination_reason_and_promotion) {

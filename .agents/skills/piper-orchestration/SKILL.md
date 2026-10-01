@@ -111,7 +111,7 @@ Use the card from `piper dispatch` or `piper review`. Do not re-read every line 
 | **Status** | `status == "ok"` | `"stalled"` is not done. Read `error` or the card. |
 | **Touched files** | `files_touched` ⊆ the brief | Revert the surprise, tighten DO NOT TOUCH, re-slice. |
 | **Diff** | Proportional to the slice | Reject a drive-by rewrite. |
-| **Acceptance** | `check` exit code 0 (`UNVERIFIED` = no check ran) | New slice aimed at the card's `check:` lines (`test.output_tail`). |
+| **Acceptance** | `check` exit code 0 (`UNVERIFIED` = no check ran) | New slice aimed at the card's `at:`/`failing:`/`check:` lines. `test.output_tail` is a triaged digest, not the raw last bytes; `test.output_path` is the full log. A timed-out or could-not-run check says so on the `test:` line. |
 | **Summary** | `result.message` matches the goal | If the card is ambiguous, read the log. |
 
 ---

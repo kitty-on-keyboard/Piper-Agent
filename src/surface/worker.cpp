@@ -27,6 +27,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "src/tools/log_triage.hpp"
+
 namespace lmp::surface::worker {
 namespace {
 
@@ -42,23 +44,38 @@ std::string expand_user(const std::string& path) {
     return path;
 }
 
-bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
-             int& exit_code, std::string& output) {
-    output.clear();
-    exit_code = -1;
+// How much of a command's output to keep. The git callers keep a head only; the
+// operator check keeps a head AND a tail, because a build or test log puts its verdict
+// last and a head-only capture of a log over the cap loses exactly that.
+struct CmdCapture {
+    std::size_t head_bytes = 1024 * 1024;
+    std::size_t tail_bytes = 0;           // 0 = head only
+};
+
+struct CmdOutcome {
+    bool spawned = false;                 // pipe() and fork() succeeded
+    bool timed_out = false;
+    int exit_code = -1;
+    std::string output;                   // head, then "[... N bytes not captured ...]" and tail
+    std::size_t dropped_bytes = 0;
+};
+
+CmdOutcome run_cmd_captured(const std::string& cmd, const std::string& cwd, double timeout_s,
+                            const CmdCapture& capture) {
+    CmdOutcome out;
 
     int pipefd[2];
     if (::pipe(pipefd) != 0) {
-        output = "pipe() failed";
-        return false;
+        out.output = "pipe() failed";
+        return out;
     }
 
     const pid_t pid = ::fork();
     if (pid < 0) {
-        output = "fork() failed";
+        out.output = "fork() failed";
         ::close(pipefd[0]);
         ::close(pipefd[1]);
-        return false;
+        return out;
     }
 
     if (pid == 0) {
@@ -76,14 +93,32 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
         ::execlp("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
         ::_exit(127);
     }
+    out.spawned = true;
 
     ::close(pipefd[1]);
     int flags = ::fcntl(pipefd[0], F_GETFL, 0);
     ::fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
+    std::string& head = out.output;
+    std::string tail;  // trimmed to tail_bytes lazily, so trimming stays amortized O(n)
+    std::size_t total = 0;
+    const auto keep = [&](const char* data, std::size_t n) {
+        total += n;
+        if (head.size() < capture.head_bytes) {
+            const std::size_t take = std::min(n, capture.head_bytes - head.size());
+            head.append(data, take);
+            data += take;
+            n -= take;
+        }
+        if (n == 0 || capture.tail_bytes == 0) return;
+        tail.append(data, n);
+        if (tail.size() > 2 * capture.tail_bytes) {
+            tail.erase(0, tail.size() - capture.tail_bytes);
+        }
+    };
+
     const auto start = std::chrono::steady_clock::now();
     char buf[4096];
-    bool timed_out = false;
     bool output_closed = false;
     bool child_exited = false;
     int status = 0;
@@ -97,7 +132,7 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - start).count();
         if (timeout_s > 0 && elapsed >= timeout_s) {
-            timed_out = true;
+            out.timed_out = true;
             ::kill(-pid, SIGKILL);
             break;
         }
@@ -118,9 +153,7 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
         if (ret > 0 && (pfd.revents & POLLIN)) {
             ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
             if (n > 0) {
-                if (output.size() < 1024 * 1024) {
-                    output.append(buf, static_cast<size_t>(n));
-                }
+                keep(buf, static_cast<std::size_t>(n));
             } else if (n == 0) {
                 output_closed = true;
             }
@@ -129,9 +162,7 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
             while (true) {
                 ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
                 if (n > 0) {
-                    if (output.size() < 1024 * 1024) {
-                        output.append(buf, static_cast<size_t>(n));
-                    }
+                    keep(buf, static_cast<std::size_t>(n));
                 } else {
                     break;
                 }
@@ -145,18 +176,49 @@ bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
         while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
 
-    if (timed_out) {
-        exit_code = -1;
-        output += "\n[timeout after " + std::to_string(timeout_s) + "s]";
-        return false;
+    if (tail.size() > capture.tail_bytes) {
+        tail.erase(0, tail.size() - capture.tail_bytes);
+    }
+    out.dropped_bytes = total - head.size() - tail.size();
+    if (out.dropped_bytes > 0 && !tail.empty()) {
+        // Start the tail on a line boundary; the partial line counts as dropped.
+        const std::size_t nl = tail.find('\n');
+        if (nl != std::string::npos && nl + 1 < tail.size()) {
+            out.dropped_bytes += nl + 1;
+            tail.erase(0, nl + 1);
+        }
+    }
+    if (out.dropped_bytes > 0 && capture.tail_bytes > 0) {
+        if (!head.empty() && head.back() != '\n') head += '\n';
+        head += "[... " + std::to_string(out.dropped_bytes) + " bytes not captured ...]\n";
+        head += tail;
     }
 
-    if (WIFEXITED(status)) {
-        exit_code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        exit_code = 128 + WTERMSIG(status);
+    if (out.timed_out) {
+        out.exit_code = -1;
+        return out;
     }
-    return true;
+    if (WIFEXITED(status)) {
+        out.exit_code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        out.exit_code = 128 + WTERMSIG(status);
+    }
+    return out;
+}
+
+std::string format_seconds(double seconds) {
+    return std::to_string(static_cast<long long>(seconds + 0.5)) + "s";
+}
+
+bool run_cmd(const std::string& cmd, const std::string& cwd, double timeout_s,
+             int& exit_code, std::string& output) {
+    CmdOutcome o = run_cmd_captured(cmd, cwd, timeout_s, CmdCapture{});
+    exit_code = o.exit_code;
+    output = std::move(o.output);
+    if (o.timed_out) {
+        output += "\n[timeout after " + std::to_string(timeout_s) + "s]";
+    }
+    return o.spawned && !o.timed_out;
 }
 
 } // namespace
@@ -451,11 +513,23 @@ int resolve_max_iterations(const TaskPacket& packet) {
                                     : kTrustMcpDefaultMaxIterations;
 }
 
+std::string describe_check_failure(const TestBlock& test) {
+    if (test.timed_out) {
+        return "check timed out after " + format_seconds(test.seconds);
+    }
+    if (test.could_not_run) {
+        return "check could not run (exit " + std::to_string(test.exit_code) + ")";
+    }
+    return "check failed (exit " + std::to_string(test.exit_code) + ")";
+}
+
 Finalized finalize_run(const RunFacts& facts, const TestBlock& test) {
     Finalized out;
     const std::string& reason = facts.termination_reason;
-    const bool check_green = test.ran && test.exit_code == 0;
-    const bool check_red = test.ran && test.exit_code != 0;
+    // A check that timed out or never ran is not green, whatever its exit code says.
+    const bool check_green =
+        test.ran && test.exit_code == 0 && !test.timed_out && !test.could_not_run;
+    const bool check_red = test.ran && !check_green;
 
     if (!facts.started) {
         out.status = "error";
@@ -480,7 +554,7 @@ Finalized finalize_run(const RunFacts& facts, const TestBlock& test) {
     } else if (facts.completed || reason == "plan_ready") {
         if (check_red) {
             out.status = "error";
-            out.error = "check command failed (exit code " + std::to_string(test.exit_code) + ")";
+            out.error = describe_check_failure(test);
             out.exit_code = kExitError;
         } else {
             out.status = "ok";
@@ -1085,27 +1159,92 @@ void collect_git(const std::string& cwd, const std::string& out_dir, RunResult& 
     }
 }
 
+namespace {
+
+// The check's capture: 1 MB of head and 256 KB of tail, with a marker between.
+constexpr std::size_t kCheckHeadBytes = 1024 * 1024;
+constexpr std::size_t kCheckTailBytes = 256 * 1024;
+// What result.json and the card carry: a log_triage digest, not the raw last bytes.
+constexpr std::size_t kCheckDigestBytes = 2000;
+
+CheckTriage triage_check_output(const std::string& captured) {
+    const log_triage::StructuredTriage t = log_triage::analyze(captured);
+    CheckTriage out;
+    out.runner = std::string(log_triage::to_string(t.runner));
+    out.passed = t.passed;
+    out.failed = t.failed;
+    for (const std::string& name : t.failing_tests) {
+        if (out.failing_tests.size() >= 6) break;
+        out.failing_tests.push_back(name);
+    }
+    for (const log_triage::Diagnostic& d : t.primary_diagnostics) {
+        if (out.primary.size() >= 4) break;
+        out.primary.push_back({d.path, d.line, d.message});
+    }
+    for (const std::string& path : t.referenced_paths) {
+        if (out.paths.size() >= 8) break;
+        out.paths.push_back(path);
+    }
+    return out;
+}
+
+} // namespace
+
 void run_check(const TaskPacket& packet, RunResult& result) {
+    result.test = TestBlock{};
     if (packet.check_command.empty()) {
-        result.test.ran = false;
-        result.test.exit_code = -1;
-        result.test.command = "";
-        result.test.output_tail = "";
         return;
     }
 
     result.test.ran = true;
     result.test.command = packet.check_command;
 
-    int code = -1;
-    std::string out;
-    run_cmd(packet.check_command, packet.cwd, packet.check_timeout_s, code, out);
+    const auto start = std::chrono::steady_clock::now();
+    CmdCapture capture;
+    capture.head_bytes = kCheckHeadBytes;
+    capture.tail_bytes = kCheckTailBytes;
+    CmdOutcome o = run_cmd_captured(packet.check_command, packet.cwd,
+                                    packet.check_timeout_s, capture);
+    result.test.seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    result.test.exit_code = o.exit_code;
+    result.test.timed_out = o.timed_out;
+    // Same rule as ToolResult::never_executed (src/tools/tool_result.hpp): the shell
+    // could not find or start the command, so the check never ran -- not a red check.
+    result.test.could_not_run =
+        !o.spawned || (!o.timed_out && (o.exit_code == 126 || o.exit_code == 127));
 
-    result.test.exit_code = code;
-    if (out.size() > 2000) {
-        out = out.substr(out.size() - 2000);
+    std::string captured = std::move(o.output);
+    std::string marker;
+    if (o.timed_out) {
+        marker = "\n[timeout after " + std::to_string(packet.check_timeout_s) + "s]";
     }
-    result.test.output_tail = out;
+    // The marker goes on after compaction so it is never the thing compaction drops.
+    std::string digest = log_triage::compact(captured, kCheckDigestBytes - marker.size());
+    const bool partial = digest.size() < captured.size() || o.dropped_bytes > 0;
+    result.test.output_tail = digest + marker;
+
+    const bool green = o.exit_code == 0 && !result.test.timed_out && !result.test.could_not_run;
+    if (!green) {
+        result.test.triage = triage_check_output(captured);
+    }
+
+    // Spool the full capture only when the digest dropped something (the shell tool's
+    // S14 rule). A previous run's check.log is never left to read as this run's.
+    if (!packet.result_path.empty()) {
+        const std::filesystem::path log_path =
+            std::filesystem::path(packet.result_path).parent_path() / "check.log";
+        std::error_code ec;
+        if (partial) {
+            std::ofstream f(log_path.string(), std::ios::binary | std::ios::trunc);
+            if (f.is_open()) {
+                f << captured << marker << "\n";
+                result.test.output_path = log_path.string();
+            }
+        } else {
+            std::filesystem::remove(log_path, ec);
+        }
+    }
 }
 
 void write_result(const std::string& path, const RunResult& result) {
@@ -1121,11 +1260,32 @@ void write_result(const std::string& path, const RunResult& result) {
         {"files", result.diff_stat.files}
     };
 
+    const TestBlock& tb = result.test;
+    nlohmann::json triage = nullptr;
+    if (tb.ran && tb.triage.has_value()) {
+        nlohmann::json primary = nlohmann::json::array();
+        for (const CheckDiagnostic& d : tb.triage->primary) {
+            primary.push_back({{"path", d.path}, {"line", d.line}, {"message", d.message}});
+        }
+        triage = {
+            {"runner", tb.triage->runner},
+            {"passed", tb.triage->passed},
+            {"failed", tb.triage->failed},
+            {"failing_tests", tb.triage->failing_tests},
+            {"primary", primary},
+            {"paths", tb.triage->paths},
+        };
+    }
     nlohmann::json test = {
-        {"ran", result.test.ran},
-        {"exit_code", result.test.ran ? nlohmann::json(result.test.exit_code) : nlohmann::json(nullptr)},
-        {"command", result.test.ran ? nlohmann::json(result.test.command) : nlohmann::json(nullptr)},
-        {"output_tail", result.test.ran ? nlohmann::json(result.test.output_tail) : nlohmann::json(nullptr)}
+        {"ran", tb.ran},
+        {"exit_code", tb.ran ? nlohmann::json(tb.exit_code) : nlohmann::json(nullptr)},
+        {"command", tb.ran ? nlohmann::json(tb.command) : nlohmann::json(nullptr)},
+        {"output_tail", tb.ran ? nlohmann::json(tb.output_tail) : nlohmann::json(nullptr)},
+        {"timed_out", tb.timed_out},
+        {"could_not_run", tb.could_not_run},
+        {"seconds", tb.ran ? nlohmann::json(tb.seconds) : nlohmann::json(nullptr)},
+        {"output_path", tb.output_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(tb.output_path)},
+        {"triage", triage},
     };
 
     nlohmann::json j = {

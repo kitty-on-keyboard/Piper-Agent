@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "src/tools/shell_clock.hpp"
+
 namespace lmp::surface::worker {
 
 // Exit codes matching the CLI contract.
@@ -52,7 +54,8 @@ struct TaskPacket {
     // operator acceptance in result.test. A green post-run check completes the
     // slice (status=ok) even if the agent loop hit max_turns without completed=true.
     std::string check_command;
-    double check_timeout_s = 60.0;
+    // Same clock as the in-loop run of the same command (src/tools/shell_clock.hpp).
+    double check_timeout_s = ::lmp::tools::kShellWallClockSeconds;
 
     // Turn budget for lmp/start. 0 = use resolve_max_iterations() default:
     // kDefaultMaxIterations (30), or kTrustMcpDefaultMaxIterations (60) when
@@ -96,11 +99,35 @@ struct DiffStat {
     int files = 0;
 };
 
+// What the measured log_triage engine (src/tools/log_triage.hpp) found in a red
+// check's output: deterministic, no model call.
+struct CheckDiagnostic {
+    std::string path;                     // as printed; empty when none
+    int line = 0;                         // 0 when unknown
+    std::string message;
+};
+
+struct CheckTriage {
+    std::string runner;                   // pytest | ctest | cargo | swift | xcode | unknown
+    int passed = -1;                      // -1 = not reported
+    int failed = -1;
+    std::vector<std::string> failing_tests;   // <= 6
+    std::vector<CheckDiagnostic> primary;     // <= 4
+    std::vector<std::string> paths;           // <= 8
+};
+
 struct TestBlock {
     bool ran = false;
     int exit_code = -1;
     std::string command;
+    // log_triage::compact digest of the captured output (<= 2000 bytes). Output that
+    // already fits comes back byte for byte.
     std::string output_tail;
+    bool timed_out = false;               // killed at check_timeout_s
+    bool could_not_run = false;           // never executed (exit 126/127, spawn failure)
+    double seconds = 0.0;                 // wall time of the check
+    std::string output_path;              // full capture (check.log) when the digest dropped any
+    std::optional<CheckTriage> triage;    // red checks only
 };
 
 struct RunResult {
@@ -162,6 +189,10 @@ struct Finalized {
 //      stalled_no_turn)                    -> error/stalled, exit 1, never promoted
 // Pure: no I/O, so every row is covered by a gate test.
 [[nodiscard]] Finalized finalize_run(const RunFacts& facts, const TestBlock& test);
+
+// Why a ran-but-not-green check failed, in words: "check timed out after 300s",
+// "check could not run (exit 127)" or "check failed (exit 1)".
+[[nodiscard]] std::string describe_check_failure(const TestBlock& test);
 
 // Write result.json atomically (write .tmp, rename).
 void write_result(const std::string& path, const RunResult& result);
