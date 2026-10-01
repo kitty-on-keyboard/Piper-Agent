@@ -32,6 +32,10 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_TIMEOUT = 2
 EXIT_INVALID = 3
+# The model asked something nobody attached could answer (on_ask); the question is on
+# the card and in result.json. Answer it in the next brief.
+EXIT_NEEDS_INPUT = 4
+ON_ASK_POLICIES = ("wait", "continue", "end")
 MESSAGE_CAP = 2000
 MODES = ("plan", "debug", "agent")
 
@@ -151,6 +155,10 @@ def load_packet(task_arg):
         raise PacketError("trust_mcp must be an array of server names")
     trust_mcp = [str(x) for x in trust_mcp if isinstance(x, str) and x.strip()]
 
+    on_ask = data.get("on_ask", "")
+    if on_ask and on_ask not in ON_ASK_POLICIES:
+        raise PacketError(f"on_ask must be one of {ON_ASK_POLICIES}, got {on_ask!r}")
+
     return {
         "id": task_id.strip(),
         "cwd": os.path.abspath(cwd),
@@ -166,6 +174,7 @@ def load_packet(task_arg):
         "trust_mcp": trust_mcp,
         "commit_think": as_bool(data.get("commit_think"), True),
         "shadow_compact": as_bool(data.get("shadow_compact"), True),
+        "on_ask": on_ask or "",
         "task_path": task_path,
         "task_dir": task_dir,
         "raw_bytes": raw.encode("utf-8"),
@@ -465,6 +474,39 @@ def post_orch_webhook(url, payload, timeout=5.0):
 
 # --- Deterministic harness helpers (no paste / no freehand JSON) ------------
 
+# Worker telemetry (MLX breadcrumbs, heartbeats, `piper:` notices) goes to a per-slice
+# file beside result.json, not into the parent's output: ~1 KB per model turn pushed
+# the review card past tool-output caps. One file per run, the previous run's kept.
+WORKER_STDERR_LOG = "worker.stderr.log"
+WORKER_STDERR_PREV_LOG = "worker.stderr.prev.log"
+
+
+def worker_stderr_log_path(result_path):
+    return os.path.join(os.path.dirname(os.path.abspath(result_path)), WORKER_STDERR_LOG)
+
+
+def open_worker_stderr_log(result_path):
+    """Fresh log fd for this run, or None to inherit stderr.
+
+    The previous run's log is rotated to worker.stderr.prev.log rather than appended
+    to, so a card never mixes two runs. The engine writes the fd directly, so its
+    last breadcrumb survives a SIGKILL. LMP_WORKER_STDERR=inherit keeps the old
+    behaviour for a human watching `piper run` in a terminal.
+    """
+    if os.environ.get("LMP_WORKER_STDERR", "").strip().lower() == "inherit":
+        return None
+    path = worker_stderr_log_path(result_path)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path):
+            os.replace(path, os.path.join(os.path.dirname(path), WORKER_STDERR_PREV_LOG))
+        return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND, 0o644)
+    except OSError as exc:
+        print(f"piper: cannot open worker log {path}: {exc}; worker stderr stays inline",
+              file=sys.stderr)
+        return None
+
+
 ORCH_WEBHOOK_RELPATH = os.path.join(".piper", "orch_webhook")
 
 DETACHED_NO_WAKE_MSG = (
@@ -552,14 +594,66 @@ def build_answer_payload(action=None, text=None):
     return {"text": text}
 
 
-def resolve_answer_dir(dir_arg=None, task_arg=None):
+def find_active_slice(start_dir=None):
+    """The nearest `.piper/active.json` walking up from start_dir (default: cwd).
+
+    `piper packet` records the slice it emitted there; bare answer/status/await/review
+    and `piper ui` follow it instead of guessing the process cwd.
+    """
+    directory = os.path.abspath(os.path.expanduser(start_dir or os.getcwd()))
+    while True:
+        record = read_json_object(os.path.join(directory, ".piper", "active.json"))
+        if record is not None and isinstance(record.get("result_path"), str) \
+                and record["result_path"].strip():
+            out = dict(record)
+            out["result_path"] = os.path.abspath(os.path.join(directory, record["result_path"]))
+            if isinstance(record.get("task_path"), str):
+                out["task_path"] = os.path.abspath(os.path.join(directory, record["task_path"]))
+            out["root"] = directory
+            return out
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def resolve_slice_dir(dir_arg=None, task_arg=None):
+    """The one place answer/status/await/review find a slice's directory.
+
+    Order: explicit --dir, then --task's result_path, then the nearest
+    `.piper/active.json` walking up from cwd, then cwd. Slices live in
+    `.piper/slices/<id>/`, so falling straight back to cwd read the wrong folder.
+    """
     if dir_arg:
         return os.path.abspath(os.path.expanduser(dir_arg))
     if task_arg:
         packet, _roots = read_task_roots(task_arg)
         task_path = resolve_task_json_path(task_arg)
         return os.path.dirname(result_path_from_light_packet(packet, task_path))
+    active = find_active_slice()
+    if active is not None:
+        return os.path.dirname(active["result_path"])
     return os.path.abspath(".")
+
+
+def ask_is_live(awaiting):
+    """An awaiting_user.json speaks for a run only while the process that wrote it lives.
+
+    The worker records its pid; a file from a crashed or killed run is not an ask.
+    Files without a pid (older writers) are taken at their word.
+    """
+    pid = awaiting.get("pid") if isinstance(awaiting, dict) else None
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def write_answer_file(directory, payload):
@@ -685,7 +779,8 @@ def append_orch_event(result_path, event):
 def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
                      check=None, timeout_s=600, result_path=None,
                      auto_approve_irreversible=True, trust_mcp=None,
-                     prompt_file=None):
+                     prompt_file=None, max_iterations=None, check_timeout_s=None,
+                     on_ask=None):
     """Emit a correctly shaped task.json — no freehand JSON from an LLM."""
     cwd = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(cwd):
@@ -708,6 +803,20 @@ def emit_task_packet(*, task_id, cwd, prompt, out_path, model_dir=None,
     }
     if check:
         packet["check"] = check
+    if on_ask:
+        if on_ask not in ON_ASK_POLICIES:
+            raise PacketError(f"on_ask must be one of {ON_ASK_POLICIES}")
+        packet["on_ask"] = on_ask
+    if check_timeout_s is not None:
+        if isinstance(check_timeout_s, bool) or not isinstance(check_timeout_s, (int, float)) \
+                or check_timeout_s <= 0:
+            raise PacketError("check_timeout_s must be a positive number")
+        packet["check_timeout_s"] = float(check_timeout_s)
+    if max_iterations is not None:
+        if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) \
+                or max_iterations < 1:
+            raise PacketError("max_iterations must be a positive integer")
+        packet["max_iterations"] = max_iterations
     if result_path:
         packet["result_path"] = os.path.abspath(os.path.expanduser(result_path))
     else:
@@ -744,11 +853,12 @@ def format_progress_line(slice_id, verdict, note=""):
         "stalled": "stalled", "stall": "stalled",
         "timeout": "timeout", "timedout": "timeout", "timed-out": "timeout",
         "died": "died", "skip": "skip", "skipped": "skip",
+        "needs_input": "needs_input", "needs-input": "needs_input",
     }
     if ver not in aliases:
         raise ValueError(
             f"unknown progress verdict {verdict!r}; "
-            "use pass|fail|stalled|timeout|died|skip"
+            "use pass|fail|stalled|timeout|needs_input|died|skip"
         )
     note_s = " ".join(str(note or "").strip().split())
     if note_s:
@@ -776,11 +886,21 @@ def cmd_answer(args):
                 print("piper answer: need allow|deny or --text", file=sys.stderr)
                 return EXIT_INVALID
             payload = build_answer_payload(action=action)
-        directory = resolve_answer_dir(getattr(args, "dir", None), getattr(args, "task", None))
-        path = write_answer_file(directory, payload)
+        directory = resolve_slice_dir(getattr(args, "dir", None), getattr(args, "task", None))
     except (ValueError, PacketError) as exc:
         print(f"piper answer: {exc}", file=sys.stderr)
         return EXIT_INVALID
+    info = collect_run_status(directory)
+    if info.get("state") != "ask":
+        # Nothing is waiting: an answer written now would sit until some later run's
+        # first, unrelated question and answer that instead.
+        print(f"piper answer: no open ask in {directory} (state: {info.get('state')}); "
+              "nothing to answer", file=sys.stderr)
+        return EXIT_INVALID
+    # Bind the answer to the ask it answers. The worker applies only an answer whose
+    # run_id and seq match the open ask, and discards any other.
+    payload = dict(payload, run_id=info.get("run_id"), seq=info.get("seq"))
+    path = write_answer_file(directory, payload)
     print(path)
     return EXIT_OK
 
@@ -811,6 +931,9 @@ def cmd_packet(args):
             auto_approve_irreversible=not args.no_auto_approve_irreversible,
             trust_mcp=getattr(args, "trust_mcp", None),
             prompt_file=args.prompt_file,
+            max_iterations=getattr(args, "max_iterations", None),
+            check_timeout_s=getattr(args, "check_timeout_s", None),
+            on_ask=getattr(args, "on_ask", None),
         )
     except PacketError as exc:
         print(f"piper packet: {exc}", file=sys.stderr)
@@ -957,14 +1080,23 @@ def load_result_file(result_path):
 
 
 def review_verdict(result, exit_code):
-    """Cheap parent verdict: PASS / FAIL / STALLED / DIED."""
+    """Cheap parent verdict: PASS / UNVERIFIED / FAIL / STALLED / NEEDS_INPUT / DIED.
+
+    UNVERIFIED: the model finished but nothing checked it (no `--check`). A model's
+    own "done" is not a pass.
+    """
     if result is None:
         return "DIED"
     status = str(result.get("status") or "").lower()
     if status == "ok" and exit_code == EXIT_OK:
-        return "PASS"
+        test = result.get("test")
+        if isinstance(test, dict) and test.get("ran"):
+            return "PASS"
+        return "UNVERIFIED"
     if status == "stalled":
         return "STALLED"
+    if status == "needs_input":
+        return "NEEDS_INPUT"
     return "FAIL"
 
 
@@ -977,14 +1109,60 @@ def format_diff_stat(diff_stat):
     return f"+{ins} -{dels} ({files} files)"
 
 
+CARD_CHECK_LINES = 8
+CARD_LOG_PIPER_LINES = 3
+CARD_DIED_LOG_LINES = 8
+CARD_LINE_CAP = 160
+
+
+def _card_clip(line, cap=CARD_LINE_CAP):
+    line = line.rstrip()
+    return line if len(line) <= cap else line[:cap - 3] + "..."
+
+
+def _last_nonempty_lines(text, limit):
+    lines = [ln for ln in str(text or "").splitlines() if ln.strip()]
+    return lines[-limit:] if limit > 0 else []
+
+
+def _read_log_lines(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
+
+def _card_block(label, lines):
+    """`label` on the first line, the rest aligned under it, each behind `| `."""
+    out = ""
+    for i, line in enumerate(lines):
+        head = f"{label:<10}" if i == 0 else " " * 10
+        out += f"{head}| {_card_clip(line)}\n"
+    return out
+
+
 def format_review_card(result, *, exit_code, result_path):
-    """Deterministic review card — parents should not freehand the rubric."""
+    """Deterministic review card — parents should not freehand the rubric.
+
+    Compact but complete: on anything but PASS it carries the evidence (error, the
+    failing check's tail, the worker's own `piper:` notices) so the parent does not
+    have to open result.json or the log to learn why.
+    """
     verdict = review_verdict(result, exit_code)
+    log_path = worker_stderr_log_path(result_path) if result_path else ""
     if result is None:
-        return (
+        card = (
             "── piper review ─────────────────────────\n"
             f"result:   {result_path or '(none)'}\n"
             f"exit:     {exit_code}\n"
+        )
+        log_lines = _read_log_lines(log_path) if log_path else []
+        if log_lines:
+            card += f"log:      {log_path}\n"
+            card += _card_block("log tail:", _last_nonempty_lines("\n".join(log_lines),
+                                                                   CARD_DIED_LOG_LINES))
+        return card + (
             f"verdict:  {verdict}  (no result.json)\n"
             "─────────────────────────────────────────"
         )
@@ -994,28 +1172,146 @@ def format_review_card(result, *, exit_code, result_path):
     else:
         files_s = str(files)
     test = result.get("test") or {}
+    check_lines = []
+    triage_lines = []
     if isinstance(test, dict) and test.get("ran"):
-        test_s = f"exit={test.get('exit_code')} cmd={test.get('command')!r}"
+        test_s = f"{format_check_outcome(test)} cmd={test.get('command')!r}"
+        if test.get("exit_code") != 0 or test.get("timed_out") or test.get("could_not_run"):
+            triage_lines = format_triage_lines(test)
+            check_lines = _last_nonempty_lines(
+                test.get("output_tail"),
+                max(2, CARD_CHECK_LINES - len(triage_lines) - len(format_ask_lines(result))))
     elif isinstance(test, dict):
         test_s = "not run"
     else:
         test_s = str(test)
     msg = str(result.get("message") or "").strip().replace("\n", " ")
+    if msg and msg == str(result.get("error") or "").strip().replace("\n", " ") \
+            and str(result.get("status") or "").lower() == "needs_input":
+        msg = "(no narration; see question)"
     if len(msg) > 160:
         msg = msg[:157] + "..."
+    loop_s = format_loop_line(result)
+    passed = verdict == "PASS"
+    ask_lines = format_ask_lines(result)
+    error_s = str(result.get("error") or "").strip().replace("\n", " ")
+    if str(result.get("status") or "").lower() == "needs_input" and ask_lines:
+        error_s = ""  # the `question:` line says it in full
+    notices = []
+    if not passed and log_path:
+        notices = [ln for ln in _read_log_lines(log_path) if ln.startswith("piper:")]
+        if ask_lines:  # the card already carries the question in full
+            notices = [ln for ln in notices
+                       if not ln.startswith(("piper: needs input", "piper: no operator attached"))]
+        notices = notices[-CARD_LOG_PIPER_LINES:]
     return (
         "── piper review ─────────────────────────\n"
         f"task:     {result.get('task_id') or '(unknown)'}\n"
         f"status:   {result.get('status')}\n"
         f"exit:     {exit_code}\n"
+        + (f"error:    {_card_clip(error_s)}\n" if error_s and not passed else "")
+        + f"run:      {format_run_line(result)}\n"
         f"message:  {msg or '(empty)'}\n"
         f"files:    {files_s}\n"
         f"diff:     {format_diff_stat(result.get('diff_stat'))}\n"
         f"test:     {test_s}\n"
-        f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
+        + _card_block("check:", check_lines)
+        + "".join(triage_lines)
+        + (f"loop:     {loop_s}\n" if loop_s else "")
+        + "".join(ask_lines)
+        + _card_block("worker:", notices)
+        + f"git_diff: {result.get('git_diff_path') or '(none)'}\n"
         f"verdict:  {verdict}\n"
         "─────────────────────────────────────────"
     )
+
+
+def format_ask_lines(result):
+    """Questions the model asked that the card must not hide.
+
+    An unattended answer means the model went on under its own assumption; an open
+    question (needs_input) is what the next brief has to answer.
+    """
+    asks = [a for a in (result.get("asks") or []) if isinstance(a, dict)]
+    lines = []
+    unattended = [a for a in asks if a.get("answered_by") == "unattended"]
+    if unattended:
+        q = " ".join(str(unattended[0].get("question") or "").split())
+        lines.append(f"asks:     answered unattended, model chose: {_card_clip(q, 140)}\n")
+    still_open = [a for a in asks if not a.get("answered_by")]
+    if still_open:
+        last = still_open[-1]
+        q = " ".join(str(last.get("question") or "").split())
+        lines.append(f"question: {_card_clip(q, 300)}\n")
+        # Models write options one per line; the card keeps one line per field.
+        options = [" ".join(o.split()).lstrip("-*• ").strip()
+                   for o in str(last.get("options") or "").splitlines()]
+        options = [o for o in options if o]
+        if options:
+            lines.append(f"options:  {_card_clip(' | '.join(options), 300)}\n")
+    return lines
+
+
+def format_check_outcome(test):
+    """exit=N, or what stopped the check when it never produced a real exit code."""
+    seconds = test.get("seconds")
+    if test.get("timed_out"):
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            return f"timed out after {seconds:.0f}s"
+        return "timed out"
+    if test.get("could_not_run"):
+        return f"could not run (exit {test.get('exit_code')})"
+    return f"exit={test.get('exit_code')}"
+
+
+def format_triage_lines(test):
+    """At most three lines from the check's log_triage block: failing tests, the first
+    located primary diagnostic, and where the full log is."""
+    lines = []
+    triage = test.get("triage")
+    if isinstance(triage, dict):
+        failing = [str(t) for t in (triage.get("failing_tests") or []) if t]
+        if failing:
+            lines.append(f"failing:  {_card_clip(', '.join(failing))}\n")
+        for diag in triage.get("primary") or []:
+            if not isinstance(diag, dict) or not diag.get("path"):
+                continue
+            where = str(diag["path"])
+            line_no = diag.get("line")
+            if isinstance(line_no, int) and not isinstance(line_no, bool) and line_no > 0:
+                where += f":{line_no}"
+            message = str(diag.get("message") or "").strip()
+            lines.append(f"at:       {_card_clip(where + (': ' + message if message else ''))}\n")
+            break
+    if test.get("output_path"):
+        lines.append(f"log:      {test['output_path']}\n")
+    return lines
+
+
+def format_run_line(result):
+    turns = result.get("turns")
+    turns_s = str(turns) if isinstance(turns, int) and not isinstance(turns, bool) else "?"
+    wall = result.get("wall_seconds")
+    wall_s = f"{wall:.0f}s" if isinstance(wall, (int, float)) and not isinstance(wall, bool) else "?"
+    return f"turns={turns_s} wall={wall_s}"
+
+
+def format_loop_line(result):
+    """How the loop stopped, when that is not the normal ending or a check vouched for it.
+
+    A pass promoted by the check rests on the check alone, so the card says so.
+    """
+    reason = str(result.get("termination_reason") or "")
+    promoted = bool(result.get("promoted_by_check"))
+    if not promoted and reason in ("", "ended", "plan_ready"):
+        return ""
+    line = reason or "no_run_end"
+    turns = result.get("turns")
+    if isinstance(turns, int) and not isinstance(turns, bool):
+        line += f" after {turns} turn{'s' if turns != 1 else ''}"
+    if promoted:
+        line += "; ok because check passed"
+    return line
 
 
 def resolve_result_path(result_arg=None, task_arg=None):
@@ -1025,6 +1321,9 @@ def resolve_result_path(result_arg=None, task_arg=None):
         packet, _roots = read_task_roots(task_arg)
         task_path = resolve_task_json_path(task_arg)
         return result_path_from_light_packet(packet, task_path)
+    active = find_active_slice()
+    if active is not None:
+        return active["result_path"]
     return os.path.abspath("result.json")
 
 def cmd_review(args):
@@ -1044,6 +1343,8 @@ def cmd_review(args):
         exit_code = EXIT_OK
     elif str(result.get("status") or "").lower() == "timeout":
         exit_code = EXIT_TIMEOUT
+    elif str(result.get("status") or "").lower() == "needs_input":
+        exit_code = EXIT_NEEDS_INPUT
     else:
         exit_code = EXIT_ERROR
     card = format_review_card(result, exit_code=exit_code, result_path=result_path)
@@ -1073,17 +1374,20 @@ def cmd_dispatch(args):
         "id": packet["id"],
         "text": f"dispatched {packet['id']}",
     })
-    run_argv = ["run", "--task", args.task]
-    if getattr(args, "jsonl", False):
-        run_argv.append("--jsonl")
-    if getattr(args, "orch_webhook", None):
-        run_argv.extend(["--orch-webhook", args.orch_webhook])
-    if getattr(args, "auto_approve_all", False):
-        run_argv.append("--auto-approve-all")
-    elif getattr(args, "auto_approve_irreversible", False):
-        run_argv.append("--auto-approve-irreversible")
-    # Always attached: dispatch owns wait. Detach is out of scope for this helper.
-    code = main(run_argv)
+    run_args = argparse.Namespace(
+        task=args.task,
+        jsonl=bool(getattr(args, "jsonl", False)),
+        orch_webhook=getattr(args, "orch_webhook", None),
+        auto_approve_all=bool(getattr(args, "auto_approve_all", False)),
+        auto_approve_irreversible=bool(getattr(args, "auto_approve_irreversible", False))
+        and not bool(getattr(args, "auto_approve_all", False)),
+        detach=False,
+        on_ask=getattr(args, "on_ask", None),
+    )
+    # Attached by construction: dispatch owns the wait and prints the card, so
+    # neither LMP_DAEMONIZE=1 nor how this process's stdio happens to be wired
+    # can turn it into a detached launch.
+    code = cmd_run(run_args, attached_only=True)
     result = load_result_file(result_path)
     card = format_review_card(result, exit_code=code, result_path=result_path)
     append_orch_event(result_path, {
@@ -1700,17 +2004,19 @@ class WorkerParser(argparse.ArgumentParser):
 
 
 HELP_CONTRACT = (
-    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
+    "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/needs_input/died; pass --orch-webhook or stay attached. "
     "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
-    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook). "
+    "explicitly with --detach (or LMP_DAEMONIZE=1) plus a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook. "
+    "Piper never infers detach from stdio: nohup/screen/background launches must pass --detach. "
     "A run that writes result.json POSTs done if completed, stalled if stopped/failed. Process exit with no result.json POSTs died. "
     "Silent detached workers are refused."
 )
 
 PARENT_CONTRACT_BANNER = (
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
-    "Do not detach unless you pass --orch-webhook. No default URL. Events:\n"
-    "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
+    "Detach only with --detach plus a wake URL. No default URL. Events:\n"
+    "ask (piper answer allow|deny|--text), done, stalled (not success),\n"
+    "needs_input (answer it in the next brief), died (do not relaunch).\n"
     "See PIPER.md if present.\n"
 )
 
@@ -1772,8 +2078,8 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
    Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
-   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
-   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` when the loop stopped short without breaking (`max_turns`, `stalled`, or a text ending with work left open); the card's `loop:` line then says the pass rests on the check alone. A crash (`backend_error`), a cancel, a timeout or an unanswered irreversible ask is never promoted. A red check turns a completed run into `error`. The post-run check runs on the same 300 s clock as the in-loop check (`piper packet --check-timeout-s N` to change it). A check that timed out or could not run (exit 126/127) is reported as such (`test.timed_out`, `test.could_not_run`) and never counts as green. `test.output_tail` is a log_triage digest of the output (failing locators kept), `test.triage` names the runner, failing tests and primary diagnostics, and `test.output_path` points at the full log (`check.log`) when the digest dropped anything.
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice with `piper packet --max-iterations N` — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
 
 4. **Dispatch**
@@ -1790,16 +2096,21 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    - `1`: Worker error.
    - `2`: Execution timed out (`timeout_s`).
    - `3`: Invalid task packet or missing wake URL for a detached run.
+   - `4`: Needs input: the model asked something nobody attached could answer. The question is on the card (`question:`) and in `result.json` (`asks`). Answer it in the next brief; a bigger timeout will not help.
 
-   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` does not detach.
+   Questions (`on_ask`, set with `--on-ask` on `piper packet`, `dispatch` or `run`): `wait` blocks for `piper answer`; `continue` answers the model's first question with a fixed unattended reply (the card's `asks:` line shows the assumption) and ends on the next one as `needs_input`; `end` ends on the first. Default by attachment, never by wake URL: a plain attached `piper dispatch`/`run` uses `continue`; `--jsonl` and `--detach` use `wait`.
 
-   Detached or background (`--detach`, nohup, screen) requires a wake URL before start. Resolve it with `piper wake-url`. Do not copy a URL from the panel.
+   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` never detaches: it is attached by construction, whatever its stdio or `LMP_DAEMONIZE` say.
+
+   In Claude Code, run `piper dispatch` with `run_in_background: true` and read the card from the task output when the completion notice arrives. A foreground Bash call is capped at 10 minutes.
+
+   Piper never guesses detach from stdio. A background launch (nohup, screen, `&`) must say so with `piper run --detach` (or `LMP_DAEMONIZE=1`) and needs a wake URL before start; without `--detach` the run stays attached to whatever launched it. Resolve the URL with `piper wake-url`. Do not copy a URL from the panel.
    - `--orch-webhook URL`, or
    - task field `orch_webhook`, or
    - env `LMP_ORCH_WEBHOOK`, or
    - file `.piper/orch_webhook` (written by `piper_ui`)
 
-   Without a URL the CLI exits before the sidecar starts.
+   `--detach` without a URL exits before the sidecar starts.
 
    Irreversible tools pause unless auto-approve was set. Answer with `piper answer`. Do not write `answer.json`.
 
@@ -1811,8 +2122,11 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper await --dir /path/to/slice           # wait for ask/done; no sleep-loop
    ```
    On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
+   Bare `piper answer` / `status` / `await` / `review` act on the slice `piper packet` recorded in the nearest `.piper/active.json` (walking up from the current directory); `--dir` or `--task` picks another. `piper answer` refuses (exit 3) when no ask is open, and binds the answer to that ask (`run_id`, `seq`): the worker applies only a matching answer and discards any other. A run clears the previous run's `awaiting_user.json` / `answer.json` / `result.json` at start and removes its own ask when the wait ends, so `piper status` never reports a finished or dead run as asking.
 
-   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop is still `ok` when `check` was set.
+   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
+
+   Verdicts: `PASS` (ok and a green check), `UNVERIFIED` (the model finished but no check ran — review the diff yourself or re-dispatch with `--check`; never treat it as a pass), `FAIL`, `STALLED`, `DIED`. On anything but `PASS` the card carries the evidence: `error:`, the failing check's last lines (`check:`), and the worker's own `piper:` notices (`worker:`, e.g. an ask question). Worker telemetry goes to `worker.stderr.log` beside `result.json` (the previous run's is `worker.stderr.prev.log`), not into the dispatch output; a `DIED` card shows that log's tail. `LMP_WORKER_STDERR=inherit` keeps it inline for a human at a terminal.
 
 6. **Record and continue**
    ```bash
@@ -1840,7 +2154,10 @@ know who that agent is. There is no default host. Grok, Gemini, a script,
 and a human CI job each pass their own URL.
 
 Turn-based agents cannot stay attached. They pass a wake URL or they do not
-detach. `piper dispatch` stays attached and does not need a URL.
+detach. `piper dispatch` stays attached and does not need a URL. Detach is
+declared with `--detach` (or `LMP_DAEMONIZE=1`), never inferred from stdin or
+stdout: agent tool runners hand every foreground command `/dev/null` and a
+file, so a guess made there refused or orphaned attached runs.
 
 ## How to launch
 
@@ -1853,7 +2170,7 @@ Otherwise, before start, resolve the URL with `piper wake-url` (do not copy it f
 - env `LMP_ORCH_WEBHOOK`, or
 - file `.piper/orch_webhook` (written automatically by `piper_ui` — **do not copy a URL from the panel**)
 
-Detached with no URL: the CLI exits before the sidecar starts. `--help`
+`--detach` with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
 text is the contract, not this chat.
 
@@ -1866,13 +2183,15 @@ mission. No URL means no POST.
 | --- | --- | --- |
 | `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
-| `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
+| `stalled` | `result.json` written, the harness stopped the run (`stalled`, `max_turns`, not completed), and the check did not pass | read what landed. Do not treat it as success. Next slice or stop. |
+| `needs_input` | `result.json` written with `status: "needs_input"` (exit 4): the model asked and `on_ask` would not wait | read `question:` on the card. Answer it in the next brief. Do not raise the timeout. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
 standard exists to kill. `result.json` uses the same `status: "stalled"` for
-`max_turns` / no-progress stalls so parents need not parse error strings.
+`max_turns` / no-progress stalls whose check did not pass, so parents need not
+parse error strings.
 
 Body:
 
@@ -1910,10 +2229,12 @@ agent copies.
 ## Done when
 
 - `--help` names this standard in one paragraph.
-- A detached launch with no URL exits before the sidecar starts.
+- A `--detach` launch with no URL exits before the sidecar starts.
+- Detach is never inferred from stdio: `piper dispatch` under stdin=/dev/null and a
+  regular-file stdout waits for the run and prints the card.
 - A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
   `plan_ready`, or a green packet `check` after an incomplete loop stop such as
-  `max_turns`), `stalled` if it did not.
+  `max_turns`), `stalled` if it did not. A crash or cancel is never `done`.
 - The launch parent POSTs `died` if the sidecar exits with no result.
 - An irreversible call and `ask_user` both POST `ask` and wait.
 """
@@ -1948,7 +2269,9 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
    Watch the run: `piper ui --cwd /abs/workspace`.
    Unattended irreversible: `--auto-approve-irreversible` or `--auto-approve-all`.
    Lower-level attached run: `piper run --task` that same path.
-   Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper ui`).
+   In Claude Code: `piper dispatch` with `run_in_background: true`, then read the card from the task output.
+   Detached/background is declared, never inferred from stdio: `piper run --detach` plus a wake URL
+   (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper ui`).
    Resolve it with `piper wake-url`. Do not copy a URL from the panel.
 
 5. **Review**:
@@ -1963,7 +2286,8 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
 7. **Parent Contract & Events**:
    - Stay attached and read the exit code and the review card.
    - Events: `ask` → `piper answer allow|deny|--text` (do not freehand `answer.json`);
-     `done`, `stalled` (not success), `died` (do not relaunch blindly).
+     `done`, `stalled` (not success), `needs_input` (exit 4: answer the card's question in
+     the next brief), `died` (do not relaunch blindly).
    - See `PIPER.md` for the full specification.
 """
 
@@ -2063,17 +2387,6 @@ def resolve_task_json_path(task_arg):
     return path
 
 
-def resolve_status_dir(dir_arg=None, task_arg=None):
-    """Directory that holds awaiting_user.json / result.json / answer.json."""
-    if dir_arg:
-        return os.path.abspath(os.path.expanduser(dir_arg))
-    if task_arg:
-        packet, _roots = read_task_roots(task_arg)
-        task_path = resolve_task_json_path(task_arg)
-        return os.path.dirname(result_path_from_light_packet(packet, task_path))
-    return os.path.abspath(".")
-
-
 def read_json_object(path):
     if not path or not os.path.isfile(path):
         return None
@@ -2088,7 +2401,10 @@ def read_json_object(path):
 def collect_run_status(directory):
     """Deterministic workspace status — parents should not freehand cat/jq.
 
-    Priority: ask (awaiting_user.json) > finished (result.json) > idle.
+    Priority: finished (result.json) > live ask (awaiting_user.json) > idle. A run
+    clears its result at start and its ask before writing the result, so a result
+    beside an ask file means the ask is left over, and an ask whose writer is gone
+    (pid) is no ask at all.
     """
     directory = os.path.abspath(directory)
     awaiting_path = os.path.join(directory, "awaiting_user.json")
@@ -2097,7 +2413,7 @@ def collect_run_status(directory):
     awaiting = read_json_object(awaiting_path)
     result = read_json_object(result_path)
     answer_present = os.path.isfile(answer_path)
-    if awaiting is not None:
+    if result is None and awaiting is not None and ask_is_live(awaiting):
         question = str(awaiting.get("question") or "").strip()
         return {
             "state": "ask",
@@ -2119,6 +2435,8 @@ def collect_run_status(directory):
             state = "stalled"
         elif status == "timeout":
             state = "timeout"
+        elif status == "needs_input":
+            state = "needs_input"
         else:
             state = "error"
         return {
@@ -2166,7 +2484,7 @@ def format_status_card(info):
             lines.append(f"options:  {info.get('options')}")
         lines.append(f"awaiting: {info.get('awaiting_path')}")
         lines.append("next:     piper answer allow|deny|--text ...")
-    elif state in ("done", "stalled", "timeout", "error"):
+    elif state in ("done", "stalled", "timeout", "error", "needs_input"):
         lines.append(f"task:     {info.get('task_id') or '(unknown)'}")
         lines.append(f"status:   {info.get('status')}")
         msg = str(info.get("message") or "").strip().replace("\n", " ")
@@ -2174,7 +2492,12 @@ def format_status_card(info):
             msg = msg[:157] + "..."
         lines.append(f"message:  {msg or '(empty)'}")
         lines.append(f"result:   {info.get('result_path')}")
-        lines.append("next:     piper review --result …")
+        if state == "needs_input":
+            lines.extend(line.rstrip("\n") for line in format_ask_lines(info.get("result") or {})
+                         if line.startswith(("question:", "options:")))
+            lines.append("next:     answer the question in the next brief")
+        else:
+            lines.append("next:     piper review --result …")
     else:
         lines.append("next:     piper dispatch --task …  (or wait for a run)")
     lines.append("─────────────────────────────────────────")
@@ -2191,6 +2514,8 @@ def status_exit_code(info):
         return EXIT_OK
     if state == "timeout":
         return EXIT_TIMEOUT
+    if state == "needs_input":
+        return EXIT_NEEDS_INPUT
     if state in ("stalled", "error"):
         return EXIT_ERROR
     return EXIT_ERROR
@@ -2198,7 +2523,7 @@ def status_exit_code(info):
 
 def cmd_status(args):
     try:
-        directory = resolve_status_dir(getattr(args, "dir", None), getattr(args, "task", None))
+        directory = resolve_slice_dir(getattr(args, "dir", None), getattr(args, "task", None))
     except PacketError as exc:
         print(f"piper status: {exc}", file=sys.stderr)
         return EXIT_INVALID
@@ -2213,7 +2538,7 @@ def cmd_status(args):
 def cmd_await(args):
     """Poll until ask/done/stalled/error/timeout — no hand-rolled sleep loops."""
     try:
-        directory = resolve_status_dir(getattr(args, "dir", None), getattr(args, "task", None))
+        directory = resolve_slice_dir(getattr(args, "dir", None), getattr(args, "task", None))
     except PacketError as exc:
         print(f"piper await: {exc}", file=sys.stderr)
         return EXIT_INVALID
@@ -2225,7 +2550,7 @@ def cmd_await(args):
     if interval_s <= 0:
         print("piper await: --interval-s must be > 0", file=sys.stderr)
         return EXIT_INVALID
-    terminal = {"ask", "done", "stalled", "error", "timeout"}
+    terminal = {"ask", "done", "stalled", "error", "timeout", "needs_input"}
     deadline = time.time() + timeout_s
     last_state = None
     while True:
@@ -2253,6 +2578,13 @@ def cmd_await(args):
 
 
 
+ON_ASK_HELP = (
+    "what a model question does: wait for `piper answer`, continue (answer the first "
+    "unattended, end on the next as needs_input, exit 4), or end at once. "
+    "Default: wait when detached or --jsonl, else continue"
+)
+
+
 def build_parser():
     parser = WorkerParser(
         prog="piper",
@@ -2275,6 +2607,7 @@ def build_parser():
                        help="auto-approve all tool calls (exec + writes + irreversible)")
         p.add_argument("--detach", action="store_true",
                        help="detach from launch session (requires --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook)")
+        p.add_argument("--on-ask", choices=ON_ASK_POLICIES, default=None, help=ON_ASK_HELP)
 
     def add_serve_flags(p):
         p.add_argument("--socket", default=None, help="unix domain socket path")
@@ -2346,7 +2679,17 @@ def build_parser():
         help="model directory (default: LMP_QWEN_DIR; required at emit time)",
     )
     packet_p.add_argument("--check", default=None, help="optional acceptance command")
+    packet_p.add_argument(
+        "--check-timeout-s", type=float, default=None,
+        help="post-run check clock (default 300, the same clock as the in-loop check)",
+    )
     packet_p.add_argument("--timeout-s", type=float, default=600.0, help="timeout_s (default 600)")
+    packet_p.add_argument("--on-ask", choices=ON_ASK_POLICIES, default=None,
+                          help=ON_ASK_HELP)
+    packet_p.add_argument(
+        "--max-iterations", type=int, default=None,
+        help="turn budget (default 30, or 60 with --trust-mcp)",
+    )
     packet_p.add_argument("--result-path", default=None, help="optional result_path")
     packet_p.add_argument("--trust-mcp", action="append", default=None,
                           help="explicit MCP server name to trust (repeatable; must exist in cwd .mcp.json)")
@@ -2370,7 +2713,7 @@ def build_parser():
     )
     progress_p.add_argument("--id", required=True, help="slice / task id")
     progress_p.add_argument("verdict",
-                            help="slice outcome: pass|fail|stalled|timeout|died|skip")
+                            help="slice outcome: pass|fail|stalled|timeout|needs_input|died|skip")
     progress_p.add_argument("--note", default="", help="optional short note")
     progress_p.add_argument("--dir", default=None,
                             help="workspace root for .piper/progress.log (default: cwd)")
@@ -2412,6 +2755,7 @@ def build_parser():
                             help="auto-approve all tool calls (exec + writes + irreversible)")
     dispatch_p.add_argument("--json", action="store_true",
                             help="emit machine-readable JSON including the review card")
+    dispatch_p.add_argument("--on-ask", choices=ON_ASK_POLICIES, default=None, help=ON_ASK_HELP)
 
     status_p = sub.add_parser(
         "status",
@@ -2512,6 +2856,32 @@ def main(argv=None):
         if getattr(args, "worker_cmd", None) not in ("run", "serve", "init"):
             parser.error("expected `piper worker run --task PATH` or `piper worker serve` or `piper worker init`")
 
+    return cmd_run(args)
+
+
+def resolve_on_ask(args, packet, is_detached):
+    """--on-ask, else the packet's on_ask, else by attachment -- never by wake URL.
+
+    A detached run is answered over its wake URL and a --jsonl reader sees the ask
+    event, so they wait. A plain attached caller (dispatch, run in a terminal or an
+    agent tool) is blocked in the very call that would have to answer: it continues
+    past the first question unattended and ends as needs_input on the next.
+    """
+    chosen = getattr(args, "on_ask", None) or packet.get("on_ask") or ""
+    if chosen:
+        return chosen
+    return "wait" if is_detached or getattr(args, "jsonl", False) else "continue"
+
+
+def cmd_run(args, *, attached_only=False):
+    """Run one packet. Attached unless the caller explicitly asked to detach.
+
+    Detach is declared, never inferred: `--detach` or LMP_DAEMONIZE=1. Under agent
+    tool runners stdin is /dev/null and stdout is a regular file on every call, so
+    reading intent from stdio turned every foreground dispatch into a refused or
+    orphaned run. `attached_only` (dispatch) ignores both switches: dispatch owns
+    the wait and prints the card.
+    """
     try:
         packet = load_packet(args.task)
     except PacketError as exc:
@@ -2532,23 +2902,24 @@ def main(argv=None):
                       os.path.dirname(packet.get("result_path") or ""), os.getcwd()],
     )
 
-    flag = os.environ.get("LMP_DAEMONIZE", "")
-    is_detached = bool(getattr(args, "detach", False)) or (flag == "1") or (
-        flag != "0" and (ae.stdin_is_devnull() or ae.stdout_is_regular_file())
+    is_detached = (not attached_only) and (
+        bool(getattr(args, "detach", False)) or os.environ.get("LMP_DAEMONIZE") == "1"
     )
 
     if is_detached and not webhook_url:
         print(DETACHED_NO_WAKE_MSG, file=sys.stderr)
         return EXIT_INVALID
 
-    sys.stderr.write(PARENT_CONTRACT_BANNER)
-    sys.stderr.flush()
+    if not attached_only:
+        # dispatch prints the card instead; the banner is noise in the parent's output.
+        sys.stderr.write(PARENT_CONTRACT_BANNER)
+        sys.stderr.flush()
     os.environ["LMP_BANNER_PRINTED"] = "1"
 
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     if is_detached:
-        ae.detach_from_launch_session()
+        ae.daemonize()
 
     result_path = packet["result_path"]
     if os.path.isfile(result_path):
@@ -2569,8 +2940,18 @@ def main(argv=None):
             cmd.append("--auto-approve-all")
         if webhook_url:
             cmd.extend(["--orch-webhook", webhook_url])
+        cmd.extend(["--on-ask", resolve_on_ask(args, packet, is_detached)])
 
-        proc = subprocess.Popen(cmd)
+        # The engine is always attached to this harness; when the harness itself
+        # detached it already forked above. Pin that so an inherited
+        # LMP_DAEMONIZE=1 cannot make the engine refuse an attached run.
+        child_env = dict(os.environ, LMP_DAEMONIZE="0")
+        stderr_fd = open_worker_stderr_log(result_path)
+        try:
+            proc = subprocess.Popen(cmd, env=child_env, stderr=stderr_fd)
+        finally:
+            if stderr_fd is not None:
+                os.close(stderr_fd)
 
         def _forward_sig(signum, frame):
             try:
@@ -2702,6 +3083,82 @@ for raw in sys.stdin:
 """
 
 
+FAKE_SLOW_OK = FAKE_OK.replace(
+    'emit({"jsonrpc": "2.0", "method": "lmp/run_end",',
+    'import time; time.sleep(1.2)\n        emit({"jsonrpc": "2.0", "method": "lmp/run_end",',
+)
+
+# Stand-in for the C++ engine (no .py suffix, so the harness takes its Popen
+# branch): writes a green result.json after ~1 s and records the LMP_DAEMONIZE
+# it inherited, so the self-test can see the harness pinned the child attached.
+FAKE_CPP_WORKER = r"""#!%s
+import json, os, sys, time
+task = sys.argv[sys.argv.index("--task") + 1]
+if os.path.isdir(task):
+    task = os.path.join(task, "task.json")
+with open(task, encoding="utf-8") as fh:
+    packet = json.load(fh)
+time.sleep(1.2)
+result_path = packet.get("result_path") or os.path.join(os.path.dirname(task), "result.json")
+with open(result_path, "w", encoding="utf-8") as fh:
+    json.dump({"task_id": packet["id"], "status": "ok", "message": "done",
+               "turns": 1, "wall_seconds": 1.2,
+               "child_daemonize": os.environ.get("LMP_DAEMONIZE"),
+               "files_touched": [], "diff_stat": {"insertions": 0, "deletions": 0, "files": 0},
+               "test": {"ran": True, "exit_code": 0, "command": "true", "output_tail": ""}}, fh)
+"""
+
+
+# Stand-in engine that writes MLX-style breadcrumbs to stderr every "turn", like
+# src/model/mlx_backend.cpp does (~1 KB per turn), then a green result.
+FAKE_CPP_NOISY = r"""#!%s
+import json, os, sys
+task = sys.argv[sys.argv.index("--task") + 1]
+with open(task, encoding="utf-8") as fh:
+    packet = json.load(fh)
+for turn in range(30):
+    for at in ("generate_enter", "prefill_start", "prefill_chunk_begin", "prefill_chunk_end",
+               "prefill_done", "decode_begin", "decode_end"):
+        sys.stderr.write("mem at=%%s tokens=%%d active=16716315128 cache=507924 "
+                         "peak=19684121116 sum=16716823052\n" %% (at, 5000 + turn))
+sys.stderr.write("piper: task %%s finished with status 'ok' (exit 0, 1.0s, 30 turns)\n" %% packet["id"])
+with open(packet["result_path"], "w", encoding="utf-8") as fh:
+    json.dump({"task_id": packet["id"], "status": "ok", "message": "done", "turns": 30,
+               "wall_seconds": 1.0, "files_touched": ["a.py"],
+               "diff_stat": {"insertions": 1, "deletions": 0, "files": 1},
+               "test": {"ran": True, "exit_code": 0, "command": "true", "output_tail": ""}}, fh)
+"""
+
+
+# Stand-in engine for the on_ask contract: records the --on-ask it was launched with
+# and answers like the C++ worker would for a model that asks one question.
+FAKE_CPP_ASK = r"""#!%s
+import json, sys
+task = sys.argv[sys.argv.index("--task") + 1]
+on_ask = sys.argv[sys.argv.index("--on-ask") + 1] if "--on-ask" in sys.argv else ""
+with open(task, encoding="utf-8") as fh:
+    packet = json.load(fh)
+q = {"question": "Which config file should I edit?", "options": "a.toml,b.toml"}
+out = {"task_id": packet["id"], "message": "", "turns": 3, "wall_seconds": 1.0,
+       "seen_on_ask": on_ask, "files_touched": [],
+       "diff_stat": {"insertions": 0, "deletions": 0, "files": 0}}
+if on_ask == "continue":
+    out.update(status="ok", message="Edited a.toml.", asks=[dict(q, answered_by="unattended")],
+               test={"ran": True, "exit_code": 0, "command": "true", "output_tail": ""})
+    code = 0
+elif on_ask == "end":
+    out.update(status="needs_input", error="needs input: " + q["question"],
+               asks=[dict(q, answered_by=None)], test={"ran": False})
+    code = 4
+else:
+    out.update(status="timeout", error="timeout awaiting user answer (30s)", test={"ran": False})
+    code = 2
+with open(packet["result_path"], "w", encoding="utf-8") as fh:
+    json.dump(out, fh)
+sys.exit(code)
+"""
+
+
 def _write_exec(path, template):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(template % sys.executable)
@@ -2736,7 +3193,31 @@ def _sidecar_env(path):
 
 
 def self_test():
-    os.environ["LMP_DAEMONIZE"] = "0"
+    """Fake-sidecar scenarios, hermetic: own cwd, no inherited wake URL or detach switch.
+
+    Wake-URL discovery searches the process cwd, so running from a checkout that has
+    a `.piper/orch_webhook` used to change what `--detach` did. Detach is never
+    pinned off here: the stdio cases below must see the real launch policy.
+    """
+    scrubbed = ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK", "LMP_WORKER_STDERR")
+    saved_env = {key: os.environ.get(key) for key in scrubbed}
+    saved_cwd = os.getcwd()
+    for key in scrubbed:
+        os.environ.pop(key, None)
+    try:
+        with tempfile.TemporaryDirectory(prefix="piper-worker-cwd-") as cwd:
+            os.chdir(cwd)
+            return _self_test_scenarios()
+    finally:
+        os.chdir(saved_cwd)
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _self_test_scenarios():
     failures = []
 
     def check(cond, msg):
@@ -2937,6 +3418,95 @@ def self_test():
             check(sp.get("task_id") == "selftest-irr", f"expected task_id=selftest-irr, got {sp.get('task_id')!r}")
             check(sp.get("status") == "error", f"expected status=error, got {sp.get('status')!r}")
 
+        # 8b. dispatch is attached by construction. Agent tool runners (Claude Code's
+        # Bash tool) launch with stdin=/dev/null and stdout to a regular file; that
+        # used to read as "detached" -> exit 3, or a double fork and exit 0 with no
+        # card. Run it exactly that way, with LMP_DAEMONIZE unset, for every wake-URL
+        # source and both engine branches.
+        fake_slow = os.path.join(tmp, "fake_slow.py")
+        _write_exec(fake_slow, FAKE_SLOW_OK)
+        fake_cpp = os.path.join(tmp, "fake_cpp_worker")
+        _write_exec(fake_cpp, FAKE_CPP_WORKER)
+        stdio_env = {k: v for k, v in os.environ.items()
+                     if k not in ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK")}
+        stdio_env["LMP_USE_CPP_WORKER"] = "1"
+        stdio_env["LMP_QWEN_DIR"] = model_dir
+        for engine_name, engine in (("py", fake_slow), ("cpp", fake_cpp)):
+            for url_source in ("none", "env", "file"):
+                label = f"dispatch[{engine_name},{url_source}]"
+                sws = os.path.join(tmp, f"stdio_{engine_name}_{url_source}")
+                os.makedirs(sws)
+                with open(os.path.join(sws, "a.py"), "w", encoding="utf-8") as fh:
+                    fh.write("# workspace\n")
+                stask = os.path.join(sws, "task.json")
+                task_id = f"stdio-{engine_name}-{url_source}"
+                _write_json(stask, {
+                    "id": task_id, "cwd": sws, "model_dir": model_dir,
+                    "prompt": "Add hello() to a.py.", "timeout_s": 30,
+                })
+                env = dict(stdio_env, LMP_SIDECAR=engine)
+                if url_source == "env":
+                    env["LMP_ORCH_WEBHOOK"] = webhook_url
+                elif url_source == "file":
+                    write_orch_webhook_file(sws, webhook_url)
+                received_payloads.clear()
+                out_file = os.path.join(sws, "dispatch.out")
+                started = time.monotonic()
+                with open(out_file, "w", encoding="utf-8") as out_fh:
+                    proc = subprocess.run(
+                        [sys.executable, os.path.abspath(__file__), "dispatch", "--task", stask],
+                        stdin=subprocess.DEVNULL, stdout=out_fh, stderr=subprocess.STDOUT,
+                        env=env, cwd=sws, timeout=60,
+                    )
+                elapsed = time.monotonic() - started
+                with open(out_file, encoding="utf-8") as fh:
+                    disp_text = fh.read()
+                check(proc.returncode == EXIT_OK, f"{label} must exit 0, got {proc.returncode}: {disp_text!r}")
+                check(elapsed >= 1.0, f"{label} must wait for the run, returned after {elapsed:.2f}s")
+                check("detached pid=" not in disp_text, f"{label} must not detach: {disp_text!r}")
+                # The .py fallback never runs a check, so its pass is UNVERIFIED.
+                want_verdict = "verdict:  PASS" if engine_name == "cpp" else "verdict:  UNVERIFIED"
+                check(want_verdict in disp_text, f"{label} must print the card at exit: {disp_text!r}")
+                kinds = [p.get("kind") for p in received_payloads if p.get("task_id") == task_id]
+                check("died" not in kinds, f"{label} must not POST died, got {kinds!r}")
+                if engine_name == "py" and url_source != "none":
+                    check(kinds.count("done") == 1, f"{label} must POST exactly one done, got {kinds!r}")
+                if engine_name == "cpp":
+                    cpp_result = load_result_file(os.path.join(sws, "result.json")) or {}
+                    check(cpp_result.get("child_daemonize") == "0",
+                          f"{label} must pin the engine attached, got {cpp_result.get('child_daemonize')!r}")
+
+        # 8c. an explicit --detach really detaches, whatever the stdio (piped here):
+        # the launcher returns at once with `detached pid=`, the run finishes orphaned.
+        dws = os.path.join(tmp, "explicit_detach")
+        os.makedirs(dws)
+        dtask = os.path.join(dws, "task.json")
+        _write_json(dtask, {
+            "id": "explicit-detach", "cwd": dws, "model_dir": model_dir,
+            "prompt": "Add hello() to a.py.", "timeout_s": 30,
+        })
+        started = time.monotonic()
+        # Pipes on stdin and stdout, so no stdio probe could fire: only the flag can
+        # make this detach (the old helper re-probed stdio and ran it attached).
+        launcher = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "run", "--task", dtask,
+             "--detach", "--orch-webhook", webhook_url],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=dict(stdio_env, LMP_SIDECAR=fake_cpp), cwd=dws, text=True,
+        )
+        launcher.stdin.close()
+        launch_rc = launcher.wait(timeout=30)
+        launch_s = time.monotonic() - started
+        # The orphan holds the pipe until its run ends, so EOF here also means the
+        # detached run is gone before the tempdir is.
+        detach_text = launcher.stdout.read()
+        launcher.stdout.close()
+        check(launch_rc == EXIT_OK, f"--detach launcher must exit 0, got {launch_rc}")
+        check(launch_s < 1.0, f"--detach launcher must return at once, took {launch_s:.2f}s")
+        check("detached pid=" in detach_text, f"--detach must detach under piped stdio: {detach_text!r}")
+        check(os.path.isfile(os.path.join(dws, "result.json")),
+              "detached run must still finish and write result.json")
+
         # 9. piper init: PIPER.md and .cursor/rules/piper-parent.mdc created, Godoer briefs untouched
         godoer_ws = os.path.join(tmp, "godoer_project")
         os.makedirs(godoer_ws)
@@ -3109,19 +3679,40 @@ def self_test():
         # 14. piper answer writes known-right answer.json (no freehand paste)
         ans_dir = os.path.join(tmp, "answer_dir")
         os.makedirs(ans_dir)
+        # Nothing is asking: an answer now would answer some later, unrelated question.
+        with contextlib.redirect_stderr(io.StringIO()):
+            check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_INVALID,
+                  "answer with no open ask must exit 3")
+        check(not os.path.exists(os.path.join(ans_dir, "answer.json")),
+              "answer with no open ask must not write answer.json")
+        # An ask whose writer is gone is not open either.
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        _write_json(os.path.join(ans_dir, "awaiting_user.json"),
+                    {"question": "q", "options": "allow,deny", "run_id": "r-st", "seq": 5,
+                     "pid": dead.pid})
+        with contextlib.redirect_stderr(io.StringIO()):
+            check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_INVALID,
+                  "answer to a dead run's ask must exit 3")
+        # A live ask (this process stands in for the waiting worker): the answer is
+        # bound to that ask's run_id and seq.
+        _write_json(os.path.join(ans_dir, "awaiting_user.json"),
+                    {"question": "q", "options": "allow,deny", "run_id": "r-st", "seq": 5,
+                     "pid": os.getpid()})
+        bound = {"run_id": "r-st", "seq": 5}
         check(main(["answer", "allow", "--dir", ans_dir]) == EXIT_OK, "answer allow must exit 0")
         with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
             ans_body = json.load(fh)
-        check(ans_body == {"text": "allow"}, f"answer allow payload, got {ans_body!r}")
+        check(ans_body == dict(bound, text="allow"), f"answer allow payload, got {ans_body!r}")
         check(main(["answer", "deny", "--dir", ans_dir]) == EXIT_OK, "answer deny must exit 0")
         with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
             ans_body = json.load(fh)
-        check(ans_body == {"text": "deny"}, f"answer deny payload, got {ans_body!r}")
+        check(ans_body == dict(bound, text="deny"), f"answer deny payload, got {ans_body!r}")
         check(main(["answer", "--text", "use option B", "--dir", ans_dir]) == EXIT_OK,
               "answer --text must exit 0")
         with open(os.path.join(ans_dir, "answer.json"), encoding="utf-8") as fh:
             ans_body = json.load(fh)
-        check(ans_body == {"text": "use option B"}, f"answer text payload, got {ans_body!r}")
+        check(ans_body == dict(bound, text="use option B"), f"answer text payload, got {ans_body!r}")
         check(main(["answer", "--dir", ans_dir]) == EXIT_INVALID,
               "answer without action/text must exit 3")
 
@@ -3142,6 +3733,32 @@ def self_test():
             active = json.load(fh)
         check(active.get("id") == "emit-1" and active.get("task_path") == os.path.abspath(pkt_out),
               f"active.json must point at emitted packet, got {active!r}")
+        with open(pkt_out, encoding="utf-8") as fh:
+            check("max_iterations" not in json.load(fh),
+                  "packet without --max-iterations must leave the default to the worker")
+        iters_out = os.path.join(tmp, "emitted_iters.json")
+        check(
+            main(["packet", "--id", "emit-iters", "--cwd", tmp, "--prompt", "Ship X.",
+                  "--out", iters_out, "--model-dir", model_dir,
+                  "--max-iterations", "45"]) == EXIT_OK,
+            "packet --max-iterations must exit 0",
+        )
+        with open(iters_out, encoding="utf-8") as fh:
+            iters_raw = json.load(fh)
+        check(iters_raw.get("max_iterations") == 45,
+              f"packet --max-iterations must emit max_iterations, got {iters_raw!r}")
+        with contextlib.redirect_stderr(io.StringIO()):
+            bad_iters = main(["packet", "--id", "emit-iters0", "--cwd", tmp, "--prompt", "X.",
+                              "--out", os.path.join(tmp, "emitted_iters0.json"),
+                              "--model-dir", model_dir, "--max-iterations", "0"])
+        check(bad_iters == EXIT_INVALID, f"--max-iterations 0 must exit 3, got {bad_iters}")
+        clock_out = os.path.join(tmp, "emitted_clock.json")
+        check(main(["packet", "--id", "emit-clock", "--cwd", tmp, "--prompt", "X.", "--out", clock_out,
+                    "--model-dir", model_dir, "--check", "true", "--check-timeout-s", "900"]) == EXIT_OK,
+              "packet --check-timeout-s must exit 0")
+        with open(clock_out, encoding="utf-8") as fh:
+            check(json.load(fh).get("check_timeout_s") == 900.0,
+                  "packet --check-timeout-s must emit check_timeout_s")
 
         # 15b. default out path, prompt copy, model from env, missing model exits 3
         def_ws = os.path.join(tmp, "default_slice_ws")
@@ -3232,12 +3849,23 @@ def self_test():
         check("state:    done" in aw_out.getvalue(),
               f"await --task card must show done, got {aw_out.getvalue()!r}")
 
-        # 16d. answer --task must not require model_dir
+        # 16d. answer --task must not require model_dir (and a finished slice has no
+        # open ask to answer)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            done_ans_rc = main(["answer", "allow", "--task", pkt_status])
+        check(done_ans_rc == EXIT_INVALID, f"answer to a finished slice must exit 3, got {done_ans_rc}")
+        ask_root = os.path.join(tmp, "ask_task_root")
+        os.makedirs(ask_root)
+        ask_pkt = os.path.join(ask_root, "task.json")
+        _write_json(ask_pkt, {"id": "ask-task", "cwd": ask_root, "prompt": "x"})
+        _write_json(os.path.join(ask_root, "awaiting_user.json"),
+                    {"question": "q", "options": "allow,deny", "run_id": "r-t", "seq": 2,
+                     "pid": os.getpid()})
         ans_out = io.StringIO()
         with contextlib.redirect_stdout(ans_out):
-            ans_rc = main(["answer", "allow", "--task", pkt_status])
+            ans_rc = main(["answer", "allow", "--task", ask_pkt])
         check(ans_rc == EXIT_OK, f"answer --task without model_dir must exit 0, got {ans_rc}")
-        ans_path = os.path.join(status_root, "answer.json")
+        ans_path = os.path.join(ask_root, "answer.json")
         check(os.path.isfile(ans_path), "answer --task must write answer.json beside result")
 
         # 16e. relative result_path joins to task.json dir (not process cwd)
@@ -3321,12 +3949,256 @@ def self_test():
             rev_rc = main(["review", "--result", rev_path])
         check(rev_rc == EXIT_OK, f"review must exit 0, got {rev_rc}")
         rev_out = rev_stdout.getvalue()
-        check("verdict:  PASS" in rev_out, f"review card must PASS, got {rev_out!r}")
+        check("verdict:  UNVERIFIED" in rev_out,
+              f"an ok result with no check must be UNVERIFIED, got {rev_out!r}")
         check("rev-1" in rev_out and "a.py" in rev_out, f"review card must show task/files, got {rev_out!r}")
+        check("loop:" not in rev_out, f"a normal ending must not print a loop line, got {rev_out!r}")
+
+        # 18b. a pass that rests on the check alone says so; a stall names its stop
+        promo = result_shell(
+            task_id="promo-1", cwd=rev_dir, model_dir=model_dir, status="ok",
+            message="Halfway there.", turns=30,
+        )
+        promo.update({"termination_reason": "max_turns", "promoted_by_check": True,
+                      "test": {"ran": True, "exit_code": 0, "command": "make test",
+                               "output_tail": "ok"}})
+        promo_card = format_review_card(promo, exit_code=EXIT_OK, result_path=rev_path)
+        check("loop:     max_turns after 30 turns; ok because check passed" in promo_card,
+              f"promoted card must carry the loop line, got {promo_card!r}")
+        check("verdict:  PASS" in promo_card, f"promoted card must PASS, got {promo_card!r}")
+        stall = dict(promo, status="stalled", promoted_by_check=False,
+                     error="agent did not complete (max_turns)")
+        stall["test"] = dict(promo["test"], exit_code=1)
+        stall_card = format_review_card(stall, exit_code=EXIT_ERROR, result_path=rev_path)
+        check("loop:     max_turns after 30 turns\n" in stall_card,
+              f"stalled card must name the stop, got {stall_card!r}")
+        check("verdict:  STALLED" in stall_card, f"stalled card must be STALLED, got {stall_card!r}")
         check(build_answer_payload(action="approved") == {"text": "allow"},
               "approved must normalize to allow")
         check(build_answer_payload(action="denied") == {"text": "deny"},
               "denied must normalize to deny")
+
+        # 18c. non-PASS cards carry their evidence; PASS stays short
+        ev_dir = os.path.join(tmp, "evidence")
+        os.makedirs(ev_dir)
+        ev_path = os.path.join(ev_dir, "result.json")
+        with open(os.path.join(ev_dir, WORKER_STDERR_LOG), "w", encoding="utf-8") as fh:
+            fh.write("mem at=decode_end tokens=5396 active=1\n"
+                     "piper: awaiting_user.json written (seq 7). Question: which file?\n"
+                     "mem at=decode_end tokens=5400 active=1\n"
+                     "piper: task ev finished with status 'error' (exit 1, 9.0s, 4 turns)\n")
+        base = result_shell(task_id="ev", cwd=ev_dir, model_dir=model_dir, status="ok",
+                            message="All done, tests pass.", turns=4, wall_seconds=9.0)
+        red = dict(base, status="error", error="check command failed (exit code 1)",
+                   test={"ran": True, "exit_code": 1, "command": "python3 test_calc.py",
+                         "output_tail": "Traceback (most recent call last):\n"
+                                        "  File \"test_calc.py\", line 3, in <module>\n"
+                                        "    assert add(2, 3) == 5\n"
+                                        "AssertionError: expected 5, got None\n"})
+        red_card = format_review_card(red, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("error:    check command failed (exit code 1)" in red_card,
+              f"red card must carry the error, got {red_card!r}")
+        check("check:    | Traceback" in red_card and "| AssertionError: expected 5, got None" in red_card,
+              f"red card must carry the failing check's tail, got {red_card!r}")
+        check("run:      turns=4 wall=9s" in red_card, f"card must carry turns/wall, got {red_card!r}")
+        check("worker:   | piper: awaiting_user.json written" in red_card
+              and "| piper: task ev finished" in red_card,
+              f"non-PASS card must bring back the worker's piper: notices, got {red_card!r}")
+        check("mem at=" not in red_card, f"telemetry must stay off the card, got {red_card!r}")
+        check("verdict:  FAIL" in red_card, f"red card must FAIL, got {red_card!r}")
+        check(len(red_card.splitlines()) <= 25, f"card must stay compact, got {len(red_card.splitlines())} lines")
+
+        timeout_res = dict(red, error="check command failed (exit code -1)",
+                           test={"ran": True, "exit_code": -1, "command": "make test",
+                                 "output_tail": "running 312 tests\n\n[timeout after 60.000000s]"})
+        to_card = format_review_card(timeout_res, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("| [timeout after 60.000000s]" in to_card,
+              f"a timed-out check must show its timeout marker, got {to_card!r}")
+
+        stalled_res = dict(base, status="stalled", error="agent did not complete (max_turns)",
+                           termination_reason="max_turns", turns=30,
+                           test={"ran": True, "exit_code": 2, "command": "make test",
+                                 "output_tail": "FAILED test_x"})
+        st_card = format_review_card(stalled_res, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("error:    agent did not complete (max_turns)" in st_card,
+              f"stalled card must say why, got {st_card!r}")
+        check("verdict:  STALLED" in st_card, f"stalled card must be STALLED, got {st_card!r}")
+
+        green = dict(base, test={"ran": True, "exit_code": 0, "command": "make test",
+                                 "output_tail": "ok"})
+        pass_card = format_review_card(green, exit_code=EXIT_OK, result_path=ev_path)
+        check("verdict:  PASS" in pass_card, f"green card must PASS, got {pass_card!r}")
+        check("error:" not in pass_card and "check:" not in pass_card and "worker:" not in pass_card,
+              f"PASS card must not carry failure evidence, got {pass_card!r}")
+        check(pass_card == (
+            "── piper review ─────────────────────────\n"
+            "task:     ev\n"
+            "status:   ok\n"
+            "exit:     0\n"
+            "run:      turns=4 wall=9s\n"
+            "message:  All done, tests pass.\n"
+            "files:    (none)\n"
+            "diff:     +0 -0 (0 files)\n"
+            "test:     exit=0 cmd='make test'\n"
+            "git_diff: (none)\n"
+            "verdict:  PASS\n"
+            "─────────────────────────────────────────"
+        ), f"PASS card must stay byte-stable, got {pass_card!r}")
+
+        # A red check's log_triage block: failing tests, the first located primary
+        # diagnostic, and the spooled full log -- at most three lines.
+        triaged = dict(red, test=dict(red["test"], output_path=os.path.join(ev_dir, "check.log"),
+                                      seconds=4.2, timed_out=False, could_not_run=False,
+                                      triage={"runner": "pytest", "passed": 3, "failed": 1,
+                                              "failing_tests": ["tests/test_calc.py::test_add"],
+                                              "primary": [{"path": "", "line": 0, "message": "noise"},
+                                                          {"path": "calc.py", "line": 2,
+                                                           "message": "AssertionError: expected 5"}],
+                                              "paths": ["calc.py"]}))
+        tri_card = format_review_card(triaged, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("failing:  tests/test_calc.py::test_add\n" in tri_card,
+              f"red card must name failing tests, got {tri_card!r}")
+        check("at:       calc.py:2: AssertionError: expected 5\n" in tri_card,
+              f"red card must name the first located diagnostic, got {tri_card!r}")
+        check(f"log:      {os.path.join(ev_dir, 'check.log')}\n" in tri_card,
+              f"red card must point at the full check log, got {tri_card!r}")
+        check(len(tri_card.splitlines()) <= 25, f"triaged card must stay compact, got {tri_card!r}")
+        timed = dict(red, error="check timed out after 300s",
+                     test={"ran": True, "exit_code": -1, "command": "make test", "timed_out": True,
+                           "could_not_run": False, "seconds": 300.1,
+                           "output_tail": "running\n[timeout after 300.000000s]"})
+        timed_card = format_review_card(timed, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("test:     timed out after 300s cmd='make test'" in timed_card,
+              f"a timed-out check must say so, not exit=-1, got {timed_card!r}")
+        never = dict(red, error="check could not run (exit 127)",
+                     test={"ran": True, "exit_code": 127, "command": "maek test", "timed_out": False,
+                           "could_not_run": True, "seconds": 0.01,
+                           "output_tail": "sh: maek: command not found"})
+        never_card = format_review_card(never, exit_code=EXIT_ERROR, result_path=ev_path)
+        check("test:     could not run (exit 127) cmd='maek test'" in never_card,
+              f"a check that never ran must say so, got {never_card!r}")
+
+        # DIED: no result.json, so the log is the only evidence. Only this run's log,
+        # never the previous run's (rotated to worker.stderr.prev.log).
+        died_dir = os.path.join(tmp, "died")
+        os.makedirs(died_dir)
+        died_result = os.path.join(died_dir, "result.json")
+        with open(os.path.join(died_dir, WORKER_STDERR_PREV_LOG), "w", encoding="utf-8") as fh:
+            fh.write("piper: task old finished with status 'ok' (exit 0, 3.0s, 2 turns)\n")
+        with open(os.path.join(died_dir, WORKER_STDERR_LOG), "w", encoding="utf-8") as fh:
+            fh.write("mem at=generate_enter tokens=9000 active=1\n"
+                     "libc++abi: terminating due to uncaught exception: [metal] OOM\n")
+        died_card = format_review_card(None, exit_code=-9, result_path=died_result)
+        check("verdict:  DIED" in died_card, f"no result must be DIED, got {died_card!r}")
+        check(f"log:      {os.path.join(died_dir, WORKER_STDERR_LOG)}" in died_card,
+              f"DIED card must name the log, got {died_card!r}")
+        check("[metal] OOM" in died_card, f"DIED card must show the crash breadcrumbs, got {died_card!r}")
+        check("task old finished" not in died_card,
+              f"DIED card must not show the previous run's log, got {died_card!r}")
+
+        # 18d. dispatch output stays a card: telemetry lands in worker.stderr.log,
+        # and each run starts a fresh log (the previous one is rotated, not appended).
+        noisy = os.path.join(tmp, "fake_cpp_noisy")
+        _write_exec(noisy, FAKE_CPP_NOISY)
+        nws = os.path.join(tmp, "noisy_ws")
+        os.makedirs(nws)
+        ntask = os.path.join(nws, "task.json")
+        _write_json(ntask, {"id": "noisy", "cwd": nws, "model_dir": model_dir,
+                            "prompt": "Add hello() to a.py.", "timeout_s": 30,
+                            "result_path": os.path.join(nws, "result.json")})
+        noisy_env = {k: v for k, v in os.environ.items()
+                     if k not in ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK", "LMP_WORKER_STDERR")}
+        noisy_env.update(LMP_SIDECAR=noisy, LMP_USE_CPP_WORKER="1")
+        for attempt in (1, 2):
+            nout = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "dispatch", "--task", ntask],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=noisy_env, cwd=nws, timeout=60,
+            )
+            check(nout.returncode == EXIT_OK, f"noisy dispatch #{attempt} must exit 0, got {nout.returncode}")
+            check(len(nout.stdout) < 1500,
+                  f"dispatch output must be a compact card, got {len(nout.stdout)} bytes: {nout.stdout[:300]!r}")
+            check(b"verdict:  PASS" in nout.stdout, f"noisy dispatch must PASS, got {nout.stdout!r}")
+        nlog = _read_log_lines(os.path.join(nws, WORKER_STDERR_LOG))
+        check(sum(1 for ln in nlog if ln.startswith("mem at=")) == 210,
+              f"telemetry must land in worker.stderr.log, got {len(nlog)} lines")
+        check(sum(1 for ln in nlog if ln.startswith("piper: task noisy finished")) == 1,
+              "each run must start a fresh worker.stderr.log")
+        check(os.path.isfile(os.path.join(nws, WORKER_STDERR_PREV_LOG)),
+              "the previous run's log must be kept as worker.stderr.prev.log")
+        inherit_env = dict(noisy_env, LMP_WORKER_STDERR="inherit")
+        iout = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "dispatch", "--task", ntask],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=inherit_env, cwd=nws, timeout=60,
+        )
+        check(iout.stdout.count(b"mem at=") == 210,
+              "LMP_WORKER_STDERR=inherit must keep worker stderr inline")
+
+        # 18e. on_ask: an attached dispatch never waits on a question nobody can answer.
+        # Default by attachment (never by wake URL): plain attached -> continue, --jsonl
+        # or detached -> wait; the flag and the packet field override.
+        fake_ask = os.path.join(tmp, "fake_cpp_ask")
+        _write_exec(fake_ask, FAKE_CPP_ASK)
+        aws = os.path.join(tmp, "ask_ws")
+        os.makedirs(aws)
+        atask = os.path.join(aws, "task.json")
+        _write_json(atask, {"id": "ask-1", "cwd": aws, "model_dir": model_dir, "prompt": "x",
+                            "timeout_s": 30, "result_path": os.path.join(aws, "result.json")})
+        ask_env = {k: v for k, v in os.environ.items()
+                   if k not in ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK", "LMP_WORKER_STDERR")}
+        ask_env.update(LMP_SIDECAR=fake_ask, LMP_USE_CPP_WORKER="1")
+        # A leftover wake file (piper ui) must not flip an attached run to "wait".
+        write_orch_webhook_file(aws, webhook_url)
+
+        def _dispatch_ask(*extra):
+            proc = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "dispatch", "--task", atask, *extra],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=ask_env, cwd=aws, timeout=60, text=True,
+            )
+            return proc.returncode, proc.stdout, load_result_file(os.path.join(aws, "result.json")) or {}
+
+        rc, out, res = _dispatch_ask()
+        check(res.get("seen_on_ask") == "continue", f"attached dispatch must default to continue, got {res!r}")
+        check(rc == EXIT_OK and "verdict:  PASS" in out, f"continued ask must finish, got {rc}: {out!r}")
+        check("asks:     answered unattended, model chose: Which config file should I edit?" in out,
+              f"an unattended answer must be on the card, got {out!r}")
+        rc, out, res = _dispatch_ask("--jsonl")
+        check(res.get("seen_on_ask") == "wait", f"--jsonl dispatch must wait (a reader sees the ask), got {res!r}")
+        rc, out, res = _dispatch_ask("--on-ask", "end")
+        check(res.get("seen_on_ask") == "end", f"--on-ask end must reach the engine, got {res!r}")
+        check(rc == EXIT_NEEDS_INPUT, f"needs_input dispatch must exit 4, got {rc}: {out!r}")
+        check("verdict:  NEEDS_INPUT" in out and "question: Which config file should I edit?" in out
+              and "options:  a.toml,b.toml" in out,
+              f"needs_input card must carry the question, got {out!r}")
+        check(out.count("Which config file should I edit?") == 1,
+              f"the question must appear once on the card, got {out!r}")
+        ml = {"status": "needs_input", "error": "needs input: Pick one?", "message": "needs input: Pick one?",
+              "asks": [{"question": "Pick one?", "options": "- Yes, plain a + b\n- No, numbers only\n",
+                        "answered_by": None}], "test": {"ran": False}}
+        ml_card = format_review_card(ml, exit_code=EXIT_NEEDS_INPUT, result_path=os.path.join(aws, "result.json"))
+        check("options:  Yes, plain a + b | No, numbers only\n" in ml_card,
+              f"multi-line options must stay on one card line, got {ml_card!r}")
+        st = collect_run_status(aws)
+        check(st["state"] == "needs_input" and status_exit_code(st) == EXIT_NEEDS_INPUT,
+              f"status must read needs_input with exit 4, got {st['state']!r}")
+        check("question: Which config file should I edit?" in format_status_card(st),
+              f"status card must carry the open question, got {format_status_card(st)!r}")
+        _write_json(atask, {"id": "ask-1", "cwd": aws, "model_dir": model_dir, "prompt": "x",
+                            "timeout_s": 30, "result_path": os.path.join(aws, "result.json"),
+                            "on_ask": "end"})
+        rc, out, res = _dispatch_ask()
+        check(res.get("seen_on_ask") == "end", f"packet on_ask must apply when no flag is given, got {res!r}")
+        detached_args = argparse.Namespace(on_ask=None, jsonl=False)
+        check(resolve_on_ask(detached_args, {"on_ask": ""}, True) == "wait",
+              "a detached run must default to wait")
+        check(format_progress_line("ask-1", "needs_input") == "ask-1 | needs_input",
+              "progress must accept needs_input")
+        # One unattended reply, one text: the C++ worker's copy is pinned to this one.
+        with open(os.path.join(ROOT, "src", "surface", "worker.hpp"), encoding="utf-8") as fh:
+            check(json.dumps(ae.UNATTENDED_REPLY) in fh.read(),
+                  "kUnattendedReply in worker.hpp must equal agent_eval.UNATTENDED_REPLY")
 
         # 19. dispatch → wait → review card (fake sidecar)
         disp_ws = os.path.join(tmp, "dispatch_ws")
@@ -3349,7 +4221,8 @@ def self_test():
             disp_rc = main(["dispatch", "--task", disp_task])
         check(disp_rc == EXIT_OK, f"dispatch must exit 0, got {disp_rc}")
         disp_out = disp_stdout.getvalue()
-        check("verdict:  PASS" in disp_out, f"dispatch must print PASS card, got {disp_out!r}")
+        check("verdict:  UNVERIFIED" in disp_out,
+              f"dispatch of a no-check packet must print an UNVERIFIED card, got {disp_out!r}")
         check(os.path.isfile(os.path.join(disp_ws, "result.json")),
               "dispatch must leave result.json")
         orch_path = os.path.join(disp_ws, "orch.jsonl")
@@ -3362,9 +4235,9 @@ def self_test():
                     orch_lines.append(json.loads(raw))
         check(any(line.get("kind") == "dispatch" for line in orch_lines),
               f"orch.jsonl must record dispatch, got {orch_lines!r}")
-        check(any(line.get("kind") == "review" and line.get("verdict") == "PASS"
+        check(any(line.get("kind") == "review" and line.get("verdict") == "UNVERIFIED"
                   for line in orch_lines),
-              f"orch.jsonl must record PASS review, got {orch_lines!r}")
+              f"orch.jsonl must record the review verdict, got {orch_lines!r}")
 
         # 20. status card from awaiting_user.json / result.json (no freehand cat/jq)
         st_dir = os.path.join(tmp, "status_dir")
@@ -3398,6 +4271,70 @@ def self_test():
         check(done_rc == EXIT_OK, f"status done must exit 0, got {done_rc}")
         check("state:    done" in done_stdout.getvalue(),
               f"status done card, got {done_stdout.getvalue()!r}")
+
+        # 20b. a finished run's result outranks a leftover ask; a dead run's ask is no ask
+        with open(os.path.join(st_dir, "result.json"), "w", encoding="utf-8") as fh:
+            json.dump(result_shell(task_id="st-2", cwd=st_dir, model_dir=model_dir,
+                                   status="timeout", message="timeout awaiting user answer (600s)"), fh)
+        _write_json(os.path.join(st_dir, "awaiting_user.json"),
+                    {"question": "stale?", "options": "", "run_id": "r1", "seq": 7, "pid": os.getpid()})
+        stale_out = io.StringIO()
+        with contextlib.redirect_stdout(stale_out):
+            stale_rc = main(["status", "--dir", st_dir])
+        check("state:    timeout" in stale_out.getvalue() and stale_rc == EXIT_TIMEOUT,
+              f"a timeout result must outrank a leftover ask, got {stale_out.getvalue()!r}")
+        os.remove(os.path.join(st_dir, "result.json"))
+        _write_json(os.path.join(st_dir, "awaiting_user.json"),
+                    {"question": "orphan?", "options": "", "run_id": "r1", "seq": 7, "pid": dead.pid})
+        check(collect_run_status(st_dir)["state"] == "idle",
+              "an ask whose worker is gone must not read as an open ask")
+        os.remove(os.path.join(st_dir, "awaiting_user.json"))
+
+        # 20c. bare status/await/answer/review from the workspace root reach the slice
+        # `piper packet` recorded in .piper/active.json, not the root itself
+        bare_ws = os.path.join(tmp, "bare_ws")
+        os.makedirs(bare_ws)
+        with contextlib.redirect_stdout(io.StringIO()):
+            check(main(["packet", "--id", "bare-1", "--cwd", bare_ws, "--prompt", "X.",
+                        "--model-dir", model_dir]) == EXIT_OK, "bare packet must emit")
+        bare_slice = os.path.join(bare_ws, ".piper", "slices", "bare-1")
+        _write_json(os.path.join(bare_slice, "awaiting_user.json"),
+                    {"question": "Which file?", "options": "", "run_id": "r-b", "seq": 3,
+                     "pid": os.getpid()})
+        bare_sub = os.path.join(bare_ws, "src", "deep")
+        os.makedirs(bare_sub)
+        here = os.getcwd()
+        try:
+            for start in (bare_ws, bare_sub):
+                os.chdir(start)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = main(["status"])
+                check(rc == EXIT_OK and "state:    ask" in out.getvalue() and bare_slice in out.getvalue(),
+                      f"bare status from {start} must find the active slice, got {out.getvalue()!r}")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = main(["await", "--timeout-s", "1", "--interval-s", "0.05"])
+                check(rc == EXIT_OK and "Which file?" in out.getvalue(),
+                      f"bare await from {start} must find the active slice, got {out.getvalue()!r}")
+            os.chdir(bare_ws)
+            with contextlib.redirect_stdout(io.StringIO()):
+                check(main(["answer", "--text", "a.py"]) == EXIT_OK, "bare answer must exit 0")
+            check(os.path.isfile(os.path.join(bare_slice, "answer.json")),
+                  "bare answer must land in the active slice")
+            check(not os.path.exists(os.path.join(bare_ws, "answer.json")),
+                  "bare answer must not land in the workspace root")
+            os.remove(os.path.join(bare_slice, "awaiting_user.json"))
+            with open(os.path.join(bare_slice, "result.json"), "w", encoding="utf-8") as fh:
+                json.dump(result_shell(task_id="bare-1", cwd=bare_ws, model_dir=model_dir,
+                                       status="ok", message="Done."), fh)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = main(["review"])
+            check(rc == EXIT_OK and "task:     bare-1" in out.getvalue(),
+                  f"bare review must read the active slice's result, got {out.getvalue()!r}")
+        finally:
+            os.chdir(here)
 
         # 21. await returns when ask appears (no hand-rolled sleep snippet)
         await_dir = os.path.join(tmp, "await_dir")

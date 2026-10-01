@@ -176,6 +176,8 @@ struct ModePolicy {
 // Mirrors Q_ENUM_LINE in extension/src/webview.ts. Two or more means the model asked a
 // multiple-choice question in the answer channel instead of calling `ask_user` -- the
 // shape that rendered as prose on r-18cf39935cc24ac8-2ef88a6b and never drew a card.
+// The loop promotes that turn to `ask_user` only in conversational modes
+// (ModePolicy::conversational); in a working mode the same text is the final answer.
 [[nodiscard]] int enumerated_choice_lines(std::string_view text);
 
 // Exactly one repeat detector, and it is a DETECTOR / annotator -- not an authority for

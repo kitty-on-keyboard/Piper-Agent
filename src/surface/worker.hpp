@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "src/tools/shell_clock.hpp"
+
 namespace lmp::surface::worker {
 
 // Exit codes matching the CLI contract.
@@ -26,6 +28,13 @@ inline constexpr int kExitOk = 0;
 inline constexpr int kExitError = 1;
 inline constexpr int kExitTimeout = 2;
 inline constexpr int kExitInvalid = 3;
+// The model asked something nobody attached to the run could answer; the question is
+// in result.json. Answer it in the next brief, not with a bigger timeout.
+inline constexpr int kExitNeedsInput = 4;
+
+// The reply an attached run gives its model's FIRST question under on_ask=continue.
+// scripts/agent_eval.py UNATTENDED_REPLY is the same text (pinned by its self-test).
+inline constexpr const char* kUnattendedReply = "(unattended run) No operator is available to answer. Decide yourself, on the best reading of the code, state the assumption in one line, and continue. If it genuinely cannot be settled, finish with your best complete attempt.";
 
 // ------------------------------------------------------------------
 // Packet: what the orchestrator hands us.
@@ -52,7 +61,8 @@ struct TaskPacket {
     // operator acceptance in result.test. A green post-run check completes the
     // slice (status=ok) even if the agent loop hit max_turns without completed=true.
     std::string check_command;
-    double check_timeout_s = 60.0;
+    // Same clock as the in-loop run of the same command (src/tools/shell_clock.hpp).
+    double check_timeout_s = ::lmp::tools::kShellWallClockSeconds;
 
     // Turn budget for lmp/start. 0 = use resolve_max_iterations() default:
     // kDefaultMaxIterations (30), or kTrustMcpDefaultMaxIterations (60) when
@@ -67,7 +77,23 @@ struct TaskPacket {
 
     // Skills to preload into the context store on start (by id).
     std::vector<std::string> preload_skills;
+
+    // What a question from the model does: "wait" for answer.json (a detached run or a
+    // --jsonl reader can answer), "continue" (answer the first one unattended, end on
+    // the next), or "end" (end at once). Empty in task.json = decided at launch by
+    // attachment, see resolve_on_ask.
+    std::string on_ask;
 };
+
+[[nodiscard]] bool is_valid_on_ask(const std::string& policy);
+
+// The run's on_ask: the launcher's flag, else the packet's field, else by attachment.
+// A parent that can answer (detached with a wake URL, or reading --jsonl) gets "wait";
+// a plain attached parent is blocked in the same call that would have to answer, so it
+// gets "continue". Never keyed on whether a wake URL exists: `piper ui` leaves
+// .piper/orch_webhook behind and cannot answer anything.
+[[nodiscard]] std::string resolve_on_ask(const std::string& cli, const std::string& packet_field,
+                                         bool parent_can_answer);
 
 // Parse task.json (+ optional sibling prompt.md). Returns the packet on success
 // or nullopt with `error` filled. Does NOT touch the model or the sidecar.
@@ -96,11 +122,44 @@ struct DiffStat {
     int files = 0;
 };
 
+// What the measured log_triage engine (src/tools/log_triage.hpp) found in a red
+// check's output: deterministic, no model call.
+struct CheckDiagnostic {
+    std::string path;                     // as printed; empty when none
+    int line = 0;                         // 0 when unknown
+    std::string message;
+};
+
+struct CheckTriage {
+    std::string runner;                   // pytest | ctest | cargo | swift | xcode | unknown
+    int passed = -1;                      // -1 = not reported
+    int failed = -1;
+    std::vector<std::string> failing_tests;   // <= 6
+    std::vector<CheckDiagnostic> primary;     // <= 4
+    std::vector<std::string> paths;           // <= 8
+};
+
 struct TestBlock {
     bool ran = false;
     int exit_code = -1;
     std::string command;
+    // log_triage::compact digest of the captured output (<= 2000 bytes). Output that
+    // already fits comes back byte for byte.
     std::string output_tail;
+    bool timed_out = false;               // killed at check_timeout_s
+    bool could_not_run = false;           // never executed (exit 126/127, spawn failure)
+    double seconds = 0.0;                 // wall time of the check
+    std::string output_path;              // full capture (check.log) when the digest dropped any
+    std::optional<CheckTriage> triage;    // red checks only
+};
+
+// One question the model asked during the run, and who answered it: "operator"
+// (answer.json), "unattended" (on_ask=continue), or "" (nobody: the run ended
+// needs_input with this question open).
+struct AskRecord {
+    std::string question;
+    std::string options;
+    std::string answered_by;
 };
 
 struct RunResult {
@@ -118,6 +177,11 @@ struct RunResult {
     TestBlock test;
     std::string log_path;
     std::string error;                    // empty on success
+    // How the agent loop stopped (RunReport::termination_reason), and whether the
+    // status rests on the operator check alone because the loop itself did not finish.
+    std::string termination_reason;
+    bool promoted_by_check = false;
+    std::vector<AskRecord> asks;
     // Tier-A loop hygiene copied from RunReport when the worker path has one.
     std::size_t degenerate_text_count = 0;
     std::size_t text_only_turns = 0;
@@ -127,10 +191,44 @@ struct RunResult {
     std::size_t nudged_no_tool_recovery = 0;
 };
 
-// True when result.status/error is an incomplete agent-loop stop (max_turns,
-// stalled, ended without checklist clear, …) that a green operator check may
-// promote to status=ok. Timeouts, start failures, and irreversible denials stay.
-[[nodiscard]] bool is_incomplete_agent_stop(const RunResult& result);
+// What the run did, gathered once at the end of execute_task_packet. Facts only:
+// finalize_run turns them (plus the check reading) into the verdict.
+struct RunFacts {
+    std::string termination_reason;       // RunReport::termination_reason; "" if none
+    bool completed = false;               // RunReport::completed
+    bool started = true;                  // the mission produced a run at all
+    bool irreversible_unanswered = false; // an irreversible ask ended without an answer
+    std::string irreversible_detail;      // the command that was held
+    double timeout_s = 0.0;               // packet.timeout_s, for the error text
+    bool needs_input = false;             // on_ask ended the run on a question
+    std::string pending_question;         // that question
+};
+
+struct Finalized {
+    std::string status;                   // "ok" | "error" | "timeout" | "stalled" | "needs_input"
+    std::string error;                    // empty when status is "ok"
+    int exit_code = kExitError;
+    std::string wake_kind;                // "done" iff ok, "needs_input" iff needs_input, else "stalled"
+    bool promoted_by_check = false;       // ok only because a green check vouched for it
+};
+
+// THE one place that decides status, exit code and wake kind. Ordered policy:
+//   1. not started                         -> error, exit 1
+//   2. timeout_awaiting_user / wall_clock  -> timeout, exit 2, never promoted
+//   2b. a question on_ask would not wait on -> needs_input, exit 4, never promoted
+//   3. irreversible ask left unanswered    -> error, exit 1, never promoted
+//   4. completed or plan_ready             -> ok; a red check demotes it to error
+//   5. max_turns, stalled, ended && !completed (incomplete loop stops)
+//                                          -> ok when the check is green (promoted),
+//                                             else stalled (max_turns/stalled) or error
+//   6. anything else (backend_error, cancelled, loop_exit, no run end,
+//      stalled_no_turn)                    -> error/stalled, exit 1, never promoted
+// Pure: no I/O, so every row is covered by a gate test.
+[[nodiscard]] Finalized finalize_run(const RunFacts& facts, const TestBlock& test);
+
+// Why a ran-but-not-green check failed, in words: "check timed out after 300s",
+// "check could not run (exit 127)" or "check failed (exit 1)".
+[[nodiscard]] std::string describe_check_failure(const TestBlock& test);
 
 // Write result.json atomically (write .tmp, rename).
 void write_result(const std::string& path, const RunResult& result);
@@ -172,9 +270,6 @@ void merge_files_touched(std::vector<std::string>& dest,
 void collect_git(const std::string& cwd, const std::string& out_dir,
                  RunResult& result);
 
-// max_turns / stalled / stalled_no_turn → result.status "stalled" (wake contract).
-[[nodiscard]] bool is_stalled_termination(const std::string& termination_reason);
-
 // Prefer last finish summary; else short first/last of assistant text when the
 // run did not complete; never dump a whole mid-turn diary into result.message.
 [[nodiscard]] std::string compose_result_message(
@@ -188,7 +283,8 @@ void collect_git(const std::string& cwd, const std::string& out_dir,
     const std::vector<std::string>& files_touched,
     const std::string& error);
 
-// Run the check command in cwd, populate result.test.
+// Run the check command in cwd and populate result.test. Reports only; the status
+// decision is finalize_run's.
 void run_check(const TaskPacket& packet, RunResult& result);
 
 // ------------------------------------------------------------------
@@ -207,21 +303,29 @@ struct AwaitingUserInfo {
 [[nodiscard]] std::optional<AwaitingUserInfo> find_last_ask_user(
     const std::string& log_path, const std::string& run_id);
 
-// Write awaiting_user.json atomically next to result.json.
+// Write awaiting_user.json atomically next to result.json (with the waiting pid).
 void write_awaiting_user(const std::string& path, const AwaitingUserInfo& info);
 
-// Check for and consume answer.json in the result directory, deleting both
-// answer.json and awaiting_user.json so stale questions cannot be answered twice.
-// Returns the answer text if present, nullopt otherwise.
+// Check for and consume answer.json in the result directory. Only an answer bound to
+// the open ask -- its run_id and seq, as `piper answer` copies them from
+// awaiting_user.json -- is applied; then both files are deleted so a question cannot
+// be answered twice. Any other answer.json is deleted unread and described in
+// `*rejected` (when non-null) so the caller can log it. nullopt when nothing applies.
 [[nodiscard]] std::optional<std::string> read_and_consume_answer(
-    const std::string& answer_path, const std::string& awaiting_path);
+    const std::string& answer_path, const std::string& awaiting_path,
+    const std::string& run_id, uint64_t seq, std::string* rejected = nullptr);
+
+// Run start: remove the previous run's awaiting_user.json, answer.json and result
+// file from the slice dir, so a stale ask cannot shadow this run and a stale answer
+// cannot answer its first question. Returns true when an answer.json was discarded.
+bool clear_stale_run_files(const std::string& result_path);
 
 // ------------------------------------------------------------------
 // Cloud wake-up webhook (orchestrator wake).
 // ------------------------------------------------------------------
 
 struct WebhookPayload {
-    std::string kind;        // "ask" | "done" | "stalled" | "died"
+    std::string kind;        // "ask" | "done" | "stalled" | "needs_input" | "died"
     std::string task_id;
     std::string run_id;
     std::string cwd;
@@ -242,9 +346,8 @@ bool post_orch_webhook(const std::string& webhook_url,
                        const WebhookPayload& payload,
                        double timeout_s = 5.0);
 
-// Detached launch detection (spec AGENT_WAKE.md).
-[[nodiscard]] bool stdin_is_devnull();
-[[nodiscard]] bool stdout_is_regular_file();
+// Detached launch (spec AGENT_WAKE.md): true only for an explicit --detach or
+// LMP_DAEMONIZE=1. Never inferred from how stdio is wired.
 [[nodiscard]] bool is_detached_launch(bool cli_detach);
 
 // ------------------------------------------------------------------

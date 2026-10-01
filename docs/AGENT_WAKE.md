@@ -56,8 +56,8 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper ui --cwd /abs/ws                       # watch; follows .piper/active.json
    ```
    Do not pass `--out`. The emitter writes `<cwd>/.piper/slices/<id>/task.json`, copies `prompt.md` beside it, and records `.piper/active.json`. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path` (sibling `result.json` unless `--result-path` is set). Optional `--check`.
-   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` even if the loop hit `max_turns` without `completed=true` (not a crash). Timeouts and irreversible denials stay failures.
-   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice — no rebuild.
+   - **`check`**: operator acceptance command. Also becomes `verify_contract` during the run. A green post-run check yields `status=ok` / wake `done` when the loop stopped short without breaking (`max_turns`, `stalled`, or a text ending with work left open); the card's `loop:` line then says the pass rests on the check alone. A crash (`backend_error`), a cancel, a timeout or an unanswered irreversible ask is never promoted. A red check turns a completed run into `error`. The post-run check runs on the same 300 s clock as the in-loop check (`piper packet --check-timeout-s N` to change it). A check that timed out or could not run (exit 126/127) is reported as such (`test.timed_out`, `test.could_not_run`) and never counts as green. `test.output_tail` is a log_triage digest of the output (failing locators kept), `test.triage` names the runner, failing tests and primary diagnostics, and `test.output_path` points at the full log (`check.log`) when the digest dropped anything.
+   - **`max_iterations`**: turn budget sent to the agent loop. Default **30**; default **60** when `trust_mcp` is set (Godoer-heavy). Raise it for a long slice with `piper packet --max-iterations N` — no rebuild.
    - **`trust_mcp`**: explicit server names from `piper mcp-list`. No guessed JSON array.
 
 4. **Dispatch**
@@ -74,16 +74,21 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    - `1`: Worker error.
    - `2`: Execution timed out (`timeout_s`).
    - `3`: Invalid task packet or missing wake URL for a detached run.
+   - `4`: Needs input: the model asked something nobody attached could answer. The question is on the card (`question:`) and in `result.json` (`asks`). Answer it in the next brief; a bigger timeout will not help.
 
-   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` does not detach.
+   Questions (`on_ask`, set with `--on-ask` on `piper packet`, `dispatch` or `run`): `wait` blocks for `piper answer`; `continue` answers the model's first question with a fixed unattended reply (the card's `asks:` line shows the assumption) and ends on the next one as `needs_input`; `end` ends on the first. Default by attachment, never by wake URL: a plain attached `piper dispatch`/`run` uses `continue`; `--jsonl` and `--detach` use `wait`.
 
-   Detached or background (`--detach`, nohup, screen) requires a wake URL before start. Resolve it with `piper wake-url`. Do not copy a URL from the panel.
+   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` never detaches: it is attached by construction, whatever its stdio or `LMP_DAEMONIZE` say.
+
+   In Claude Code, run `piper dispatch` with `run_in_background: true` and read the card from the task output when the completion notice arrives. A foreground Bash call is capped at 10 minutes.
+
+   Piper never guesses detach from stdio. A background launch (nohup, screen, `&`) must say so with `piper run --detach` (or `LMP_DAEMONIZE=1`) and needs a wake URL before start; without `--detach` the run stays attached to whatever launched it. Resolve the URL with `piper wake-url`. Do not copy a URL from the panel.
    - `--orch-webhook URL`, or
    - task field `orch_webhook`, or
    - env `LMP_ORCH_WEBHOOK`, or
    - file `.piper/orch_webhook` (written by `piper_ui`)
 
-   Without a URL the CLI exits before the sidecar starts.
+   `--detach` without a URL exits before the sidecar starts.
 
    Irreversible tools pause unless auto-approve was set. Answer with `piper answer`. Do not write `answer.json`.
 
@@ -95,8 +100,11 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    piper await --dir /path/to/slice           # wait for ask/done; no sleep-loop
    ```
    On `ask`: `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not restart the process.
+   Bare `piper answer` / `status` / `await` / `review` act on the slice `piper packet` recorded in the nearest `.piper/active.json` (walking up from the current directory); `--dir` or `--task` picks another. `piper answer` refuses (exit 3) when no ask is open, and binds the answer to that ask (`run_id`, `seq`): the worker applies only a matching answer and discards any other. A run clears the previous run's `awaiting_user.json` / `answer.json` / `result.json` at start and removes its own ask when the wait ends, so `piper status` never reports a finished or dead run as asking.
 
-   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop is still `ok` when `check` was set.
+   The card is the rubric. A pass is `status == "ok"`, `files_touched` inside the brief, a proportional diff, and a green `check` (`result.test`). `"stalled"` is not a pass. Green `test.exit_code=0` after an incomplete loop stop is still `ok` when `check` was set, and the card's `loop:` line names the stop.
+
+   Verdicts: `PASS` (ok and a green check), `UNVERIFIED` (the model finished but no check ran — review the diff yourself or re-dispatch with `--check`; never treat it as a pass), `FAIL`, `STALLED`, `DIED`. On anything but `PASS` the card carries the evidence: `error:`, the failing check's last lines (`check:`), and the worker's own `piper:` notices (`worker:`, e.g. an ask question). Worker telemetry goes to `worker.stderr.log` beside `result.json` (the previous run's is `worker.stderr.prev.log`), not into the dispatch output; a `DIED` card shows that log's tail. `LMP_WORKER_STDERR=inherit` keeps it inline for a human at a terminal.
 
 6. **Record and continue**
    ```bash
@@ -124,7 +132,10 @@ know who that agent is. There is no default host. Grok, Gemini, a script,
 and a human CI job each pass their own URL.
 
 Turn-based agents cannot stay attached. They pass a wake URL or they do not
-detach. `piper dispatch` stays attached and does not need a URL.
+detach. `piper dispatch` stays attached and does not need a URL. Detach is
+declared with `--detach` (or `LMP_DAEMONIZE=1`), never inferred from stdin or
+stdout: agent tool runners hand every foreground command `/dev/null` and a
+file, so a guess made there refused or orphaned attached runs.
 
 ## How to launch
 
@@ -137,7 +148,7 @@ Otherwise, before start, resolve the URL with `piper wake-url` (do not copy it f
 - env `LMP_ORCH_WEBHOOK`, or
 - file `.piper/orch_webhook` (written automatically by `piper_ui` — **do not copy a URL from the panel**)
 
-Detached with no URL: the CLI exits before the sidecar starts. `--help`
+`--detach` with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
 text is the contract, not this chat.
 
@@ -150,13 +161,15 @@ mission. No URL means no POST.
 | --- | --- | --- |
 | `ask` | `awaiting_user.json` written, or an irreversible call is paused | `piper answer allow`, `piper answer deny`, or `piper answer --text "..."` (writes `answer.json`). Do not restart. Do not freehand the JSON. |
 | `done` | `result.json` written and the slice completed | `piper review` (or the dispatch card). Send the next slice or stop. |
-| `stalled` | `result.json` written and the harness stopped the run (`stalled`, `max_turns`, not completed) | read what landed. Do not treat it as success. Next slice or stop. |
+| `stalled` | `result.json` written, the harness stopped the run (`stalled`, `max_turns`, not completed), and the check did not pass | read what landed. Do not treat it as success. Next slice or stop. |
+| `needs_input` | `result.json` written with `status: "needs_input"` (exit 4): the model asked and `on_ask` would not wait | read `question:` on the card. Answer it in the next brief. Do not raise the timeout. |
 | `died` | process exited and no `result.json` was written | launch parent sends this. Tell the user. Do not relaunch blindly. |
 
 `stalled` is its own kind. Do not hide it inside `done` with `status: error`.
 A parent that only handles `done` will miss a stall, which is the bug this
 standard exists to kill. `result.json` uses the same `status: "stalled"` for
-`max_turns` / no-progress stalls so parents need not parse error strings.
+`max_turns` / no-progress stalls whose check did not pass, so parents need not
+parse error strings.
 
 Body:
 
@@ -194,9 +207,11 @@ agent copies.
 ## Done when
 
 - `--help` names this standard in one paragraph.
-- A detached launch with no URL exits before the sidecar starts.
+- A `--detach` launch with no URL exits before the sidecar starts.
+- Detach is never inferred from stdio: `piper dispatch` under stdin=/dev/null and a
+  regular-file stdout waits for the run and prints the card.
 - A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
   `plan_ready`, or a green packet `check` after an incomplete loop stop such as
-  `max_turns`), `stalled` if it did not.
+  `max_turns`), `stalled` if it did not. A crash or cancel is never `done`.
 - The launch parent POSTs `died` if the sidecar exits with no result.
 - An irreversible call and `ask_user` both POST `ask` and wait.

@@ -21,7 +21,7 @@ Local models require fat direction and thin scope: burn cloud input tokens on th
 
 - **Scope:** 1–3 files per slice. Never dispatch open-ended multi-module tasks.
 - **Explicitness:** Enumerate `EDIT`, `CREATE`, and `DO NOT TOUCH` in `prompt.md`.
-- **Acceptance:** Put an automated check in the brief and pass it to `piper packet --check`. A passing check promotes an incomplete loop stop (for example `max_turns` without an explicit finish) to `status: "ok"`.
+- **Acceptance:** Put an automated check in the brief and pass it to `piper packet --check`. A passing check promotes an incomplete loop stop (for example `max_turns` without an explicit finish) to `status: "ok"`, and the card's `loop:` line says the pass rests on the check alone. A crash, a timeout or an unanswered ask is never promoted.
 - **Stop Condition:** Say when to stop if stuck.
 
 ### `prompt.md` template
@@ -65,7 +65,9 @@ piper packet --id slice-001 --cwd /abs/workspace \
   --prompt-file prompt.md --check "pytest tests/test_slice.py"
 # piper packet ... --trust-mcp godoer
 
-# 3. Attached run. Prints the review card. Does not detach.
+# 3. Attached run. Prints the review card. Never detaches, whatever its stdio.
+#    Claude Code: run it with run_in_background: true and read the card from the
+#    task output when the completion notice arrives (foreground caps at 10 min).
 piper dispatch --task /abs/workspace/.piper/slices/slice-001/task.json --auto-approve-irreversible
 
 # 4. Watch. Optional; the dashboard follows .piper/active.json.
@@ -76,22 +78,24 @@ piper progress --id slice-001 pass --note "validator + test"
 ```
 
 - **Unattended irreversible tools:** `--auto-approve-irreversible` or `--auto-approve-all` on `piper dispatch`.
-- **Ask:** `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not freehand `answer.json`. Do not restart the process.
+- **Ask:** `piper answer allow`, `piper answer deny`, or `piper answer --text "..."`. Do not freehand `answer.json`. Do not restart the process. Bare `piper answer`/`status`/`await`/`review` act on the active slice (`.piper/active.json`). `piper answer` exits 3 when no ask is open; the answer is bound to the open ask and a stale one is discarded.
 - **Already finished:** `piper review --task …`. Status without cat/jq: `piper status --dir …` / `piper await --dir …`.
 - **Lower-level attached run:** `piper run --task …` (same as `piper worker run`). Keep weights warm with `piper worker serve`, then `piper worker run`.
 - **Telemetry / Flight-Recorder Distillation:** `piper distill --input <path>` (e.g. `.godoer/incidents.json` or stdin). Queries the model via `~/.piper/worker.sock` with zero RAM overhead and single-flight lock protection (`/tmp/piper_distill.lock`).
-- **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL.
+- **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL, `4` needs input (the model asked; the question is on the card).
+- **Questions (`--on-ask`):** a plain attached dispatch answers the model's first question unattended (card line `asks:` shows what it assumed) and ends on the next as `needs_input`. `--on-ask wait` blocks for `piper answer`; `--on-ask end` ends on the first question. `--jsonl` and `--detach` default to `wait`.
 
-The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set.
+The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set; raise it with `--max-iterations N`.
 
 ### Wake
-Stay attached (`piper dispatch` / `piper run`). Detach only with a wake URL: `--orch-webhook`, task field `orch_webhook`, `LMP_ORCH_WEBHOOK`, or `.piper/orch_webhook` written by `piper_ui`. Resolve it with `piper wake-url`. Do not copy a URL from the panel. Do not poll as the primary wake.
+Stay attached (`piper dispatch` / `piper run`). Piper never guesses detach from stdio: a background launch passes `piper run --detach` plus a wake URL: `--orch-webhook`, task field `orch_webhook`, `LMP_ORCH_WEBHOOK`, or `.piper/orch_webhook` written by `piper_ui`. Resolve it with `piper wake-url`. Do not copy a URL from the panel. Do not poll as the primary wake.
 
 | kind | parent does |
 | --- | --- |
 | `ask` | `piper answer`. Do not relaunch. |
 | `done` | Read the review card. Next slice or stop. |
 | `stalled` | Not success. Narrow the brief or stop. |
+| `needs_input` | Exit 4. Read `question:` on the card and answer it in the next brief. |
 | `died` | No `result.json`. Tell the user. Do not relaunch blindly. |
 
 ---
@@ -100,12 +104,16 @@ Stay attached (`piper dispatch` / `piper run`). Detach only with a wake URL: `--
 
 Use the card from `piper dispatch` or `piper review`. Do not re-read every line when the card is green.
 
+- `verdict: UNVERIFIED` means the model finished but nothing checked it. It is not a pass: review the diff, or re-dispatch with `--check`.
+- On anything but `PASS` the card already carries `error:`, the failing check's tail (`check:`) and the worker's `piper:` notices (`worker:`). Read those before opening `result.json`.
+- Worker telemetry is in `worker.stderr.log` beside `result.json`; a `DIED` card shows its tail.
+
 | Check | Pass signal | On failure |
 |---|---|---|
 | **Status** | `status == "ok"` | `"stalled"` is not done. Read `error` or the card. |
 | **Touched files** | `files_touched` ⊆ the brief | Revert the surprise, tighten DO NOT TOUCH, re-slice. |
 | **Diff** | Proportional to the slice | Reject a drive-by rewrite. |
-| **Acceptance** | `check` exit code 0 | New slice aimed at `test.output_tail`. |
+| **Acceptance** | `check` exit code 0 (`UNVERIFIED` = no check ran) | New slice aimed at the card's `at:`/`failing:`/`check:` lines. `test.output_tail` is a triaged digest, not the raw last bytes; `test.output_path` is the full log. A timed-out or could-not-run check says so on the `test:` line. |
 | **Summary** | `result.message` matches the goal | If the card is ambiguous, read the log. |
 
 ---
@@ -113,6 +121,7 @@ Use the card from `piper dispatch` or `piper review`. Do not re-read every line 
 ## 5. Failure Playbook
 
 - **Timeout (`exit 2` or `status: "timeout"`):** Smaller slice, or a higher `timeout_s` on the next `piper packet`.
+- **`needs_input` (`exit 4`):** The model asked something nobody attached could answer. Put the answer to the card's `question:` in the next brief. A bigger timeout will not help.
 - **`died` / no result:** Kill a stale `lmp_sidecar`, clear the lock, retry the same packet once.
 - **Thrash:** `mode` is not on the emitter. For a read-only diagnosis, say so in `prompt.md` and keep the slice to one file. Then a pinpoint edit slice.
 - **Model ceiling:** Orchestrator writes the hard logic, then hands tests and boilerplate back to Piper.

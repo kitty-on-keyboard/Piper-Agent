@@ -2,7 +2,9 @@
 #include "src/surface/socket_reader.hpp"
 
 #include <arpa/inet.h>
+#include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <netinet/in.h>
@@ -308,17 +310,6 @@ TEST(merge_files_touched_unions_git_paths_for_mcp) {
     CHECK_EQ(touched[2], "c.json");
 }
 
-TEST(is_stalled_termination_covers_max_turns_and_no_progress) {
-    // P2: result.status must be "stalled" for these reasons.
-    CHECK(is_stalled_termination("max_turns"));
-    CHECK(is_stalled_termination("stalled"));
-    CHECK(is_stalled_termination("stalled_no_turn"));
-    CHECK(!is_stalled_termination("ended"));
-    CHECK(!is_stalled_termination("wall_clock"));
-    CHECK(!is_stalled_termination("backend_error"));
-    CHECK(!is_stalled_termination(""));
-}
-
 TEST(compose_result_message_prefers_finish_and_trims_incomplete) {
     // P3: finish summary wins; incomplete runs get short first/last, not a diary.
     const std::string finish = "Shipped the validator and its unit test.";
@@ -372,7 +363,10 @@ TEST(write_result_writes_atomic_json) {
     r.generated_tokens = 450;
     r.files_touched = {"a.py", "b.py"};
     r.diff_stat = {15, 2, 2};
-    r.test = {true, 0, "pytest", "tests passed"};
+    r.test.ran = true;
+    r.test.exit_code = 0;
+    r.test.command = "pytest";
+    r.test.output_tail = "tests passed";
 
     write_result(res_file, r);
 
@@ -471,6 +465,8 @@ TEST(write_awaiting_user_writes_valid_json) {
     CHECK_EQ(j["options"].get<std::string>(), "yes,no");
     CHECK_EQ(j["run_id"].get<std::string>(), "r-test");
     CHECK_EQ(j["seq"].get<uint64_t>(), uint64_t{42});
+    // The waiting process, so `piper status` can tell a live ask from a dead one.
+    CHECK_EQ(j["pid"].get<long long>(), static_cast<long long>(::getpid()));
 
     std::filesystem::remove_all(tmp_dir);
 }
@@ -481,58 +477,98 @@ TEST(read_and_consume_answer_reads_formats_and_deletes_files) {
     std::string ans_file = (tmp_dir / "answer.json").string();
     std::string await_file = (tmp_dir / "awaiting_user.json").string();
 
-    // 1. Missing answer.json returns nullopt
-    CHECK(!read_and_consume_answer(ans_file, await_file).has_value());
+    // 1. Missing answer.json returns nullopt and rejects nothing
+    std::string rejected;
+    CHECK(!read_and_consume_answer(ans_file, await_file, "r-1", 4, &rejected).has_value());
+    CHECK(rejected.empty());
 
-    // 2. Object with "text"
+    // 2. Bound object with "text"
     {
         std::ofstream af(await_file);
         af << "{\"question\":\"q\"}";
         std::ofstream f(ans_file);
-        f << "{\"text\":\"Proceed with option A\"}";
+        f << "{\"text\":\"Proceed with option A\",\"run_id\":\"r-1\",\"seq\":4}";
     }
-    auto ans1 = read_and_consume_answer(ans_file, await_file);
+    auto ans1 = read_and_consume_answer(ans_file, await_file, "r-1", 4);
     REQUIRE(ans1.has_value());
     CHECK_EQ(*ans1, "Proceed with option A");
     CHECK(!std::filesystem::exists(ans_file));
     CHECK(!std::filesystem::exists(await_file));
 
-    // 3. Object with "answer"
+    // 3. Bound object with "answer"
     {
         std::ofstream af(await_file);
         af << "{\"question\":\"q\"}";
         std::ofstream f(ans_file);
-        f << "{\"answer\":\"Proceed with option B\"}";
+        f << "{\"answer\":\"Proceed with option B\",\"run_id\":\"r-1\",\"seq\":4}";
     }
-    auto ans2 = read_and_consume_answer(ans_file, await_file);
+    auto ans2 = read_and_consume_answer(ans_file, await_file, "r-1", 4);
     REQUIRE(ans2.has_value());
     CHECK_EQ(*ans2, "Proceed with option B");
     CHECK(!std::filesystem::exists(ans_file));
     CHECK(!std::filesystem::exists(await_file));
 
-    // 4. Raw JSON string
-    {
-        std::ofstream af(await_file);
-        af << "{\"question\":\"q\"}";
-        std::ofstream f(ans_file);
-        f << "\"Direct JSON string answer\"";
+    // 4. Unbound forms (a bare JSON string, plain text, an object with no run/seq)
+    // are not this ask's answer: deleted unread, reported, the ask stays open.
+    for (const char* body : {"\"Direct JSON string answer\"",
+                             "Plain text reply from orchestrator\n",
+                             "{\"text\":\"allow\"}"}) {
+        {
+            std::ofstream af(await_file);
+            af << "{\"question\":\"q\"}";
+            std::ofstream f(ans_file);
+            f << body;
+        }
+        rejected.clear();
+        CHECK(!read_and_consume_answer(ans_file, await_file, "r-1", 4, &rejected).has_value());
+        CHECK(!rejected.empty());
+        CHECK(!std::filesystem::exists(ans_file));
+        CHECK(std::filesystem::exists(await_file));
     }
-    auto ans3 = read_and_consume_answer(ans_file, await_file);
-    REQUIRE(ans3.has_value());
-    CHECK_EQ(*ans3, "Direct JSON string answer");
-    CHECK(!std::filesystem::exists(ans_file));
-
-    // 5. Raw plain text
-    {
-        std::ofstream f(ans_file);
-        f << "Plain text reply from orchestrator\n";
-    }
-    auto ans4 = read_and_consume_answer(ans_file, await_file);
-    REQUIRE(ans4.has_value());
-    CHECK_EQ(*ans4, "Plain text reply from orchestrator");
-    CHECK(!std::filesystem::exists(ans_file));
 
     std::filesystem::remove_all(tmp_dir);
+}
+
+// The stale-answer chain: an answer written for an earlier ask (or an earlier run)
+// must never answer the question that happens to be open now.
+TEST(read_and_consume_answer_ignores_an_answer_for_another_ask) {
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_worker_consume_seq";
+    std::filesystem::create_directories(tmp_dir);
+    std::string ans_file = (tmp_dir / "answer.json").string();
+    std::string await_file = (tmp_dir / "awaiting_user.json").string();
+
+    for (const char* body : {"{\"text\":\"allow\",\"run_id\":\"r-1\",\"seq\":3}",
+                             "{\"text\":\"allow\",\"run_id\":\"r-0\",\"seq\":4}"}) {
+        {
+            std::ofstream af(await_file);
+            af << "{\"question\":\"q\",\"run_id\":\"r-1\",\"seq\":4}";
+            std::ofstream f(ans_file);
+            f << body;
+        }
+        std::string rejected;
+        CHECK(!read_and_consume_answer(ans_file, await_file, "r-1", 4, &rejected).has_value());
+        CHECK(rejected.find("does not match the open ask") != std::string::npos);
+        CHECK(!std::filesystem::exists(ans_file));
+        CHECK(std::filesystem::exists(await_file));
+    }
+    std::filesystem::remove_all(tmp_dir);
+}
+
+TEST(clear_stale_run_files_removes_the_previous_runs_ask_answer_and_result) {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "test_worker_stale_files";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string result = (dir / "result.json").string();
+    CHECK(!clear_stale_run_files(result));
+    for (const char* name : {"awaiting_user.json", "answer.json", "result.json", "events.jsonl"}) {
+        std::ofstream((dir / name).string()) << "{}";
+    }
+    CHECK(clear_stale_run_files(result));
+    CHECK(!std::filesystem::exists(dir / "awaiting_user.json"));
+    CHECK(!std::filesystem::exists(dir / "answer.json"));
+    CHECK(!std::filesystem::exists(dir / "result.json"));
+    CHECK(std::filesystem::exists(dir / "events.jsonl"));  // archive_prior_events owns that
+    std::filesystem::remove_all(dir);
 }
 
 TEST(find_last_ask_user_handles_missing_or_empty_log) {
@@ -1006,7 +1042,7 @@ TEST(handle_irreversible_ask_allow_path) {
     // Pre-populate answer.json so handle_irreversible_ask consumes it immediately
     {
         std::ofstream f(ans_file);
-        f << "{\"text\":\"allow\"}\n";
+        f << "{\"text\":\"allow\",\"run_id\":\"r-test-allow\",\"seq\":7}\n";
     }
 
     IrreversibleAskParams params;
@@ -1040,7 +1076,7 @@ TEST(handle_irreversible_ask_deny_path) {
 
     {
         std::ofstream f(ans_file);
-        f << "{\"answer\":\"deny\"}\n";
+        f << "{\"answer\":\"deny\",\"run_id\":\"r-test-deny\",\"seq\":10}\n";
     }
 
     IrreversibleAskParams params;
@@ -1087,13 +1123,9 @@ TEST(handle_irreversible_ask_timeout_path) {
     IrreversibleAskResult res = handle_irreversible_ask(params);
     CHECK(res == IrreversibleAskResult::Timeout);
 
-    // On timeout, awaiting_user.json was written and NOT deleted
-    CHECK(std::filesystem::exists(await_file));
-    std::ifstream f(await_file);
-    auto j = nlohmann::json::parse(f, nullptr, false);
-    CHECK(!j.is_discarded());
-    CHECK_EQ(j["run_id"].get<std::string>(), "r-test-timeout");
-    CHECK_EQ(j["seq"].get<uint64_t>(), uint64_t{12});
+    // The ask ends with the wait: a timed-out ask must not survive to outrank the
+    // run's result in `piper status` or answer the next run's `piper await`.
+    CHECK(!std::filesystem::exists(await_file));
 
     std::filesystem::remove_all(tmp_dir);
 }
@@ -1120,6 +1152,7 @@ TEST(handle_irreversible_ask_cancelled_path) {
 
     IrreversibleAskResult res = handle_irreversible_ask(params);
     CHECK(res == IrreversibleAskResult::Cancelled);
+    CHECK(!std::filesystem::exists(await_file));
 
     std::filesystem::remove_all(tmp_dir);
 }
@@ -1153,7 +1186,19 @@ TEST(detached_launch_detection_and_gating) {
     ::setenv("LMP_DAEMONIZE", "0", 1);
     CHECK(!is_detached_launch(false));
 
+    // 4. Unset: stdin=/dev/null (what every agent tool runner hands a foreground
+    // command) is NOT a request to detach. Inferring it refused attached runs.
     ::unsetenv("LMP_DAEMONIZE");
+    const int saved_stdin = ::dup(STDIN_FILENO);
+    REQUIRE(saved_stdin >= 0);
+    const int devnull = ::open("/dev/null", O_RDONLY);
+    REQUIRE(devnull >= 0);
+    REQUIRE(::dup2(devnull, STDIN_FILENO) >= 0);
+    ::close(devnull);
+    CHECK(!is_detached_launch(false));
+    CHECK(is_detached_launch(true));
+    ::dup2(saved_stdin, STDIN_FILENO);
+    ::close(saved_stdin);
 }
 
 TEST(init_project_creates_files_and_preserves_godoer) {
@@ -1312,6 +1357,10 @@ TEST(load_packet_parses_auto_approve_irreversible) {
     std::filesystem::remove_all(tmp_dir);
 }
 
+namespace {
+std::string g_forwarded_request;
+} // namespace
+
 TEST(forward_to_daemon_exits_on_result_without_hanging) {
     std::filesystem::path tmp_dir = std::filesystem::temp_directory_path() / "test_fwd_daemon";
     std::filesystem::remove_all(tmp_dir);
@@ -1335,7 +1384,9 @@ TEST(forward_to_daemon_exits_on_result_without_hanging) {
         // Read request
         char buf[1024];
         ssize_t n = ::read(client, buf, sizeof(buf));
-        (void)n;
+        if (n > 0) {
+            g_forwarded_request.assign(buf, static_cast<std::size_t>(n));
+        }
 
         // Send intermediate jsonl line then final result with exit_code: 0
         std::string line1 = "{\"kind\":\"status\",\"step\":1}\n";
@@ -1351,12 +1402,17 @@ TEST(forward_to_daemon_exits_on_result_without_hanging) {
     });
 
     auto start_t = std::chrono::steady_clock::now();
-    auto res = forward_to_daemon(sock_path, "/tmp/task.json", false);
+    auto res = forward_to_daemon(sock_path, "/tmp/task.json", false, false, false, "end", "continue");
     auto end_t = std::chrono::steady_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(end_t - start_t).count();
 
     CHECK(res.has_value());
     CHECK_EQ(*res, 0);
+    // The daemon gets the launcher's on_ask and what its attachment implies.
+    const auto req = nlohmann::json::parse(g_forwarded_request, nullptr, false);
+    CHECK(!req.is_discarded());
+    CHECK_EQ(req.value("on_ask", std::string()), "end");
+    CHECK_EQ(req.value("on_ask_default", std::string()), "continue");
     // Client should have returned immediately upon reading exit_code, well before the 500ms delay!
     CHECK(elapsed_ms < 350.0);
 
@@ -1597,8 +1653,9 @@ TEST(worker_check_timeout_survives_early_output_close) {
     CHECK(seconds < 1.0);
     CHECK(result.test.ran);
     CHECK(result.test.exit_code != 0);
-    CHECK_EQ(result.status, "error");
     CHECK(result.test.output_tail.find("timeout") != std::string::npos);
+    // run_check reports; it never decides the status.
+    CHECK_EQ(result.status, "ok");
 }
 
 TEST(worker_check_retains_output_and_exit_status) {
@@ -1608,84 +1665,396 @@ TEST(worker_check_retains_output_and_exit_status) {
     for (const int exit_code : {0, 7}) {
         packet.check_command = "printf check-output; exit " + std::to_string(exit_code);
         RunResult result;
-        result.status = "ok";
+        result.status = "stalled";
+        result.error = "agent did not complete (max_turns)";
         run_check(packet, result);
+        CHECK(result.test.ran);
         CHECK_EQ(result.test.exit_code, exit_code);
         CHECK_EQ(result.test.output_tail, "check-output");
-        CHECK_EQ(result.status, exit_code == 0 ? "ok" : "error");
+        CHECK_EQ(result.status, "stalled");
+        CHECK_EQ(result.error, "agent did not complete (max_turns)");
     }
 }
 
-TEST(is_incomplete_agent_stop_matches_sidecar_error_shape) {
-    RunResult incomplete;
-    incomplete.status = "error";
-    incomplete.error = "agent did not complete (max_turns)";
-    CHECK(is_incomplete_agent_stop(incomplete));
-
-    RunResult stalled;
-    stalled.status = "error";
-    stalled.error = "agent did not complete (stalled)";
-    CHECK(is_incomplete_agent_stop(stalled));
-
-    RunResult timeout;
-    timeout.status = "timeout";
-    timeout.error = "wall clock exceeded (600s)";
-    CHECK(!is_incomplete_agent_stop(timeout));
-
-    RunResult start_fail;
-    start_fail.status = "error";
-    start_fail.error = "mission failed to start (check model_dir or settings)";
-    CHECK(!is_incomplete_agent_stop(start_fail));
-
-    RunResult irr;
-    irr.status = "error";
-    irr.error = "irreversible tool denied (orchestrator must escalate): rm -rf";
-    CHECK(!is_incomplete_agent_stop(irr));
-}
-
-TEST(worker_check_promotes_incomplete_max_turns_when_green) {
-    // lt-004-class: check green + completed=false must not look like a crash.
+TEST(worker_check_without_command_does_not_run) {
     TaskPacket packet;
     packet.cwd = std::filesystem::temp_directory_path().string();
-    packet.check_command = "printf green; exit 0";
-    packet.check_timeout_s = 2.0;
-
     RunResult result;
-    result.status = "error";
-    result.error = "agent did not complete (max_turns)";
-    result.message = "agent did not complete (max_turns)";
+    run_check(packet, result);
+    CHECK(!result.test.ran);
+    CHECK_EQ(result.test.exit_code, -1);
+}
+
+namespace {
+
+enum class Check { None, Green, Red };
+
+TestBlock check_block(Check c) {
+    TestBlock t;
+    if (c == Check::None) return t;
+    t.ran = true;
+    t.command = "make test";
+    t.exit_code = c == Check::Green ? 0 : 1;
+    return t;
+}
+
+struct FinalizeRow {
+    const char* reason;
+    bool completed;
+    bool started;
+    Check check;
+    const char* status;
+    int exit_code;
+    bool promoted;
+};
+
+} // namespace
+
+// lt-004 was the motivating case: max_turns with a green check came back STALLED
+// because promotion keyed on an error string the sidecar no longer wrote, while a
+// backend crash on an already-green workspace came back PASS. Every row here is a
+// path execute_task_packet can take; the irreversible flag is crossed with all of
+// them below.
+TEST(finalize_run_decides_status_exit_wake_and_promotion_in_one_place) {
+    const FinalizeRow rows[] = {
+        // Not started: nothing ran, so nothing can pass.
+        {"", false, false, Check::None, "error", kExitError, false},
+        {"", false, false, Check::Green, "error", kExitError, false},
+        // Timeouts are never promoted.
+        {"wall_clock", false, true, Check::None, "timeout", kExitTimeout, false},
+        {"wall_clock", false, true, Check::Green, "timeout", kExitTimeout, false},
+        {"wall_clock", false, true, Check::Red, "timeout", kExitTimeout, false},
+        {"timeout_awaiting_user", false, true, Check::Green, "timeout", kExitTimeout, false},
+        // Completed: ok unless the check is red.
+        {"ended", true, true, Check::None, "ok", kExitOk, false},
+        {"ended", true, true, Check::Green, "ok", kExitOk, false},
+        {"ended", true, true, Check::Red, "error", kExitError, false},
+        {"plan_ready", false, true, Check::None, "ok", kExitOk, false},
+        {"plan_ready", false, true, Check::Red, "error", kExitError, false},
+        // Incomplete loop stops: a green check promotes, and says so.
+        {"max_turns", false, true, Check::None, "stalled", kExitError, false},
+        {"max_turns", false, true, Check::Green, "ok", kExitOk, true},
+        {"max_turns", false, true, Check::Red, "stalled", kExitError, false},
+        {"stalled", false, true, Check::None, "stalled", kExitError, false},
+        {"stalled", false, true, Check::Green, "ok", kExitOk, true},
+        {"stalled", false, true, Check::Red, "stalled", kExitError, false},
+        {"ended", false, true, Check::None, "error", kExitError, false},
+        {"ended", false, true, Check::Green, "ok", kExitOk, true},
+        {"ended", false, true, Check::Red, "error", kExitError, false},
+        // Crashes, cancels and the hang detector are never promoted.
+        {"backend_error", false, true, Check::None, "error", kExitError, false},
+        {"backend_error", false, true, Check::Green, "error", kExitError, false},
+        {"cancelled", false, true, Check::Green, "error", kExitError, false},
+        {"loop_exit", false, true, Check::Green, "error", kExitError, false},
+        {"", false, true, Check::Green, "error", kExitError, false},
+        {"stalled_no_turn", false, true, Check::None, "stalled", kExitError, false},
+        {"stalled_no_turn", false, true, Check::Green, "stalled", kExitError, false},
+    };
+    for (const FinalizeRow& row : rows) {
+        for (const bool irreversible : {false, true}) {
+            RunFacts facts;
+            facts.termination_reason = row.reason;
+            facts.completed = row.completed;
+            facts.started = row.started;
+            facts.irreversible_unanswered = irreversible;
+            facts.irreversible_detail = "rm -rf build";
+            facts.timeout_s = 600.0;
+            const Finalized f = finalize_run(facts, check_block(row.check));
+
+            // An unanswered irreversible ask outranks every loop stop but not a
+            // start failure or a timeout, and a check never answers it.
+            const bool escalated = irreversible && row.started &&
+                std::string(row.reason) != "wall_clock" &&
+                std::string(row.reason) != "timeout_awaiting_user";
+            const std::string want_status = escalated ? "error" : row.status;
+            const int want_exit = escalated ? kExitError : row.exit_code;
+            const bool want_promoted = escalated ? false : row.promoted;
+            if (f.status != want_status || f.exit_code != want_exit ||
+                f.promoted_by_check != want_promoted) {
+                std::fprintf(stderr, "  row reason=%s completed=%d started=%d check=%d irr=%d -> %s/%d/%d\n",
+                             row.reason, row.completed, row.started, static_cast<int>(row.check),
+                             irreversible, f.status.c_str(), f.exit_code, f.promoted_by_check);
+            }
+            CHECK_EQ(f.status, want_status);
+            CHECK_EQ(f.exit_code, want_exit);
+            CHECK_EQ(f.promoted_by_check, want_promoted);
+            CHECK_EQ(f.wake_kind, std::string(want_status == "ok" ? "done" : "stalled"));
+            CHECK_EQ(f.error.empty(), want_status == "ok");
+            if (escalated) {
+                CHECK(f.error.find("irreversible") != std::string::npos);
+                CHECK(f.error.find("rm -rf build") != std::string::npos);
+            }
+        }
+    }
+}
+
+TEST(finalize_run_error_text_names_the_cause) {
+    RunFacts facts;
+    facts.timeout_s = 600.0;
+
+    facts.termination_reason = "max_turns";
+    CHECK_EQ(finalize_run(facts, check_block(Check::Red)).error,
+             "agent did not complete (max_turns)");
+
+    facts.termination_reason = "";
+    CHECK_EQ(finalize_run(facts, check_block(Check::None)).error,
+             "agent did not complete (no_run_end)");
+
+    facts.termination_reason = "timeout_awaiting_user";
+    CHECK_EQ(finalize_run(facts, check_block(Check::None)).error,
+             "timeout awaiting user answer (600s)");
+
+    facts.termination_reason = "ended";
+    facts.completed = true;
+    TestBlock red = check_block(Check::Red);
+    red.exit_code = 7;
+    CHECK_EQ(finalize_run(facts, red).error, "check failed (exit 7)");
+
+    facts.started = false;
+    facts.termination_reason = "";
+    facts.completed = false;
+    CHECK_EQ(finalize_run(facts, check_block(Check::Green)).error,
+             "mission failed to start (check model_dir or settings)");
+}
+
+// A check that timed out or never ran is not a green check and not an ordinary red one:
+// it can never promote, and the error names what happened.
+TEST(finalize_run_never_promotes_a_timed_out_or_never_run_check) {
+    RunFacts facts;
+    facts.termination_reason = "max_turns";
+
+    TestBlock timed_out;
+    timed_out.ran = true;
+    timed_out.exit_code = 0;  // whatever the code says, the deadline killed it
+    timed_out.timed_out = true;
+    timed_out.seconds = 300.2;
+    Finalized f = finalize_run(facts, timed_out);
+    CHECK_EQ(f.status, "stalled");
+    CHECK(!f.promoted_by_check);
+
+    facts.termination_reason = "ended";
+    facts.completed = true;
+    f = finalize_run(facts, timed_out);
+    CHECK_EQ(f.status, "error");
+    CHECK_EQ(f.error, "check timed out after 300s");
+
+    TestBlock never;
+    never.ran = true;
+    never.exit_code = 127;
+    never.could_not_run = true;
+    f = finalize_run(facts, never);
+    CHECK_EQ(f.status, "error");
+    CHECK_EQ(f.error, "check could not run (exit 127)");
+}
+
+namespace {
+
+std::filesystem::path check_scratch(const char* tag) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        (std::string("test_worker_check_") + tag + "_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+} // namespace
+
+// The corpus log whose primary locator a raw 2000-byte tail loses: the digest keeps it,
+// triage names it, and the full capture is spooled because the digest dropped bytes.
+TEST(run_check_digests_a_red_build_log_with_log_triage) {
+    const char* root = std::getenv("LMP_REPO_ROOT");
+    REQUIRE(root != nullptr);
+    const std::string log =
+        std::string(root) + "/tests/testdata/log_triage/logs/build_missing_semi_early.log";
+    REQUIRE(std::filesystem::is_regular_file(log));
+
+    const auto dir = check_scratch("triage");
+    TaskPacket packet;
+    packet.cwd = dir.string();
+    packet.result_path = (dir / "result.json").string();
+    packet.check_command = "cat '" + log + "'; exit 2";
+    packet.check_timeout_s = 10.0;
+    RunResult result;
     run_check(packet, result);
 
-    CHECK(result.test.ran);
-    CHECK_EQ(result.test.exit_code, 0);
-    CHECK_EQ(result.status, "ok");
-    CHECK(result.error.empty());
-    CHECK_EQ(result.message, "check passed");
+    CHECK_EQ(result.test.exit_code, 2);
+    CHECK(!result.test.timed_out);
+    CHECK(!result.test.could_not_run);
+    CHECK(result.test.output_tail.size() <= 2000);
+    CHECK(result.test.output_tail.find("config.cpp:4:21") != std::string::npos);
+    REQUIRE(result.test.triage.has_value());
+    bool located = false;
+    for (const CheckDiagnostic& d : result.test.triage->primary) {
+        if (d.path.find("config.cpp") != std::string::npos && d.line == 4) located = true;
+    }
+    CHECK(located);
+    CHECK_EQ(result.test.output_path, (dir / "check.log").string());
+    CHECK(std::filesystem::file_size(dir / "check.log") > 20000);
+    std::filesystem::remove_all(dir);
 }
 
-TEST(worker_check_does_not_promote_timeout_or_irreversible) {
+// Past the 1 MB head the verdict line used to be gone from every artifact.
+TEST(run_check_keeps_the_last_error_of_an_output_over_the_head_cap) {
+    const auto dir = check_scratch("bigout");
     TaskPacket packet;
-    packet.cwd = std::filesystem::temp_directory_path().string();
-    packet.check_command = "exit 0";
-    packet.check_timeout_s = 2.0;
+    packet.cwd = dir.string();
+    packet.result_path = (dir / "result.json").string();
+    packet.check_command =
+        "i=0; while [ $i -lt 30000 ]; do echo \"noise line $i of the build output padding\"; "
+        "i=$((i+1)); done; echo 'src/x.cpp:7:3: error: use of undeclared identifier boom'; exit 1";
+    packet.check_timeout_s = 60.0;
+    RunResult result;
+    run_check(packet, result);
 
-    RunResult timeout;
-    timeout.status = "timeout";
-    timeout.error = "wall clock exceeded (60s)";
-    timeout.message = timeout.error;
-    run_check(packet, timeout);
-    CHECK_EQ(timeout.test.exit_code, 0);
-    CHECK_EQ(timeout.status, "timeout");
-    CHECK_EQ(timeout.error, "wall clock exceeded (60s)");
+    CHECK_EQ(result.test.exit_code, 1);
+    CHECK(result.test.output_tail.find("undeclared identifier boom") != std::string::npos);
+    REQUIRE(!result.test.output_path.empty());
+    std::ifstream in(result.test.output_path);
+    const std::string spooled((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(spooled.find("bytes not captured") != std::string::npos);
+    CHECK(spooled.find("undeclared identifier boom") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}
 
-    RunResult irr;
-    irr.status = "error";
-    irr.error = "irreversible tool denied (orchestrator must escalate): wipe";
-    irr.message = irr.error;
-    run_check(packet, irr);
-    CHECK_EQ(irr.test.exit_code, 0);
-    CHECK_EQ(irr.status, "error");
-    CHECK(!irr.error.empty());
+TEST(run_check_names_a_timeout_and_a_command_that_never_ran) {
+    const auto dir = check_scratch("taxonomy");
+    TaskPacket packet;
+    packet.cwd = dir.string();
+    packet.result_path = (dir / "result.json").string();
+
+    packet.check_command = "sleep 2";
+    packet.check_timeout_s = 1.0;
+    RunResult slow;
+    run_check(packet, slow);
+    CHECK(slow.test.timed_out);
+    CHECK(!slow.test.could_not_run);
+    CHECK(slow.test.output_tail.find("[timeout after") != std::string::npos);
+    CHECK(describe_check_failure(slow.test).rfind("check timed out after ", 0) == 0);
+
+    packet.check_command = "exit 127";
+    packet.check_timeout_s = 5.0;
+    RunResult never;
+    run_check(packet, never);
+    CHECK(never.test.could_not_run);
+    CHECK(!never.test.timed_out);
+    CHECK_EQ(describe_check_failure(never.test), "check could not run (exit 127)");
+
+    // Green and short: no triage, no spool, and a stale check.log is not left behind.
+    { std::ofstream((dir / "check.log").string()) << "stale\n"; }
+    packet.check_command = "printf ok";
+    RunResult green;
+    run_check(packet, green);
+    CHECK(!green.test.triage.has_value());
+    CHECK(green.test.output_path.empty());
+    CHECK(!std::filesystem::exists(dir / "check.log"));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(post_run_check_shares_the_in_loop_shell_clock) {
+    TaskPacket packet;
+    CHECK_EQ(packet.check_timeout_s, static_cast<double>(lmp::tools::kShellWallClockSeconds));
+}
+
+// on_ask: the launcher's flag, then the packet, then attachment. Never the wake URL.
+TEST(resolve_on_ask_prefers_flag_then_packet_then_attachment) {
+    CHECK(is_valid_on_ask("wait"));
+    CHECK(is_valid_on_ask("continue"));
+    CHECK(is_valid_on_ask("end"));
+    CHECK(!is_valid_on_ask(""));
+    CHECK(!is_valid_on_ask("ask"));
+    CHECK_EQ(resolve_on_ask("end", "wait", true), "end");
+    CHECK_EQ(resolve_on_ask("", "end", false), "end");
+    CHECK_EQ(resolve_on_ask("", "", true), "wait");       // detached, or a --jsonl reader
+    CHECK_EQ(resolve_on_ask("", "", false), "continue");  // plain attached: nobody can answer
+}
+
+TEST(finalize_run_ends_a_question_nobody_can_answer_as_needs_input) {
+    RunFacts facts;
+    facts.termination_reason = "awaiting_user";
+    facts.needs_input = true;
+    facts.pending_question = "Which config file should I edit?";
+    for (const Check c : {Check::None, Check::Green, Check::Red}) {
+        const Finalized f = finalize_run(facts, check_block(c));
+        CHECK_EQ(f.status, "needs_input");
+        CHECK_EQ(f.exit_code, kExitNeedsInput);
+        CHECK_EQ(f.wake_kind, "needs_input");
+        CHECK(!f.promoted_by_check);
+        CHECK_EQ(f.error, "needs input: Which config file should I edit?");
+    }
+    // The run's own clock still wins: a timeout is a timeout.
+    facts.termination_reason = "wall_clock";
+    CHECK_EQ(finalize_run(facts, check_block(Check::None)).status, "timeout");
+}
+
+TEST(load_packet_parses_and_validates_on_ask) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_worker_on_ask_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "cwd");
+    std::filesystem::create_directories(dir / "model");
+    const auto write = [&](const nlohmann::json& extra) {
+        nlohmann::json j = {{"id", "oa"}, {"cwd", (dir / "cwd").string()},
+                            {"model_dir", (dir / "model").string()}, {"prompt", "x"}};
+        j.update(extra);
+        std::ofstream((dir / "task.json").string()) << j.dump();
+    };
+    std::string error;
+    write(nlohmann::json::object());
+    auto none = load_packet((dir / "task.json").string(), error);
+    REQUIRE(none.has_value());
+    CHECK(none->on_ask.empty());
+    write({{"on_ask", "end"}});
+    auto end = load_packet((dir / "task.json").string(), error);
+    REQUIRE(end.has_value());
+    CHECK_EQ(end->on_ask, "end");
+    write({{"on_ask", "sometimes"}});
+    CHECK(!load_packet((dir / "task.json").string(), error).has_value());
+    CHECK(error.find("on_ask") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(write_result_records_every_ask_and_who_answered) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_worker_asks_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "result.json").string();
+    RunResult result;
+    result.status = "needs_input";
+    result.asks = {{"Use tabs?", "", "unattended"}, {"Which file?", "a,b", ""}};
+    write_result(path, result);
+    std::ifstream in(path);
+    const nlohmann::json j = nlohmann::json::parse(in);
+    REQUIRE(j.at("asks").is_array());
+    REQUIRE(j.at("asks").size() == 2);
+    CHECK_EQ(j["asks"][0]["answered_by"].get<std::string>(), "unattended");
+    CHECK(j["asks"][1]["answered_by"].is_null());
+    CHECK_EQ(j["asks"][1]["options"].get<std::string>(), "a,b");
+    std::filesystem::remove_all(dir);
+}
+
+TEST(unattended_reply_matches_the_eval_harness) {
+    // scripts/agent_eval.py pins its copy against this header; this pins the text.
+    CHECK(std::string(kUnattendedReply).rfind("(unattended run) No operator is available", 0) == 0);
+}
+
+TEST(write_result_records_termination_reason_and_promotion) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_worker_promotion_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "result.json").string();
+
+    RunResult result;
+    result.task_id = "promo";
+    result.status = "ok";
+    result.termination_reason = "max_turns";
+    result.promoted_by_check = true;
+    write_result(path, result);
+
+    std::ifstream in(path);
+    const nlohmann::json j = nlohmann::json::parse(in);
+    CHECK_EQ(j.at("termination_reason").get<std::string>(), "max_turns");
+    CHECK(j.at("promoted_by_check").get<bool>());
+    std::filesystem::remove_all(dir);
 }
 
 TEST(load_packet_parses_max_iterations) {

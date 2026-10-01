@@ -188,7 +188,7 @@ void ensure_registry(Session& session, const std::string& workspace,
     wctx.max_result_bytes = 8192;
     wctx.max_observation_bytes = tools::kObservationBudgetBytes;
     wctx.spool_dir = workspace + "/.lmp_spool";
-    wctx.shell_wall_clock_seconds = 300;
+    wctx.shell_wall_clock_seconds = tools::kShellWallClockSeconds;
     wctx.model_can_see = can_see;
     wctx.commit_think = commit_think;
 

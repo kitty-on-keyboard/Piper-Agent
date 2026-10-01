@@ -76,6 +76,17 @@ DEFAULT_MODEL = os.environ.get("LMP_QWEN_DIR", "")
 SIDECAR = os.path.join(ROOT, "build", "src", "surface", "lmp_sidecar")
 # Bakeoff isolation: product defaults are ON. LMP_COMMIT_THINK=0 LMP_SHADOW_COMPACT=0.
 
+# The one reply an unattended run gives its model's first question. The C++ worker
+# sends the same text under on_ask=continue (kUnattendedReply in
+# src/surface/worker.hpp); piper_worker's self-test pins the two equal.
+UNATTENDED_REPLY = (
+    "(unattended run) No operator is available to answer. Decide "
+    "yourself, on the best reading of the code, state the "
+    "assumption in one line, and continue. If it genuinely cannot "
+    "be settled, finish with your best complete attempt."
+)
+
+
 def stdin_is_devnull():
     """True when stdin is /dev/null (classic nohup / redirected-null launch)."""
     try:
@@ -121,6 +132,16 @@ def detach_from_launch_session():
         return
     if os.getppid() == 1:
         return
+    daemonize()
+
+
+def daemonize():
+    """The detach mechanism alone: double-fork out of the launching session.
+
+    No policy here. Callers that already decided to detach (piper run --detach)
+    call this directly; re-probing stdio is what made an explicit --detach a
+    no-op under piped stdio.
+    """
     if os.fork() > 0:
         os._exit(0)
     os.setsid()
@@ -709,12 +730,7 @@ def drive_sidecar(meta, model_dir, workspace, harness_dir, sampling, contract,
                 state["unattended_replies"] = 1
                 state["prior_yield_turns"] += yield_turns
                 send({"jsonrpc": "2.0", "id": str(ids[0]), "method": "lmp/message",
-                      "params": {"text": (
-                          "(unattended run) No operator is available to answer. Decide "
-                          "yourself, on the best reading of the code, state the "
-                          "assumption in one line, and continue. If it genuinely cannot "
-                          "be settled, finish with your best complete attempt."
-                      )}})
+                      "params": {"text": UNATTENDED_REPLY}})
                 ids[0] += 1
             else:
                 state["completed"] = bool(params.get("completed"))

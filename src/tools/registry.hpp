@@ -43,6 +43,7 @@
 
 #include "src/model/backend.hpp"
 #include "src/platform/fs.hpp"
+#include "src/tools/shell_clock.hpp"
 #include "src/tools/skills.hpp"
 #include "src/tools/think_blocks.hpp"
 #include "src/tools/tool_result.hpp"
