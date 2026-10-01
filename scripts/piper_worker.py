@@ -1099,17 +1099,19 @@ def cmd_dispatch(args):
         "id": packet["id"],
         "text": f"dispatched {packet['id']}",
     })
-    run_argv = ["run", "--task", args.task]
-    if getattr(args, "jsonl", False):
-        run_argv.append("--jsonl")
-    if getattr(args, "orch_webhook", None):
-        run_argv.extend(["--orch-webhook", args.orch_webhook])
-    if getattr(args, "auto_approve_all", False):
-        run_argv.append("--auto-approve-all")
-    elif getattr(args, "auto_approve_irreversible", False):
-        run_argv.append("--auto-approve-irreversible")
-    # Always attached: dispatch owns wait. Detach is out of scope for this helper.
-    code = main(run_argv)
+    run_args = argparse.Namespace(
+        task=args.task,
+        jsonl=bool(getattr(args, "jsonl", False)),
+        orch_webhook=getattr(args, "orch_webhook", None),
+        auto_approve_all=bool(getattr(args, "auto_approve_all", False)),
+        auto_approve_irreversible=bool(getattr(args, "auto_approve_irreversible", False))
+        and not bool(getattr(args, "auto_approve_all", False)),
+        detach=False,
+    )
+    # Attached by construction: dispatch owns the wait and prints the card, so
+    # neither LMP_DAEMONIZE=1 nor how this process's stdio happens to be wired
+    # can turn it into a detached launch.
+    code = cmd_run(run_args, attached_only=True)
     result = load_result_file(result_path)
     card = format_review_card(result, exit_code=code, result_path=result_path)
     append_orch_event(result_path, {
@@ -1728,14 +1730,15 @@ class WorkerParser(argparse.ArgumentParser):
 HELP_CONTRACT = (
     "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
     "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
-    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook). "
+    "explicitly with --detach (or LMP_DAEMONIZE=1) plus a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook. "
+    "Piper never infers detach from stdio: nohup/screen/background launches must pass --detach. "
     "A run that writes result.json POSTs done if completed, stalled if stopped/failed. Process exit with no result.json POSTs died. "
     "Silent detached workers are refused."
 )
 
 PARENT_CONTRACT_BANNER = (
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
-    "Do not detach unless you pass --orch-webhook. No default URL. Events:\n"
+    "Detach only with --detach plus a wake URL. No default URL. Events:\n"
     "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
     "See PIPER.md if present.\n"
 )
@@ -1817,15 +1820,17 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    - `2`: Execution timed out (`timeout_s`).
    - `3`: Invalid task packet or missing wake URL for a detached run.
 
-   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` does not detach.
+   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` never detaches: it is attached by construction, whatever its stdio or `LMP_DAEMONIZE` say.
 
-   Detached or background (`--detach`, nohup, screen) requires a wake URL before start. Resolve it with `piper wake-url`. Do not copy a URL from the panel.
+   In Claude Code, run `piper dispatch` with `run_in_background: true` and read the card from the task output when the completion notice arrives. A foreground Bash call is capped at 10 minutes.
+
+   Piper never guesses detach from stdio. A background launch (nohup, screen, `&`) must say so with `piper run --detach` (or `LMP_DAEMONIZE=1`) and needs a wake URL before start; without `--detach` the run stays attached to whatever launched it. Resolve the URL with `piper wake-url`. Do not copy a URL from the panel.
    - `--orch-webhook URL`, or
    - task field `orch_webhook`, or
    - env `LMP_ORCH_WEBHOOK`, or
    - file `.piper/orch_webhook` (written by `piper_ui`)
 
-   Without a URL the CLI exits before the sidecar starts.
+   `--detach` without a URL exits before the sidecar starts.
 
    Irreversible tools pause unless auto-approve was set. Answer with `piper answer`. Do not write `answer.json`.
 
@@ -1866,7 +1871,10 @@ know who that agent is. There is no default host. Grok, Gemini, a script,
 and a human CI job each pass their own URL.
 
 Turn-based agents cannot stay attached. They pass a wake URL or they do not
-detach. `piper dispatch` stays attached and does not need a URL.
+detach. `piper dispatch` stays attached and does not need a URL. Detach is
+declared with `--detach` (or `LMP_DAEMONIZE=1`), never inferred from stdin or
+stdout: agent tool runners hand every foreground command `/dev/null` and a
+file, so a guess made there refused or orphaned attached runs.
 
 ## How to launch
 
@@ -1879,7 +1887,7 @@ Otherwise, before start, resolve the URL with `piper wake-url` (do not copy it f
 - env `LMP_ORCH_WEBHOOK`, or
 - file `.piper/orch_webhook` (written automatically by `piper_ui` — **do not copy a URL from the panel**)
 
-Detached with no URL: the CLI exits before the sidecar starts. `--help`
+`--detach` with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
 text is the contract, not this chat.
 
@@ -1937,7 +1945,9 @@ agent copies.
 ## Done when
 
 - `--help` names this standard in one paragraph.
-- A detached launch with no URL exits before the sidecar starts.
+- A `--detach` launch with no URL exits before the sidecar starts.
+- Detach is never inferred from stdio: `piper dispatch` under stdin=/dev/null and a
+  regular-file stdout waits for the run and prints the card.
 - A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
   `plan_ready`, or a green packet `check` after an incomplete loop stop such as
   `max_turns`), `stalled` if it did not. A crash or cancel is never `done`.
@@ -1975,7 +1985,9 @@ Use Piper to execute small, bounded slices of long-horizon tasks until the great
    Watch the run: `piper ui --cwd /abs/workspace`.
    Unattended irreversible: `--auto-approve-irreversible` or `--auto-approve-all`.
    Lower-level attached run: `piper run --task` that same path.
-   Detached/background requires a wake URL (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper ui`).
+   In Claude Code: `piper dispatch` with `run_in_background: true`, then read the card from the task output.
+   Detached/background is declared, never inferred from stdio: `piper run --detach` plus a wake URL
+   (`--orch-webhook`, task field, env, or `.piper/orch_webhook` from `piper ui`).
    Resolve it with `piper wake-url`. Do not copy a URL from the panel.
 
 5. **Review**:
@@ -2543,6 +2555,18 @@ def main(argv=None):
         if getattr(args, "worker_cmd", None) not in ("run", "serve", "init"):
             parser.error("expected `piper worker run --task PATH` or `piper worker serve` or `piper worker init`")
 
+    return cmd_run(args)
+
+
+def cmd_run(args, *, attached_only=False):
+    """Run one packet. Attached unless the caller explicitly asked to detach.
+
+    Detach is declared, never inferred: `--detach` or LMP_DAEMONIZE=1. Under agent
+    tool runners stdin is /dev/null and stdout is a regular file on every call, so
+    reading intent from stdio turned every foreground dispatch into a refused or
+    orphaned run. `attached_only` (dispatch) ignores both switches: dispatch owns
+    the wait and prints the card.
+    """
     try:
         packet = load_packet(args.task)
     except PacketError as exc:
@@ -2563,9 +2587,8 @@ def main(argv=None):
                       os.path.dirname(packet.get("result_path") or ""), os.getcwd()],
     )
 
-    flag = os.environ.get("LMP_DAEMONIZE", "")
-    is_detached = bool(getattr(args, "detach", False)) or (flag == "1") or (
-        flag != "0" and (ae.stdin_is_devnull() or ae.stdout_is_regular_file())
+    is_detached = (not attached_only) and (
+        bool(getattr(args, "detach", False)) or os.environ.get("LMP_DAEMONIZE") == "1"
     )
 
     if is_detached and not webhook_url:
@@ -2579,7 +2602,7 @@ def main(argv=None):
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     if is_detached:
-        ae.detach_from_launch_session()
+        ae.daemonize()
 
     result_path = packet["result_path"]
     if os.path.isfile(result_path):
@@ -2601,7 +2624,11 @@ def main(argv=None):
         if webhook_url:
             cmd.extend(["--orch-webhook", webhook_url])
 
-        proc = subprocess.Popen(cmd)
+        # The engine is always attached to this harness; when the harness itself
+        # detached it already forked above. Pin that so an inherited
+        # LMP_DAEMONIZE=1 cannot make the engine refuse an attached run.
+        child_env = dict(os.environ, LMP_DAEMONIZE="0")
+        proc = subprocess.Popen(cmd, env=child_env)
 
         def _forward_sig(signum, frame):
             try:
@@ -2733,6 +2760,32 @@ for raw in sys.stdin:
 """
 
 
+FAKE_SLOW_OK = FAKE_OK.replace(
+    'emit({"jsonrpc": "2.0", "method": "lmp/run_end",',
+    'import time; time.sleep(1.2)\n        emit({"jsonrpc": "2.0", "method": "lmp/run_end",',
+)
+
+# Stand-in for the C++ engine (no .py suffix, so the harness takes its Popen
+# branch): writes a green result.json after ~1 s and records the LMP_DAEMONIZE
+# it inherited, so the self-test can see the harness pinned the child attached.
+FAKE_CPP_WORKER = r"""#!%s
+import json, os, sys, time
+task = sys.argv[sys.argv.index("--task") + 1]
+if os.path.isdir(task):
+    task = os.path.join(task, "task.json")
+with open(task, encoding="utf-8") as fh:
+    packet = json.load(fh)
+time.sleep(1.2)
+result_path = packet.get("result_path") or os.path.join(os.path.dirname(task), "result.json")
+with open(result_path, "w", encoding="utf-8") as fh:
+    json.dump({"task_id": packet["id"], "status": "ok", "message": "done",
+               "turns": 1, "wall_seconds": 1.2,
+               "child_daemonize": os.environ.get("LMP_DAEMONIZE"),
+               "files_touched": [], "diff_stat": {"insertions": 0, "deletions": 0, "files": 0},
+               "test": {"ran": True, "exit_code": 0, "command": "true", "output_tail": ""}}, fh)
+"""
+
+
 def _write_exec(path, template):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(template % sys.executable)
@@ -2767,7 +2820,31 @@ def _sidecar_env(path):
 
 
 def self_test():
-    os.environ["LMP_DAEMONIZE"] = "0"
+    """Fake-sidecar scenarios, hermetic: own cwd, no inherited wake URL or detach switch.
+
+    Wake-URL discovery searches the process cwd, so running from a checkout that has
+    a `.piper/orch_webhook` used to change what `--detach` did. Detach is never
+    pinned off here: the stdio cases below must see the real launch policy.
+    """
+    scrubbed = ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK")
+    saved_env = {key: os.environ.get(key) for key in scrubbed}
+    saved_cwd = os.getcwd()
+    for key in scrubbed:
+        os.environ.pop(key, None)
+    try:
+        with tempfile.TemporaryDirectory(prefix="piper-worker-cwd-") as cwd:
+            os.chdir(cwd)
+            return _self_test_scenarios()
+    finally:
+        os.chdir(saved_cwd)
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _self_test_scenarios():
     failures = []
 
     def check(cond, msg):
@@ -2967,6 +3044,93 @@ def self_test():
             check(sp.get("kind") == "stalled", f"expected kind=stalled, got {sp.get('kind')!r}")
             check(sp.get("task_id") == "selftest-irr", f"expected task_id=selftest-irr, got {sp.get('task_id')!r}")
             check(sp.get("status") == "error", f"expected status=error, got {sp.get('status')!r}")
+
+        # 8b. dispatch is attached by construction. Agent tool runners (Claude Code's
+        # Bash tool) launch with stdin=/dev/null and stdout to a regular file; that
+        # used to read as "detached" -> exit 3, or a double fork and exit 0 with no
+        # card. Run it exactly that way, with LMP_DAEMONIZE unset, for every wake-URL
+        # source and both engine branches.
+        fake_slow = os.path.join(tmp, "fake_slow.py")
+        _write_exec(fake_slow, FAKE_SLOW_OK)
+        fake_cpp = os.path.join(tmp, "fake_cpp_worker")
+        _write_exec(fake_cpp, FAKE_CPP_WORKER)
+        stdio_env = {k: v for k, v in os.environ.items()
+                     if k not in ("LMP_DAEMONIZE", "LMP_ORCH_WEBHOOK")}
+        stdio_env["LMP_USE_CPP_WORKER"] = "1"
+        stdio_env["LMP_QWEN_DIR"] = model_dir
+        for engine_name, engine in (("py", fake_slow), ("cpp", fake_cpp)):
+            for url_source in ("none", "env", "file"):
+                label = f"dispatch[{engine_name},{url_source}]"
+                sws = os.path.join(tmp, f"stdio_{engine_name}_{url_source}")
+                os.makedirs(sws)
+                with open(os.path.join(sws, "a.py"), "w", encoding="utf-8") as fh:
+                    fh.write("# workspace\n")
+                stask = os.path.join(sws, "task.json")
+                task_id = f"stdio-{engine_name}-{url_source}"
+                _write_json(stask, {
+                    "id": task_id, "cwd": sws, "model_dir": model_dir,
+                    "prompt": "Add hello() to a.py.", "timeout_s": 30,
+                })
+                env = dict(stdio_env, LMP_SIDECAR=engine)
+                if url_source == "env":
+                    env["LMP_ORCH_WEBHOOK"] = webhook_url
+                elif url_source == "file":
+                    write_orch_webhook_file(sws, webhook_url)
+                received_payloads.clear()
+                out_file = os.path.join(sws, "dispatch.out")
+                started = time.monotonic()
+                with open(out_file, "w", encoding="utf-8") as out_fh:
+                    proc = subprocess.run(
+                        [sys.executable, os.path.abspath(__file__), "dispatch", "--task", stask],
+                        stdin=subprocess.DEVNULL, stdout=out_fh, stderr=subprocess.STDOUT,
+                        env=env, cwd=sws, timeout=60,
+                    )
+                elapsed = time.monotonic() - started
+                with open(out_file, encoding="utf-8") as fh:
+                    disp_text = fh.read()
+                check(proc.returncode == EXIT_OK, f"{label} must exit 0, got {proc.returncode}: {disp_text!r}")
+                check(elapsed >= 1.0, f"{label} must wait for the run, returned after {elapsed:.2f}s")
+                check("detached pid=" not in disp_text, f"{label} must not detach: {disp_text!r}")
+                check("verdict:  PASS" in disp_text, f"{label} must print the card at exit: {disp_text!r}")
+                kinds = [p.get("kind") for p in received_payloads if p.get("task_id") == task_id]
+                check("died" not in kinds, f"{label} must not POST died, got {kinds!r}")
+                if engine_name == "py" and url_source != "none":
+                    check(kinds.count("done") == 1, f"{label} must POST exactly one done, got {kinds!r}")
+                if engine_name == "cpp":
+                    cpp_result = load_result_file(os.path.join(sws, "result.json")) or {}
+                    check(cpp_result.get("child_daemonize") == "0",
+                          f"{label} must pin the engine attached, got {cpp_result.get('child_daemonize')!r}")
+
+        # 8c. an explicit --detach really detaches, whatever the stdio (piped here):
+        # the launcher returns at once with `detached pid=`, the run finishes orphaned.
+        dws = os.path.join(tmp, "explicit_detach")
+        os.makedirs(dws)
+        dtask = os.path.join(dws, "task.json")
+        _write_json(dtask, {
+            "id": "explicit-detach", "cwd": dws, "model_dir": model_dir,
+            "prompt": "Add hello() to a.py.", "timeout_s": 30,
+        })
+        started = time.monotonic()
+        # Pipes on stdin and stdout, so no stdio probe could fire: only the flag can
+        # make this detach (the old helper re-probed stdio and ran it attached).
+        launcher = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "run", "--task", dtask,
+             "--detach", "--orch-webhook", webhook_url],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=dict(stdio_env, LMP_SIDECAR=fake_cpp), cwd=dws, text=True,
+        )
+        launcher.stdin.close()
+        launch_rc = launcher.wait(timeout=30)
+        launch_s = time.monotonic() - started
+        # The orphan holds the pipe until its run ends, so EOF here also means the
+        # detached run is gone before the tempdir is.
+        detach_text = launcher.stdout.read()
+        launcher.stdout.close()
+        check(launch_rc == EXIT_OK, f"--detach launcher must exit 0, got {launch_rc}")
+        check(launch_s < 1.0, f"--detach launcher must return at once, took {launch_s:.2f}s")
+        check("detached pid=" in detach_text, f"--detach must detach under piped stdio: {detach_text!r}")
+        check(os.path.isfile(os.path.join(dws, "result.json")),
+              "detached run must still finish and write result.json")
 
         # 9. piper init: PIPER.md and .cursor/rules/piper-parent.mdc created, Godoer briefs untouched
         godoer_ws = os.path.join(tmp, "godoer_project")

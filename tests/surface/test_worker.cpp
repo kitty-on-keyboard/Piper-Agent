@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <netinet/in.h>
@@ -1143,7 +1144,19 @@ TEST(detached_launch_detection_and_gating) {
     ::setenv("LMP_DAEMONIZE", "0", 1);
     CHECK(!is_detached_launch(false));
 
+    // 4. Unset: stdin=/dev/null (what every agent tool runner hands a foreground
+    // command) is NOT a request to detach. Inferring it refused attached runs.
     ::unsetenv("LMP_DAEMONIZE");
+    const int saved_stdin = ::dup(STDIN_FILENO);
+    REQUIRE(saved_stdin >= 0);
+    const int devnull = ::open("/dev/null", O_RDONLY);
+    REQUIRE(devnull >= 0);
+    REQUIRE(::dup2(devnull, STDIN_FILENO) >= 0);
+    ::close(devnull);
+    CHECK(!is_detached_launch(false));
+    CHECK(is_detached_launch(true));
+    ::dup2(saved_stdin, STDIN_FILENO);
+    ::close(saved_stdin);
 }
 
 TEST(init_project_creates_files_and_preserves_godoer) {

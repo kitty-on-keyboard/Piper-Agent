@@ -121,6 +121,16 @@ def detach_from_launch_session():
         return
     if os.getppid() == 1:
         return
+    daemonize()
+
+
+def daemonize():
+    """The detach mechanism alone: double-fork out of the launching session.
+
+    No policy here. Callers that already decided to detach (piper run --detach)
+    call this directly; re-probing stdio is what made an explicit --detach a
+    no-op under piped stdio.
+    """
     if os.fork() > 0:
         os._exit(0)
     os.setsid()

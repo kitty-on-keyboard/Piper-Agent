@@ -2351,7 +2351,7 @@ void handle_daemon_sig(int sig) {
 
 static constexpr const char* kParentContractBanner =
     "piper: you are the parent. Stay attached and read the exit and result.json.\n"
-    "Do not detach unless you pass --orch-webhook. No default URL. Events:\n"
+    "Detach only with --detach plus a wake URL. No default URL. Events:\n"
     "ask (piper answer allow|deny|--text), done, stalled (not success), died (do not relaunch).\n"
     "See PIPER.md if present.\n";
 
@@ -2378,7 +2378,8 @@ static constexpr const char* kWorkerHelpText =
     "  --idle-timeout <seconds>        Idle timeout in seconds (default: 3600)\n\n"
     "Piper worker wake standard: parent owns the horizon; events ask/done/stalled/died; pass --orch-webhook or stay attached. "
     "Two legal ways to own the horizon: stay attached (parent waits on files/exit, no webhook) or detach "
-    "(screen, nohup, background, requiring a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook). "
+    "explicitly with --detach (or LMP_DAEMONIZE=1) plus a wake URL via --orch-webhook, task.json orch_webhook, LMP_ORCH_WEBHOOK, or .piper/orch_webhook. "
+    "Piper never infers detach from stdio: nohup/screen/background launches must pass --detach. "
     "A run that writes result.json POSTs done if completed, stalled if stopped/failed. Process exit with no result.json POSTs died. "
     "Silent detached workers are refused.\n";
 } // namespace

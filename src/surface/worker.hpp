@@ -271,9 +271,8 @@ bool post_orch_webhook(const std::string& webhook_url,
                        const WebhookPayload& payload,
                        double timeout_s = 5.0);
 
-// Detached launch detection (spec AGENT_WAKE.md).
-[[nodiscard]] bool stdin_is_devnull();
-[[nodiscard]] bool stdout_is_regular_file();
+// Detached launch (spec AGENT_WAKE.md): true only for an explicit --detach or
+// LMP_DAEMONIZE=1. Never inferred from how stdio is wired.
 [[nodiscard]] bool is_detached_launch(bool cli_detach);
 
 // ------------------------------------------------------------------

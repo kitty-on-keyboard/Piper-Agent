@@ -65,7 +65,9 @@ piper packet --id slice-001 --cwd /abs/workspace \
   --prompt-file prompt.md --check "pytest tests/test_slice.py"
 # piper packet ... --trust-mcp godoer
 
-# 3. Attached run. Prints the review card. Does not detach.
+# 3. Attached run. Prints the review card. Never detaches, whatever its stdio.
+#    Claude Code: run it with run_in_background: true and read the card from the
+#    task output when the completion notice arrives (foreground caps at 10 min).
 piper dispatch --task /abs/workspace/.piper/slices/slice-001/task.json --auto-approve-irreversible
 
 # 4. Watch. Optional; the dashboard follows .piper/active.json.
@@ -82,10 +84,10 @@ piper progress --id slice-001 pass --note "validator + test"
 - **Telemetry / Flight-Recorder Distillation:** `piper distill --input <path>` (e.g. `.godoer/incidents.json` or stdin). Queries the model via `~/.piper/worker.sock` with zero RAM overhead and single-flight lock protection (`/tmp/piper_distill.lock`).
 - **Exit codes:** `0` ok, `1` worker error, `2` timeout, `3` invalid packet or detached launch with no wake URL.
 
-The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set.
+The emitter writes `<cwd>/.piper/slices/<id>/task.json` unless `--out` is set. It writes `id`, `cwd`, `prompt`, `model_dir` (from `--model-dir` or `LMP_QWEN_DIR`; missing model exits 3), auto-approve flags, `timeout_s` (default 600), and `result_path`. It copies `--prompt-file` to `prompt.md` beside the packet and records `.piper/active.json`. Optional `--check`, `--trust-mcp`. Turn budget defaults to **30**, or **60** when `trust_mcp` is set; raise it with `--max-iterations N`.
 
 ### Wake
-Stay attached (`piper dispatch` / `piper run`). Detach only with a wake URL: `--orch-webhook`, task field `orch_webhook`, `LMP_ORCH_WEBHOOK`, or `.piper/orch_webhook` written by `piper_ui`. Resolve it with `piper wake-url`. Do not copy a URL from the panel. Do not poll as the primary wake.
+Stay attached (`piper dispatch` / `piper run`). Piper never guesses detach from stdio: a background launch passes `piper run --detach` plus a wake URL: `--orch-webhook`, task field `orch_webhook`, `LMP_ORCH_WEBHOOK`, or `.piper/orch_webhook` written by `piper_ui`. Resolve it with `piper wake-url`. Do not copy a URL from the panel. Do not poll as the primary wake.
 
 | kind | parent does |
 | --- | --- |

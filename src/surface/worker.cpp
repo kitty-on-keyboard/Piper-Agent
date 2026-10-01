@@ -1530,35 +1530,15 @@ bool post_orch_webhook(const std::string& webhook_url,
     return false;
 }
 
-bool stdin_is_devnull() {
-    struct stat s0{}, sn{};
-    if (::fstat(STDIN_FILENO, &s0) != 0 || ::stat("/dev/null", &sn) != 0) {
-        return false;
-    }
-    return (s0.st_dev == sn.st_dev && s0.st_ino == sn.st_ino);
-}
-
-bool stdout_is_regular_file() {
-    struct stat s1{};
-    if (::fstat(STDOUT_FILENO, &s1) != 0) {
-        return false;
-    }
-    return S_ISREG(s1.st_mode);
-}
-
 bool is_detached_launch(bool cli_detach) {
+    // Declared, never inferred. stdin=/dev/null and a regular-file stdout are what
+    // every agent tool runner hands a foreground command, so reading detach from
+    // them refused or orphaned attached runs.
     if (cli_detach) {
         return true;
     }
     const char* flag = std::getenv("LMP_DAEMONIZE");
-    std::string f = flag ? flag : "";
-    if (f == "1") {
-        return true;
-    }
-    if (f != "0" && (stdin_is_devnull() || stdout_is_regular_file())) {
-        return true;
-    }
-    return false;
+    return flag != nullptr && std::string(flag) == "1";
 }
 
 bool parse_approval_answer(const std::string& raw) {

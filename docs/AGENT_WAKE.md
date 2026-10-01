@@ -75,15 +75,17 @@ Local models work best on scoped slices: **the brief must be specific**, and **e
    - `2`: Execution timed out (`timeout_s`).
    - `3`: Invalid task packet or missing wake URL for a detached run.
 
-   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` does not detach.
+   Lower-level attached run, when you are not using the review card helper: `piper run --task task.json` (same as `piper worker run --task task.json`). Keep weights warm across slices with `piper worker serve`, then `piper worker run`. `piper dispatch` never detaches: it is attached by construction, whatever its stdio or `LMP_DAEMONIZE` say.
 
-   Detached or background (`--detach`, nohup, screen) requires a wake URL before start. Resolve it with `piper wake-url`. Do not copy a URL from the panel.
+   In Claude Code, run `piper dispatch` with `run_in_background: true` and read the card from the task output when the completion notice arrives. A foreground Bash call is capped at 10 minutes.
+
+   Piper never guesses detach from stdio. A background launch (nohup, screen, `&`) must say so with `piper run --detach` (or `LMP_DAEMONIZE=1`) and needs a wake URL before start; without `--detach` the run stays attached to whatever launched it. Resolve the URL with `piper wake-url`. Do not copy a URL from the panel.
    - `--orch-webhook URL`, or
    - task field `orch_webhook`, or
    - env `LMP_ORCH_WEBHOOK`, or
    - file `.piper/orch_webhook` (written by `piper_ui`)
 
-   Without a URL the CLI exits before the sidecar starts.
+   `--detach` without a URL exits before the sidecar starts.
 
    Irreversible tools pause unless auto-approve was set. Answer with `piper answer`. Do not write `answer.json`.
 
@@ -124,7 +126,10 @@ know who that agent is. There is no default host. Grok, Gemini, a script,
 and a human CI job each pass their own URL.
 
 Turn-based agents cannot stay attached. They pass a wake URL or they do not
-detach. `piper dispatch` stays attached and does not need a URL.
+detach. `piper dispatch` stays attached and does not need a URL. Detach is
+declared with `--detach` (or `LMP_DAEMONIZE=1`), never inferred from stdin or
+stdout: agent tool runners hand every foreground command `/dev/null` and a
+file, so a guess made there refused or orphaned attached runs.
 
 ## How to launch
 
@@ -137,7 +142,7 @@ Otherwise, before start, resolve the URL with `piper wake-url` (do not copy it f
 - env `LMP_ORCH_WEBHOOK`, or
 - file `.piper/orch_webhook` (written automatically by `piper_ui` — **do not copy a URL from the panel**)
 
-Detached with no URL: the CLI exits before the sidecar starts. `--help`
+`--detach` with no URL: the CLI exits before the sidecar starts. `--help`
 says this in one paragraph. Read that before the first launch. The help
 text is the contract, not this chat.
 
@@ -195,7 +200,9 @@ agent copies.
 ## Done when
 
 - `--help` names this standard in one paragraph.
-- A detached launch with no URL exits before the sidecar starts.
+- A `--detach` launch with no URL exits before the sidecar starts.
+- Detach is never inferred from stdio: `piper dispatch` under stdin=/dev/null and a
+  regular-file stdout waits for the run and prints the card.
 - A run that writes `result.json` POSTs `done` if `status=ok` (model completed,
   `plan_ready`, or a green packet `check` after an incomplete loop stop such as
   `max_turns`), `stalled` if it did not. A crash or cancel is never `done`.
