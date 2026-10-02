@@ -33,6 +33,11 @@
 **Learning:** Token identifier and access credential suffixes like `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` must be explicitly included in suffix filtering rules to prevent sensitive authentication tokens and key pairs from being inherited.
 **Prevention:** Added `CRED`, `CREDS`, `TOKEN_ID`, `SECRET_KEY`, `AUTH_TOKEN`, and `ACCESS_TOKEN` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
 
+## 2026-03-31 - Include authorization headers and database connection string suffixes in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying HTTP authorization headers or database connection strings under allowlisted prefixes (such as `LC_AUTHORIZATION`, `XDG_AUTH_HEADER`, `LC_DATABASE_URL`, `XDG_CONN_STRING`, `LC_CONNECTION_STRING`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Common connection strings and HTTP authentication header terms like `AUTHORIZATION`, `AUTH_HEADER`, `DATABASE_URL`, `CONN_STRING`, and `CONNECTION_STRING` must be explicitly included in suffix filtering rules to prevent sensitive database credentials and HTTP bearer/basic auth headers in allowlisted namespaces from leaking to untrusted child processes.
+**Prevention:** Added `AUTHORIZATION`, `AUTH_HEADER`, `DATABASE_URL`, `CONN_STRING`, and `CONNECTION_STRING` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+
 ## 2026-03-31 - Include passwords and secret/key file path suffixes in spawn environment deny list
 **Vulnerability:** Parent environment variables carrying shorthand passwords or secret/key/token/auth file paths under allowlisted prefixes (such as `LC_PASS`, `XDG_KEYFILE`, `LC_KEY_FILE`, `XDG_SECRET_FILE`, `LC_TOKEN_FILE`, `XDG_AUTH_FILE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Common credential shorthands and sensitive file path suffixes like `PASS`, `KEYFILE`, `KEY_FILE`, `SECRET_FILE`, `TOKEN_FILE`, and `AUTH_FILE` must be explicitly included in suffix filtering rules to prevent sensitive secret files and passwords in allowlisted namespaces from leaking to untrusted child processes.
