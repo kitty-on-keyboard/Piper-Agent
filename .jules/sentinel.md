@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-09-23 - Include concatenated token and key terms in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying un-delimited or concatenated token/key identifiers under allowlisted prefixes (such as `LC_IDTOKEN`, `XDG_AUTHTOKEN`, `LC_OAUTHTOKEN`, `XDG_SESSIONTOKEN`, `LC_ACCESSTOKEN`, `XDG_SECRETKEY`, `LC_AUTHKEY`, `XDG_CLIENTSECRET`) bypassed `denied_parent_key` because `_TOKEN` / `_KEY` suffix matches required an underscore separator prior to the suffix.
+**Learning:** Concatenated credential terms without delimiter underscores (like `IDTOKEN`, `AUTHTOKEN`, `OAUTHTOKEN`, `SESSIONTOKEN`, `ACCESSTOKEN`, `SECRETKEY`, `AUTHKEY`, `CLIENTSECRET`) must be explicitly listed in suffix filtering rules to prevent sensitive authentication tokens and secrets from leaking across process boundaries under allowlisted namespace prefixes.
+**Prevention:** Added `IDTOKEN`, `AUTHTOKEN`, `OAUTHTOKEN`, `SESSIONTOKEN`, `ACCESSTOKEN`, `SECRETKEY`, `AUTHKEY`, and `CLIENTSECRET` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
