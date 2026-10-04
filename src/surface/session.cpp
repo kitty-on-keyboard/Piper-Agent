@@ -64,7 +64,7 @@ ModelLoad load_model(Session& session, const std::string& model_dir,
     // it died with "the prompt carries an image but the model was loaded without its
     // vision tower". A capability nothing switches on is a capability that does not ship.
     //
-    // Unconditional `true` is not the fix: the loader REFUSES vision against a text-only
+    // Unconditional `true` is not the answer: the loader REFUSES vision against a text-only
     // export by design, so asking always would turn every text-only checkpoint into a
     // load failure. Ask what is there, then request exactly that.
     //
