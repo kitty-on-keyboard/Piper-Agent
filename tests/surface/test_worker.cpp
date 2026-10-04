@@ -1496,6 +1496,28 @@ TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(is_daemon_alive_rejects_oversized_socket_path) {
+    struct sockaddr_un addr{};
+    std::string long_path(sizeof(addr.sun_path) + 10, 'a');
+    CHECK(!is_daemon_alive(long_path));
+}
+
+TEST(forward_to_daemon_rejects_oversized_socket_path) {
+    struct sockaddr_un addr{};
+    std::string long_path(sizeof(addr.sun_path) + 10, 'a');
+    CHECK(!forward_to_daemon(long_path, "/tmp/task.json", false).has_value());
+}
+
+TEST(daemon_listener_start_rejects_oversized_socket_path) {
+    struct sockaddr_un addr{};
+    std::string long_path(sizeof(addr.sun_path) + 10, 'a');
+    DaemonConfig config;
+    config.socket_path = long_path;
+    config.pid_path = "/tmp/test.pid";
+    DaemonListener listener(config);
+    CHECK(!listener.start());
+}
+
 TEST(parse_idle_timeout_arg_handles_invalid_conversions) {
     // Gate covers the catch without linking sidecar's worker_main.
     CHECK_EQ(parse_idle_timeout_arg("abc", 3600.0), 3600.0);
