@@ -86,6 +86,15 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_KEY_PATH=/tmp/keypath",
+        "XDG_SECRET_PATH=/tmp/secretpath",
+        "LC_TOKEN_PATH=/tmp/tokenpath",
+        "XDG_AUTH_PATH=/tmp/authpath",
+        "LC_CERT_PATH=/tmp/certpath",
+        "LC_KEYPATH=/tmp/keypath",
+        "LC_PEM=/tmp/cert.pem",
+        "XDG_KEYSTORE=/tmp/keystore",
+        "LC_NETRC=/tmp/.netrc",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +125,15 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_KEY_PATH"));
+    CHECK(!has_key(env, "XDG_SECRET_PATH"));
+    CHECK(!has_key(env, "LC_TOKEN_PATH"));
+    CHECK(!has_key(env, "XDG_AUTH_PATH"));
+    CHECK(!has_key(env, "LC_CERT_PATH"));
+    CHECK(!has_key(env, "LC_KEYPATH"));
+    CHECK(!has_key(env, "LC_PEM"));
+    CHECK(!has_key(env, "XDG_KEYSTORE"));
+    CHECK(!has_key(env, "LC_NETRC"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +199,15 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_KEY_PATH=secret",
+        "XDG_SECRET_PATH=secret",
+        "LC_TOKEN_PATH=secret",
+        "XDG_AUTH_PATH=secret",
+        "LC_CERT_PATH=secret",
+        "LC_KEYPATH=secret",
+        "LC_PEM=secret",
+        "XDG_KEYSTORE=secret",
+        "LC_NETRC=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +244,15 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_KEY_PATH"));
+    CHECK(!has_key(env, "XDG_SECRET_PATH"));
+    CHECK(!has_key(env, "LC_TOKEN_PATH"));
+    CHECK(!has_key(env, "XDG_AUTH_PATH"));
+    CHECK(!has_key(env, "LC_CERT_PATH"));
+    CHECK(!has_key(env, "LC_KEYPATH"));
+    CHECK(!has_key(env, "LC_PEM"));
+    CHECK(!has_key(env, "XDG_KEYSTORE"));
+    CHECK(!has_key(env, "LC_NETRC"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
