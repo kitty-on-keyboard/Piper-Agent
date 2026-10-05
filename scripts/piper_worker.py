@@ -1419,37 +1419,85 @@ def _default_worker_socket():
     return "/tmp/piper_worker.sock"
 
 
-def _is_daemon_alive(socket_path):
+def _daemon_state(socket_path):
+    """"ready", "busy" or "offline" -- and busy is not offline.
+
+    The daemon answers one connection at a time, so a ping that connects and
+    hears nothing within a second means it is working for somebody else. Read
+    as "offline", a second caller went on to cold-load a second model beside
+    the one already resident: 15 GB on top of 15 GB.
+    """
     if not socket_path or not os.path.exists(socket_path):
-        return False
+        return "offline"
+    socket_path_for_pid = socket_path
     import socket
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(1.0)
     try:
-        s.connect(socket_path)
-        s.sendall(b'{"method":"ping"}\n')
-        resp = s.recv(1024)
-        s.close()
-        data = json.loads(resp.decode("utf-8"))
-        return data.get("status") == "ok"
-    except Exception:
+        try:
+            s.connect(socket_path)
+        except (ConnectionRefusedError, FileNotFoundError):
+            # Refused is not offline: a daemon mid-request accepts nothing, and
+            # once its listen backlog fills, macOS refuses every connect --
+            # measured on a live daemon. Its pid file says whether it is there.
+            return "busy" if _daemon_pid_alive(socket_path_for_pid) else "offline"
+        except OSError:
+            return "busy"
+        try:
+            s.sendall(b'{"method":"ping"}\n')
+            resp = s.recv(1024)
+        except (socket.timeout, TimeoutError):
+            return "busy"
+        except OSError:
+            return "offline"
+        if not resp:
+            return "busy"
+        try:
+            data = json.loads(resp.decode("utf-8"))
+        except ValueError:
+            return "busy"
+        return "ready" if data.get("status") == "ok" else "busy"
+    finally:
         try:
             s.close()
         except Exception:
             pass
-        return False
 
 
-def _forward_task_to_daemon(sock_path, task_path):
+def _daemon_pid_alive(socket_path):
+    """Whether the daemon that owns ``socket_path`` is a running process."""
+    # Beside its own socket only (`~/.piper/worker.pid`, or the `/tmp`
+    # fallback's `piper_worker.pid`): another socket's daemon says nothing.
+    candidates = [os.path.join(os.path.dirname(socket_path), "worker.pid"),
+                  os.path.splitext(socket_path)[0] + ".pid"]
+    for pid_file in candidates:
+        try:
+            with open(pid_file, encoding="utf-8") as f:
+                pid = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    return False
+
+
+def _is_daemon_alive(socket_path):
+    return _daemon_state(socket_path) == "ready"
+
+
+def _forward_task_to_daemon(sock_path, task_path, *, approve=True):
     import socket
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(sock_path)
-    req = {
-        "method": "run",
-        "task": os.path.abspath(task_path),
-        "auto_approve_irreversible": True,
-        "auto_approve_all": True,
-    }
+    req = {"method": "run", "task": os.path.abspath(task_path)}
+    if approve:
+        req["auto_approve_irreversible"] = True
+        req["auto_approve_all"] = True
     s.sendall((json.dumps(req) + "\n").encode("utf-8"))
     accum = b""
     while True:
@@ -1459,6 +1507,109 @@ def _forward_task_to_daemon(sock_path, task_path):
         accum += chunk
     s.close()
     return accum.decode("utf-8", errors="replace")
+
+
+def _distill_prompt(inc):
+    inc_id = inc.get("id", "INC-UNK")
+    return f"""<|im_start|>system
+You are a senior Godot 4 engine expert and flight-recorder analyst.
+Your task is to analyze factual runtime telemetry incidents and provide a grounded root-cause diagnosis.
+CRITICAL RULES:
+1. You must cite the exact incident ID [{inc_id}].
+2. Do NOT invent, assume, or hallucinate bugs not listed in the incident.
+3. Provide:
+   - Root Cause: exactly why the line threw this error in Godot 4.
+   - Recommended Fix: the concrete GDScript code replacement or configuration change.
+<|im_end|>
+<|im_start|>user
+INCIDENT:
+- ID: {inc_id}
+- Kind: {inc.get("kind", "UNKNOWN")}
+- Error: {inc.get("message", "")}
+- File: {inc.get("file", "")} (Line {inc.get("line", "")})
+
+SOURCE CODE CONTEXT:
+```gdscript
+{inc.get("source_context", "")}
+```
+
+Diagnose [{inc_id}] and provide the exact fix.
+<|im_end|>
+<|im_start|>assistant
+"""
+
+
+#: A distill task is a request for *text*. Plan mode loads no write or exec
+#: tool at all; the approvals are off besides, and `on_ask: end` stops a
+#: headless mission that asks a question nobody is there to answer. It used to
+#: go out as an agent mission with exec, writes and irreversible actions all
+#: auto-approved, its prompt carrying the game's own error text and source.
+_DISTILL_TASK = {
+    "mode": "plan",
+    "auto_approve_exec": False,
+    "auto_approve_writes": False,
+    "auto_approve_irreversible": False,
+    "on_ask": "end",
+    "max_iterations": 8,
+    "timeout_s": 300,
+}
+
+
+def _write_distill(out_path, payload):
+    tmp = f"{out_path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, out_path)
+
+
+def _cold_generate(mlx_python, model_dir, prompts, max_tokens, timeout):
+    """Every prompt through ONE model load, in a child that dies with us.
+
+    A load per incident was a cold 15 GB load each time, and with no timeout a
+    caller that gave up left the child running -- holding the memory the lock
+    was meant to protect, after the lock itself had been released.
+    """
+    code = (
+        "import json, sys\n"
+        "from mlx_lm import load, generate\n"
+        "spec = json.load(sys.stdin)\n"
+        "model, tok = load(spec['model_dir'])\n"
+        "out = [generate(model, tok, prompt=p, max_tokens=spec['max_tokens'], verbose=False)"
+        " for p in spec['prompts']]\n"
+        "print(json.dumps(out))\n"
+    )
+    proc = subprocess.Popen(
+        [mlx_python, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    spec = json.dumps({"model_dir": model_dir, "prompts": prompts, "max_tokens": max_tokens})
+    try:
+        stdout, stderr = proc.communicate(spec, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        return None, f"cold generation timed out after {timeout:.0f}s"
+    if proc.returncode != 0:
+        return None, stderr.strip() or f"exit {proc.returncode}"
+    try:
+        outs = json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None, f"unreadable generation output: {stdout[-300:]!r}"
+    return [str(o) for o in outs], ""
+
+
+def _kill_group(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
 
 
 def cmd_distill(args):
@@ -1475,33 +1626,38 @@ def cmd_distill(args):
         print(f"piper distill: invalid incidents JSON: {exc}", file=sys.stderr)
         return EXIT_INVALID
 
+    out_path = args.out or os.path.join(os.path.dirname(incidents_path), "distilled_diagnosis.json")
     incidents = data.get("incidents", [])
     if not incidents:
         print("piper distill: zero incidents recorded. All systems green.")
-        if args.out:
-            with open(args.out, "w", encoding="utf-8") as f:
-                json.dump({"status": "clean", "diagnoses": []}, f, indent=2)
+        _write_distill(out_path, {"status": "clean", "diagnoses": []})
+        return EXIT_OK
+
+    def skipped(status, msg):
+        # Always written: a caller that finds no file cannot tell "skipped"
+        # from "crashed", and one that finds last week's file reads it as now.
+        print(msg, file=sys.stderr)
+        _write_distill(out_path, {"status": status, "message": msg, "diagnoses": []})
         return EXIT_OK
 
     sock_path = getattr(args, "socket", None) or _default_worker_socket()
-    daemon_online = _is_daemon_alive(sock_path)
+    state = _daemon_state(sock_path)
+    if state == "busy":
+        return skipped(
+            "skipped_busy",
+            f"piper distill: the keep-warm daemon on {sock_path} is busy with another "
+            f"request; not loading a second model beside it.",
+        )
+    daemon_online = state == "ready"
 
     allow_cold = getattr(args, "allow_cold", False)
     if not daemon_online and not allow_cold:
-        msg = (
+        return skipped(
+            "skipped_daemon_offline",
             f"piper distill: keep-warm daemon is not active on {sock_path}.\n"
             f"Start the warm daemon with: piper worker serve\n"
-            f"Or pass '--allow-cold' to explicitly permit cold loading weights into RAM."
+            f"Or pass '--allow-cold' to explicitly permit cold loading weights into RAM.",
         )
-        print(msg, file=sys.stderr)
-        out_path = args.out or os.path.join(os.path.dirname(incidents_path), "distilled_diagnosis.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "status": "skipped_daemon_offline",
-                "message": msg,
-                "diagnoses": [],
-            }, f, indent=2)
-        return EXIT_OK
 
     model_dir = args.model_dir or os.environ.get("LMP_QWEN_DIR") or "/Users/dev/Desktop/Models/Qwen3.8-27B-MLX-4bit"
     if not daemon_online and not os.path.isdir(model_dir):
@@ -1536,114 +1692,61 @@ def cmd_distill(args):
             lock_file = open(lock_path, "w")
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):
-            print("piper distill: another distillation process is active; skipping cold load to prevent memory contention.", file=sys.stderr)
             if lock_file:
                 lock_file.close()
-            return EXIT_OK
+            return skipped(
+                "skipped_busy",
+                "piper distill: another distillation process is active; skipping "
+                "cold load to prevent memory contention.",
+            )
 
     mode_label = f"warm daemon ({sock_path})" if daemon_online else f"cold {os.path.basename(model_dir)}"
     print(f"piper distill: analyzing {len(incidents)} incident(s) via {mode_label}...")
 
-    diagnoses = []
+    prompts = [_distill_prompt(inc) for inc in incidents]
+    outputs = [None] * len(incidents)
+    errors = [""] * len(incidents)
     try:
-        for inc in incidents:
-            inc_id = inc.get("id", "INC-UNK")
-            kind = inc.get("kind", "UNKNOWN")
-            msg = inc.get("message", "")
-            file_path = inc.get("file", "")
-            line = inc.get("line", "")
-            ctx = inc.get("source_context", "")
-
-            prompt = f"""<|im_start|>system
-You are a senior Godot 4 engine expert and flight-recorder analyst.
-Your task is to analyze factual runtime telemetry incidents and provide a grounded root-cause diagnosis.
-CRITICAL RULES:
-1. You must cite the exact incident ID [{inc_id}].
-2. Do NOT invent, assume, or hallucinate bugs not listed in the incident.
-3. Provide:
-   - Root Cause: exactly why the line threw this error in Godot 4.
-   - Recommended Fix: the concrete GDScript code replacement or configuration change.
-<|im_end|>
-<|im_start|>user
-INCIDENT:
-- ID: {inc_id}
-- Kind: {kind}
-- Error: {msg}
-- File: {file_path} (Line {line})
-
-SOURCE CODE CONTEXT:
-```gdscript
-{ctx}
-```
-
-Diagnose [{inc_id}] and provide the exact fix.
-<|im_end|>
-<|im_start|>assistant
-"""
-            raw_output = ""
-            if daemon_online:
+        if daemon_online:
+            for i, inc in enumerate(incidents):
+                inc_id = inc.get("id", "INC-UNK")
                 temp_slice_dir = tempfile.mkdtemp(prefix="piper_distill_")
                 task_file = os.path.join(temp_slice_dir, "task.json")
                 res_file = os.path.join(temp_slice_dir, "result.json")
                 task_data = {
                     "id": f"distill-{inc_id.lower()}",
                     "cwd": os.path.dirname(incidents_path),
-                    "prompt": prompt,
+                    "prompt": prompts[i],
                     "model_dir": model_dir,
-                    "auto_approve_exec": True,
-                    "auto_approve_writes": True,
-                    "auto_approve_irreversible": True,
-                    "timeout_s": 300,
                     "result_path": res_file,
+                    **_DISTILL_TASK,
                 }
                 with open(task_file, "w", encoding="utf-8") as f:
                     json.dump(task_data, f, indent=2)
-
-                _forward_task_to_daemon(sock_path, task_file)
-
+                _forward_task_to_daemon(sock_path, task_file, approve=False)
+                res_obj = {}
                 if os.path.isfile(res_file):
                     try:
                         with open(res_file, encoding="utf-8") as f:
                             res_obj = json.load(f)
-                        raw_output = str(res_obj.get("message") or res_obj.get("error") or "").strip()
                     except Exception as exc:
-                        raw_output = f"Error reading daemon result: {exc}"
+                        errors[i] = f"Error reading daemon result: {exc}"
                 else:
-                    raw_output = "Daemon finished but no result.json was produced"
+                    errors[i] = "Daemon finished but no result.json was produced"
+                message = str(res_obj.get("message") or "").strip()
+                if message:
+                    outputs[i] = message
+                elif not errors[i]:
+                    errors[i] = str(res_obj.get("error") or "the mission returned no message").strip()
                 shutil.rmtree(temp_slice_dir, ignore_errors=True)
+        else:
+            timeout = float(getattr(args, "timeout", 0) or 900)
+            outs, err = _cold_generate(mlx_python, model_dir, prompts, args.max_tokens, timeout)
+            if outs is None:
+                print(f"piper distill: {err}", file=sys.stderr)
+                errors = [err] * len(incidents)
             else:
-                code = f"""
-import json, sys
-from mlx_lm import load, generate
-
-model, tok = load({json.dumps(model_dir)})
-out = generate(model, tok, prompt={json.dumps(prompt)}, max_tokens={args.max_tokens}, verbose=False)
-print(out)
-"""
-                run = subprocess.run([mlx_python, "-c", code], capture_output=True, text=True)
-                if run.returncode != 0:
-                    print(f"piper distill: error analyzing {inc_id}: {run.stderr}", file=sys.stderr)
-                    diagnoses.append({
-                        "incident_id": inc_id,
-                        "status": "error",
-                        "diagnosis": run.stderr.strip()
-                    })
-                    continue
-                raw_output = run.stdout.strip()
-
-            clean_diagnosis = raw_output
-            if "</think>" in raw_output:
-                clean_diagnosis = raw_output.split("</think>")[-1].strip()
-
-            diagnoses.append({
-                "incident_id": inc_id,
-                "kind": kind,
-                "file": file_path,
-                "line": line,
-                "error": msg,
-                "diagnosis": clean_diagnosis,
-                "raw_output": raw_output,
-            })
+                outputs = outs
     finally:
         if lock_file:
             import fcntl
@@ -1653,16 +1756,31 @@ print(out)
             except Exception:
                 pass
 
+    diagnoses = []
+    for i, inc in enumerate(incidents):
+        entry = {
+            "incident_id": inc.get("id", "INC-UNK"),
+            "kind": inc.get("kind", "UNKNOWN"),
+            "file": inc.get("file", ""),
+            "line": inc.get("line", ""),
+            "error": inc.get("message", ""),
+        }
+        if outputs[i] is None:
+            # An error is not a diagnosis, and is never shown as one.
+            entry.update(status="error", diagnosis="", raw_output=errors[i])
+        else:
+            raw_output = outputs[i]
+            clean = raw_output.split("</think>")[-1].strip() if "</think>" in raw_output else raw_output
+            entry.update(status="ok", diagnosis=clean, raw_output=raw_output)
+        diagnoses.append(entry)
+
     report = {
-        "status": "diagnosed",
+        "status": "diagnosed" if any(d["status"] == "ok" for d in diagnoses) else "failed",
         "incidents_count": len(incidents),
         "model": "warm-daemon" if daemon_online else os.path.basename(model_dir),
         "diagnoses": diagnoses,
     }
-
-    out_path = args.out or os.path.join(os.path.dirname(incidents_path), "distilled_diagnosis.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+    _write_distill(out_path, report)
 
     print("\n" + "=" * 65)
     print(f" PIPER FLIGHT-RECORDER DISTILLATION CARD ({report['model']})")
@@ -1670,11 +1788,11 @@ print(out)
     for d in diagnoses:
         print(f"\n[{d['incident_id']}] {d.get('file', '')}:{d.get('line', '')} - {d.get('error', '')}")
         print("-" * 65)
-        print(d.get("diagnosis", ""))
+        print(d.get("diagnosis", "") if d["status"] == "ok" else f"(no diagnosis: {d['raw_output']})")
     print("=" * 65)
     print(f"Saved distilled report to: {out_path}\n")
 
-    return EXIT_OK
+    return EXIT_OK if report["status"] == "diagnosed" else EXIT_ERROR
 
 
 def empty_test_block():
@@ -2801,6 +2919,7 @@ def build_parser():
     distill_p.add_argument("--max-tokens", type=int, default=1500, help="max tokens per diagnosis")
     distill_p.add_argument("--socket", default=None, help="unix domain socket path for keep-warm daemon")
     distill_p.add_argument("--allow-cold", action="store_true", help="allow loading model cold into RAM if daemon is not running")
+    distill_p.add_argument("--timeout", type=float, default=900, help="seconds the cold generation may take (all incidents, one model load)")
 
     return parser
 
