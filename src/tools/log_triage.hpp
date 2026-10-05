@@ -806,6 +806,9 @@ inline void push_unique(std::vector<std::string>& v, std::string s) {
 inline void parse_counts(std::string_view log, StructuredTriage& t) {
     // pytest: "3 failed, 128 passed"
     for (std::size_t i = 0; i + 10 < log.size(); ++i) {
+        if (t.failed >= 0 && t.passed >= 0) {
+            break;
+        }
         if (!is_digit(log[i])) {
             continue;
         }
@@ -820,12 +823,17 @@ inline void parse_counts(std::string_view log, StructuredTriage& t) {
         }
         if (starts_with(log.substr(j), "failed") && t.failed < 0) {
             t.failed = n;
+            j += 6;
         } else if (starts_with(log.substr(j), "passed") && t.passed < 0) {
             t.passed = n;
+            j += 6;
         }
-        i = j;
+        i = j > 0 ? j - 1 : 0;
     }
     // ctest: "92% tests passed, 1 tests failed out of 13"
+    if (t.failed >= 0) {
+        return;
+    }
     const std::size_t ctest = log.find("tests failed out of");
     if (ctest != std::string_view::npos) {
         // walk back for "N tests failed"
