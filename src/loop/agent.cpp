@@ -3285,6 +3285,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
                 // each one nudged with the file note, none of them broken out of.
                 const bool display_only_turn =
                     spun && turn.extra_calls.empty() && is_display_only(turn.tool_name);
+                // HISTORICAL RATIONALE for think_truncated note below (preventing bad advice).
                 // A TURN WHOSE REASONING THE HARNESS CUT DID NOT CHOOSE TO STOP THINKING,
                 // and the generic note reads as though it did. ThinkCapMask forces a
                 // `</think>` at the budget; the model receives it, but a thought
