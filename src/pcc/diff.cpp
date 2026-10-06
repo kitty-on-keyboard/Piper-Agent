@@ -15,7 +15,8 @@ struct Op {
 
 // Longest common subsequence over the trimmed middle, backtracked into an edit script.
 // Classic O(n*m); the caller has already checked the product against the budget.
-std::vector<Op> align(const std::vector<std::string>& a, const std::vector<std::string>& b,
+std::vector<Op> align(const std::vector<std::string_view>& a,
+                      const std::vector<std::string_view>& b,
                       std::size_t lo, std::size_t a_hi, std::size_t b_hi) {
     const std::size_t n = a_hi - lo;
     const std::size_t m = b_hi - lo;
@@ -61,7 +62,7 @@ struct Trim {
     std::size_t b_hi = 0;
 };
 
-Trim trim_common(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+Trim trim_common(const std::vector<std::string_view>& a, const std::vector<std::string_view>& b) {
     Trim t;
     const std::size_t limit = std::min(a.size(), b.size());
     while (t.lo < limit && a[t.lo] == b[t.lo]) {
@@ -76,8 +77,8 @@ Trim trim_common(const std::vector<std::string>& a, const std::vector<std::strin
     return t;
 }
 
-std::vector<Op> build_script(const std::vector<std::string>& a,
-                             const std::vector<std::string>& b, const Trim& t,
+std::vector<Op> build_script(const std::vector<std::string_view>& a,
+                             const std::vector<std::string_view>& b, const Trim& t,
                              bool& degraded) {
     std::vector<Op> ops;
     for (std::size_t i = 0; i < t.lo; ++i) {
@@ -138,7 +139,7 @@ std::vector<Hunk> group_hunks(const std::vector<Op>& ops, std::size_t context) {
 }
 
 void render_hunk(std::string& out, const std::vector<Op>& ops, const Hunk& hunk,
-                 const std::vector<std::string>& a, const std::vector<std::string>& b) {
+                 const std::vector<std::string_view>& a, const std::vector<std::string_view>& b) {
     // Where the hunk starts in EACH file, counted from the top of the script.
     //
     // Both numbers used to be read off the first op's `index`, which is an index into `a`
@@ -171,15 +172,13 @@ void render_hunk(std::string& out, const std::vector<Op>& ops, const Hunk& hunk,
         const Op& op = ops[k];
         const char sign = op.tag == Tag::Equal ? ' ' : (op.tag == Tag::Delete ? '-' : '+');
         out += sign;
-        out += op.tag == Tag::Insert ? b[op.index] : a[op.index];
+        out.append(op.tag == Tag::Insert ? b[op.index] : a[op.index]);
         out += '\n';
     }
 }
 
-} // namespace
-
-std::vector<std::string> split_lines(std::string_view text) {
-    std::vector<std::string> lines;
+inline std::vector<std::string_view> split_lines_view(std::string_view text) {
+    std::vector<std::string_view> lines;
     std::size_t start = 0;
     while (start <= text.size()) {
         const std::size_t nl = text.find('\n', start);
@@ -195,13 +194,25 @@ std::vector<std::string> split_lines(std::string_view text) {
     return lines;
 }
 
+} // namespace
+
+std::vector<std::string> split_lines(std::string_view text) {
+    const std::vector<std::string_view> views = split_lines_view(text);
+    std::vector<std::string> lines;
+    lines.reserve(views.size());
+    for (const std::string_view v : views) {
+        lines.emplace_back(v);
+    }
+    return lines;
+}
+
 std::string unified_diff(std::string_view a_text, std::string_view b_text,
                          std::string from_label, std::string to_label, int context) {
     if (a_text == b_text) {
         return {};
     }
-    const std::vector<std::string> a = split_lines(a_text);
-    const std::vector<std::string> b = split_lines(b_text);
+    const std::vector<std::string_view> a = split_lines_view(a_text);
+    const std::vector<std::string_view> b = split_lines_view(b_text);
 
     bool degraded = false;
     const Trim trim = trim_common(a, b);
