@@ -221,15 +221,15 @@ struct Locate {
             first = p;
         }
         ++count;
+        if (count > 1) {
+            loc.status = Status::Ambiguous;
+            loc.offset = first;
+            return loc;
+        }
         p = hay.find(needle, p + needle.size());
     }
     if (count == 0) {
         loc.status = Status::NoMatch;
-        return loc;
-    }
-    if (count > 1) {
-        loc.status = Status::Ambiguous;
-        loc.offset = first;
         return loc;
     }
     loc.status = Status::Applied;
