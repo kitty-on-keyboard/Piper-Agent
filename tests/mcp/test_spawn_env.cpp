@@ -86,6 +86,16 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_KEYSTORE=/tmp/keystore",
+        "XDG_KEY_STORE=/tmp/keystore",
+        "LC_PASSFILE=/tmp/passfile",
+        "XDG_PASS_FILE=/tmp/passfile",
+        "LC_CREDFILE=/tmp/credfile",
+        "XDG_CRED_FILE=/tmp/credfile",
+        "LC_CERTFILE=/tmp/certfile",
+        "XDG_CERT_FILE=/tmp/certfile",
+        "LC_PEM=/tmp/pem",
+        "XDG_PEM_FILE=/tmp/pemfile",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +126,16 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_KEYSTORE"));
+    CHECK(!has_key(env, "XDG_KEY_STORE"));
+    CHECK(!has_key(env, "LC_PASSFILE"));
+    CHECK(!has_key(env, "XDG_PASS_FILE"));
+    CHECK(!has_key(env, "LC_CREDFILE"));
+    CHECK(!has_key(env, "XDG_CRED_FILE"));
+    CHECK(!has_key(env, "LC_CERTFILE"));
+    CHECK(!has_key(env, "XDG_CERT_FILE"));
+    CHECK(!has_key(env, "LC_PEM"));
+    CHECK(!has_key(env, "XDG_PEM_FILE"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +201,16 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_KEYSTORE=secret",
+        "XDG_KEY_STORE=secret",
+        "LC_PASSFILE=secret",
+        "XDG_PASS_FILE=secret",
+        "LC_CREDFILE=secret",
+        "XDG_CRED_FILE=secret",
+        "LC_CERTFILE=secret",
+        "XDG_CERT_FILE=secret",
+        "LC_PEM=secret",
+        "XDG_PEM_FILE=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +247,16 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_KEYSTORE"));
+    CHECK(!has_key(env, "XDG_KEY_STORE"));
+    CHECK(!has_key(env, "LC_PASSFILE"));
+    CHECK(!has_key(env, "XDG_PASS_FILE"));
+    CHECK(!has_key(env, "LC_CREDFILE"));
+    CHECK(!has_key(env, "XDG_CRED_FILE"));
+    CHECK(!has_key(env, "LC_CERTFILE"));
+    CHECK(!has_key(env, "XDG_CERT_FILE"));
+    CHECK(!has_key(env, "LC_PEM"));
+    CHECK(!has_key(env, "XDG_PEM_FILE"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {

@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-10-05 - Include keystore, passfile, credfile, certfile, and PEM suffixes in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying keystore paths, password files, credential files, certificate files, or PEM keys under allowlisted namespaces (such as `LC_KEYSTORE`, `XDG_KEY_STORE`, `LC_PASSFILE`, `XDG_PASS_FILE`, `LC_CREDFILE`, `XDG_CRED_FILE`, `LC_CERTFILE`, `XDG_CERT_FILE`, `LC_PEM`, `XDG_PEM_FILE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Common key and credential storage suffixes like `KEYSTORE`, `KEY_STORE`, `PASSFILE`, `PASS_FILE`, `CREDFILE`, `CRED_FILE`, `CERTFILE`, `CERT_FILE`, `PEM`, and `PEM_FILE` must be explicitly included in suffix filtering rules to prevent sensitive credential files and store locations from leaking to child processes.
+**Prevention:** Added `KEYSTORE`, `KEY_STORE`, `PASSFILE`, `PASS_FILE`, `CREDFILE`, `CRED_FILE`, `CERTFILE`, `CERT_FILE`, `PEM`, and `PEM_FILE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
