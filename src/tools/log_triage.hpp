@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace log_triage {
@@ -568,7 +569,8 @@ struct Line {
     // marker is the only sign the other two existed. That is the right trade against a
     // cascade, and local anchors are considered first, so the copy that survives is the one
     // in code the agent can edit.
-    std::vector<std::string_view> seen;
+    std::unordered_set<std::string_view> seen;
+    seen.reserve(lines.size() / 4 + 8);
     for (std::size_t i : order) {
         if (!lines[i].diagnostic) {
             continue;
@@ -583,12 +585,12 @@ struct Line {
             (loc_end == std::string_view::npos || loc_end >= lines[i].text.size())
                 ? lines[i].text
                 : lines[i].text.substr(loc_end);
-        if (std::find(seen.begin(), seen.end(), message) != seen.end()) {
+        if (seen.find(message) != seen.end()) {
             lines[i].duplicate = true;
             continue;
         }
         if (select(i)) {
-            seen.push_back(message);
+            seen.insert(message);
         }
     }
 
