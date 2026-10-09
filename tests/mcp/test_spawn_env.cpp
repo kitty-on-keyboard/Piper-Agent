@@ -181,6 +181,15 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_PEM=secret",
+        "XDG_PEMFILE=secret",
+        "LC_PEM_FILE=secret",
+        "XDG_KEYSTORE=secret",
+        "LC_CREDENTIAL_FILE=secret",
+        "XDG_CREDENTIALS_FILE=secret",
+        "LC_DB_URL=secret",
+        "XDG_DATABASE_URL=secret",
+        "LC_NETRC=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +226,15 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_PEM"));
+    CHECK(!has_key(env, "XDG_PEMFILE"));
+    CHECK(!has_key(env, "LC_PEM_FILE"));
+    CHECK(!has_key(env, "XDG_KEYSTORE"));
+    CHECK(!has_key(env, "LC_CREDENTIAL_FILE"));
+    CHECK(!has_key(env, "XDG_CREDENTIALS_FILE"));
+    CHECK(!has_key(env, "LC_DB_URL"));
+    CHECK(!has_key(env, "XDG_DATABASE_URL"));
+    CHECK(!has_key(env, "LC_NETRC"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
