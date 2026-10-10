@@ -143,3 +143,71 @@ TEST(send_fails_if_peer_destroyed) {
 
     p.client->stop();
 }
+
+TEST(fifo_message_ordering) {
+    InProcessTransport::Pair p = InProcessTransport::make_pair();
+
+    Receiver server_rx;
+    p.client->start({});
+    p.server->start(server_rx.handlers());
+
+    CHECK(p.client->send({{"seq", 1}}));
+    CHECK(p.client->send({{"seq", 2}}));
+    CHECK(p.client->send({{"seq", 3}}));
+
+    nlohmann::json msg1 = server_rx.wait_for_message();
+    nlohmann::json msg2 = server_rx.wait_for_message();
+    nlohmann::json msg3 = server_rx.wait_for_message();
+
+    CHECK_EQ(msg1["seq"].get<int>(), 1);
+    CHECK_EQ(msg2["seq"].get<int>(), 2);
+    CHECK_EQ(msg3["seq"].get<int>(), 3);
+
+    p.client->stop();
+    p.server->stop();
+}
+
+TEST(queued_messages_delivered_before_close) {
+    InProcessTransport::Pair p = InProcessTransport::make_pair();
+
+    Receiver server_rx;
+    p.client->start({});
+    p.server->start(server_rx.handlers());
+
+    // Send messages then immediately stop client
+    CHECK(p.client->send({{"msg", "first"}}));
+    CHECK(p.client->send({{"msg", "second"}}));
+    p.client->stop();
+
+    // Server should receive both queued messages before getting closed notification
+    nlohmann::json msg1 = server_rx.wait_for_message();
+    nlohmann::json msg2 = server_rx.wait_for_message();
+
+    CHECK_EQ(msg1["msg"].get<std::string>(), "first");
+    CHECK_EQ(msg2["msg"].get<std::string>(), "second");
+    CHECK(server_rx.wait_for_close());
+}
+
+TEST(multiple_stop_calls_and_unstarted_stop) {
+    InProcessTransport::Pair p = InProcessTransport::make_pair();
+
+    // Stopping unstarted transports should be safe
+    p.client->stop();
+    p.server->stop();
+
+    // Multiple calls to stop should be idempotent
+    p.client->stop();
+    p.server->stop();
+}
+
+TEST(send_fails_before_start) {
+    InProcessTransport::Pair p = InProcessTransport::make_pair();
+
+    nlohmann::json msg = {{"hello", "world"}};
+    // Neither client nor server started yet
+    CHECK(!p.client->send(msg));
+    CHECK(!p.server->send(msg));
+
+    p.client->stop();
+    p.server->stop();
+}
