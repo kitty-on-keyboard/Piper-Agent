@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-09-23 - Filter netrc, keychain, salt, and PIN suffixes in spawn environment
+**Vulnerability:** Parent environment variables carrying netrc credential file paths, system keychains, cryptographic salts, or PINs under allowlisted prefixes (such as `LC_NETRC`, `XDG_KEYCHAIN`, `LC_SALT`, `XDG_PIN`, `LC_PINCODE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Netrc credentials, keychain locations, salts, and PIN suffixes must be explicitly included in suffix filtering rules to prevent sensitive authentication secrets using allowlisted namespace prefixes from being inherited.
+**Prevention:** Added `NETRC`, `KEYCHAIN`, `SALT`, `PIN`, and `PINCODE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
