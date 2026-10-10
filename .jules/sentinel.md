@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-03-31 - Restrict Unix Domain Socket and PID File Permissions
+**Vulnerability:** `DaemonListener::start()` created UNIX domain socket and PID files in shared locations (`/tmp/piper_worker.sock` or `~/.piper/worker.sock`) with default umask permissions, allowing other local users on shared multi-tenant hosts to connect or tamper with worker RPC endpoints.
+**Learning:** UNIX domain sockets created by `bind()` default to umask permissions (often `0755` or `0775`), permitting unauthorized local connections if not explicitly restricted.
+**Prevention:** Always restrict UNIX domain socket file permissions via `chmod(..., 0600)` immediately after binding and create PID files using `open(..., O_CREAT | ..., 0600)`.

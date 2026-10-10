@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -249,6 +250,9 @@ bool DaemonListener::start() {
         return false;
     }
 
+    // Restrict socket file permissions to owner-only to prevent unauthorized local connections
+    ::chmod(config_.socket_path.c_str(), 0600);
+
     if (::listen(listen_fd_, 5) != 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
@@ -256,10 +260,12 @@ bool DaemonListener::start() {
         return false;
     }
 
-    // Write PID file
-    std::ofstream pid_file(config_.pid_path);
-    if (pid_file.is_open()) {
-        pid_file << ::getpid() << "\n";
+    // Write PID file securely with 0600 permissions
+    int pid_fd = ::open(config_.pid_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (pid_fd >= 0) {
+        std::string pid_str = std::to_string(::getpid()) + "\n";
+        (void)::write(pid_fd, pid_str.data(), pid_str.size());
+        ::close(pid_fd);
     }
 
     bound_ = true;
