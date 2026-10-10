@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-03-31 - Include certificate, key, and credential path suffixes in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying TLS certificates, private keys, or credential file paths under allowlisted prefixes (such as `LC_CERT_FILE`, `XDG_CERT_PATH`, `LC_KEY_PATH`, `XDG_SECRET_PATH`, `LC_TOKEN_PATH`, `XDG_AUTH_PATH`, `LC_CRED_FILE`, `XDG_CRED_PATH`, `LC_PEM`, `XDG_PEM_FILE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Certificate, key, and credential path suffixes like `CERT_FILE`, `CERT_PATH`, `KEY_PATH`, `SECRET_PATH`, `TOKEN_PATH`, `AUTH_PATH`, `CRED_FILE`, `CRED_PATH`, `PEM`, and `PEM_FILE` must be explicitly included in suffix filtering rules to prevent sensitive credential files and private key locations from leaking across process boundaries.
+**Prevention:** Added `CERT_FILE`, `CERT_PATH`, `KEY_PATH`, `SECRET_PATH`, `TOKEN_PATH`, `AUTH_PATH`, `CRED_FILE`, `CRED_PATH`, `PEM`, and `PEM_FILE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
