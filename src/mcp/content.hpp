@@ -22,11 +22,6 @@ namespace content {
 [[nodiscard]] nlohmann::json image(std::string_view base64_data, std::string_view mime_type);
 [[nodiscard]] nlohmann::json audio(std::string_view base64_data, std::string_view mime_type);
 
-// A pointer to a resource the client may then read, as opposed to embedding it.
-[[nodiscard]] nlohmann::json resource_link(std::string_view uri, std::string_view name,
-                                           std::string_view description = {},
-                                           std::string_view mime_type = {});
-
 // The resource itself, inline.
 [[nodiscard]] nlohmann::json embedded_text_resource(std::string_view uri, std::string_view text,
                                                     std::string_view mime_type = "text/plain");
