@@ -25,8 +25,10 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace lmp::tools {
@@ -35,6 +37,29 @@ struct SymbolHit {
     std::string path;
     long line = 0;
     std::string text;
+    int score = 0;
+    std::size_t indent = 0;
+};
+
+struct PathLineKey {
+    std::string_view path;
+    long line;
+    bool operator==(const PathLineKey& o) const noexcept {
+        return line == o.line && path == o.path;
+    }
+};
+
+struct PathLineHash {
+    std::size_t operator()(const PathLineKey& k) const noexcept {
+        std::size_t h = std::hash<std::string_view>{}(k.path);
+        return h ^ (static_cast<std::size_t>(k.line) + 0x9e3779b9 + (h << 6) + (h >> 2));
+    }
+};
+
+struct RawHit {
+    std::string_view path;
+    long line = 0;
+    std::string_view text;
     int score = 0;
     std::size_t indent = 0;
 };
@@ -94,7 +119,9 @@ inline constexpr std::string_view kDefinitionKeywords[] = {
                                                              std::string_view symbol,
                                                              std::size_t limit,
                                                              std::size_t& suppressed) {
-    std::vector<SymbolHit> hits;
+    std::vector<RawHit> raw_hits;
+    std::unordered_set<PathLineKey, PathLineHash> seen;
+
     std::size_t at = 0;
     while (at < grep_output.size()) {
         const std::size_t nl = grep_output.find('\n', at);
@@ -121,34 +148,43 @@ inline constexpr std::string_view kDefinitionKeywords[] = {
             continue;
         }
 
-        // Fast-path duplicate check using string_view before constructing path/text std::strings
-        const bool dup =
-            std::any_of(hits.begin(), hits.end(), [line, path_sv](const SymbolHit& e) {
-                return e.line == line && e.path == path_sv;
-            });
-        if (dup) {
+        // O(1) deduplication using string_views in hash set before allocations
+        if (!seen.insert(PathLineKey{path_sv, line}).second) {
             continue;
         }
 
         const std::string_view text_sv = row.substr(c2 + 1);
-        SymbolHit h;
-        h.path = std::string(path_sv);
+        RawHit h;
+        h.path = path_sv;
         h.line = line;
-        h.text = std::string(text_sv);
+        h.text = text_sv;
         h.score = score_hit(text_sv, symbol);
         h.indent = indent_of(text_sv);
-        hits.push_back(std::move(h));
+        raw_hits.push_back(h);
     }
-    std::stable_sort(hits.begin(), hits.end(), [](const SymbolHit& a, const SymbolHit& b) {
+
+    std::stable_sort(raw_hits.begin(), raw_hits.end(), [](const RawHit& a, const RawHit& b) {
         if (a.score != b.score) {
             return a.score > b.score;
         }
         return a.indent < b.indent;
     });
-    suppressed = hits.size() > limit ? hits.size() - limit : 0;
-    if (hits.size() > limit) {
-        hits.resize(limit);
+
+    suppressed = raw_hits.size() > limit ? raw_hits.size() - limit : 0;
+    const std::size_t take = std::min(limit, raw_hits.size());
+
+    std::vector<SymbolHit> hits;
+    hits.reserve(take);
+    for (std::size_t i = 0; i < take; ++i) {
+        SymbolHit h;
+        h.path = std::string(raw_hits[i].path);
+        h.line = raw_hits[i].line;
+        h.text = std::string(raw_hits[i].text);
+        h.score = raw_hits[i].score;
+        h.indent = raw_hits[i].indent;
+        hits.push_back(std::move(h));
     }
+
     return hits;
 }
 
