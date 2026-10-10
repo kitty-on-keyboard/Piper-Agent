@@ -86,6 +86,14 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_AUTHORIZATION=Bearer abc",
+        "XDG_IDENTITY=id_secret",
+        "LC_CERT_FILE=/tmp/cert.pem",
+        "XDG_CREDS_FILE=/tmp/creds",
+        "LC_SECRET_PATH=/tmp/secret",
+        "XDG_KEY_PATH=/tmp/key",
+        "LC_TOKEN_PATH=/tmp/token",
+        "LC_PEM=private_pem",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +124,14 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_IDENTITY"));
+    CHECK(!has_key(env, "LC_CERT_FILE"));
+    CHECK(!has_key(env, "XDG_CREDS_FILE"));
+    CHECK(!has_key(env, "LC_SECRET_PATH"));
+    CHECK(!has_key(env, "XDG_KEY_PATH"));
+    CHECK(!has_key(env, "LC_TOKEN_PATH"));
+    CHECK(!has_key(env, "LC_PEM"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +197,14 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_AUTHORIZATION=secret",
+        "XDG_IDENTITY=secret",
+        "LC_CERT_FILE=secret",
+        "XDG_CREDS_FILE=secret",
+        "LC_SECRET_PATH=secret",
+        "XDG_KEY_PATH=secret",
+        "LC_TOKEN_PATH=secret",
+        "LC_PEM=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +241,14 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_IDENTITY"));
+    CHECK(!has_key(env, "LC_CERT_FILE"));
+    CHECK(!has_key(env, "XDG_CREDS_FILE"));
+    CHECK(!has_key(env, "LC_SECRET_PATH"));
+    CHECK(!has_key(env, "XDG_KEY_PATH"));
+    CHECK(!has_key(env, "LC_TOKEN_PATH"));
+    CHECK(!has_key(env, "LC_PEM"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {

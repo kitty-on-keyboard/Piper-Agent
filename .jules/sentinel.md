@@ -37,6 +37,11 @@
 **Vulnerability:** Parent environment variables carrying shorthand passwords or secret/key/token/auth file paths under allowlisted prefixes (such as `LC_PASS`, `XDG_KEYFILE`, `LC_KEY_FILE`, `XDG_SECRET_FILE`, `LC_TOKEN_FILE`, `XDG_AUTH_FILE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Common credential shorthands and sensitive file path suffixes like `PASS`, `KEYFILE`, `KEY_FILE`, `SECRET_FILE`, `TOKEN_FILE`, and `AUTH_FILE` must be explicitly included in suffix filtering rules to prevent sensitive secret files and passwords in allowlisted namespaces from leaking to untrusted child processes.
 **Prevention:** Added `PASS`, `KEYFILE`, `KEY_FILE`, `SECRET_FILE`, `TOKEN_FILE`, and `AUTH_FILE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+
+## 2026-03-31 - Include authorization, identity, and path-based secret terms in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying authorization credentials, identity strings, credential files, or secret path locations under allowlisted prefixes (such as `LC_AUTHORIZATION`, `XDG_IDENTITY`, `LC_CERT_FILE`, `XDG_CREDS_FILE`, `LC_SECRET_PATH`, `XDG_KEY_PATH`, `LC_TOKEN_PATH`, `LC_PEM`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Common authorization header terms, identity keys, credential files, and path-based secret suffixes like `AUTHORIZATION`, `IDENTITY`, `CERT_FILE`, `CREDS_FILE`, `SECRET_PATH`, `KEY_PATH`, `TOKEN_PATH`, and `PEM` must be explicitly included in suffix filtering rules to prevent sensitive credentials in allowlisted namespaces from being inherited by child processes.
+**Prevention:** Added `AUTHORIZATION`, `IDENTITY`, `CERT_FILE`, `CREDS_FILE`, `SECRET_PATH`, `KEY_PATH`, `TOKEN_PATH`, and `PEM` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
 ## 2024-05-18 - Socket Path Truncation Vulnerability
 **Vulnerability:** Unix domain socket path truncation in `strncpy` due to unchecked length vs `sizeof(sockaddr_un::sun_path)`.
 **Learning:** `strncpy` truncates silently when the string is too long. If the socket path is longer than `sun_path` (usually 108 bytes), the connection will silently attempt to connect/bind to the truncated path.
