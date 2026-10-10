@@ -394,12 +394,6 @@ const std::string* get(const std::vector<ToolParamValue>& params, const char* na
     return nullptr;
 }
 
-std::string resolve_contained(const std::string& root, const std::string& rel) {
-    const fsx::WorkspaceFs workspace(root);
-    const fsx::ContainedPath path = workspace.contained_path(rel);
-    return path.ok() ? path.absolute : std::string();
-}
-
 const ToolDecl* Registry::find(const std::string& name) const {
     for (const ToolDecl& d : decls_) {
         if (d.name == name) {
