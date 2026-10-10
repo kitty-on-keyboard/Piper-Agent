@@ -101,6 +101,10 @@ class MlxBackend final : public InferenceBackend {
     [[nodiscard]] GenResult warm_stable_prefix(const InferenceTask& task,
                                                const CancelToken& cancel) override;
 
+    // Pulse T1: prefill forced prefix + softmax over option ids; roll KV back after.
+    [[nodiscard]] PulseDecodeResult pulse_decode(const PulseDecodeTask& task,
+                                                 const CancelToken& cancel) override;
+
     // The verified-reuse ledger, exposed for tests and for the loop's fresh-window
     // restart (S8.3).
     [[nodiscard]] const KvCacheLedger& ledger() const noexcept { return ledger_; }
@@ -114,6 +118,8 @@ class MlxBackend final : public InferenceBackend {
                                           const CancelToken& cancel);
     [[nodiscard]] GenResult warm_stable_prefix_impl(const InferenceTask& task,
                                                     const CancelToken& cancel);
+    [[nodiscard]] PulseDecodeResult pulse_decode_impl(const PulseDecodeTask& task,
+                                                      const CancelToken& cancel);
 
     struct Impl; // holds the mx graph objects; keeps mlx headers out of this header
     std::unique_ptr<Impl> impl_;

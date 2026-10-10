@@ -186,6 +186,29 @@ struct GenResult {
     std::size_t cache_reclaimed_bytes = 0;
 };
 
+// Pulse micro-decode: one forward over a forced prefix + enum mask; returns option
+// probabilities from last-step logits. No free text. Default backend returns
+// unsupported so gate / Scripted paths fall back to existing heuristics.
+struct PulseDecodeTask {
+    std::vector<TokenId> prompt;
+    // Option token ids (first token per choice), order fixed by the caller.
+    std::vector<TokenId> option_ids;
+    // Prefer Extend: stable prefix end of the host turn, when the ledger still agrees.
+    std::size_t checkpoint_at = 0;
+};
+
+struct PulseDecodeResult {
+    bool ok = false;
+    std::string error;
+    TokenId chosen_id = kInvalidToken;
+    std::size_t chosen_index = 0;
+    std::vector<float> p_vec;
+    float p = 0.0F;
+    double latency_ms = 0.0;
+    std::size_t prefill_reused_tokens = 0;
+    std::string reuse_mode; // Extend|Restore|Reset|unsupported
+};
+
 class InferenceBackend {
   public:
     InferenceBackend() = default;
@@ -208,6 +231,19 @@ class InferenceBackend {
         (void)cancel;
         GenResult r;
         r.status = GenStatus::Complete;
+        return r;
+    }
+
+    // Schema-only Pulse gate. Default: unsupported (caller falls back). MlxBackend
+    // prefills, softmaxes over option ids, then rolls the KV back so the next real
+    // turn is not polluted by the Pulse suffix.
+    [[nodiscard]] virtual PulseDecodeResult pulse_decode(const PulseDecodeTask& task,
+                                                         const CancelToken& cancel) {
+        (void)task;
+        (void)cancel;
+        PulseDecodeResult r;
+        r.error = "pulse_decode unsupported";
+        r.reuse_mode = "unsupported";
         return r;
     }
 };

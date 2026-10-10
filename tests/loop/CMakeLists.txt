@@ -1,5 +1,8 @@
 lmp_add_test(test_loop SOURCES test_loop.cpp LABELS gate LINK lmp_loop)
 
+# Pulse T1: mask / logits / policy — pure, no tokenizer, no GPU.
+lmp_add_test(test_pulse SOURCES test_pulse.cpp LABELS gate LINK lmp_loop)
+
 # Agent::step end to end IN THE GATE, on the miniature vocabulary. historical build notes named
 # agent.cpp:168 and :287 as surviving mutants with one shared blocker -- "not driven
 # end-to-end in the gate, vocab-fixture blocker" -- so shipping the fixture without this
