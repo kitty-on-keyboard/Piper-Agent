@@ -25,6 +25,15 @@
 
 namespace lmp::tools {
 
+// Fast path number formatting to avoid heap allocations
+template <typename T>
+inline void append_num(std::string& out, T val) {
+    char buf[32];
+    auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
+    out.append(buf, static_cast<std::size_t>(ptr - buf));
+}
+
+
 // Lines in `s`, counting the last one whether or not it ends in a newline.
 [[nodiscard]] inline std::size_t count_lines(std::string_view s) {
     return static_cast<std::size_t>(std::count(s.begin(), s.end(), '\n')) + 1;

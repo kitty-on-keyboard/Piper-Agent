@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/tools/text_view.hpp"
+
 namespace apply_patch {
 
 enum class FileOpKind { Add, Update, Delete };
@@ -137,7 +139,7 @@ inline void split_lines(std::string_view text, std::vector<std::string_view>& ou
     const std::size_t end = std::min(lines.size(), focus + radius);
     std::string out;
     for (std::size_t i = begin; i <= end; ++i) {
-        out += std::to_string(i);
+        lmp::tools::append_num(out, i);
         out += '\t';
         out.append(strip_cr(lines[i - 1]));
         out += '\n';
@@ -559,8 +561,9 @@ inline void splice(std::string& file, std::size_t begin, std::size_t end,
                 res.status = Status::NoMatch;
                 res.failure.path = op.path;
                 res.failure.hunk_index = hi;
-                res.failure.reason =
-                    "hunk " + std::to_string(hi + 1) + " context/preimage not found exactly";
+                res.failure.reason = "hunk ";
+                lmp::tools::append_num(res.failure.reason, hi + 1);
+                res.failure.reason += " context/preimage not found exactly";
                 // Approximate focus: first non-empty search line.
                 std::size_t focus = 1;
                 const std::size_t nl = search_lf.find('\n');
@@ -582,9 +585,9 @@ inline void splice(std::string& file, std::size_t begin, std::size_t end,
                 res.status = Status::Ambiguous;
                 res.failure.path = op.path;
                 res.failure.hunk_index = hi;
-                res.failure.reason =
-                    "hunk " + std::to_string(hi + 1) +
-                    " matches more than one site; add more context lines";
+                res.failure.reason = "hunk ";
+                lmp::tools::append_num(res.failure.reason, hi + 1);
+                res.failure.reason += " matches more than one site; add more context lines";
                 res.failure.nearby =
                     detail::nearby_lines(working, detail::count_lines_before(working, loc.offset));
                 res.changes.clear();
