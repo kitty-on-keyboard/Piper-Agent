@@ -150,7 +150,7 @@ struct ModePolicy {
     // where this lived at first and is the wrong thing to read: the tier is an operator
     // setting and can be moved, and mode policy must not be a function of a knob. It also
     // made the HITL gate untestable, because the tests that pin the real, measured
-    // approval bugs set tier 0 precisely so `rm -rf Sources` reaches the gate and never
+    // approval issues set tier 0 precisely so `rm -rf Sources` reaches the gate and never
     // the shell.
     bool allow_execution = false;
     // This mode YIELDS rather than loops: a text-only turn means "your move, operator"
