@@ -1,5 +1,8 @@
 lmp_add_test(test_loop SOURCES test_loop.cpp LABELS gate LINK lmp_loop)
 
+# Tiny gate: Stage-0 + client JSON parse — pure, no tokenizer, no GPU.
+lmp_add_test(test_tiny_gate SOURCES test_tiny_gate.cpp LABELS gate LINK lmp_loop)
+
 # Agent::step end to end IN THE GATE, on the miniature vocabulary. historical build notes named
 # agent.cpp:168 and :287 as surviving mutants with one shared blocker -- "not driven
 # end-to-end in the gate, vocab-fixture blocker" -- so shipping the fixture without this
