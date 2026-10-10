@@ -28,14 +28,6 @@ constexpr std::uint64_t fold(std::uint64_t prev, TokenId id) noexcept {
 
 } // namespace
 
-std::uint64_t hash_ids(const std::vector<TokenId>& ids) noexcept {
-    std::uint64_t h = kSeed;
-    for (TokenId id : ids) {
-        h = fold(h, id);
-    }
-    return h;
-}
-
 KvCacheLedger::KvCacheLedger() { hashes_.push_back(kSeed); }
 
 void KvCacheLedger::append(TokenId id) { append(id, ContentTag{0}); }
