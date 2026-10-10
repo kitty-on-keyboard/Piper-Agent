@@ -20,7 +20,6 @@ namespace content {
 
 [[nodiscard]] nlohmann::json text(std::string_view s);
 [[nodiscard]] nlohmann::json image(std::string_view base64_data, std::string_view mime_type);
-[[nodiscard]] nlohmann::json audio(std::string_view base64_data, std::string_view mime_type);
 
 // A pointer to a resource the client may then read, as opposed to embedding it.
 [[nodiscard]] nlohmann::json resource_link(std::string_view uri, std::string_view name,
