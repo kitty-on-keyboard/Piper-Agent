@@ -364,7 +364,7 @@ TEST(t1_makes_swiftpm_runnable_without_touching_the_tier) {
     CHECK(t1_compat_rewrite("swift run") == "swift run --disable-sandbox");
 
     // The shape an operator's verify contract actually has. This is the case the note
-    // could never fix: the contract is run verbatim, so a `swift test` contract was
+    // could never address: the contract is run verbatim, so a `swift test` contract was
     // unpassable at T1 however correct the code became.
     CHECK(t1_compat_rewrite("cd /w/p && swift test") ==
           "cd /w/p && swift test --disable-sandbox");
