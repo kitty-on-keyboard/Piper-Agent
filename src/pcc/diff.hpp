@@ -16,7 +16,8 @@ namespace lmp::pcc {
 
 // Splits on '\n'. A trailing newline does NOT produce a final empty line, so a file and
 // the same file without its last newline differ by one line rather than by two.
-[[nodiscard]] std::vector<std::string> split_lines(std::string_view text);
+// Returns string_views into `text` to avoid allocating std::string heap objects per line.
+[[nodiscard]] std::vector<std::string_view> split_lines(std::string_view text);
 
 // A unified diff with `context` lines of context. Identical inputs produce an empty
 // string, which is what lets a caller test "did this change" without a second compare.

@@ -245,7 +245,7 @@ TEST(diff_handles_pure_insertion_and_deletion) {
     CHECK(unified_diff("", "one\ntwo\n", "a", "b").find("+one") != std::string::npos);
     CHECK(unified_diff("one\ntwo\n", "", "a", "b").find("-two") != std::string::npos);
 
-    const std::vector<std::string> lines = split_lines("a\nb\nc");
+    const std::vector<std::string_view> lines = split_lines("a\nb\nc");
     CHECK_EQ(lines.size(), std::size_t{3});
     // A trailing newline must not manufacture an empty final line.
     CHECK_EQ(split_lines("a\nb\n").size(), std::size_t{2});
