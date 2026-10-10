@@ -51,10 +51,6 @@ struct Event {
 // form and the caller is responsible for also emitting the __b64 sibling.
 bool append_json_string(std::string& out, std::string_view in);
 
-// True if `in` is well-formed UTF-8: no overlong encodings, no surrogate halves, no
-// truncated sequences, nothing above U+10FFFF.
-[[nodiscard]] bool is_valid_utf8(std::string_view in) noexcept;
-
 [[nodiscard]] std::string base64_encode(std::string_view in);
 // Returns false on any character outside the base64 alphabet or a bad length, leaving
 // `out` unspecified.

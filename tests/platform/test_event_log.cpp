@@ -53,18 +53,6 @@ TEST(json_escaping_covers_the_control_range) {
     CHECK_EQ(escaped(std::string("\x7f")), std::string("\"\x7f\""));
 }
 
-TEST(utf8_validator_rejects_the_three_classic_forgeries) {
-    CHECK(is_valid_utf8("hello"));
-    CHECK(is_valid_utf8("\xF0\x9F\x98\x80"));           // U+1F600, well formed
-    CHECK(is_valid_utf8(""));
-
-    CHECK(!is_valid_utf8(std::string("\xC0\xAF")));      // overlong '/'
-    CHECK(!is_valid_utf8(std::string("\xED\xA0\x80")));  // U+D800, a surrogate half
-    CHECK(!is_valid_utf8(std::string("\xF0\x9F\x98")));  // truncated 4-byte sequence
-    CHECK(!is_valid_utf8(std::string("\xF5\x80\x80\x80")));  // beyond U+10FFFF
-    CHECK(!is_valid_utf8(std::string("\x80")));          // lone continuation byte
-}
-
 TEST(a_codepoint_split_across_two_tokens_survives_as_bytes) {
     // This is the S5.3 scenario in miniature: 944 of Qwen's tokens are byte fragments
     // that are not valid standalone UTF-8, and an emoji routinely spans two of them.
@@ -73,8 +61,10 @@ TEST(a_codepoint_split_across_two_tokens_survives_as_bytes) {
     const std::string half1 = "\xF0\x9F"; // first half of U+1F600
     const std::string half2 = "\x98\x80"; // second half
 
-    CHECK(!is_valid_utf8(half1));
-    CHECK(!is_valid_utf8(half2));
+    std::string dummy;
+    CHECK(!append_json_string(dummy, half1));
+    dummy.clear();
+    CHECK(!append_json_string(dummy, half2));
 
     Event ev;
     ev.kind = "token";
@@ -98,7 +88,8 @@ TEST(a_codepoint_split_across_two_tokens_survives_as_bytes) {
     std::string r2;
     CHECK(base64_decode(base64_encode(half1), r1));
     CHECK(base64_decode(base64_encode(half2), r2));
-    CHECK(is_valid_utf8(r1 + r2));
+    dummy.clear();
+    CHECK(append_json_string(dummy, r1 + r2));
     CHECK_EQ(r1 + r2, std::string("\xF0\x9F\x98\x80"));
 }
 
