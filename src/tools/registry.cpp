@@ -1901,7 +1901,7 @@ Registry::Registry(WorkspaceContext ctx)
                         }
                         return ToolResult::error(ErrorClass::Transient, true, removed.error);
                     }
-                    read_versions_.erase(resolved.absolute);
+                    forget_read_version(resolved.absolute);
                     bytes_changed += removed.removed_size;
                     ok_paths.push_back(ch.path);
                     continue;
@@ -2094,7 +2094,7 @@ Registry::Registry(WorkspaceContext ctx)
                 return ToolResult::error(ErrorClass::Transient, true,
                                          removed.error);
             }
-            read_versions_.erase(resolved.absolute);
+            forget_read_version(resolved.absolute);
             return measured_edit(
                 ToolResult::okay("deleted " + path), removed.removed_size);
         });
