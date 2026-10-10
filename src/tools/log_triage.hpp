@@ -302,14 +302,35 @@ inline void normalise(std::string_view in, std::string& out) {
     out.clear();
     out.reserve(in.size());
     std::size_t line_start = 0;
-    for (std::size_t i = 0; i < in.size();) {
+    std::size_t i = 0;
+    while (i < in.size()) {
+        // Fast path: find next ESC sequence or carriage return using string_view search
+        const std::size_t next_special = in.find_first_of("\x1b\r", i);
+        if (next_special == std::string_view::npos) {
+            out.append(in.data() + i, in.size() - i);
+            break;
+        }
+
+        if (next_special > i) {
+            out.append(in.data() + i, next_special - i);
+            const std::size_t last_nl = in.rfind('\n', next_special - 1);
+            if (last_nl != std::string_view::npos && last_nl >= i) {
+                line_start = out.size() - (next_special - 1 - last_nl);
+            }
+        }
+
+        i = next_special;
         const char c = in[i];
         if (c == '\x1b' && i + 1 < in.size() && in[i + 1] == '[') {
             std::size_t j = i + 2;
             while (j < in.size() && ((in[j] >= '0' && in[j] <= '9') || in[j] == ';')) {
                 ++j;
             }
-            i = (j < in.size()) ? j + 1 : j;
+            if (j < in.size() && (in[j] == 'm' || in[j] == 'K' || in[j] == 'H' || in[j] == 'J' || in[j] == 'f')) {
+                i = j + 1;
+            } else {
+                i = j;
+            }
             continue;
         }
         if (c == '\r') {
@@ -321,6 +342,7 @@ inline void normalise(std::string_view in, std::string& out) {
             ++i;
             continue;
         }
+        // Fallback for unmatched ESC or single character
         out.push_back(c);
         if (c == '\n') {
             line_start = out.size();
