@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-03-31 - Include authorization and identity terms in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying authorization tokens or identity credentials under allowlisted prefixes (such as `LC_AUTHORIZATION`, `XDG_AUTHORIZATION`, `LC_IDENTITY`, `XDG_IDENTITY`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** Authorization and identity terms (`AUTHORIZATION`, `IDENTITY`) must be explicitly listed in suffix filtering rules to prevent sensitive authentication headers and identity keys in allowlisted namespaces from being inherited across process boundaries.
+**Prevention:** Added `AUTHORIZATION` and `IDENTITY` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
