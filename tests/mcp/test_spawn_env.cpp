@@ -86,6 +86,8 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_AUTHORIZATION=secret_auth",
+        "XDG_IDENTITY=secret_identity",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +118,8 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_IDENTITY"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +185,10 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_AUTHORIZATION=secret",
+        "XDG_AUTHORIZATION=secret",
+        "LC_IDENTITY=secret",
+        "XDG_IDENTITY=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +225,10 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_AUTHORIZATION"));
+    CHECK(!has_key(env, "XDG_AUTHORIZATION"));
+    CHECK(!has_key(env, "LC_IDENTITY"));
+    CHECK(!has_key(env, "XDG_IDENTITY"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
