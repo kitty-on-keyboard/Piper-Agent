@@ -61,3 +61,7 @@
 ## 2026-05-29 - Pre-Tokenization Callback and Bitmask Popcount Matching in Edit Diagnostics
 **Learning:** `nearest_regions` in `src/tools/edit_diagnostics.hpp` previously created temporary `std::string` windows and re-tokenized token vectors across sliding line windows, leading to $O(N \times win)$ string allocations, copies, and linear token searches ($1.75\text{s}$ per 10k lines). Pre-tokenizing lines once via zero-allocation callback `tokenize_cb` into per-line token counts and a 64-bit target token presence mask (`uint64_t want_mask`) reduces window matching to $O(1)$ bitwise OR and `std::popcount`, improving candidate search throughput by ~4.8x (~366ms).
 **Action:** Pre-tokenize lines once using callbacks and use bitwise masks (`uint64_t`) with `std::popcount` for fast multi-token sliding window intersection scoring instead of string concatenation and vector re-tokenization.
+
+## 2026-06-01 - Zero-Allocation Non-Backtracking Choice Line Matching
+**Learning:** `enumerated_choice_lines` in `src/loop/turn.cpp` previously executed `std::regex_search` with `std::regex kEnumLine` on every line of assistant response text during plan/conversational mode evaluations. C++ `std::regex` engine setup and state-machine backtracking overhead added significant latency (~105.8ms per 1,000 text evaluations).
+**Action:** Replace `std::regex` line evaluations on structured string formats with custom, zero-allocation `std::string_view` prefix/character checks (`is_enum_line`), reducing line matching latency by ~28x (~3.7ms per 1,000 evaluations).

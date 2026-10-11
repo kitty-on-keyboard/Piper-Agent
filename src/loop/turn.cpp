@@ -66,14 +66,66 @@ std::string_view to_string(Outcome o) noexcept {
     return "BackendError";
 }
 
+namespace {
+
+[[nodiscard]] bool is_enum_line(std::string_view s) noexcept {
+    if (s.empty()) return false;
+
+    // Pattern 1: option\s+[0-9a-z]+\s*[:.)]
+    if (s.size() >= 7 && (s[0] == 'o' || s[0] == 'O') &&
+        (s[1] == 'p' || s[1] == 'P') && (s[2] == 't' || s[2] == 'T') &&
+        (s[3] == 'i' || s[3] == 'I') && (s[4] == 'o' || s[4] == 'O') &&
+        (s[5] == 'n' || s[5] == 'N') && (s[6] == ' ' || s[6] == '\t' || s[6] == '\r')) {
+        std::size_t i = 7;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) ++i;
+        const std::size_t start = i;
+        while (i < s.size() && ((s[i] >= '0' && s[i] <= '9') ||
+                                (s[i] >= 'a' && s[i] <= 'z') ||
+                                (s[i] >= 'A' && s[i] <= 'Z'))) {
+            ++i;
+        }
+        if (i > start) {
+            while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) ++i;
+            if (i < s.size() && (s[i] == ':' || s[i] == '.' || s[i] == ')')) {
+                return true;
+            }
+        }
+    }
+
+    // Pattern 2: [0-9]{1,2}\s*[.)]\s
+    if (s[0] >= '0' && s[0] <= '9') {
+        std::size_t i = 1;
+        if (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) ++i;
+        if (i < s.size() && (s[i] == '.' || s[i] == ')')) {
+            ++i;
+            if (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) {
+                return true;
+            }
+        }
+    }
+
+    // Pattern 3: [a-z]\s*[.)]\s
+    if ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+        std::size_t i = 1;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) ++i;
+        if (i < s.size() && (s[i] == '.' || s[i] == ')')) {
+            ++i;
+            if (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+} // namespace
+
 int enumerated_choice_lines(std::string_view text) {
-    // Keep in lockstep with Q_ENUM_LINE in webview.ts. The `i` flag is icase here.
-    static const std::regex kEnumLine(
-        R"(^(?:option\s+[0-9a-z]+\s*[:.)]|[0-9]{1,2}\s*[.)]\s|[a-z]\s*[.)]\s))",
-        std::regex::icase);
+    // Keep in lockstep with Q_ENUM_LINE in webview.ts. Fast non-allocating matcher.
     int n = 0;
     std::size_t at = 0;
-    // Fast-path: scan line-by-line via std::string_view without allocating std::string
     while (at <= text.size()) {
         std::size_t nl = text.find('\n', at);
         if (nl == std::string_view::npos) {
@@ -87,7 +139,7 @@ int enumerated_choice_lines(std::string_view text) {
         }
         const std::size_t b = line.find_last_not_of(" \t\r");
         const std::string_view trimmed = line.substr(a, b - a + 1);
-        if (std::regex_search(trimmed.begin(), trimmed.end(), kEnumLine)) {
+        if (is_enum_line(trimmed)) {
             ++n;
         }
     }
