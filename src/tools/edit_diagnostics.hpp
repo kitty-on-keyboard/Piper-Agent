@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace edit_diagnostics {
@@ -135,20 +136,11 @@ struct Candidate {
     const std::size_t want_size = want.size();
     const bool use_mask = (want_size <= 64);
 
-    std::vector<LineInfo> line_info(n_lines);
-    for (std::size_t k = 0; k < n_lines; ++k) {
-        detail::tokenize_cb(lines[k], [&](std::string_view tok) {
-            line_info[k].token_count++;
-            for (std::size_t m = 0; m < want_size; ++m) {
-                if (want[m] == tok) {
-                    if (m < 64) {
-                        line_info[k].want_mask |= (std::uint64_t{1} << m);
-                    } else {
-                        line_info[k].extra_want_indices.push_back(m);
-                    }
-                }
-            }
-        });
+    // Fast O(1) token lookup table mapping token text to its index positions in want
+    std::unordered_map<std::string_view, std::vector<std::size_t>> want_lookup;
+    want_lookup.reserve(want_size);
+    for (std::size_t m = 0; m < want_size; ++m) {
+        want_lookup[want[m]].push_back(m);
     }
 
     // First non-empty line of the want — used to break Jaccard ties when an earlier
@@ -164,6 +156,41 @@ struct Candidate {
                 want_anchor = std::move(toks);
                 break;
             }
+        }
+    }
+
+    const std::size_t anchor_size = want_anchor.size();
+    std::vector<LineInfo> line_info(n_lines);
+    std::vector<double> line_anchor(n_lines, 0.0);
+    std::vector<bool> anchor_hits(anchor_size, false);
+
+    // Pre-tokenize each line once: compute bitmask matches and precompute line_anchor scores
+    for (std::size_t k = 0; k < n_lines; ++k) {
+        std::fill(anchor_hits.begin(), anchor_hits.end(), false);
+        std::size_t anchor_hit_count = 0;
+
+        detail::tokenize_cb(lines[k], [&](std::string_view tok) {
+            line_info[k].token_count++;
+            auto it = want_lookup.find(tok);
+            if (it != want_lookup.end()) {
+                for (std::size_t m : it->second) {
+                    if (m < 64) {
+                        line_info[k].want_mask |= (std::uint64_t{1} << m);
+                    } else {
+                        line_info[k].extra_want_indices.push_back(m);
+                    }
+                }
+            }
+            for (std::size_t a = 0; a < anchor_size; ++a) {
+                if (!anchor_hits[a] && want_anchor[a] == tok) {
+                    anchor_hits[a] = true;
+                    anchor_hit_count++;
+                }
+            }
+        });
+
+        if (anchor_size > 0 && line_info[k].token_count > 0) {
+            line_anchor[k] = static_cast<double>(anchor_hit_count) / static_cast<double>(anchor_size);
         }
     }
 
@@ -215,24 +242,12 @@ struct Candidate {
 
         double anchor = 0.0;
         bool start_aligned = false;
-        if (!want_anchor.empty()) {
+        if (anchor_size > 0) {
             for (std::size_t j = i; j < end_j; ++j) {
                 if (line_info[j].token_count == 0) {
                     continue;
                 }
-                std::size_t hits = 0;
-                for (std::string_view wt : want_anchor) {
-                    bool hit = false;
-                    detail::tokenize_cb(lines[j], [&](std::string_view tok) {
-                        if (tok == wt) {
-                            hit = true;
-                        }
-                    });
-                    if (hit) {
-                        ++hits;
-                    }
-                }
-                anchor = static_cast<double>(hits) / static_cast<double>(want_anchor.size());
+                anchor = line_anchor[j];
                 // Prefer the window that opens on the matching line over one that
                 // only reaches it after a leading blank (same Jaccard + same anchor).
                 start_aligned = (j == i && anchor > 0.0);
