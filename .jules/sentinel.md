@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-09-23 - Unvalidated Webhook URL Scheme and Parameter Injection Risk
+**Vulnerability:** `post_orch_webhook` in `src/surface/worker.cpp` accepted arbitrary `webhook_url` strings and passed them directly to `curl` via `execlp`. An attacker-controlled or unvalidated webhook URL (e.g., `file:///etc/passwd` or CLI flags like `-o /tmp/evil`) could trigger unexpected local file reads/writes or command parameter injection via curl.
+**Learning:** Passing dynamic URL parameters directly to CLI subprocesses like `curl` without strict scheme validation (`http://` or `https://`) exposes the application to local protocol handlers and option injection risks.
+**Prevention:** Always validate URL schemes strictly (`rfind("http://", 0) == 0` or `rfind("https://", 0) == 0`) before passing URLs to subprocess execution wrappers.

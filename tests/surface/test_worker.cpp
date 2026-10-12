@@ -979,6 +979,12 @@ TEST(post_orch_webhook_network_and_schema) {
 
     bool dead_ok = post_orch_webhook("http://127.0.0.1:1/dead", ask_p, 1.0);
     CHECK(!dead_ok);
+
+    bool file_ok = post_orch_webhook("file:///etc/passwd", ask_p, 1.0);
+    CHECK(!file_ok);
+
+    bool flag_ok = post_orch_webhook("-o /tmp/evil", ask_p, 1.0);
+    CHECK(!flag_ok);
 }
 
 TEST(parse_approval_answer_handles_various_formats) {
