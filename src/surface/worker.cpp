@@ -1615,6 +1615,12 @@ bool post_orch_webhook(const std::string& webhook_url,
         return false;
     }
 
+    if (webhook_url.rfind("http://", 0) != 0 && webhook_url.rfind("https://", 0) != 0) {
+        std::fprintf(stderr, "piper: warning: refusing webhook URL with non-http(s) scheme: %s\n",
+                     webhook_url.c_str());
+        return false;
+    }
+
     nlohmann::json j = {
         {"kind", payload.kind},
         {"task_id", payload.task_id},
