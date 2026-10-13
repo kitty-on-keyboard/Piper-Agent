@@ -180,6 +180,9 @@ void render_hunk(std::string& out, const std::vector<Op>& ops, const Hunk& hunk,
 
 std::vector<std::string> split_lines(std::string_view text) {
     std::vector<std::string> lines;
+    const std::size_t newlines = static_cast<std::size_t>(
+        std::count(text.begin(), text.end(), '\n'));
+    lines.reserve(newlines + 1);
     std::size_t start = 0;
     while (start <= text.size()) {
         const std::size_t nl = text.find('\n', start);
