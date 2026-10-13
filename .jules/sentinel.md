@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-03-31 - Include credential and creds file path suffixes in spawn environment deny list
+**Vulnerability:** Parent environment variables carrying file paths to credential files under allowlisted namespaces (e.g. `LC_CREDENTIAL_FILE` or `XDG_CREDS_FILE`) bypassed `denied_parent_key` filtering and leaked to spawned child MCP process environments.
+**Learning:** Sensitive credential file suffixes like `CREDENTIAL_FILE` and `CREDS_FILE` must be explicitly included in environment filtering rules alongside `KEYFILE` and `SECRET_FILE` to avoid leaking credential paths to untrusted child processes.
+**Prevention:** Added `CREDENTIAL_FILE` and `CREDS_FILE` to `kSuffix` in `src/mcp/spawn_env.cpp`.
