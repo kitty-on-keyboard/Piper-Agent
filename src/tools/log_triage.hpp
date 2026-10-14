@@ -300,9 +300,20 @@ inline constexpr std::size_t kMarkerFixed =
 // Only ever applied on the COMPACTION path. A log that already fits is returned untouched.
 inline void normalise(std::string_view in, std::string& out) {
     out.clear();
+    // Fast path: if no ANSI escape or CR is present, just assign in one shot.
+    const std::size_t first_special = in.find_first_of("\x1b\r");
+    if (first_special == std::string_view::npos) {
+        out.assign(in.data(), in.size());
+        return;
+    }
+
     out.reserve(in.size());
-    std::size_t line_start = 0;
-    for (std::size_t i = 0; i < in.size();) {
+    out.assign(in.data(), first_special);
+
+    std::size_t line_start = out.rfind('\n');
+    line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+
+    for (std::size_t i = first_special; i < in.size();) {
         const char c = in[i];
         if (c == '\x1b' && i + 1 < in.size() && in[i + 1] == '[') {
             std::size_t j = i + 2;
