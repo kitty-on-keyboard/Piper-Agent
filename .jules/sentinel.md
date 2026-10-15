@@ -51,3 +51,8 @@
 **Vulnerability:** In `path_inside()`, checking string path prefix using `str(resolved).startswith(root_s + os.sep)` failed when the workspace root was the filesystem root `/` because `str(root) + os.sep` evaluates to `//` instead of `/`, incorrectly marking valid subpaths as escaping the workspace.
 **Learning:** String-based path prefix matching is fragile and prone to subtle bugs and false positives when handling edge cases like root paths or trailing separators.
 **Prevention:** Use standard library path hierarchy methods such as `Path.is_relative_to()` to validate filesystem containment securely and reliably.
+
+## 2026-09-23 - Insecure Unix Domain Socket Permissions
+**Vulnerability:** `DaemonListener::start()` in `src/surface/socket_reader.cpp` created a Unix domain socket without setting permissions. On shared systems or fallback paths like `/tmp/piper_worker.sock`, default umask allowed local users to connect to the socket and execute arbitrary commands under the daemon's user privileges.
+**Learning:** Binding a Unix domain socket inherits default process umask permissions, which may permit local group or world read/write access depending on environment setup.
+**Prevention:** Always explicitly set socket permissions using `chmod(socket_path, S_IRUSR | S_IWUSR)` (0600) immediately after `bind()` to restrict socket IPC access to the socket owner.
