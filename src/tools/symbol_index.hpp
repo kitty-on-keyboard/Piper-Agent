@@ -27,9 +27,22 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace lmp::tools {
+
+namespace detail {
+
+struct PathLineHash {
+    std::size_t operator()(const std::pair<std::string_view, long>& p) const noexcept {
+        const std::size_t h1 = std::hash<std::string_view>{}(p.first);
+        const std::size_t h2 = std::hash<long>{}(p.second);
+        return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+} // namespace detail
 
 struct SymbolHit {
     std::string path;
@@ -95,6 +108,7 @@ inline constexpr std::string_view kDefinitionKeywords[] = {
                                                              std::size_t limit,
                                                              std::size_t& suppressed) {
     std::vector<SymbolHit> hits;
+    std::unordered_set<std::pair<std::string_view, long>, detail::PathLineHash> seen;
     std::size_t at = 0;
     while (at < grep_output.size()) {
         const std::size_t nl = grep_output.find('\n', at);
@@ -121,12 +135,7 @@ inline constexpr std::string_view kDefinitionKeywords[] = {
             continue;
         }
 
-        // Fast-path duplicate check using string_view before constructing path/text std::strings
-        const bool dup =
-            std::any_of(hits.begin(), hits.end(), [line, path_sv](const SymbolHit& e) {
-                return e.line == line && e.path == path_sv;
-            });
-        if (dup) {
+        if (!seen.insert({path_sv, line}).second) {
             continue;
         }
 
