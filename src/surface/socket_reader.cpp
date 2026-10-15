@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -246,6 +247,13 @@ bool DaemonListener::start() {
     if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
+        return false;
+    }
+
+    if (::chmod(config_.socket_path.c_str(), S_IRUSR | S_IWUSR) != 0) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        ::unlink(config_.socket_path.c_str());
         return false;
     }
 
