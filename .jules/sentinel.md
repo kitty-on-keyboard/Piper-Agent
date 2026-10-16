@@ -37,6 +37,11 @@
 **Vulnerability:** Parent environment variables carrying shorthand passwords or secret/key/token/auth file paths under allowlisted prefixes (such as `LC_PASS`, `XDG_KEYFILE`, `LC_KEY_FILE`, `XDG_SECRET_FILE`, `LC_TOKEN_FILE`, `XDG_AUTH_FILE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
 **Learning:** Common credential shorthands and sensitive file path suffixes like `PASS`, `KEYFILE`, `KEY_FILE`, `SECRET_FILE`, `TOKEN_FILE`, and `AUTH_FILE` must be explicitly included in suffix filtering rules to prevent sensitive secret files and passwords in allowlisted namespaces from leaking to untrusted child processes.
 **Prevention:** Added `PASS`, `KEYFILE`, `KEY_FILE`, `SECRET_FILE`, `TOKEN_FILE`, and `AUTH_FILE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
+
+## 2026-03-31 - Add SSH key file suffixes to spawn environment deny list
+**Vulnerability:** Parent environment variables carrying SSH identity key file paths under allowlisted prefixes (such as `LC_SSH_KEY`, `XDG_SSH_KEYFILE`, `LC_SSH_KEY_FILE`) bypassed `denied_parent_key` and leaked into child MCP server process environments.
+**Learning:** SSH identity file variables like `SSH_KEY`, `SSH_KEY_FILE`, and `SSH_KEYFILE` must be explicitly included in suffix filtering rules to prevent sensitive SSH identity paths in allowlisted namespaces from leaking across process boundaries.
+**Prevention:** Added `SSH_KEY`, `SSH_KEY_FILE`, and `SSH_KEYFILE` to the `kSuffix` deny list in `src/mcp/spawn_env.cpp`.
 ## 2024-05-18 - Socket Path Truncation Vulnerability
 **Vulnerability:** Unix domain socket path truncation in `strncpy` due to unchecked length vs `sizeof(sockaddr_un::sun_path)`.
 **Learning:** `strncpy` truncates silently when the string is too long. If the socket path is longer than `sun_path` (usually 108 bytes), the connection will silently attempt to connect/bind to the truncated path.
