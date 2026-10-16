@@ -43,8 +43,8 @@ namespace lmp::tools {
         const std::size_t stop = nl == std::string_view::npos ? body.size() : nl + 1;
         const auto [ptr, ec] = std::to_chars(num_buf, num_buf + sizeof(num_buf), line);
         out.append(num_buf, static_cast<std::size_t>(ptr - num_buf));
-        out += '\t';
-        out.append(body, at, stop - at);
+        out.push_back('\t');
+        out.append(body.data() + at, stop - at);
         if (nl == std::string_view::npos) {
             break;
         }
