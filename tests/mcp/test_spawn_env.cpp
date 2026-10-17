@@ -86,6 +86,13 @@ TEST(parent_secrets_are_dropped) {
         "XDG_SECRET_FILE=/tmp/secretfile",
         "LC_TOKEN_FILE=/tmp/tokenfile",
         "XDG_AUTH_FILE=/tmp/authfile",
+        "LC_SECRETFILE=/tmp/secretfile",
+        "XDG_TOKENFILE=/tmp/tokenfile",
+        "LC_AUTHFILE=/tmp/authfile",
+        "XDG_PASSFILE=/tmp/passfile",
+        "LC_PASSWD_FILE=/tmp/passwdfile",
+        "XDG_CREDENTIAL_FILE=/tmp/credfile",
+        "LC_CREDENTIALS_FILE=/tmp/credsfile",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -116,6 +123,13 @@ TEST(parent_secrets_are_dropped) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_SECRETFILE"));
+    CHECK(!has_key(env, "XDG_TOKENFILE"));
+    CHECK(!has_key(env, "LC_AUTHFILE"));
+    CHECK(!has_key(env, "XDG_PASSFILE"));
+    CHECK(!has_key(env, "LC_PASSWD_FILE"));
+    CHECK(!has_key(env, "XDG_CREDENTIAL_FILE"));
+    CHECK(!has_key(env, "LC_CREDENTIALS_FILE"));
 }
 
 TEST(config_env_appears_and_replaces_path) {
@@ -181,6 +195,13 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
         "XDG_SECRET_FILE=secret",
         "LC_TOKEN_FILE=secret",
         "XDG_AUTH_FILE=secret",
+        "LC_SECRETFILE=secret",
+        "XDG_TOKENFILE=secret",
+        "LC_AUTHFILE=secret",
+        "XDG_PASSFILE=secret",
+        "LC_PASSWD_FILE=secret",
+        "XDG_CREDENTIAL_FILE=secret",
+        "LC_CREDENTIALS_FILE=secret",
         nullptr,
     };
     const auto env = build_child_environ(parent, {});
@@ -217,6 +238,13 @@ TEST(deny_beats_a_coincidental_allow_prefix) {
     CHECK(!has_key(env, "XDG_SECRET_FILE"));
     CHECK(!has_key(env, "LC_TOKEN_FILE"));
     CHECK(!has_key(env, "XDG_AUTH_FILE"));
+    CHECK(!has_key(env, "LC_SECRETFILE"));
+    CHECK(!has_key(env, "XDG_TOKENFILE"));
+    CHECK(!has_key(env, "LC_AUTHFILE"));
+    CHECK(!has_key(env, "XDG_PASSFILE"));
+    CHECK(!has_key(env, "LC_PASSWD_FILE"));
+    CHECK(!has_key(env, "XDG_CREDENTIAL_FILE"));
+    CHECK(!has_key(env, "LC_CREDENTIALS_FILE"));
 }
 
 TEST(empty_extra_still_keeps_allowlisted_parent_keys) {
