@@ -302,7 +302,23 @@ inline void normalise(std::string_view in, std::string& out) {
     out.clear();
     out.reserve(in.size());
     std::size_t line_start = 0;
-    for (std::size_t i = 0; i < in.size();) {
+    std::size_t i = 0;
+    while (i < in.size()) {
+        // Fast path: find next ANSI escape sequence or carriage return in bulk.
+        const std::size_t next_spec = in.find_first_of("\x1b\r", i);
+        if (next_spec == std::string_view::npos) {
+            out.append(in.data() + i, in.size() - i);
+            break;
+        }
+        if (next_spec > i) {
+            std::string_view chunk = in.substr(i, next_spec - i);
+            const std::size_t last_nl = chunk.rfind('\n');
+            if (last_nl != std::string_view::npos) {
+                line_start = out.size() + last_nl + 1;
+            }
+            out.append(chunk.data(), chunk.size());
+            i = next_spec;
+        }
         const char c = in[i];
         if (c == '\x1b' && i + 1 < in.size() && in[i + 1] == '[') {
             std::size_t j = i + 2;
