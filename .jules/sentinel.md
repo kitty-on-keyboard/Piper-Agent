@@ -1,3 +1,8 @@
+## 2026-10-18 - World-Accessible Unix Domain Socket Permissions
+**Vulnerability:** `DaemonListener::start()` created UNIX domain socket listeners without explicitly restricting file permissions, leaving the socket file permissions governed by the process umask (typically 0755 or 0775). Local users or processes on multi-user systems could connect to the daemon socket and issue commands or submit tasks to be executed with the daemon's host privileges.
+**Learning:** `bind()` creates socket files using standard process `umask` permissions, which often permit read/write access to group and other users.
+**Prevention:** Always explicitly set owner-only permissions (`chmod(path, 0600)`) on Unix domain sockets immediately after successful `bind()` invocation.
+
 ## 2026-03-31 - Command Injection via std::system in Container Probe
 **Vulnerability:** `probe()` in `src/tools/container.cpp` invoked `std::system` with string concatenation (`"command -v " + binary + " ..."`). If a binary argument contained shell metacharacters, arbitrary commands could be executed with host privileges.
 **Learning:** Shell invocation via `std::system` passes raw command strings through `/bin/sh`, evaluating shell metacharacters instead of isolating argument boundaries.

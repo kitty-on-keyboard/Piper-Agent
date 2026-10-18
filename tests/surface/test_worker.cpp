@@ -1496,6 +1496,36 @@ TEST(forward_to_daemon_disconnect_after_submission_must_not_allow_replay) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(daemon_listener_restricts_socket_permissions) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_daemon_perm_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    const std::string sock_path = (dir / "worker.sock").string();
+    const std::string pid_path = (dir / "worker.pid").string();
+
+    DaemonConfig cfg;
+    cfg.socket_path = sock_path;
+    cfg.pid_path = pid_path;
+
+    DaemonListener listener(cfg);
+    CHECK(listener.start());
+
+    std::error_code ec;
+    auto perms = std::filesystem::status(sock_path, ec).permissions();
+    CHECK(!ec);
+    CHECK((perms & std::filesystem::perms::owner_read) != std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::owner_write) != std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::group_read) == std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::group_write) == std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::group_exec) == std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::others_read) == std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::others_write) == std::filesystem::perms::none);
+    CHECK((perms & std::filesystem::perms::others_exec) == std::filesystem::perms::none);
+
+    listener.stop();
+    std::filesystem::remove_all(dir);
+}
+
 TEST(parse_idle_timeout_arg_handles_invalid_conversions) {
     // Gate covers the catch without linking sidecar's worker_main.
     CHECK_EQ(parse_idle_timeout_arg("abc", 3600.0), 3600.0);
