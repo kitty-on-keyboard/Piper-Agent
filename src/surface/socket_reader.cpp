@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -248,6 +249,8 @@ bool DaemonListener::start() {
         listen_fd_ = -1;
         return false;
     }
+
+    ::chmod(config_.socket_path.c_str(), 0600);
 
     if (::listen(listen_fd_, 5) != 0) {
         ::close(listen_fd_);
