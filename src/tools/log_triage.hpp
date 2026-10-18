@@ -804,44 +804,56 @@ inline void push_unique(std::vector<std::string>& v, std::string s) {
 }
 
 inline void parse_counts(std::string_view log, StructuredTriage& t) {
-    // pytest: "3 failed, 128 passed"
-    for (std::size_t i = 0; i + 10 < log.size(); ++i) {
-        if (!is_digit(log[i])) {
-            continue;
+    // Helper to extract an integer count directly preceding a keyword occurrence.
+    auto extract_preceding_count = [](std::string_view s, std::size_t kw_pos) -> int {
+        std::size_t k = kw_pos;
+        while (k > 0 && (s[k - 1] == ' ' || s[k - 1] == '\t')) {
+            --k;
         }
-        std::size_t j = i;
+        const std::size_t end_digits = k;
+        while (k > 0 && is_digit(s[k - 1])) {
+            --k;
+        }
+        if (end_digits == k) {
+            return -1;
+        }
         int n = 0;
-        while (j < log.size() && is_digit(log[j])) {
-            n = n * 10 + (log[j] - '0');
-            ++j;
+        for (std::size_t p = k; p < end_digits; ++p) {
+            n = n * 10 + (s[p] - '0');
         }
-        while (j < log.size() && (log[j] == ' ' || log[j] == '\t')) {
-            ++j;
+        return n;
+    };
+
+    // Fast-path search for pytest "failed" / "passed" counts via std::string_view::find.
+    if (t.failed < 0) {
+        std::size_t pos = 0;
+        while ((pos = log.find("failed", pos)) != std::string_view::npos) {
+            const int n = extract_preceding_count(log, pos);
+            if (n >= 0) {
+                t.failed = n;
+                break;
+            }
+            pos += 6;
         }
-        if (starts_with(log.substr(j), "failed") && t.failed < 0) {
-            t.failed = n;
-        } else if (starts_with(log.substr(j), "passed") && t.passed < 0) {
-            t.passed = n;
-        }
-        i = j;
     }
+
+    if (t.passed < 0) {
+        std::size_t pos = 0;
+        while ((pos = log.find("passed", pos)) != std::string_view::npos) {
+            const int n = extract_preceding_count(log, pos);
+            if (n >= 0) {
+                t.passed = n;
+                break;
+            }
+            pos += 6;
+        }
+    }
+
     // ctest: "92% tests passed, 1 tests failed out of 13"
     const std::size_t ctest = log.find("tests failed out of");
     if (ctest != std::string_view::npos) {
-        // walk back for "N tests failed"
-        std::size_t k = ctest;
-        while (k > 0 && !is_digit(log[k - 1])) {
-            --k;
-        }
-        std::size_t end = k;
-        while (k > 0 && is_digit(log[k - 1])) {
-            --k;
-        }
-        if (end > k) {
-            int n = 0;
-            for (std::size_t p = k; p < end; ++p) {
-                n = n * 10 + (log[p] - '0');
-            }
+        const int n = extract_preceding_count(log, ctest);
+        if (n >= 0) {
             t.failed = n;
         }
     }
