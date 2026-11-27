@@ -24,15 +24,14 @@
 //      r-18cf2a6c7f16da98-14a63603 the model asked about Blender instead of calling
 //      the Godoer tool sitting in the registry under `mcp__godoer__godot_model`.
 //   2. CONTAINMENT. A remote tool runs in the SERVER's process, outside Seatbelt. We do
-//      not sandbox it and cannot. So an untrusted server's tools are all declared
-//      `irreversible`, which routes every call through the approval card. The operator
-//      opts a server into `trusted` explicitly; the server's own MCP annotations never
-//      decide this, because the MCP spec says they must not be trusted for security.
-//      On a trusted server, `readOnlyHint` decides mutates vs read -- that is a
-//      statement about what the tool does, used for mode policy, not a bypass of
-//      Seatbelt. `destructiveHint` is already covered by mutates_workspace; it does
-//      not set `irreversible` (that flag is containment / delete-class cards).
-//      Untrusted servers keep the assume-worst flags.
+//      not sandbox it and cannot. So an untrusted server's mutating tools are declared
+//      `irreversible`, which routes every mutating call through the approval card, while
+//      tools explicitly annotated `readOnlyHint: true` (such as worker `ask_user` reads)
+//      need no per-call card. The operator opts a server into `trusted` explicitly:
+//      on a trusted server, mutating tools leave `irreversible` false so approved-write
+//      workflows can run without per-call cards. `readOnlyHint` still controls mode
+//      policy (read-only vs workspace-mutating) and `destructiveHint` does not override
+//      `irreversible` on trusted servers.
 //   3. AVAILABILITY. A server that fails to spawn, refuses the handshake, or hangs leaves
 //      its tools ABSENT and the run continues. A broken server must never be able to
 //      stall a turn, so every call carries a timeout.

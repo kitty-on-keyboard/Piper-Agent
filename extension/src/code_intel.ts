@@ -3,9 +3,37 @@
 // Uses language features VS Code already hosts. Does not launch clangd and is not the
 // post-edit syntax_check path.
 
+import * as fs from "fs";
+import * as path from "path";
 import * as vscode from "vscode";
 import { CodeIntelNotification } from "./protocol.generated";
 import { SidecarClient } from "./client";
+
+/** True iff `targetPath` resolves inside one of the open workspace folders. */
+export function isPathWithinWorkspace(targetPath: string): boolean {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0 || !targetPath) return false;
+  const resolveWithParent = (p: string): string => {
+    const abs = path.resolve(p);
+    try {
+      return fs.realpathSync(abs);
+    } catch {
+      const parent = path.dirname(abs);
+      const base = path.basename(abs);
+      if (parent === abs) return abs;
+      return path.join(resolveWithParent(parent), base);
+    }
+  };
+  const resolvedTarget = resolveWithParent(targetPath);
+  for (const folder of folders) {
+    const root = resolveWithParent(folder.uri.fsPath);
+    const rel = path.relative(root, resolvedTarget);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Caches relative path computations per URI string to avoid redundant VS Code workspace API calls.
 function relPath(uri: vscode.Uri, cache?: Map<string, string>): string {
@@ -58,8 +86,11 @@ async function workspaceSymbols(query: string): Promise<string> {
   return lines.join("\n");
 }
 
-async function definitions(path: string, line: number, character: number): Promise<string> {
-  const uri = vscode.Uri.file(path);
+async function definitions(fsPath: string, line: number, character: number): Promise<string> {
+  if (!isPathWithinWorkspace(fsPath)) {
+    throw new Error("definitions path is outside workspace");
+  }
+  const uri = vscode.Uri.file(fsPath);
   const pos = new vscode.Position(Math.max(0, line - 1), Math.max(0, character));
   const locs =
     (await vscode.commands.executeCommand<
@@ -79,8 +110,11 @@ async function definitions(path: string, line: number, character: number): Promi
   return lines.join("\n");
 }
 
-async function references(path: string, line: number, character: number): Promise<string> {
-  const uri = vscode.Uri.file(path);
+async function references(fsPath: string, line: number, character: number): Promise<string> {
+  if (!isPathWithinWorkspace(fsPath)) {
+    throw new Error("references path is outside workspace");
+  }
+  const uri = vscode.Uri.file(fsPath);
   const pos = new vscode.Position(Math.max(0, line - 1), Math.max(0, character));
   const locs =
     (await vscode.commands.executeCommand<vscode.Location[]>(
@@ -100,20 +134,23 @@ function isAbsPath(p: string): boolean {
   return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
 }
 
-async function diagnostics(path: string): Promise<string> {
+async function diagnostics(targetPath: string): Promise<string> {
   const all = vscode.languages.getDiagnostics();
   const cache = new Map<string, string>();
   const lines: string[] = [];
-  const isAbs = isAbsPath(path);
+  const isAbs = isAbsPath(targetPath);
+  if (targetPath && isAbs && !isPathWithinWorkspace(targetPath)) {
+    throw new Error("diagnostics path is outside workspace");
+  }
   for (const [uri, diags] of all) {
-    if (!diags.length) continue;
+    if (!diags.length || !isPathWithinWorkspace(uri.fsPath)) continue;
     // Optimization: Fast-path filter for path queries. For absolute target paths,
     // uri.fsPath !== path guarantees a non-match, skipping relPath() and avoiding
     // expensive VS Code workspace API calls (getWorkspaceFolder / asRelativePath)
     // for all non-matching workspace documents.
-    if (path) {
-      if (uri.fsPath !== path) {
-        if (isAbs || relPath(uri, cache) !== path) {
+    if (targetPath) {
+      if (uri.fsPath !== targetPath) {
+        if (isAbs || relPath(uri, cache) !== targetPath) {
           continue;
         }
       }
@@ -138,12 +175,15 @@ async function diagnostics(path: string): Promise<string> {
 }
 
 async function renamePreview(
-  path: string,
+  fsPath: string,
   line: number,
   character: number,
   query: string
 ): Promise<string> {
-  const uri = vscode.Uri.file(path);
+  if (!isPathWithinWorkspace(fsPath)) {
+    throw new Error("rename_preview path is outside workspace");
+  }
+  const uri = vscode.Uri.file(fsPath);
   const pos = new vscode.Position(Math.max(0, line - 1), Math.max(0, character));
   const newName = query.trim();
   if (!newName) {

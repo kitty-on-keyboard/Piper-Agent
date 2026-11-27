@@ -31,7 +31,7 @@ import {
   SessionSummary,
 } from "./protocol.generated";
 import { editPreconditionError } from "./edit_version";
-import { handleCodeIntel } from "./code_intel";
+import { handleCodeIntel, isPathWithinWorkspace } from "./code_intel";
 import {
   classifyCheckpoint,
   effectiveDraftDir,
@@ -323,8 +323,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // loads the weights if the operator has not yet. Resuming is exactly as much of a
     // reason to do that as sending a message is.
     if (!(await this.ready())) return;
+    const settings = this.host.settings();
+    if (!(await this.host.confirmContainment(settings))) {
+      this.fail("Cancelled: the run needs a containment choice.");
+      return;
+    }
+    if (!(await this.host.confirmTrustedMcp(settings))) {
+      this.fail("Cancelled: the run needs a trusted-MCP choice.");
+      return;
+    }
+    if (!(await this.host.confirmWorkspaceMcp(settings))) {
+      this.fail("Cancelled: the run needs a workspace-MCP choice.");
+      return;
+    }
     this.post("status", { text: "Resuming…" });
-    const reply = await this.client.resume(runId, this.host.settings());
+    const reply = await this.client.resume(runId, settings);
     // Two different failures, and both land here: `error` is the transport's (no sidecar,
     // malformed reply) and `ok === false` is the resume gate's considered refusal, which
     // carries the reason the operator needs -- which workspace, model or tool schema
@@ -362,6 +375,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    */
   private async applyEdit(n: EditNotification): Promise<void> {
     try {
+      if (!isPathWithinWorkspace(n.path)) {
+        await this.client.editApplied(
+          n.request_id,
+          false,
+          `refused edit outside workspace: ${n.path}`
+        );
+        return;
+      }
       const uri = vscode.Uri.file(n.path);
       const edit = new vscode.WorkspaceEdit();
       let existing: vscode.TextDocument | undefined;
@@ -912,25 +933,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.post("said", { text, steering: this.runInFlight, images: imagePaths });
     if (!(await this.ready())) return;
 
-    // A run id survives its run: it is what makes the NEXT prompt a follow-up over the
-    // same context rather than a fresh mission. It is cleared when the model unloads,
-    // because that is when the context it names stops existing.
-    if (this.currentRunId !== undefined) {
-      this.runInFlight = true;
-      const reply = await this.client.message(
-        this.currentRunId,
-        text,
-        imagePaths,
-        this.host.settings()
-      );
-      if (reply.error) this.fail(reply.error);
-      else if (reply.run_id) this.currentRunId = reply.run_id;
-      return;
-    }
-
     const settings = this.host.settings();
-    const problems = this.host.problems(settings);
-    if (problems.length > 0) return this.fail(problems.join("\n"));
     if (!(await this.host.confirmContainment(settings))) {
       this.fail("Cancelled: the run needs a containment choice.");
       return;
@@ -943,6 +946,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       this.fail("Cancelled: the run needs a workspace-MCP choice.");
       return;
     }
+
+    // A run id survives its run: it is what makes the NEXT prompt a follow-up over the
+    // same context rather than a fresh mission. It is cleared when the model unloads,
+    // because that is when the context it names stops existing.
+    if (this.currentRunId !== undefined) {
+      this.runInFlight = true;
+      const reply = await this.client.message(
+        this.currentRunId,
+        text,
+        imagePaths,
+        settings
+      );
+      if (reply.error) this.fail(reply.error);
+      else if (reply.run_id) this.currentRunId = reply.run_id;
+      return;
+    }
+
+    const problems = this.host.problems(settings);
+    if (problems.length > 0) return this.fail(problems.join("\n"));
     this.beginRun(text, false);
     const reply = await this.client.start_run(text, settings, imagePaths);
     if (reply.error) this.fail(reply.error);

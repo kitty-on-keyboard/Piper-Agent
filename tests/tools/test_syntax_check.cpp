@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #include "src/platform/fs.hpp"
@@ -125,4 +126,28 @@ TEST(the_compile_database_command_drops_output_arguments) {
     // No build directory was created above (write_file_atomic does not mkdir), so the
     // database is absent and the lookup must come back empty rather than guess.
     CHECK(compile_db_syntax_command(root, abs).empty());
+}
+
+TEST(compile_database_rejects_shell_injection_and_disallowed_flags) {
+    const std::string root = temp_dir();
+    const std::string abs = lmp::platform::WorkspaceFs(root).contained_path("x.cpp").absolute;
+    write(root + "/x.cpp", "int main(){return 0;}\n");
+    std::filesystem::create_directories(root + "/build");
+
+    const std::string pwn_target = root + "/pwned.txt";
+    const std::string db =
+        "[{\"directory\":\"" + root + "\",\"file\":\"" + abs +
+        "\",\"command\":\"clang++ " + abs + "; touch " + pwn_target + "\"}"
+        ",{\"directory\":\"" + root + "\",\"file\":\"" + abs +
+        "\",\"command\":\"clang++ -fplugin=/tmp/evil.so " + abs + "\"}"
+        ",{\"directory\":\"" + root + "\",\"file\":\"" + abs +
+        "\",\"command\":\"/bin/sh -c 'touch " + pwn_target + "' " + abs + "\"}]";
+    write(root + "/build/compile_commands.json", db);
+    CHECK(compile_db_syntax_command(root, abs).empty());
+    CHECK(!std::filesystem::exists(pwn_target));
+
+    const SyntaxChecker checker(root, 2048);
+    CHECK(!checker.check("x.cpp", 1).ran);
+    // Out-of-range approved_tier must not escalate to T3_HostUnsandboxed.
+    CHECK(!checker.check("broken.py", 99).ran);
 }

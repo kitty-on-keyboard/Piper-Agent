@@ -81,11 +81,13 @@
         "lmPipe.modelDir": {
           "type": "string",
           "default": "",
+          "scope": "application",
           "description": "Absolute path to the Qwen3 MLX model directory. Required; there is no default model (S7.5)."
         },
         "lmPipe.draftModelDir": {
           "type": "string",
           "default": "",
+          "scope": "application",
           "description": "Remembered path to a Qwen MTP draft head (model_type qwen3_5_mtp) for the dense checkpoint. Not sent when loading A3B / MoE. Prefer the Speculative decoding checkbox in the sidebar over editing this by hand."
         },
         "lmPipe.speculativeDecoding": {
@@ -109,11 +111,13 @@
             "type": "string"
           },
           "default": [],
+          "scope": "application",
           "description": "Recently used Qwen3 MLX checkpoint directories. The sidebar switcher shows the current one and the previous one so A3B and dense can be swapped without a folder picker."
         },
         "lmPipe.mode": {
           "type": "string",
           "default": "agent",
+          "scope": "application",
           "enum": [
             "plan",
             "debug",
@@ -151,6 +155,7 @@
         "lmPipe.requireApproval": {
           "type": "boolean",
           "default": false,
+          "scope": "application",
           "description": "Ask me about everything. A floor over the two switches above: it can only tighten them, never loosen them."
         },
         "lmPipe.sampling.temperature": {
@@ -262,18 +267,21 @@
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
+          "scope": "application",
           "description": "System prompt for agent (code) mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
         },
         "lmPipe.prompts.plan": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
+          "scope": "application",
           "description": "System prompt for plan mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
         },
         "lmPipe.prompts.debug": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
+          "scope": "application",
           "description": "System prompt for debug mode. Leave empty for the built-in Piper persona. This replaces the persona entirely -- it does not append to it."
         },
         "lmPipe.allowedCommands": {
@@ -282,6 +290,7 @@
             "type": "string"
           },
           "default": [],
+          "scope": "application",
           "description": "Commands you have already approved. The 'Always allow' button on an approval card adds to this. An entry matches a command that equals it or starts with it followed by a space; a command containing shell chaining (; && || | ` $( > <) never matches, so allowing 'pytest' cannot authorise 'pytest; rm -rf ~'. Persistent prefix matches apply only to fully parsed, non-destructive commands. Irreversible operations and opaque (partially parsed / unparseable) scripts always ask; opaque approvals for the rest of a run bind to script digests rather than this list."
         },
         "lmPipe.mcpServers": {

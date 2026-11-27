@@ -60,7 +60,7 @@ constexpr float kDeterministicDrafter = 1.0F;
 
 // The repetition-penalty window MlxBackend::generate keeps. Speculative rows must be
 // shaped against the same window or they are not the rows sequential decoding would use.
-constexpr std::size_t kRecentWindow = 64;
+constexpr std::size_t kRecentWindow = 256;
 
 // The most committed-but-unforwarded tokens a block may carry in (see `pending_`).
 //
@@ -457,6 +457,7 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
             // is exactly the assumption that does not hold here. walk_masks() truncates.
             ? propose(context, is_special, walking ? nullptr : mask, fwd)
             : std::vector<TokenId>{};
+    const bool had_raw_draft = !drafted.empty();
 
     if (walking && !drafted.empty()) {
         walk_masks(*src, drafted);
@@ -468,7 +469,11 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     }
 
     // No block to fold the prefix into, so it has to be paid for on its own.
+    // If walk_masks truncated all drafted tokens, trim any speculative proposer state.
     if (drafted.empty()) {
+        if (had_raw_draft) {
+            proposer_->cancel_draft(fwd);
+        }
         flush(fwd);
         return decode_one(mask, recent, fwd);
     }
@@ -501,13 +506,10 @@ SpecStep SpeculativeDecoder::step(MaskSource* src, const std::vector<TokenId>& r
     // Map into the verifier's index space: each row is dense over that position's
     // candidate list, and a drafted token that did not survive shaping is given an
     // out-of-range index, which the verifier reads as p = 0 and rejects with certainty.
-    std::vector<std::vector<float>> compact;
     std::vector<std::span<const float>> row_spans;
-    compact.reserve(dists.size());
     row_spans.reserve(dists.size());
     for (const TokenDist& d : dists) {
-        compact.push_back(d.probs);
-        row_spans.emplace_back(compact.back().data(), compact.back().size());
+        row_spans.emplace_back(d.probs.data(), d.probs.size());
     }
 
     const std::vector<TokenId> draft_idx = prepare_draft_indices(drafted, dists);

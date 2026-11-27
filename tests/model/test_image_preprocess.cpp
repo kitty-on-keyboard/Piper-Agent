@@ -271,4 +271,18 @@ TEST(decoding_a_non_image_fails_loudly) {
     CHECK(!err.empty());
     CHECK(!decode_image_file("/nonexistent/nope.png", 1 << 20, out, err));
     CHECK(!err.empty());
+
+    // Overflow / huge pixel ceiling guard must fail loudly without integer wrap.
+    const std::string valid_small_fail = "bad";
+    CHECK(!decode_image_bytes(reinterpret_cast<const std::uint8_t*>(valid_small_fail.data()),
+                              valid_small_fail.size(), 10, out, err));
+}
+
+TEST(resample_bicubic_handles_non_positive_dimensions_safely) {
+    const ImageRGB src = gradient(8, 8);
+    ImageRGB dst;
+    resample_bicubic(src, 0, 8, dst);
+    CHECK(dst.width == 0 && dst.height == 0 && dst.rgb.empty());
+    resample_bicubic(src, 8, -4, dst);
+    CHECK(dst.width == 0 && dst.height == 0 && dst.rgb.empty());
 }

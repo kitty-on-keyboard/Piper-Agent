@@ -37,6 +37,7 @@ Db::Db(const std::string& path, LinkPolicy links) {
         handle_ = nullptr;
         throw SqlError(msg);
     }
+    sqlite3_busy_timeout(handle_, 5000);
 }
 
 Db::~Db() {

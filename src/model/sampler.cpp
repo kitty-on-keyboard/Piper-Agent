@@ -49,7 +49,7 @@ void apply_mask(std::vector<float>& logits, const TokenMask* mask) {
 // Qwen defaults (1.05) assume the HF semantics, which are per-id.
 void apply_repetition_penalty(std::vector<float>& logits, const std::vector<TokenId>& recent,
                               float penalty) {
-    if (penalty == 1.0F) {
+    if (!std::isfinite(penalty) || penalty <= 0.0F || penalty == 1.0F) {
         return;
     }
     std::vector<TokenId> unique_ids(recent);
@@ -60,12 +60,15 @@ void apply_repetition_penalty(std::vector<float>& logits, const std::vector<Toke
             continue;
         }
         float& l = logits[static_cast<std::size_t>(id)];
+        if (!std::isfinite(l)) {
+            continue;
+        }
         l = l > 0 ? l / penalty : l * penalty;
     }
 }
 
 // The k highest finite logits, returned in ascending id order. A masked-out or
-// otherwise -inf logit is never a candidate: softmax gave it zero weight anyway, so
+// otherwise non-finite logit is never a candidate: softmax gave it zero weight anyway, so
 // selecting over the finite entries only is the same distribution.
 std::vector<Cand> select_top_k(const std::vector<float>& logits, std::int32_t k) {
     const bool bounded = k > 0 && static_cast<std::size_t>(k) < logits.size();
@@ -75,7 +78,7 @@ std::vector<Cand> select_top_k(const std::vector<float>& logits, std::int32_t k)
         heap.reserve(static_cast<std::size_t>(k) + 1);
     }
     for (std::size_t i = 0; i < logits.size(); ++i) {
-        if (logits[i] == kNegInf) {
+        if (!std::isfinite(logits[i])) {
             continue;
         }
         if (!bounded) {
@@ -110,19 +113,19 @@ Dist softmax(const std::vector<Cand>& cands, float temperature) {
     float max_logit = kNegInf;
     std::size_t max_index = 0;
     for (std::size_t i = 0; i < cands.size(); ++i) {
-        if (cands[i].logit > max_logit) {
+        if (std::isfinite(cands[i].logit) && cands[i].logit > max_logit) {
             max_logit = cands[i].logit;
             max_index = i;
         }
     }
-    if (max_logit == kNegInf) {
-        return d; // everything masked
+    if (!std::isfinite(max_logit)) {
+        return d; // everything masked or non-finite
     }
     // Temperature zero means greedy decoding, not "sample at temperature one". Besides
     // matching the conventional API contract, this is what makes evaluator smoke runs
     // deterministic independently of seed. Cands are in ascending id order and strict >
     // above keeps the lowest id on an exact tie.
-    if (temperature <= 0.0F) {
+    if (!std::isfinite(temperature) || temperature <= 0.0F) {
         d.probs[max_index] = 1.0F;
         d.total = 1.0F;
         return d;

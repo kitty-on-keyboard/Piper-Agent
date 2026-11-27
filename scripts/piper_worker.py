@@ -453,10 +453,21 @@ def write_result(path, payload):
 def post_orch_webhook(url, payload, timeout=5.0):
     if not url:
         return False
-    if not (url.startswith("http://") or url.startswith("https://")):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
         print(f"piper: warning: refusing webhook URL with non-http(s) scheme: {url}", file=sys.stderr)
         return False
+    host = (parsed.hostname or "").lower()
+    allow_remote = os.environ.get("PIPER_ALLOW_REMOTE_WEBHOOK") == "1"
+    if not allow_remote and host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"piper: warning: refusing non-loopback webhook host: {host!r}", file=sys.stderr)
+        return False
     try:
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                raise urllib.error.HTTPError(newurl, code, f"refusing redirect ({code})", headers, fp)
+
+        opener = urllib.request.build_opener(_NoRedirect())
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -464,7 +475,7 @@ def post_orch_webhook(url, payload, timeout=5.0):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             return 200 <= resp.status < 300
     except Exception as exc:
         print(f"piper: warning: failed to post '{payload.get('kind')}' wake event to {url}: {exc}", file=sys.stderr)
@@ -730,8 +741,8 @@ def validate_trust_mcp_names(cwd, names):
 def default_slice_task_path(cwd, task_id):
     """Default packet location: <cwd>/.piper/slices/<id>/task.json."""
     sid = str(task_id or "").strip()
-    if not sid:
-        raise PacketError("id must be a non-empty string")
+    if not sid or "/" in sid or "\\" in sid or ".." in sid or sid in (".", ".."):
+        raise PacketError("id must be a single safe path segment")
     return os.path.join(
         os.path.abspath(os.path.expanduser(cwd)), ".piper", "slices", sid, "task.json"
     )
@@ -1687,7 +1698,9 @@ def cmd_distill(args):
     lock_file = None
     if not daemon_online:
         import fcntl
-        lock_path = "/tmp/piper_distill.lock"
+        lock_dir = os.path.join(os.path.expanduser("~"), ".piper")
+        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+        lock_path = os.path.join(lock_dir, "distill.lock")
         try:
             lock_file = open(lock_path, "w")
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

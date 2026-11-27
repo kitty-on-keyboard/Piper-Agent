@@ -7,6 +7,7 @@
 // files of 600 unreviewed lines would have been the same product.
 
 import * as vscode from "vscode";
+import * as crypto from "crypto";
 import * as path from "path";
 import { serializeAllowedCommands } from "./allowlist";
 import { SidecarClient } from "./client";
@@ -18,10 +19,10 @@ let client: SidecarClient | undefined;
 let output: vscode.OutputChannel;
 /** Set once the operator has confirmed an unsandboxed run in this window. */
 let unsandboxedAcknowledged = false;
-/** Set once the operator has confirmed trusted MCP servers in this window. */
-let trustedMcpAcknowledged = false;
-/** Once decided this window: true = spawn `.mcp.json`, false = skip it, null = ask. */
-let workspaceMcpDecision: boolean | null = null;
+/** Digest of trusted MCP server configs already confirmed in this window. */
+let trustedMcpDigest: string | null = null;
+/** Decisions keyed by SHA-256 of `.mcp.json` contents so edits re-prompt. */
+const workspaceMcpDecisions = new Map<string, boolean>();
 
 function settingsFromConfig(): RunSettings {
   const cfg = vscode.workspace.getConfiguration("lmPipe");
@@ -162,7 +163,12 @@ async function confirmContainment(settings: RunSettings): Promise<boolean> {
  *  run; dismissing cancels. */
 async function confirmTrustedMcp(settings: RunSettings): Promise<boolean> {
   const trusted = settings.mcp_servers.filter((s) => s.trusted);
-  if (trusted.length === 0 || trustedMcpAcknowledged) return true;
+  if (trusted.length === 0) return true;
+  const canonical = trusted
+    .map((s) => ({ name: s.name, command: s.command, args: s.args, env: s.env }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const digest = crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+  if (trustedMcpDigest === digest) return true;
   const names = trusted.map((s) => s.name).join(", ");
   const choice = await vscode.window.showWarningMessage(
     `LM_Pipe will treat MCP server${trusted.length === 1 ? "" : "s"} ` +
@@ -176,17 +182,13 @@ async function confirmTrustedMcp(settings: RunSettings): Promise<boolean> {
   if (choice === "Run them untrusted") {
     for (const s of settings.mcp_servers) s.trusted = false;
   } else {
-    trustedMcpAcknowledged = true;
+    trustedMcpDigest = digest;
   }
   return true;
 }
 
-/** Once-per-window acknowledgement before spawning servers from workspace `.mcp.json`.
- *
- *  Trusting the folder is not consent to run a checkout's commands. Settings-sourced
- *  servers are unchanged; this only gates the file-sourced list the sidecar would
- *  otherwise connect at run start. Declining leaves allow_workspace_mcp false so the
- *  sidecar skips the file; dismissing cancels the run. */
+/** Once-per-window acknowledgement (bound to SHA-256 of `.mcp.json`) before spawning
+ *  servers from workspace `.mcp.json`. */
 async function confirmWorkspaceMcp(settings: RunSettings): Promise<boolean> {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
@@ -214,8 +216,10 @@ async function confirmWorkspaceMcp(settings: RunSettings): Promise<boolean> {
     settings.allow_workspace_mcp = false;
     return true;
   }
-  if (workspaceMcpDecision !== null) {
-    settings.allow_workspace_mcp = workspaceMcpDecision;
+  const digest = crypto.createHash("sha256").update(raw, "utf8").digest("hex");
+  const prior = workspaceMcpDecisions.get(digest);
+  if (prior !== undefined) {
+    settings.allow_workspace_mcp = prior;
     return true;
   }
   const label = names.length <= 3 ? names.join(", ") : `${names.slice(0, 3).join(", ")} (+${names.length - 3} more)`;
@@ -230,10 +234,10 @@ async function confirmWorkspaceMcp(settings: RunSettings): Promise<boolean> {
   if (choice === undefined) return false;
   if (choice === "Skip workspace .mcp.json") {
     settings.allow_workspace_mcp = false;
-    workspaceMcpDecision = false;
+    workspaceMcpDecisions.set(digest, false);
   } else {
     settings.allow_workspace_mcp = true;
-    workspaceMcpDecision = true;
+    workspaceMcpDecisions.set(digest, true);
   }
   return true;
 }

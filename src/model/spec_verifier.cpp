@@ -24,20 +24,26 @@ double next_uniform(std::uint64_t& state) noexcept {
 TokenId sample_row(std::span<const float> probs, std::uint64_t& state) noexcept {
     double sum = 0.0;
     for (float v : probs) {
-        sum += static_cast<double>(v);
+        if (std::isfinite(v) && v > 0.0F) {
+            sum += static_cast<double>(v);
+        }
     }
-    if (sum <= 0.0) {
+    if (!std::isfinite(sum) || sum <= 0.0) {
         return 0;
     }
     double target = next_uniform(state) * sum;
     for (std::size_t i = 0; i < probs.size(); ++i) {
-        target -= static_cast<double>(probs[i]);
-        if (target <= 0.0 && probs[i] > 0.0F) {
+        const double p = (std::isfinite(probs[i]) && probs[i] > 0.0F)
+                             ? static_cast<double>(probs[i])
+                             : 0.0;
+        if (p == 0.0) continue;
+        target -= p;
+        if (target <= 0.0) {
             return static_cast<TokenId>(i);
         }
     }
     for (std::size_t i = probs.size(); i > 0; --i) {
-        if (probs[i - 1] > 0.0F) {
+        if (std::isfinite(probs[i - 1]) && probs[i - 1] > 0.0F) {
             return static_cast<TokenId>(i - 1);
         }
     }
@@ -59,13 +65,18 @@ SpecResult SpecVerifier::verify(std::span<const TokenId> draft,
         const std::span<const float> row = target_rows[i];
         double row_sum = 0.0;
         for (float v : row) {
-            row_sum += static_cast<double>(v);
+            if (std::isfinite(v) && v > 0.0F) {
+                row_sum += static_cast<double>(v);
+            }
         }
         const auto t = static_cast<std::size_t>(draft[i]);
-        const double p = (draft[i] >= 0 && t < row.size() && row_sum > 0.0)
-                             ? static_cast<double>(row[t]) / row_sum
-                             : 0.0;
-        const double q = i < draft_probs.size() ? static_cast<double>(draft_probs[i]) : 1.0;
+        const double tv = (draft[i] >= 0 && t < row.size() &&
+                           std::isfinite(row[t]) && row[t] > 0.0F)
+                              ? static_cast<double>(row[t])
+                              : 0.0;
+        const double p = (row_sum > 0.0 && std::isfinite(row_sum)) ? (tv / row_sum) : 0.0;
+        const double q_raw = i < draft_probs.size() ? static_cast<double>(draft_probs[i]) : 1.0;
+        const double q = (std::isfinite(q_raw) && q_raw > 0.0) ? q_raw : 0.0;
 
         // accept with probability min(1, p/q); q == 0 cannot be divided by, and a drafter
         // that assigned zero mass to what it proposed has told us nothing, so the target's

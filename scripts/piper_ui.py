@@ -13,16 +13,29 @@ import http.server
 import json
 import mimetypes
 import os
+import secrets
 import sys
 import threading
 import time
 import webbrowser
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 # Ensure mime types are registered
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("text/html", ".html")
+
+
+def is_within_dir(root, candidate):
+    """True iff `candidate` resolves inside `root` (following symlinks cleanly)."""
+    if not root or not candidate or "\0" in str(candidate):
+        return False
+    try:
+        real_root = os.path.realpath(root)
+        real_cand = os.path.realpath(candidate)
+        return os.path.commonpath([real_root, real_cand]) == real_root
+    except (OSError, ValueError):
+        return False
 
 
 def read_appended(path, offset):
@@ -129,6 +142,8 @@ def list_slice_records(workspace_dir):
             result_path = os.path.join(directory, "result.json")
         if not os.path.isabs(result_path):
             result_path = os.path.abspath(os.path.join(directory, result_path))
+        if not is_within_dir(workspace_dir, result_path):
+            result_path = os.path.join(directory, "result.json")
         result = read_json(result_path)
         if isinstance(result, dict) and result.get("status"):
             status = str(result["status"])
@@ -162,13 +177,18 @@ def resolve_watch_dir(workspace_dir):
     """Active slice (the same resolver `piper status` uses), else the last slice dir."""
     import piper_worker as pw
 
+    workspace_dir = os.path.abspath(workspace_dir)
     active = pw.find_active_slice(workspace_dir)
     if active is not None:
-        return os.path.dirname(active["result_path"]), {
-            "id": str(active.get("id") or ""),
-            "task_path": active.get("task_path"),
-            "result_path": active["result_path"],
-        }
+        raw_res = active.get("result_path") or ""
+        raw_task = active.get("task_path") or ""
+        if is_within_dir(workspace_dir, raw_res):
+            safe_task = raw_task if is_within_dir(workspace_dir, raw_task) else None
+            return os.path.dirname(os.path.realpath(raw_res)), {
+                "id": str(active.get("id") or ""),
+                "task_path": safe_task,
+                "result_path": os.path.realpath(raw_res),
+            }
     slices = list_slice_records(workspace_dir)
     if slices:
         last = slices[-1]
@@ -207,29 +227,37 @@ def collect_status(workspace_dir):
 
 class EventBroker:
     def __init__(self):
-        self._clients = set()
+        # Maps wfile -> per-client threading.Lock so heartbeats and broadcasts never
+        # interleave frames on the same socket.
+        self._clients = {}
         self._lock = threading.Lock()
 
     def register(self, client):
+        client_lock = threading.Lock()
         with self._lock:
-            self._clients.add(client)
+            self._clients[client] = client_lock
+        return client_lock
 
     def unregister(self, client):
         with self._lock:
-            self._clients.discard(client)
+            self._clients.pop(client, None)
 
     def broadcast(self, event_type, data):
         payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
         with self._lock:
-            dead_clients = set()
-            for client in list(self._clients):
-                try:
+            items = list(self._clients.items())
+        dead_clients = []
+        for client, client_lock in items:
+            try:
+                with client_lock:
                     client.write(payload)
                     client.flush()
-                except Exception:
-                    dead_clients.add(client)
-            for dc in dead_clients:
-                self._clients.discard(dc)
+            except Exception:
+                dead_clients.append(client)
+        if dead_clients:
+            with self._lock:
+                for dc in dead_clients:
+                    self._clients.pop(dc, None)
 
 
 class WorkspaceWatcher:
@@ -322,11 +350,20 @@ class WorkspaceWatcher:
             time.sleep(0.1)
 
 
-def make_handler(static_dir, workspace_dir, broker, watcher):
+def make_handler(static_dir, workspace_dir, broker, watcher, wake_token=None):
+    real_static = os.path.realpath(static_dir)
+
     class VisualizerHTTPHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             # Suppress normal HTTP logging for clean CLI output
             pass
+
+        def _is_loopback_origin(self):
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            op = urlparse(origin)
+            return op.scheme in ("http", "https") and (op.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
 
         def do_GET(self):
             parsed = urlparse(self.path)
@@ -337,21 +374,21 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
 
                 # Send initial status
                 init_data = json.dumps({"cwd": workspace_dir})
-                self.wfile.write(f"event: status\ndata: {init_data}\n\n".encode("utf-8"))
-                self.wfile.flush()
-
-                broker.register(self.wfile)
+                client_lock = broker.register(self.wfile)
                 try:
-                    while True:
+                    with client_lock:
+                        self.wfile.write(f"event: status\ndata: {init_data}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                    while watcher.running:
                         # Heartbeat every 15s to keep connection alive
                         time.sleep(15)
-                        self.wfile.write(b": heartbeat\n\n")
-                        self.wfile.flush()
+                        with client_lock:
+                            self.wfile.write(b": heartbeat\n\n")
+                            self.wfile.flush()
                 except Exception:
                     pass
                 finally:
@@ -369,18 +406,20 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
                 self.wfile.write(json.dumps(status_data).encode("utf-8"))
                 return
 
-            # Serve UI static files
+            # Serve UI static files strictly contained in real_static (resolved symlinks).
             if path == "/" or path == "":
                 rel_path = "index.html"
             else:
                 rel_path = path.lstrip("/")
 
-            safe_path = os.path.normpath(os.path.join(static_dir, rel_path))
-            if not safe_path.startswith(static_dir) or not os.path.exists(safe_path) or os.path.isdir(safe_path):
+            candidate = os.path.join(real_static, rel_path)
+            if (not is_within_dir(real_static, candidate) or
+                    not os.path.exists(candidate) or os.path.isdir(candidate)):
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"404 Not Found")
                 return
+            safe_path = os.path.realpath(candidate)
 
             mime_type, _ = mimetypes.guess_type(safe_path)
             self.send_response(200)
@@ -394,10 +433,31 @@ def make_handler(static_dir, workspace_dir, broker, watcher):
             parsed = urlparse(self.path)
             path = parsed.path
 
-            length = int(self.headers.get("Content-Length", 0))
+            if not self._is_loopback_origin():
+                self.send_response(403)
+                self.end_headers()
+                return
+
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if length < 0 or length > (1 << 20):
+                self.send_response(413)
+                self.end_headers()
+                return
             body = self.rfile.read(length) if length > 0 else b"{}"
 
             if path == "/wake":
+                if wake_token is not None:
+                    qs = parse_qs(parsed.query)
+                    supplied = (qs.get("token") or [""])[0] or self.headers.get("X-Piper-Token", "")
+                    if not secrets.compare_digest(supplied, wake_token):
+                        self.send_response(403)
+                        self.end_headers()
+                        return
                 # Webhook wake endpoint for detached runs (--orch-webhook)
                 try:
                     payload = json.loads(body.decode("utf-8"))
@@ -435,11 +495,13 @@ def run_server(workspace_dir, port=8765, open_browser=True, log_path=None):
     watcher = WorkspaceWatcher(workspace_dir, broker, log_path=log_path)
     watcher.start()
 
-    handler = make_handler(static_dir, workspace_dir, broker, watcher)
+    wake_token = secrets.token_hex(16)
+    handler = make_handler(static_dir, workspace_dir, broker, watcher, wake_token=wake_token)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server.daemon_threads = True
 
     url = f"http://127.0.0.1:{port}"
-    wake_url = url + "/wake"
+    wake_url = f"{url}/wake?token={wake_token}"
     wake_file = write_wake_url_file(workspace_dir, wake_url)
     print(f"┌────────────────────────────────────────────────────────┐")
     print(f"│  Piper Orchestration Visualizer                        │")
@@ -457,6 +519,7 @@ def run_server(workspace_dir, port=8765, open_browser=True, log_path=None):
     except KeyboardInterrupt:
         print("\nShutting down Piper visualizer...")
     finally:
+        watcher.running = False
         server.server_close()
 
 

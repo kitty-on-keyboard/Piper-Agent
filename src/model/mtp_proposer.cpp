@@ -5,6 +5,16 @@
 
 namespace lmp::model {
 
+void MtpProposer::cancel_draft(SpecForward& fwd) {
+    if (round_appended_ > 0 && fwd.has_mtp()) {
+        fwd.mtp_trim(round_appended_);
+    }
+    round_appended_ = 0;
+    has_seed_ = false;
+    seed_hidden_.clear();
+    drafted_.clear();
+}
+
 void MtpProposer::reset() {
     round_appended_ = 0;
     has_seed_ = false;

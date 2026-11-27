@@ -194,9 +194,9 @@ void Server::run(Transport& transport) {
         done_cv_.wait(lock, [this] { return closed_; });
     }
 
-    // Drain and join before returning. Entrant S4 returned from main() with detached
-    // workers still writing to stdout and lost replies as a result; this is the fix, and
-    // it is why the pool is joined rather than detached.
+    // Stop transport reader before draining workers and clearing transport_ so
+    // handlers cannot fire after transport_ becomes null.
+    transport.stop();
     stop_workers();
     transport_ = nullptr;
 }

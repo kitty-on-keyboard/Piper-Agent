@@ -4,10 +4,14 @@
 
 #include <csignal>
 #include <climits>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -485,4 +489,57 @@ TEST(cancel_kills_a_sleeping_command_under_one_second) {
     CHECK(o.cancelled);
     CHECK(!o.wall_clock_killed);
     CHECK(elapsed < std::chrono::seconds(2));
+}
+
+TEST(seatbelt_profile_escapes_special_chars_and_blocks_newlines) {
+    const std::string injected = "/tmp/ws\")\n(allow file-write* (subpath \"/\"))";
+    CHECK(seatbelt_profile(injected).empty() ||
+          seatbelt_profile(injected).find("(subpath \"/\")") == std::string::npos);
+
+    const std::string quoted = "/tmp/ws\"quote";
+    const std::string prof = seatbelt_profile(quoted);
+    CHECK(prof.find("/tmp/ws\\\"quote") != std::string::npos);
+}
+
+TEST(prune_scratch_never_follows_aged_symlinks_outside_workspace) {
+    const std::string root = temp_dir();
+    const std::string outside = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(!outside.empty());
+
+    std::ofstream(outside + "/precious.txt") << "keep\n";
+    const std::string lmp_tmp = lmp::platform::WorkspaceFs(root).root() + "/.lmp_tmp";
+    std::filesystem::create_directories(lmp_tmp);
+    const std::string stale_dir = lmp_tmp + "/stale_dir";
+    std::filesystem::create_directories(stale_dir);
+    std::ofstream(stale_dir + "/temp.txt") << "old\n";
+    const std::string link_path = lmp_tmp + "/evil_link";
+    REQUIRE(::symlink(outside.c_str(), link_path.c_str()) == 0);
+
+    // Backdate both the stale_dir and the symlink (with AT_SYMLINK_NOFOLLOW / lutimes-style mtime)
+    const struct timespec old_ts[2] = {{1000, 0}, {1000, 0}};
+    REQUIRE(::utimensat(AT_FDCWD, stale_dir.c_str(), old_ts, 0) == 0);
+    REQUIRE(::utimensat(AT_FDCWD, link_path.c_str(), old_ts, AT_SYMLINK_NOFOLLOW) == 0);
+
+    const ExecOutcome o = run_sandboxed(grant_execution(SandboxTier::T1_Seatbelt),
+                                        "echo pruned", root, root, limits(10));
+    CHECK(o.status == Status::Ok);
+    CHECK(!std::filesystem::exists(stale_dir));
+    CHECK(!std::filesystem::exists(link_path));
+    CHECK(std::filesystem::exists(outside + "/precious.txt"));
+}
+
+TEST(sandbox_scrubs_secret_env_vars_from_child) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    ::setenv("OPENAI_API_KEY", "sk-secret-test-value", 1);
+    ::setenv("GITHUB_TOKEN", "ghp_secret_test_value", 1);
+    const ExecOutcome o = run_sandboxed(
+        grant_execution(SandboxTier::T1_Seatbelt),
+        "printf 'O=%s G=%s P=%s' \"$OPENAI_API_KEY\" \"$GITHUB_TOKEN\" \"${PATH:+set}\"",
+        root, root, limits(10));
+    ::unsetenv("OPENAI_API_KEY");
+    ::unsetenv("GITHUB_TOKEN");
+    CHECK(o.status == Status::Ok);
+    CHECK_EQ(o.output, std::string("O= G= P=set"));
 }

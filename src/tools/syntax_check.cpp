@@ -95,6 +95,92 @@ const std::vector<SyntaxContract>& syntax_contracts() {
     return kContracts;
 }
 
+bool split_shell_command_safe(std::string_view cmd, std::vector<std::string>& argv) {
+    argv.clear();
+    std::string cur;
+    bool in_tok = false;
+    char quote = '\0';
+    for (std::size_t i = 0; i < cmd.size(); ++i) {
+        const char c = cmd[i];
+        if (c == '\0' || c == '\n' || c == '\r') {
+            return false;
+        }
+        if (quote != '\0') {
+            if (quote == '\'' ) {
+                if (c == '\'') {
+                    quote = '\0';
+                } else {
+                    cur.push_back(c);
+                }
+                continue;
+            }
+            // Double-quoted: reject unescaped expansions/subshells inside compile DB.
+            if (c == '$' || c == '`') {
+                return false;
+            }
+            if (c == '\\' && i + 1 < cmd.size()) {
+                cur.push_back(cmd[++i]);
+                continue;
+            }
+            if (c == '"') {
+                quote = '\0';
+                continue;
+            }
+            cur.push_back(c);
+            continue;
+        }
+        if (c == ';' || c == '|' || c == '&' || c == '`' || c == '>' || c == '<' ||
+            c == '$' || c == '(' || c == ')') {
+            return false;
+        }
+        if (c == '\'' || c == '"') {
+            quote = c;
+            in_tok = true;
+            continue;
+        }
+        if (c == '\\' && i + 1 < cmd.size()) {
+            cur.push_back(cmd[++i]);
+            in_tok = true;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+            if (in_tok) {
+                argv.push_back(std::move(cur));
+                cur.clear();
+                in_tok = false;
+            }
+            continue;
+        }
+        cur.push_back(c);
+        in_tok = true;
+    }
+    if (quote != '\0') {
+        return false;
+    }
+    if (in_tok) {
+        argv.push_back(std::move(cur));
+    }
+    return !argv.empty();
+}
+
+bool is_allowed_compiler_argv0(std::string_view tok) {
+    const std::size_t slash = tok.find_last_of('/');
+    const std::string_view base =
+        slash == std::string_view::npos ? tok : tok.substr(slash + 1);
+    return base == "clang" || base == "clang++" || base == "cc" || base == "c++" ||
+           base == "gcc" || base == "g++" || base.rfind("clang-", 0) == 0 ||
+           base.rfind("clang++-", 0) == 0 || base.rfind("gcc-", 0) == 0 ||
+           base.rfind("g++-", 0) == 0;
+}
+
+bool is_disallowed_compiler_arg(std::string_view tok) {
+    if (tok.empty()) return false;
+    if (tok.front() == '@') return true; // response file
+    return tok == "-Xclang" || tok == "-load" || tok == "-B" || tok == "-wrapper" ||
+           tok == "--specs" || tok.rfind("-fplugin", 0) == 0 ||
+           tok.rfind("-B", 0) == 0 || tok.rfind("--specs=", 0) == 0;
+}
+
 static std::string compile_db_syntax_command(const fsx::WorkspaceFs& workspace,
                                              const std::string& abs_path) {
     const fsx::FileContents f =
@@ -116,34 +202,49 @@ static std::string compile_db_syntax_command(const fsx::WorkspaceFs& workspace,
         if (e["file"].get_string().get(file) != simdjson::SUCCESS || file != abs_path) {
             continue;
         }
+        std::vector<std::string> raw_argv;
+        simdjson::dom::array args_arr;
         std::string_view command;
-        if (e["command"].get_string().get(command) != simdjson::SUCCESS) {
+        if (e["arguments"].get_array().get(args_arr) == simdjson::SUCCESS) {
+            for (simdjson::dom::element arg_el : args_arr) {
+                std::string_view sv;
+                if (arg_el.get_string().get(sv) != simdjson::SUCCESS ||
+                    sv.find('\0') != std::string_view::npos) {
+                    return {};
+                }
+                raw_argv.emplace_back(sv);
+            }
+        } else if (e["command"].get_string().get(command) == simdjson::SUCCESS) {
+            if (!split_shell_command_safe(command, raw_argv)) {
+                return {};
+            }
+        } else {
             return {};
         }
-        // Drop the output argument -- with -fsyntax-only there is nothing to write, and a
-        // stale -o would have the check clobber a real object file.
+        if (raw_argv.empty() || !is_allowed_compiler_argv0(raw_argv[0])) {
+            return {};
+        }
+
+        // Drop output/compile flags and reject compiler plugin/loader flags; quote every
+        // surviving token individually so /bin/sh cannot interpret repo data as shell.
         std::string out;
-        std::size_t at = 0;
-        const std::string_view cmd = command;
-        while (at < cmd.size()) {
-            const std::size_t sp = cmd.find(' ', at);
-            const std::size_t stop = sp == std::string_view::npos ? cmd.size() : sp;
-            const std::string_view tok = cmd.substr(at, stop - at);
+        for (std::size_t i = 0; i < raw_argv.size(); ++i) {
+            const std::string& tok = raw_argv[i];
+            if (is_disallowed_compiler_arg(tok)) {
+                return {};
+            }
             if (tok == "-o") {
-                at = stop + 1;
-                const std::size_t sp2 = cmd.find(' ', at);
-                at = sp2 == std::string_view::npos ? cmd.size() : sp2 + 1;
+                if (i + 1 < raw_argv.size()) ++i;
                 continue;
             }
             if (tok == "-c") {
-                at = stop + 1;
                 continue;
             }
-            if (!tok.empty()) {
-                out += out.empty() ? "" : " ";
-                out.append(tok);
-            }
-            at = stop + 1;
+            if (!out.empty()) out += ' ';
+            out += quote(tok);
+        }
+        if (out.empty()) {
+            return {};
         }
         out += " -fsyntax-only";
         return out;
@@ -216,10 +317,7 @@ SyntaxVerdict SyntaxChecker::check(const std::string& rel_path, int approved_tie
         command.replace(at, 6, quote(input));
     }
 
-    const ExecutionGrant grant = grant_execution(
-        approved_tier == 1 ? SandboxTier::T1_Seatbelt
-        : approved_tier == 2 ? SandboxTier::T2_Container
-                             : SandboxTier::T3_HostUnsandboxed);
+    const ExecutionGrant grant = grant_execution(tier_for(approved_tier));
     const ExecLimits limits{kWallClockSeconds, kWallClockSeconds, 4LL << 30, 256, 64,
                             budget_ * 4};
     const ExecOutcome o = run_sandboxed(grant, command, root_, root_, limits);

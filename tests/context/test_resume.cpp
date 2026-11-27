@@ -260,3 +260,45 @@ TEST(context_store_renders_skills_catalog_and_loaded_skills) {
     CHECK(system_prompt.find("# Available skills\n\n- godoer: Godot skill\n- swift: Swift skill") != std::string::npos);
     CHECK(system_prompt.find("# Loaded skills\n\n## Skill: Godoer\n\nStep 1: Check scene\n") != std::string::npos);
 }
+
+TEST(resume_replays_checklist_handles_capitalized_ok_and_isolates_later_runs) {
+    std::vector<Event> events = {
+        make(10, "run_begin",
+             {{"run_id", "r1"},
+              {"mission", "first mission"},
+              {"workspace_root", "/tmp/ws"},
+              {"model_identity", "/m"},
+              {"protocol_version", "1.0.0"},
+              {"tool_schema_hash", "h"}}),
+        make(11, "checklist",
+             {{"run_id", "r1"},
+              {"count", "2"},
+              {"open", "1"},
+              {"items", "[x] Done step | [ ] Pending step"}}),
+        make(12, "tool_result",
+             {{"run_id", "r1"},
+              {"tool", "read_file"},
+              {"status", "Ok"},
+              {"summary", "contents"}}),
+        make(1, "run_begin",
+             {{"run_id", "r2"},
+              {"mission", "second mission"},
+              {"workspace_root", "/tmp/ws"},
+              {"model_identity", "/m"},
+              {"protocol_version", "1.0.0"},
+              {"tool_schema_hash", "h"}}),
+        make(2, "tool_result",
+             {{"tool", "write_file"},
+              {"status", "ToolError"},
+              {"summary", "should not leak into r1"}}),
+    };
+    const ResumeRebuild rebuilt = reconstruct_context(events, "r1");
+    REQUIRE(rebuilt.ok);
+    REQUIRE(rebuilt.store.checklist().size() == 2);
+    CHECK(rebuilt.store.checklist()[0].done);
+    CHECK_EQ(rebuilt.store.checklist()[0].text, std::string("Done step"));
+    CHECK(!rebuilt.store.checklist()[1].done);
+    CHECK_EQ(rebuilt.store.checklist()[1].text, std::string("Pending step"));
+    REQUIRE(rebuilt.store.recent().size() == 1);
+    CHECK(!rebuilt.store.recent()[0].observation_is_error);
+}

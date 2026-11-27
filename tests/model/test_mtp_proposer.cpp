@@ -345,3 +345,17 @@ TEST(after_a_restore_mtp_reset_the_next_propose_starts_cold) {
     // Two GPU steps: no seed was carried across the reset.
     CHECK_EQ(fwd.steps.size(), std::size_t{2});
 }
+
+TEST(cancel_draft_trims_head_cache_when_proposals_are_filtered_out) {
+    FakeMtp fwd;
+    MtpProposer p(/*block_size=*/3);
+    const std::vector<TokenId> context = {42};
+    fwd.report = {tag(7.0F)};
+    const std::vector<TokenId> drafted = p.propose(context, 4, fwd);
+    REQUIRE(drafted.size() == 2);
+    CHECK(fwd.trims.empty());
+    p.cancel_draft(fwd);
+    REQUIRE(fwd.trims.size() == 1);
+    CHECK_EQ(fwd.trims[0], std::size_t{2});
+    CHECK(!p.can_draft_deferred());
+}

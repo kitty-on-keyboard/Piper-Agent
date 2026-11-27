@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <thread>
 #include <unistd.h>
@@ -2114,5 +2115,47 @@ TEST(busy_daemon_is_not_mistaken_for_absent_worker) {
     CHECK(is_daemon_alive(path));
     CHECK(std::filesystem::exists(path));
     ::close(listener);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(daemon_listener_binds_socket_with_0600_mode_and_private_parent) {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("test_daemon_perms_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    DaemonConfig cfg;
+    cfg.socket_path = (dir / "sub" / "worker.sock").string();
+    cfg.pid_path = (dir / "sub" / "worker.pid").string();
+    cfg.idle_timeout_s = 1.0;
+
+    CHECK(!is_daemon_alive(cfg.socket_path));
+    DaemonListener listener(cfg);
+    REQUIRE(listener.start());
+
+    struct stat pst{};
+    REQUIRE(::stat((dir / "sub").c_str(), &pst) == 0);
+    CHECK_EQ(pst.st_mode & 0777, mode_t{0700});
+
+    struct stat sst{};
+    REQUIRE(::stat(cfg.socket_path.c_str(), &sst) == 0);
+    CHECK_EQ(sst.st_mode & 0777, mode_t{0600});
+
+    // Start a tiny client thread that connects so accept_client() succeeds on peer UID match.
+    std::thread client([sock_path = cfg.socket_path] {
+        int cfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (cfd < 0) return;
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, sock_path.c_str(), sizeof(addr.sun_path) - 1);
+        if (::connect(cfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            const char* ping = "{\"method\":\"ping\"}\n";
+            (void)::write(cfd, ping, std::strlen(ping));
+        }
+        ::close(cfd);
+    });
+    const int accepted = listener.accept_client();
+    CHECK(accepted >= 0);
+    if (accepted >= 0) ::close(accepted);
+    client.join();
+    listener.stop();
     std::filesystem::remove_all(dir);
 }

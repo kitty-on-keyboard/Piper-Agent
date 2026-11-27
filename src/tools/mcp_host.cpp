@@ -1,11 +1,13 @@
 #include "src/tools/mcp_host.hpp"
 #include "src/platform/event_log.hpp"
+#include <fcntl.h>
 #include <unistd.h>
 #include <system_error>
 #include <fstream>
 #include <filesystem>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -216,20 +218,40 @@ void fill_param_constraints(const nlohmann::json& prop, parsephony::ParamSpec& p
                 if (!ext.empty() &&
                     platform::base64_decode(block.value("data", std::string{}), bytes) &&
                     !bytes.empty()) {
+                    static std::atomic<std::uint64_t> next_spool_id{0};
+                    const std::uint64_t seq =
+                        next_spool_id.fetch_add(1, std::memory_order_relaxed);
                     const std::string path = spool_dir + "/mcp_image_" +
                                              std::to_string(::getpid()) + "_" +
+                                             std::to_string(seq) + "_" +
                                              std::to_string(index++) + "." + ext;
                     std::error_code ec;
                     std::filesystem::create_directories(spool_dir, ec);
-                    std::ofstream f(path, std::ios::binary);
-                    if (f && f.write(bytes.data(),
-                                     static_cast<std::streamsize>(bytes.size()))) {
-                        f.close();
-                        images.push_back(path);
-                        // The model is told the picture is THERE as well as shown it: a
-                        // path it can name in a later view_image call is worth more than
-                        // an image it can only remember.
-                        note = "[image spooled to " + path + " and shown to you]";
+                    // Refuse symlink clobber and cross-call overwrite via O_CREAT|O_EXCL|O_NOFOLLOW.
+                    const int fd =
+                        ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                               0600);
+                    if (fd >= 0) {
+                        std::size_t off = 0;
+                        bool wrote_all = true;
+                        while (off < bytes.size()) {
+                            const ssize_t wn =
+                                ::write(fd, bytes.data() + off, bytes.size() - off);
+                            if (wn < 0 && errno == EINTR) continue;
+                            if (wn <= 0) {
+                                wrote_all = false;
+                                break;
+                            }
+                            off += static_cast<std::size_t>(wn);
+                        }
+                        ::close(fd);
+                        if (wrote_all) {
+                            images.push_back(path);
+                            // The model is told the picture is THERE as well as shown it: a
+                            // path it can name in a later view_image call is worth more than
+                            // an image it can only remember.
+                            note = "[image spooled to " + path + " and shown to you]";
+                        }
                     }
                 }
             }

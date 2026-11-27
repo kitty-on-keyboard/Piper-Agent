@@ -261,11 +261,23 @@ LoadStatus MlxBackend::load(const MlxBackendConfig& config) {
         }
         // A hard failure, not a warning. The operator asked for a drafter; running without
         // one would be slower than requested and say nothing about why.
-        if (!impl_->model.load_mtp(config.draft_model_dir)) {
-            const std::string why =
+        bool mtp_ok = false;
+        std::string mtp_err;
+        try {
+            mtp_ok = impl_->model.load_mtp(config.draft_model_dir);
+        } catch (const std::exception& e) {
+            mtp_err = e.what();
+        } catch (...) {
+            mtp_err = "non-standard exception";
+        }
+        if (!mtp_ok) {
+            std::string why =
                 config.draft_model_dir +
                 ": not a usable MTP draft head (needs config.json with model_type "
                 "qwen3_5_mtp and block_size >= 2, plus fc / norm / layers.0 tensors)";
+            if (!mtp_err.empty()) {
+                why += " [" + mtp_err + "]";
+            }
             impl_.reset();
             mx::clear_cache();
             return {false, why};
@@ -535,6 +547,9 @@ class MlxSpecForward final : public SpecForward {
         if (mtp_h_gpu_ && mtp_h_host_.size() == hidden.size() &&
             std::equal(mtp_h_host_.begin(), mtp_h_host_.end(), hidden.begin())) {
             return *mtp_h_gpu_;
+        }
+        if (hidden.empty()) {
+            return mx::zeros({1, 1, 0}, mx::float32);
         }
         return mx::array(hidden.data(), {1, 1, static_cast<int>(hidden.size())}, mx::float32);
     }
@@ -862,14 +877,26 @@ bool prepare_images(const InferenceTask& task, mlxl::Qwen35MoeModel& model,
             tags[i] = img.content_hash;
         }
 
-        const mlxl::VisionGrid grid{1, img.grid_h, img.grid_w};
-        const auto patch_count =
-            static_cast<int>(img.patches.size() / static_cast<std::size_t>(img.patch_dim));
-        if (patch_count != grid.patches()) {
-            error = "image patch buffer holds " + std::to_string(patch_count) +
-                    " patches but its grid says " + std::to_string(grid.patches());
+        if (img.grid_h <= 0 || img.grid_w <= 0 || img.patch_dim <= 0) {
+            error = "image has non-positive grid or patch dimension";
             return false;
         }
+        if (img.patches.size() % static_cast<std::size_t>(img.patch_dim) != 0) {
+            error = "image patch buffer size is not divisible by patch_dim";
+            return false;
+        }
+        const std::size_t patches_in_buf =
+            img.patches.size() / static_cast<std::size_t>(img.patch_dim);
+        const mlxl::VisionGrid grid{1, img.grid_h, img.grid_w};
+        const std::size_t expected_patches =
+            static_cast<std::size_t>(img.grid_h) * static_cast<std::size_t>(img.grid_w);
+        if (patches_in_buf != expected_patches ||
+            patches_in_buf > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            error = "image patch buffer holds " + std::to_string(patches_in_buf) +
+                    " patches but its grid says " + std::to_string(expected_patches);
+            return false;
+        }
+        const int patch_count = static_cast<int>(patches_in_buf);
         mx::array patches(img.patches.data(), {patch_count, img.patch_dim}, mx::float32);
         mx::array rows = model.vision().forward(patches, grid);
         mx::eval(rows);
@@ -952,6 +979,10 @@ bool prefill_tokens(mlxl::Qwen35MoeModel& model, KvCacheLedger& ledger,
         log_mlx_mem("prefill_chunk_begin", at);
         mx::array ids = mx::array(task.prompt.data() + static_cast<std::ptrdiff_t>(at),
                                   {1, static_cast<int>(chunk_end - at)}, mx::int32);
+        struct EmbedSplicesGuard {
+            mlxl::Qwen35MoeModel& m;
+            ~EmbedSplicesGuard() { m.clear_embed_splices(); }
+        } splice_guard{model};
         model.set_embed_splices(splices_for_chunk(image_rows, at, chunk_end));
         mx::array logits = model.forward_logits(ids);
         model.eval_caches();
@@ -1013,14 +1044,28 @@ GenResult MlxBackend::generate(const InferenceTask& task, TokenSink& sink,
     // go. Catching by reference and reporting what() also puts MLX's own words -- which
     // name the size it could not get -- in front of whoever reads the trace.
     log_mlx_mem("generate_enter", task.prompt.size());
+    auto clear_partial_state = [&] {
+        if (impl_) {
+            impl_->model.clear_embed_splices();
+            impl_->model.reset_cache();
+            impl_->model.mtp_reset();
+            impl_->ckpt.cp = {};
+            impl_->ckpt.len = 0;
+            impl_->ckpt.valid = false;
+        }
+        ledger_.clear();
+        mx::clear_cache();
+    };
     try {
         return generate_impl(task, sink, cancel);
     } catch (const std::exception& e) {
+        clear_partial_state();
         GenResult r;
         r.status = GenStatus::BackendError;
         r.error = std::string("MLX threw during generation: ") + e.what();
         return r;
     } catch (...) {
+        clear_partial_state();
         GenResult r;
         r.status = GenStatus::BackendError;
         r.error = "MLX threw a non-standard exception during generation";
@@ -1120,14 +1165,26 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             log_mlx_mem("after_reset", 0);
             break;
     }
-    const std::size_t start = plan.prefill_from;
+    std::size_t start = plan.prefill_from;
+    const std::size_t prompt_n = task.prompt.size();
+    if (start >= prompt_n) {
+        if (impl_->ckpt.valid && impl_->ckpt.len < prompt_n) {
+            impl_->model.restore(impl_->ckpt.cp);
+            ledger_.truncate_to(impl_->ckpt.len);
+            impl_->model.mtp_reset();
+            start = impl_->ckpt.len;
+        } else {
+            reset_live_kv(impl_->model, ledger_, impl_->ckpt.cp, impl_->ckpt.len,
+                          impl_->ckpt.valid, r);
+            start = 0;
+        }
+    }
     r.prefill_reused_tokens = start;
 
     const auto t0 = clock_.mono();
 
     // --- chunked prefill ----------------------------------------------------
     std::vector<float> logits_host;
-    const std::size_t prompt_n = task.prompt.size();
     // The stable boundary is made a CHUNK EDGE so the snapshot lands exactly on it. One
     // extra edge per turn, against a full GPU barrier every 512 tokens anyway.
     const std::size_t boundary =
@@ -1169,9 +1226,6 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
     std::vector<TokenId> recent;
     bool first_token = true;
     auto t_decode_start = clock_.mono();
-    std::fprintf(stderr, "decode_begin speculative=0 mtp=%d prompt=%zu\n",
-                 impl_->model.has_mtp() ? 1 : 0, task.prompt.size());
-    std::fflush(stderr);
     log_mlx_mem("decode_begin", ledger_.size());
 
     while (r.tokens_generated < task.max_new_tokens) {
@@ -1214,7 +1268,6 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
         if (recent.size() > kPenaltyWindow) {
             recent.erase(recent.begin());
         }
-        ledger_.append(pick.id);
 
         const bool keep_going = sink.on_token(pick.id);
         if (!keep_going) {
@@ -1225,11 +1278,16 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
             r.status = GenStatus::LengthCapped;
             break;
         }
+        if (r.tokens_generated >= task.max_new_tokens) {
+            r.status = GenStatus::LengthCapped;
+            break;
+        }
 
         const auto t_f0 = clock_.mono();
         mx::array ids = mx::array(&pick.id, {1, 1}, mx::int32);
         mx::array logits = impl_->model.forward_logits(ids);
         mx::eval(logits);
+        ledger_.append(pick.id);
         const auto t_f1 = clock_.mono();
         logits_to_host(logits, logits_host);
         const auto t_f2 = clock_.mono();
@@ -1248,14 +1306,28 @@ GenResult MlxBackend::generate_impl(const InferenceTask& task, TokenSink& sink,
 
 GenResult MlxBackend::warm_stable_prefix(const InferenceTask& task,
                                          const CancelToken& cancel) {
+    auto clear_partial_state = [&] {
+        if (impl_) {
+            impl_->model.clear_embed_splices();
+            impl_->model.reset_cache();
+            impl_->model.mtp_reset();
+            impl_->ckpt.cp = {};
+            impl_->ckpt.len = 0;
+            impl_->ckpt.valid = false;
+        }
+        ledger_.clear();
+        mx::clear_cache();
+    };
     try {
         return warm_stable_prefix_impl(task, cancel);
     } catch (const std::exception& e) {
+        clear_partial_state();
         GenResult r;
         r.status = GenStatus::BackendError;
         r.error = std::string("MLX threw during shadow compact: ") + e.what();
         return r;
     } catch (...) {
+        clear_partial_state();
         GenResult r;
         r.status = GenStatus::BackendError;
         r.error = "MLX threw a non-standard exception during shadow compact";

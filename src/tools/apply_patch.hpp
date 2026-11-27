@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -424,7 +425,15 @@ inline void splice(std::string& file, std::size_t begin, std::size_t end,
     res.ops = ops;
     res.status = Status::Applied;
 
+    std::unordered_set<std::string> seen_paths;
     for (const FileOp& op : ops) {
+        if (!seen_paths.insert(op.path).second) {
+            res.status = Status::ParseError;
+            res.failure.path = op.path;
+            res.failure.reason = "duplicate file operation for path: " + op.path;
+            res.changes.clear();
+            return res;
+        }
         if (op.kind == FileOpKind::Delete) {
             const auto cur = read_file(op.path);
             if (!cur) {

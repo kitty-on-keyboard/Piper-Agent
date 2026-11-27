@@ -241,14 +241,19 @@ public:
     }
 
     void eval_caches() {
-        for (auto& c : kv_caches_) {
-            c.sync();
+        std::vector<mx::array> live;
+        live.reserve((kv_caches_.size() + qkv_caches_.size() * 3 + ssm_caches_.size()) * 2);
+        for (const auto& c : kv_caches_) {
+            c.collect_live(live);
         }
-        for (auto& c : qkv_caches_) {
-            c.sync();
+        for (const auto& c : qkv_caches_) {
+            c.collect_live(live);
         }
-        for (auto& c : ssm_caches_) {
-            c.sync();
+        for (const auto& c : ssm_caches_) {
+            c.collect_live(live);
+        }
+        if (!live.empty()) {
+            mx::eval(live);
         }
     }
 
@@ -445,8 +450,10 @@ public:
     mx::array mtp_forward(const mx::array& token_ids, const mx::array& hidden) {
         const int seq_len = static_cast<int>(token_ids.shape()[1]);
         const mx::array e = embed_tokens(token_ids);
+        const mx::array h_cast =
+            hidden.dtype() == e.dtype() ? hidden : mx::astype(hidden, e.dtype());
         mx::array h = mx::concatenate({rms_norm(e, "mtp.pre_fc_norm_embedding.weight"),
-                                       rms_norm(hidden, "mtp.pre_fc_norm_hidden.weight")},
+                                       rms_norm(h_cast, "mtp.pre_fc_norm_hidden.weight")},
                                       -1);
         h = weights_.linear(h, "mtp.fc");
 
@@ -946,7 +953,17 @@ private:
     static int kv_quant_bits() {
         static const int b = [] {
             const char* v = std::getenv("LMP_KV_BITS");
-            return v == nullptr ? 0 : std::atoi(v);
+            if (v == nullptr || *v == '\0') {
+                return 0;
+            }
+            const int parsed = std::atoi(v);
+            if (parsed != 0 && parsed != 4 && parsed != 8) {
+                std::fprintf(stderr,
+                             "warning: ignoring unsupported LMP_KV_BITS=%d (expected 0, 4, or 8)\n",
+                             parsed);
+                return 0;
+            }
+            return parsed;
         }();
         return b;
     }

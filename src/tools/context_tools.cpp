@@ -89,14 +89,15 @@ ToolResult recall_result(const pcc::Recall& r, const char* nothing_found,
 } // namespace
 
 bool Registry::declare_context_tools(ContextSourceFn source, TokenCounter count_tokens) {
-    // The reused-Registry case. ensure_registry() keeps a Registry across missions, and
-    // declare() does not check for duplicates -- handlers_.emplace would silently keep
-    // the first handler while decls_ and specs_ each grew a second copy, advertising both
-    // tools twice in the system prompt and adding a redundant grammar spec.
+    // Rebind the source and token counter even when the tools are already declared:
+    // ensure_registry() reuses a Registry across start/resume transitions, while the
+    // backing journal and tokenizer change per session. Updating them here prevents a
+    // resumed session from reading a destroyed candidate journal or stale store.
+    context_source_ = std::move(source);
+    context_token_counter_ = std::move(count_tokens);
     if (find("context_recall") != nullptr) {
         return false;
     }
-    context_source_ = std::move(source);
 
     // ONE LOCK FOR BOTH TOOLS, and it is load-bearing rather than defensive.
     //
@@ -135,7 +136,7 @@ bool Registry::declare_context_tools(ContextSourceFn source, TokenCounter count_
         // on the parallel read-only path. It is readable at T1 like search and
         // locate_symbol: `approved_tier` is deliberately unused because nothing here
         // reaches a sandbox to spend it on.
-        declare(d, [this, lock, count_tokens](const std::vector<ToolParamValue>& p, int) {
+        declare(d, [this, lock](const std::vector<ToolParamValue>& p, int) {
             const ContextSource src = context_source_();
             if (src.store == nullptr) {
                 return no_store();
@@ -171,7 +172,7 @@ bool Registry::declare_context_tools(ContextSourceFn source, TokenCounter count_
             // with no answer. An honest negative that suggests nothing reads to a model
             // like a transient failure worth retrying.
             return recall_result(
-                pcc::recall(*src.store, req, count_tokens),
+                pcc::recall(*src.store, req, context_token_counter_),
                 "nothing stored matches that. This workspace has no remembered history "
                 "of it, and asking again will not change that -- look in the files "
                 "instead (search, then read_file).",
@@ -192,7 +193,7 @@ bool Registry::declare_context_tools(ContextSourceFn source, TokenCounter count_
         d.spec.params = {param("first_event", ParamType::Number, true),
                          param("last_event", ParamType::Number, true),
                          param("token_budget", ParamType::Number, false)};
-        declare(d, [this, lock, count_tokens](const std::vector<ToolParamValue>& p, int) {
+        declare(d, [this, lock](const std::vector<ToolParamValue>& p, int) {
             const ContextSource src = context_source_();
             if (src.store == nullptr) {
                 return no_store();
@@ -216,7 +217,8 @@ bool Registry::declare_context_tools(ContextSourceFn source, TokenCounter count_
             // ever appears in the current run's own summary, so there is nothing to lose.
             const std::lock_guard<std::mutex> guard(*lock);
             return recall_result(
-                pcc::rehydrate(*src.store, first, last, budget, src.session, count_tokens),
+                pcc::rehydrate(*src.store, first, last, budget, src.session,
+                               context_token_counter_),
                 "no turns were journalled in that event range. Re-check the two numbers "
                 "against the summary line you took them from; if they are right, that "
                 "span predates this store and the detail is gone -- look in the files "

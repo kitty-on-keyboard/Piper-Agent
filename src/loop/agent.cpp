@@ -1543,65 +1543,78 @@ TurnResult Agent::step(const model::CancelToken& cancel) {
         emit("tool_call", std::move(fields));
     }
 
-    // The read-only calls of this batch run at once; everything else stays exactly where
-    // it was. See parallel_calls.hpp for which calls qualify and why the others cannot.
-    // Repeats always revalidate: the detector annotates, it does not skip execution.
-    std::vector<std::size_t> parallel;
-    for (std::size_t i = 0; i < calls.size(); ++i) {
-        if (can_run_in_parallel(calls[i].name)) {
-            parallel.push_back(i);
+    // Execute calls in call order while overlapping maximal contiguous segments of
+    // read-only calls (length >= 2). A read after a mutating/shell/plan call must never
+    // be hoisted ahead of it.
+    for (std::size_t seg_begin = 0; seg_begin < calls.size();) {
+        if (!can_run_in_parallel(calls[seg_begin].name)) {
+            bool ran = false;
+            tools::ToolResult result = dispatch_call(calls[seg_begin].name, params[seg_begin], ran);
+            const bool fresh = ran && observation_is_new(calls[seg_begin].name, params[seg_begin], result);
+            if (seg_begin == 0) {
+                turn.tool_name = calls[0].name;
+                turn.tool_params = params[0];
+                turn.tool_result = std::move(result);
+                turn.produced_new_information = fresh;
+                turn.outcome = classify_turn(turn.generation, grammar, ran, !ran);
+            } else {
+                TurnResult::ExtraCall extra;
+                extra.tool_name = calls[seg_begin].name;
+                extra.params = params[seg_begin];
+                extra.result = std::move(result);
+                extra.produced_new_information = fresh;
+                turn.extra_calls.push_back(std::move(extra));
+            }
+            ++seg_begin;
+            continue;
         }
-    }
-    std::vector<tools::ToolResult> precomputed;
-    if (parallel.size() > 1) {
-        precomputed = run_calls_concurrently(parallel, [this, &calls, &params](std::size_t i) {
-            // ONLY the registry. Every gate and every ledger write stays on this thread,
-            // below, in call order.
-            return registry_.execute(calls[i].name, params[i], policy_.sandbox_tier);
-        });
-    }
-    const auto precomputed_for = [&](std::size_t i) -> const tools::ToolResult* {
-        for (std::size_t k = 0; k < precomputed.size(); ++k) {
-            if (parallel[k] == i) {
-                return &precomputed[k];
+
+        std::size_t seg_end = seg_begin + 1;
+        while (seg_end < calls.size() && can_run_in_parallel(calls[seg_end].name)) {
+            ++seg_end;
+        }
+
+        std::vector<tools::ToolResult> precomputed;
+        if (seg_end - seg_begin > 1) {
+            std::vector<std::size_t> segment_indices;
+            segment_indices.reserve(seg_end - seg_begin);
+            for (std::size_t i = seg_begin; i < seg_end; ++i) {
+                segment_indices.push_back(i);
+            }
+            precomputed = run_calls_concurrently(segment_indices, [this, &calls, &params](std::size_t i) {
+                // ONLY the registry. Every gate and every ledger write stays on this thread,
+                // below, in call order.
+                return registry_.execute(calls[i].name, params[i], policy_.sandbox_tier);
+            });
+        }
+
+        for (std::size_t i = seg_begin; i < seg_end; ++i) {
+            bool ran = false;
+            tools::ToolResult result;
+            if (!precomputed.empty()) {
+                result = std::move(precomputed[i - seg_begin]);
+                ran = adopt_readonly_result(calls[i].name, params[i], result);
+            } else {
+                result = dispatch_call(calls[i].name, params[i], ran);
+            }
+
+            const bool fresh = ran && observation_is_new(calls[i].name, params[i], result);
+            if (i == 0) {
+                turn.tool_name = calls[0].name;
+                turn.tool_params = params[0];
+                turn.tool_result = std::move(result);
+                turn.produced_new_information = fresh;
+                turn.outcome = classify_turn(turn.generation, grammar, ran, !ran);
+            } else {
+                TurnResult::ExtraCall extra;
+                extra.tool_name = calls[i].name;
+                extra.params = params[i];
+                extra.result = std::move(result);
+                extra.produced_new_information = fresh;
+                turn.extra_calls.push_back(std::move(extra));
             }
         }
-        return nullptr;
-    };
-
-    // Serial from here, in index order, so the emits, the history records and the UI rows
-    // are what the fully serial path produced. Parallelism must not be observable.
-    for (std::size_t i = 0; i < calls.size(); ++i) {
-        bool ran = false;
-        tools::ToolResult result;
-        if (const tools::ToolResult* done = precomputed_for(i); done != nullptr) {
-            result = *done;
-            ran = adopt_readonly_result(calls[i].name, params[i], result);
-        } else {
-            result = dispatch_call(calls[i].name, params[i], ran);
-        }
-
-        // ASKED HERE, BEFORE record_call FOLDS THIS RESULT IN. Both dispatch paths have
-        // finished with the call and neither has touched the detector yet, so this is the
-        // one point where "did this differ from last time" is still answerable -- and the
-        // one point both paths pass through, so a batched call is measured exactly like a
-        // solitary one.
-        const bool fresh = ran && observation_is_new(calls[i].name, params[i], result);
-
-        if (i == 0) {
-            turn.tool_name = calls[0].name;
-            turn.tool_params = params[0];
-            turn.tool_result = std::move(result);
-            turn.produced_new_information = fresh;
-            turn.outcome = classify_turn(turn.generation, grammar, ran, !ran);
-        } else {
-            TurnResult::ExtraCall extra;
-            extra.tool_name = calls[i].name;
-            extra.params = params[i];
-            extra.result = std::move(result);
-            extra.produced_new_information = fresh;
-            turn.extra_calls.push_back(std::move(extra));
-        }
+        seg_begin = seg_end;
     }
     return turn;
 }
@@ -2855,6 +2868,7 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         }
 
         const std::size_t writes_before_turn = ctx_.workspace_writes();
+        const std::uint64_t turn_first_seq = log_.events_written() + 1;
         TurnResult turn = step(cancel);
         ++report.iterations;
         // A turn came back, so the run is not wedged -- whatever the turn decided, and
@@ -2955,6 +2969,8 @@ RunReport Agent::run(const model::CancelToken& cancel) {
         // What the tool wants the model to SEE. Paths, re-read at prompt time.
         rec.observed_images = turn.tool_result.images;
         rec.last_event_seq = log_.events_written();
+        rec.first_event_seq =
+            turn_first_seq <= rec.last_event_seq ? turn_first_seq : rec.last_event_seq;
 
         // Tool turns often leave the answer channel empty (reasoning lived in <think>).
         // Carry a trailing slice so the next turn continues instead of re-deriving.

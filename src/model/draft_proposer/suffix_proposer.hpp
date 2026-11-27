@@ -91,6 +91,7 @@ class SuffixProposer {
 
     [[nodiscard]] std::size_t indexed_tokens() const noexcept;
     [[nodiscard]] std::size_t sequence_count() const noexcept;
+    [[nodiscard]] std::size_t node_count() const noexcept;
     void clear() noexcept;
 
   private:

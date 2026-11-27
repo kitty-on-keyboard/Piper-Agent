@@ -175,16 +175,26 @@ std::vector<SkillSummary> discover_skills(const std::string& workspace_root,
 
     const auto roots = candidate_roots(workspace_root, home_dir);
     for (const auto& r : roots) {
-        if (!std::filesystem::is_directory(r.path, ec)) continue;
+        if (std::filesystem::is_symlink(r.path, ec) ||
+            !std::filesystem::is_directory(r.path, ec)) {
+            continue;
+        }
+        const std::string canon_root = std::filesystem::canonical(r.path, ec).string();
+        if (ec || canon_root.empty()) continue;
 
         for (const auto& entry : std::filesystem::directory_iterator(r.path, ec)) {
-            if (!entry.is_directory(ec)) continue;
+            if (entry.is_symlink(ec) || !entry.is_directory(ec)) continue;
 
             const std::string id = entry.path().filename().string();
             if (!is_valid_skill_id(id) || seen_ids.count(id) > 0) continue;
 
             const std::filesystem::path skill_file = entry.path() / "SKILL.md";
-            if (!std::filesystem::is_regular_file(skill_file, ec)) continue;
+            if (std::filesystem::is_symlink(skill_file, ec) ||
+                !std::filesystem::is_regular_file(skill_file, ec)) {
+                continue;
+            }
+            const std::string canon_file = std::filesystem::canonical(skill_file, ec).string();
+            if (ec || !platform::is_within(canon_root, canon_file)) continue;
 
             const platform::FileContents f = platform::read_file_whole(skill_file.string(), 128U * 1024);
             if (!f.ok()) continue;
@@ -218,8 +228,22 @@ std::optional<SkillDetail> load_skill(const std::string& workspace_root,
     std::error_code ec;
     const auto roots = candidate_roots(workspace_root, home_dir);
     for (const auto& r : roots) {
-        const std::filesystem::path skill_file = std::filesystem::path(r.path) / std::string(skill_id) / "SKILL.md";
-        if (!std::filesystem::is_regular_file(skill_file, ec)) continue;
+        if (std::filesystem::is_symlink(r.path, ec) ||
+            !std::filesystem::is_directory(r.path, ec)) {
+            continue;
+        }
+        const std::string canon_root = std::filesystem::canonical(r.path, ec).string();
+        if (ec || canon_root.empty()) continue;
+
+        const std::filesystem::path skill_dir = std::filesystem::path(r.path) / std::string(skill_id);
+        const std::filesystem::path skill_file = skill_dir / "SKILL.md";
+        if (std::filesystem::is_symlink(skill_dir, ec) ||
+            std::filesystem::is_symlink(skill_file, ec) ||
+            !std::filesystem::is_regular_file(skill_file, ec)) {
+            continue;
+        }
+        const std::string canon_file = std::filesystem::canonical(skill_file, ec).string();
+        if (ec || !platform::is_within(canon_root, canon_file)) continue;
 
         const platform::FileContents f = platform::read_file_whole(skill_file.string(), 2U * 1024 * 1024);
         if (!f.ok()) {

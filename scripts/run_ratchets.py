@@ -233,6 +233,10 @@ def gate_protocol(root, cfg):
                 findings.append(Finding("protocol", line.split(":")[0].replace("DRIFT ", ""),
                                         0, "generated file differs from protocol/schema.json"
                                            " -- run scripts/gen_protocol.py"))
+        if not findings:
+            detail = (result.stderr or result.stdout or "gen_protocol.py --check failed").strip()
+            findings.append(Finding("protocol", "scripts/gen_protocol.py", 0,
+                                    detail.splitlines()[0]))
     return 1, findings
 
 

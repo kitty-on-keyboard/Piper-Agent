@@ -76,56 +76,160 @@ namespace {
     return has_script_extension(w);
 }
 
+[[nodiscard]] std::vector<std::string> split_segments(std::string_view cmd) {
+    std::vector<std::string> segs;
+    std::string cur;
+    char quote = '\0';
+    for (std::size_t i = 0; i < cmd.size(); ++i) {
+        const char c = cmd[i];
+        if (quote != '\0') {
+            if (quote == '"' && c == '\\' && i + 1 < cmd.size()) {
+                cur.push_back(c);
+                cur.push_back(cmd[++i]);
+                continue;
+            }
+            if (c == quote) {
+                quote = '\0';
+            }
+            cur.push_back(c);
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            quote = c;
+            cur.push_back(c);
+            continue;
+        }
+        if (c == ';' || c == '|' || c == '&' || c == '\n' || c == '\r') {
+            if (!cur.empty()) {
+                segs.push_back(std::move(cur));
+                cur.clear();
+            }
+            continue;
+        }
+        cur.push_back(c);
+    }
+    if (!cur.empty()) {
+        segs.push_back(std::move(cur));
+    }
+    return segs;
+}
+
+[[nodiscard]] std::vector<std::string> tokenize_segment(std::string_view seg) {
+    std::vector<std::string> words;
+    std::string cur;
+    bool in_word = false;
+    char quote = '\0';
+    for (std::size_t i = 0; i < seg.size(); ++i) {
+        const char c = seg[i];
+        if (quote != '\0') {
+            if (quote == '"' && c == '\\' && i + 1 < seg.size()) {
+                cur.push_back(seg[++i]);
+                continue;
+            }
+            if (c == quote) {
+                quote = '\0';
+                continue;
+            }
+            cur.push_back(c);
+            continue;
+        }
+        if (c == '\'' || c == '"') {
+            quote = c;
+            in_word = true;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+            if (in_word) {
+                words.push_back(std::move(cur));
+                cur.clear();
+                in_word = false;
+            }
+            continue;
+        }
+        cur.push_back(c);
+        in_word = true;
+    }
+    if (in_word) {
+        words.push_back(std::move(cur));
+    }
+    return words;
+}
+
 // Best-effort operands whose bytes are NOT in the command string. Empty when there is
 // nothing to hash (e.g. `bash -c '...'`); the consent key still binds command + caps.
 [[nodiscard]] std::vector<std::string> referenced_script_paths(std::string_view command) {
-    std::vector<std::string> words;
-    std::string cur;
-    for (char ch : command) {
-        if (std::isspace(static_cast<unsigned char>(ch)) != 0) {
-            if (!cur.empty()) {
-                words.push_back(cur);
-                cur.clear();
-            }
-        } else {
-            cur.push_back(ch);
-        }
-    }
-    if (!cur.empty()) {
-        words.push_back(std::move(cur));
-    }
-    if (words.empty()) {
-        return {};
-    }
-    if (words[0] == "source" || words[0] == ".") {
-        if (words.size() >= 2 && looks_like_script_operand(words[1])) {
-            return {words[1]};
-        }
-        return {};
-    }
-    // Matched on the BASENAME, so an interpreter reached through a venv is still an
-    // interpreter. `.venv/bin/python wipe.py` used to be caught only by accident -- the
-    // slash in words[0] made it opaque -- and narrowing that slash rule would have opened
-    // the real hole this function exists to close if the operand were not read here.
-    if (is_interpreter(basename_of(words[0]))) {
-        for (std::size_t i = 1; i < words.size(); ++i) {
-            if (words[i] == "-c") {
-                return {}; // body is in the string; no file digest
-            }
-            if (!words[i].empty() && words[i][0] == '-') {
+    std::vector<std::string> out;
+    for (const std::string& seg : split_segments(command)) {
+        const std::vector<std::string> raw = tokenize_segment(seg);
+        std::size_t at = 0;
+        // Skip inline env assignments (`FOO=1`) and transparent launcher wrappers
+        // (`env`, `nice -n 5`, `nohup`, `time`, `command`, `exec`) with their flags.
+        while (at < raw.size()) {
+            const std::string& w = raw[at];
+            if (!w.empty() && w.front() != '-' && w.find('=') != std::string::npos) {
+                ++at;
                 continue;
             }
-            if (looks_like_script_operand(words[i])) {
-                return {words[i]};
+            const std::string_view base = basename_of(w);
+            if (base == "env" || base == "nice" || base == "nohup" || base == "time" ||
+                base == "command" || base == "exec") {
+                ++at;
+                while (at < raw.size() && !raw[at].empty()) {
+                    const std::string& fl = raw[at];
+                    if (fl.front() == '-') {
+                        ++at;
+                        if ((fl == "-u" || fl == "-C" || fl == "-S" || fl == "-n" ||
+                             fl == "-o" || fl == "-f") && at < raw.size()) {
+                            ++at;
+                        }
+                        continue;
+                    }
+                    if (base == "env" && fl.find('=') != std::string::npos) {
+                        ++at;
+                        continue;
+                    }
+                    break;
+                }
+                continue;
             }
-            return {};
+            break;
         }
-        return {};
+        if (at >= raw.size()) {
+            continue;
+        }
+        const std::string_view head = raw[at];
+        if (head == "source" || head == ".") {
+            if (at + 1 < raw.size() && looks_like_script_operand(raw[at + 1])) {
+                out.push_back(raw[at + 1]);
+            }
+            continue;
+        }
+        if (is_interpreter(basename_of(head))) {
+            for (std::size_t i = at + 1; i < raw.size(); ++i) {
+                const std::string& arg = raw[i];
+                if (arg == "-c" || arg == "-e") {
+                    break; // body is in the string; no file digest
+                }
+                if (!arg.empty() && arg[0] == '-') {
+                    // Flags that consume the following token (`bash -o errexit`, `python -m`).
+                    if ((arg == "-o" || arg == "+o" || arg == "-m" || arg == "-W" ||
+                         arg == "-X") && i + 1 < raw.size()) {
+                        ++i;
+                    }
+                    continue;
+                }
+                if (looks_like_script_operand(arg)) {
+                    out.push_back(arg);
+                }
+                break;
+            }
+            continue;
+        }
+        if (names_a_script_file(head)) {
+            out.push_back(std::string(head));
+        }
     }
-    if (names_a_script_file(words[0])) {
-        return {words[0]};
-    }
-    return {};
+    return out;
 }
 
 [[nodiscard]] std::string caps_fingerprint(const tools::RiskHint& hint) {

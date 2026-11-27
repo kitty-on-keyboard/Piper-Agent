@@ -135,8 +135,12 @@ std::vector<tools::McpServerConfig> parse_mcp_servers(const std::string& message
             continue;
         }
         tools::McpServerConfig cfg;
-        cfg.name = s.value("name", std::string{});
-        cfg.command = s.value("command", std::string{});
+        if (s.contains("name") && s.at("name").is_string()) {
+            cfg.name = s.at("name").get<std::string>();
+        }
+        if (s.contains("command") && s.at("command").is_string()) {
+            cfg.command = s.at("command").get<std::string>();
+        }
         cfg.args = json_string_array(s, "args");
         cfg.env = json_string_array(s, "env");
         // Required to be a literal boolean true, never coerced. This is the operator
@@ -182,7 +186,10 @@ std::vector<tools::McpServerConfig> parse_mcp_json_file(const std::string& works
         }
         tools::McpServerConfig cfg;
         cfg.name = name;
-        cfg.command = s.value("command", std::string{});
+        if (!s.contains("command") || !s.at("command").is_string()) {
+            continue;
+        }
+        cfg.command = s.at("command").get<std::string>();
         if (cfg.command.empty()) {
             continue;
         }

@@ -64,29 +64,33 @@ void TokenStreamer::run() {
 
     Event ev;
     while (true) {
-        if (queue_.try_pop(ev)) {
-            if (have_pending && pending_channel != ev.channel) {
-                flush_pending();
+        if (!queue_.try_pop(ev)) {
+            if (queue_.drained()) {
+                break;
             }
-            model::QwenTokenizer::Stream& decoder =
-                ev.channel == StreamChannel::Thinking ? thinking : answer;
-            pending += decoder.push(ev.id);
-            pending_channel = ev.channel;
-            have_pending = true;
+            if (!queue_.wait_pop(ev, std::chrono::milliseconds(10))) {
+                if (queue_.drained()) {
+                    break;
+                }
+                continue;
+            }
+        }
+        if (have_pending && pending_channel != ev.channel) {
+            flush_pending();
+        }
+        model::QwenTokenizer::Stream& decoder =
+            ev.channel == StreamChannel::Thinking ? thinking : answer;
+        pending += decoder.push(ev.id);
+        pending_channel = ev.channel;
+        have_pending = true;
 
-            // Coalesce only what is ALREADY queued, never wait for more. In steady state
-            // the queue is empty between tokens, so this emits per token; it batches only
-            // when a backlog exists, which is exactly when the extra flushes would hurt
-            // and when nothing is gained by delivering them separately.
-            if (queue_.empty()) {
-                flush_pending();
-            }
-            continue;
+        // Coalesce only what is ALREADY queued, never wait for more. In steady state
+        // the queue is empty between tokens, so this emits per token; it batches only
+        // when a backlog exists, which is exactly when the extra flushes would hurt
+        // and when nothing is gained by delivering them separately.
+        if (queue_.empty()) {
+            flush_pending();
         }
-        if (queue_.drained()) {
-            break;
-        }
-        std::this_thread::yield();
     }
     flush_pending();
 

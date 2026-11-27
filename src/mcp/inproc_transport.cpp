@@ -6,127 +6,118 @@ InProcessTransport::Pair InProcessTransport::make_pair() {
     Pair p;
     p.client = std::unique_ptr<InProcessTransport>(new InProcessTransport());
     p.server = std::unique_ptr<InProcessTransport>(new InProcessTransport());
-    p.client->peer_ = p.server.get();
-    p.server->peer_ = p.client.get();
+    p.client->peer_ = p.server->state_;
+    p.server->peer_ = p.client->state_;
     return p;
 }
 
 InProcessTransport::~InProcessTransport() {
     stop();
-    // Unlink, so a peer that outlives us cannot enqueue into freed state.
-    if (peer_ != nullptr) {
-        const std::lock_guard<std::mutex> lock(peer_->mutex_);
-        peer_->peer_ = nullptr;
-    }
 }
 
 void InProcessTransport::start(Handlers handlers) {
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        handlers_ = std::move(handlers);
-        open_ = true;
-        started_ = true;
+        const std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->handlers = std::move(handlers);
+        state_->open = true;
     }
-    delivery_ = std::thread([this] { deliver_loop(); });
+    const std::lock_guard<std::mutex> jlock(join_mutex_);
+    delivery_ = std::thread([state = state_] { deliver_loop(state); });
 }
 
 bool InProcessTransport::is_open() const {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    return open_;
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->open;
 }
 
 bool InProcessTransport::send(const nlohmann::json& message) {
-    InProcessTransport* peer = nullptr;
+    std::shared_ptr<State> peer;
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        if (!open_) {
+        const std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!state_->open) {
             return false;
         }
-        peer = peer_;
+        peer = peer_.lock();
     }
-    if (peer == nullptr) {
+    if (!peer) {
         return false;
     }
-    peer->enqueue(message);
+    enqueue(peer, message);
     return true;
 }
 
-void InProcessTransport::enqueue(const nlohmann::json& message) {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_) {
+void InProcessTransport::enqueue(const std::shared_ptr<State>& target,
+                                 const nlohmann::json& message) {
+    const std::lock_guard<std::mutex> lock(target->mutex);
+    if (target->stopping) {
         return;
     }
     // The copy here is the whole cost of the transport: one JSON value, no text form.
-    queue_.push_back(message);
-    cv_.notify_one();
+    target->queue.push_back(message);
+    target->cv.notify_one();
 }
 
 void InProcessTransport::stop() {
-    bool join_needed = false;
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_) {
-            join_needed = delivery_.joinable();
-        } else {
-            stopping_ = true;
-            open_ = false;
-            join_needed = delivery_.joinable();
-            cv_.notify_all();
+        const std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!state_->stopping) {
+            state_->stopping = true;
+            state_->open = false;
+            state_->cv.notify_all();
         }
     }
 
-    if (join_needed && delivery_.get_id() != std::this_thread::get_id()) {
-        delivery_.join();
+    {
+        const std::lock_guard<std::mutex> jlock(join_mutex_);
+        if (delivery_.joinable() && delivery_.get_id() != std::this_thread::get_id()) {
+            delivery_.join();
+        }
     }
 
     close_peer();
 }
 
 void InProcessTransport::close_peer() {
-    InProcessTransport* peer = nullptr;
-    {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        peer = peer_;
-    }
-    if (peer == nullptr) {
+    const std::shared_ptr<State> peer = peer_.lock();
+    if (!peer) {
         return;
     }
     // Wake the peer so its owner's run() returns instead of waiting on a session whose
     // other half is gone.
-    const std::lock_guard<std::mutex> lock(peer->mutex_);
-    if (!peer->stopping_) {
-        peer->stopping_ = true;
-        peer->open_ = false;
-        peer->cv_.notify_all();
+    const std::lock_guard<std::mutex> lock(peer->mutex);
+    if (!peer->stopping) {
+        peer->stopping = true;
+        peer->open = false;
+        peer->cv.notify_all();
     }
 }
 
-void InProcessTransport::deliver_loop() {
+void InProcessTransport::deliver_loop(const std::shared_ptr<State>& state) {
     for (;;) {
         nlohmann::json msg;
         {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+            std::unique_lock<std::mutex> lock(state->mutex);
+            state->cv.wait(lock, [&state] { return state->stopping || !state->queue.empty(); });
 
             // Deliver what is already queued even while stopping: a request that was
             // accepted deserves to reach its handler.
-            if (queue_.empty()) {
-                if (stopping_) {
+            if (state->queue.empty()) {
+                if (state->stopping) {
                     break;
                 }
                 continue;
             }
-            msg = std::move(queue_.front());
-            queue_.pop_front();
+            msg = std::move(state->queue.front());
+            state->queue.pop_front();
         }
 
-        if (handlers_.on_message) {
-            handlers_.on_message(msg);
+        if (state->handlers.on_message) {
+            state->handlers.on_message(msg);
         }
     }
 
-    if (handlers_.on_closed) {
-        handlers_.on_closed();
+    if (state->handlers.on_closed) {
+        state->handlers.on_closed();
     }
 }
 

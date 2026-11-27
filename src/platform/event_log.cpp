@@ -371,6 +371,9 @@ OpenResult EventLogWriter::open(const EventLogOptions& opts) {
     path_ = opts.path;
     max_bytes_ = opts.max_bytes_per_file;
     max_files_ = opts.max_files;
+    if (fd_observer_) {
+        fd_observer_(fd_);
+    }
     return {true, {}};
 }
 
@@ -391,6 +394,9 @@ void EventLogWriter::append(Event& ev, const Clock& clock) {
 }
 
 void EventLogWriter::rotate() {
+    if (fd_observer_) {
+        fd_observer_(-1);
+    }
     ::close(fd_);
     fd_ = -1;
     if (max_files_ > 1) {
@@ -403,6 +409,9 @@ void EventLogWriter::rotate() {
     fd_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     cur_bytes_ = 0;
     ++rotations_;
+    if (fd_observer_) {
+        fd_observer_(fd_);
+    }
 }
 
 void EventLogWriter::flush() {
@@ -412,6 +421,9 @@ void EventLogWriter::flush() {
 }
 
 void EventLogWriter::close() {
+    if (fd_observer_) {
+        fd_observer_(-1);
+    }
     if (fd_ >= 0) {
         ::close(fd_);
         fd_ = -1;

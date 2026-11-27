@@ -259,4 +259,23 @@ TEST(check_framework_can_still_fail_here) {
     });
 }
 
+TEST(cas_rejects_oversized_expected_size_without_oom) {
+    Db db = open_db();
+    Cas cas(db);
+    const std::string hash = cas.put(source_file(10, 1));
+
+    Stmt tamper(db, "UPDATE blob SET size = ? WHERE hash = ?");
+    tamper.bind(1, static_cast<std::int64_t>(512ULL * 1024ULL * 1024ULL));
+    tamper.bind(2, hash);
+    tamper.run();
+
+    bool threw = false;
+    try {
+        (void)cas.get(hash);
+    } catch (const SqlError&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 } // namespace

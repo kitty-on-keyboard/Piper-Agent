@@ -57,6 +57,15 @@ public:
     [[nodiscard]] bool is_open() const override;
 
 private:
+    struct State {
+        Handlers handlers;
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::deque<nlohmann::json> queue;
+        bool open = false;
+        bool stopping = false;
+    };
+
     InProcessTransport() = default;
 
     // Delivery happens on the endpoint's own thread rather than inline on the sender's.
@@ -64,21 +73,14 @@ private:
     // handler replying to a client that is still inside its own dispatch would recurse
     // through both stacks -- and would deadlock the moment either side holds a lock
     // across a send.
-    void deliver_loop();
-    void enqueue(const nlohmann::json& message);
+    static void deliver_loop(const std::shared_ptr<State>& state);
+    static void enqueue(const std::shared_ptr<State>& target, const nlohmann::json& message);
     void close_peer();
 
-    InProcessTransport* peer_ = nullptr;
-
-    Handlers handlers_;
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+    std::weak_ptr<State> peer_;
     std::thread delivery_;
-
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::deque<nlohmann::json> queue_;
-    bool open_ = false;
-    bool stopping_ = false;
-    bool started_ = false;
+    std::mutex join_mutex_;
 };
 
 } // namespace lmp::mcp
