@@ -48,10 +48,14 @@ public:
     // mid-message, which is worth logging -- it is the signature of a crashed server.
     [[nodiscard]] std::size_t buffered() const noexcept { return buf_.size(); }
 
-    void reset() noexcept { buf_.clear(); }
+    void reset() noexcept {
+        buf_.clear();
+        discarding_overflow_ = false;
+    }
 
 private:
     std::string buf_;
+    bool discarding_overflow_ = false;
 };
 
 // Serialise one message for the wire: compact, then exactly one '\n'.

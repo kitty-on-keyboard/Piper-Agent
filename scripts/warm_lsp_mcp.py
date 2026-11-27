@@ -379,6 +379,13 @@ class LspSession:
     def close(self) -> None:
         proc = self.proc
         self.proc = None
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
         if proc is None or proc.poll() is not None:
             return
         try:
@@ -389,13 +396,6 @@ class LspSession:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-        sock = self._sock
-        self._sock = None
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None

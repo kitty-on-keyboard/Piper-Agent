@@ -177,7 +177,8 @@ def test_path_inside():
     # Workspace at root directory '/'
     root_dir = Path("/").resolve()
     inside_root = warm_lsp_mcp.path_inside(root_dir, "etc/passwd")
-    check(inside_root == root_dir / "etc" / "passwd", f"expected path inside root: {inside_root}")
+    check(inside_root == (root_dir / "etc" / "passwd").resolve(),
+          f"expected path inside root: {inside_root}")
 
 
 def test_godot_defaults_to_godoer_fork():

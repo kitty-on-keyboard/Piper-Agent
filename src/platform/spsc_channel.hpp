@@ -15,7 +15,11 @@
 // read boundary back.
 //
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <mutex>
 #include <new>
 #include <utility>
 #include <vector>
@@ -57,6 +61,11 @@ class SpscChannel {
         }
         slots_[tail & mask_] = std::move(value);
         tail_.store(tail + 1, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (waiters_.load(std::memory_order_acquire) > 0) {
+            const std::lock_guard<std::mutex> lock(wait_mu_);
+            wait_cv_.notify_one();
+        }
         return true;
     }
 
@@ -80,10 +89,41 @@ class SpscChannel {
         return true;
     }
 
+    // Consumer thread only. Waits up to `timeout` without busy-spinning when empty.
+    [[nodiscard]] bool wait_pop(T& out, std::chrono::milliseconds timeout) {
+        if (try_pop(out)) {
+            return true;
+        }
+        if (drained()) {
+            return false;
+        }
+        {
+            std::unique_lock<std::mutex> lock(wait_mu_);
+            waiters_.fetch_add(1, std::memory_order_seq_cst);
+            wait_cv_.wait_for(lock, timeout, [this] {
+                return !empty() || closed();
+            });
+            waiters_.fetch_sub(1, std::memory_order_release);
+        }
+        return try_pop(out);
+    }
+
+    void wake() {
+        const std::lock_guard<std::mutex> lock(wait_mu_);
+        wait_cv_.notify_all();
+    }
+
     // Producer signals end-of-stream (stdin EOF). The consumer must still drain: a
     // closed channel can hold messages, and treating closed as empty is how the last
     // request before EOF gets dropped.
-    void close() noexcept { closed_.store(true, std::memory_order_release); }
+    void close() noexcept {
+        closed_.store(true, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (waiters_.load(std::memory_order_acquire) > 0) {
+            const std::lock_guard<std::mutex> lock(wait_mu_);
+            wait_cv_.notify_all();
+        }
+    }
 
     [[nodiscard]] bool closed() const noexcept {
         return closed_.load(std::memory_order_acquire);
@@ -129,6 +169,9 @@ class SpscChannel {
     alignas(kCacheLinePad) std::atomic<std::size_t> tail_{0};
     std::size_t head_cached_ = 0;
     alignas(kCacheLinePad) std::atomic<bool> closed_{false};
+    alignas(kCacheLinePad) std::atomic<std::uint32_t> waiters_{0};
+    std::mutex wait_mu_;
+    std::condition_variable wait_cv_;
 };
 
 } // namespace lmp::platform

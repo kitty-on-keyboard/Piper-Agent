@@ -61,6 +61,7 @@ import json
 import math
 import os
 import pathlib
+import shlex
 import shutil
 import signal
 import subprocess
@@ -243,7 +244,7 @@ def compose_check_command(disk_meta, grader_path):
             raise ValueError("check must be a non-empty NUL-free string")
     if grader_path:
         # Absolute path keeps the script outside cwd even if the agent creates a shadow.
-        grader_cmd = f"/bin/sh {json.dumps(grader_path)}"
+        grader_cmd = f"/bin/sh {shlex.quote(grader_path)}"
         if inline:
             # Both may be present: grader is authoritative; inline is documentation only.
             return grader_cmd

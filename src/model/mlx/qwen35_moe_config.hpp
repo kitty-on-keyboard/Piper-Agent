@@ -176,7 +176,8 @@ inline bool load_qwen35_moe_config(const std::string& model_dir, Qwen35MoeConfig
         }
     }
 
-    return cfg.hidden_size > 0 && cfg.num_hidden_layers > 0;
+    return cfg.vocab_size > 0 && cfg.hidden_size > 0 && cfg.num_hidden_layers > 0 &&
+           cfg.num_attention_heads > 0 && cfg.num_key_value_heads > 0 && cfg.head_dim > 0;
 }
 
 // The vision tower, which BOTH checkpoints on this machine already carry and which the
@@ -280,7 +281,9 @@ inline bool load_qwen35_vision_config(const std::string& model_dir,
     get_i(root, "video_token_id", cfg.video_token_id);
     get_i(root, "vision_start_token_id", cfg.vision_start_token_id);
     get_i(root, "vision_end_token_id", cfg.vision_end_token_id);
-    return true;
+    return cfg.patch_size > 0 && cfg.spatial_merge_size > 0 && cfg.temporal_patch_size > 0 &&
+           cfg.in_channels > 0 && cfg.num_heads > 0 && cfg.hidden_size > 0 &&
+           (cfg.hidden_size % cfg.num_heads == 0);
 }
 
 // The MTP head's block size, or 0 when the directory is not a usable MTP checkpoint.

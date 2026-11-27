@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -19,6 +20,22 @@
 #include "src/surface/worker.hpp"
 
 namespace lmp::surface::worker {
+namespace {
+
+std::string private_fallback_dir() {
+    char buf[4096];
+    const std::size_t n = ::confstr(_CS_DARWIN_USER_TEMP_DIR, buf, sizeof(buf));
+    if (n > 0 && n <= sizeof(buf)) {
+        std::string base(buf);
+        while (base.size() > 1 && base.back() == '/') {
+            base.pop_back();
+        }
+        return base + "/piper";
+    }
+    return "/tmp/piper-" + std::to_string(static_cast<unsigned long>(::getuid()));
+}
+
+} // namespace
 
 std::string default_socket_path() {
     const char* env = std::getenv("LMP_WORKER_SOCKET");
@@ -27,7 +44,7 @@ std::string default_socket_path() {
     if (home && *home) {
         return std::string(home) + "/.piper/worker.sock";
     }
-    return "/tmp/piper_worker.sock";
+    return private_fallback_dir() + "/worker.sock";
 }
 
 std::string default_pid_path() {
@@ -35,7 +52,7 @@ std::string default_pid_path() {
     if (home && *home) {
         return std::string(home) + "/.piper/worker.pid";
     }
-    return "/tmp/piper_worker.pid";
+    return private_fallback_dir() + "/worker.pid";
 }
 
 bool is_daemon_alive(const std::string& socket_path) {
@@ -58,10 +75,14 @@ bool is_daemon_alive(const std::string& socket_path) {
     std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
     if (::connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+        const int err = errno;
         ::close(fd);
-        // Stale socket from a dead daemon: unlink it and its pid file
-        ::unlink(socket_path.c_str());
-        ::unlink(default_pid_path().c_str());
+        // Only unlink on ECONNREFUSED (confirmed dead/stale listener); do not destroy
+        // a live daemon's socket on transient EAGAIN/EINTR/EACCES.
+        if (err == ECONNREFUSED) {
+            ::unlink(socket_path.c_str());
+            ::unlink(default_pid_path().c_str());
+        }
         return false;
     }
 
@@ -69,7 +90,6 @@ bool is_daemon_alive(const std::string& socket_path) {
     std::string ping = "{\"method\":\"ping\"}\n";
     if (::write(fd, ping.data(), ping.size()) <= 0) {
         ::close(fd);
-        ::unlink(socket_path.c_str());
         return false;
     }
 
@@ -224,7 +244,16 @@ bool DaemonListener::start() {
 
     std::error_code ec;
     std::filesystem::path parent = std::filesystem::path(config_.socket_path).parent_path();
-    std::filesystem::create_directories(parent, ec);
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        // Fail closed if the socket directory is symlinked or owned by another user.
+        struct stat pst{};
+        if (::lstat(parent.c_str(), &pst) != 0 || S_ISLNK(pst.st_mode) ||
+            !S_ISDIR(pst.st_mode) || pst.st_uid != ::getuid()) {
+            return false;
+        }
+        ::chmod(parent.c_str(), 0700);
+    }
 
     ::unlink(config_.socket_path.c_str());
 
@@ -243,11 +272,16 @@ bool DaemonListener::start() {
 
     std::strncpy(addr.sun_path, config_.socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
-    if (::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+    const mode_t old_umask = ::umask(0077);
+    const int bind_rc =
+        ::bind(listen_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    ::umask(old_umask);
+    if (bind_rc != 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
         return false;
     }
+    ::chmod(config_.socket_path.c_str(), 0600);
 
     if (::listen(listen_fd_, 5) != 0) {
         ::close(listen_fd_);
@@ -269,24 +303,53 @@ bool DaemonListener::start() {
 int DaemonListener::accept_client() {
     if (listen_fd_ < 0) return -1;
 
-    struct pollfd pfd{};
-    pfd.fd = listen_fd_;
-    pfd.events = POLLIN;
+    const auto deadline = config_.idle_timeout_s > 0
+        ? std::chrono::steady_clock::now() +
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::duration<double>(config_.idle_timeout_s))
+        : std::chrono::steady_clock::time_point::max();
 
-    int timeout_ms = config_.idle_timeout_s > 0
-        ? static_cast<int>(config_.idle_timeout_s * 1000.0)
-        : -1;
+    while (listen_fd_ >= 0) {
+        int timeout_ms = -1;
+        if (config_.idle_timeout_s > 0) {
+            const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (rem.count() <= 0) {
+                return -1;
+            }
+            timeout_ms = static_cast<int>(rem.count());
+        }
 
-    int ret = ::poll(&pfd, 1, timeout_ms);
-    if (ret <= 0 || !(pfd.revents & POLLIN)) {
-        return -1;
-    }
+        struct pollfd pfd{};
+        pfd.fd = listen_fd_;
+        pfd.events = POLLIN;
+        const int ret = ::poll(&pfd, 1, timeout_ms);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (ret == 0 || !(pfd.revents & POLLIN)) {
+            return -1;
+        }
 
-    int client_fd = ::accept(listen_fd_, nullptr, nullptr);
-    if (client_fd >= 0) {
+        const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
+        if (client_fd < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return -1;
+        }
         ::fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+
+        // Authenticate peer UID so only the owning user (not other local accounts) can
+        // submit tasks or toggle auto_approve_all.
+        uid_t euid = static_cast<uid_t>(-1);
+        gid_t egid = static_cast<gid_t>(-1);
+        if (::getpeereid(client_fd, &euid, &egid) != 0 || euid != ::getuid()) {
+            ::close(client_fd);
+            continue;
+        }
+        return client_fd;
     }
-    return client_fd;
+    return -1;
 }
 
 void DaemonListener::stop() {

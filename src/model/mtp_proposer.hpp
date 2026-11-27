@@ -73,6 +73,8 @@ class MtpProposer final : public DraftProposer {
     void settle(std::size_t accepted, std::span<const TokenId> committed, std::size_t prefix,
                 SpecForward& fwd) override;
 
+    void cancel_draft(SpecForward& fwd) override;
+
     void reset() override;
 
     // How many tokens a full round proposes. Zero when the head cannot draft at all.

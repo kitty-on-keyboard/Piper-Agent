@@ -256,4 +256,22 @@ TEST(resolve_against_handles_both_kinds) {
     // The composition that matters: resolve, then contain.
     CHECK(!is_within("/work/repo", resolve_against("/work/repo", "../escape")));
     CHECK(is_within("/work/repo", resolve_against("/work/repo", "sub/../ok.txt")));
+
+    // Relative root vs relative escape (`is_within(".", "../secret")` must be false).
+    CHECK(!is_within(".", "../secret"));
+    CHECK(!is_within(".", ".."));
+    CHECK(is_within(".", "sub/file.txt"));
+    CHECK(is_within("../repo", "../repo/src/a.cpp"));
+    CHECK(!is_within("../repo", "../../secret"));
+}
+
+TEST(open_file_readonly_rejects_fifo_without_blocking) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    REQUIRE(::mkfifo((root + "/pipe.fifo").c_str(), 0600) == 0);
+    WorkspaceFs workspace(root);
+    REQUIRE(workspace.valid());
+    const OpenedFile opened = workspace.open_file_readonly("pipe.fifo");
+    CHECK(!opened.ok());
+    CHECK(opened.status == FsStatus::InvalidPath);
 }

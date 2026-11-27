@@ -158,6 +158,7 @@ export interface MessageResult {
 
 export interface LoadModelParams {
   model_dir: string;
+  draft_model_dir: string;
 }
 export interface LoadModelResult {
   loaded: boolean;
@@ -197,6 +198,10 @@ export interface ResumeResult {
   turns_restored: number;
   transcript: TranscriptEntry[];
   omitted_leading: number;
+}
+
+export interface ReadyNotification {
+  protocol_version: string;
 }
 
 export interface ModelStatusNotification {
@@ -313,6 +318,7 @@ export const METHODS = [
   "lmp/shutdown",
   "lmp/sessions",
   "lmp/resume",
+  "lmp/ready",
   "lmp/model_status",
   "lmp/token",
   "lmp/turn",

@@ -6079,3 +6079,104 @@ TEST(agent_loop_wins_tool_result_carries_error_class) {
 
     (void)::system(("rm -rf " + root).c_str());
 }
+
+TEST(mixed_batch_preserves_write_before_read_segment_ordering) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream f(root + "/other.txt");
+        f << "other\n";
+    }
+
+    std::vector<model::TokenId> script;
+    script.push_back(tok.specials().think_close);
+    const std::vector<std::string> bodies = {
+        "<function=write_file>\n<parameter=path>\nnew_target.txt\n</parameter>\n"
+        "<parameter=content>\nafter\n</parameter>\n</function>\n",
+        "<function=read_file>\n<parameter=path>\nnew_target.txt\n</parameter>\n</function>\n",
+        "<function=read_file>\n<parameter=path>\nother.txt\n</parameter>\n</function>\n",
+    };
+    for (const std::string& b : bodies) {
+        script.push_back(tok.specials().tool_call_open);
+        for (model::TokenId id : tok.encode_content(b)) {
+            script.push_back(id);
+        }
+        script.push_back(tok.specials().tool_call_close);
+    }
+    script.push_back(tok.specials().im_end);
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(std::move(script));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("write then read");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = root + "/events.jsonl";
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    config.auto_approve_writes = true;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::TurnResult turn = agent.step(cancel);
+
+    CHECK(turn.tool_result.ok());
+    REQUIRE(turn.extra_calls.size() == 2);
+    CHECK(turn.extra_calls[0].result.ok());
+    CHECK(turn.extra_calls[0].result.summary.find("after") != std::string::npos);
+    CHECK(turn.extra_calls[1].result.ok());
+    CHECK(turn.extra_calls[1].result.summary.find("other") != std::string::npos);
+
+    (void)::system(("rm -rf " + root).c_str());
+}
+
+TEST(agent_run_sets_first_event_seq_on_primary_turns) {
+    const model::QwenTokenizer& tok = mini_vocab();
+    REQUIRE(tok.loaded());
+
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    {
+        std::ofstream f(root + "/file.txt");
+        f << "hello\n";
+    }
+
+    model::ScriptedBackend backend;
+    backend.enqueue_response(call_turn(
+        tok,
+        "<function=read_file>\n<parameter=path>\nfile.txt\n</parameter>\n</function>\n",
+        "read"));
+    backend.enqueue_response(call_turn(
+        tok,
+        "<function=finish>\n<parameter=summary>\ndone\n</parameter>\n</function>\n",
+        "done"));
+
+    tools::Registry registry(workspace(root));
+    context::ContextStore ctx("verify first_event_seq");
+    platform::EventLogWriter log;
+    platform::EventLogOptions opts;
+    opts.path = root + "/events.jsonl";
+    opts.max_bytes_per_file = 1U << 20;
+    opts.max_files = 2;
+    REQUIRE(log.open(opts).ok);
+    platform::SystemClock clock;
+    loop::AgentConfig config;
+    config.auto_syntax_check = false;
+    loop::Agent agent(tok, backend, registry, ctx, log, clock, config);
+    const model::CancelToken cancel;
+    const loop::RunReport report = agent.run(cancel);
+
+    CHECK_EQ(report.termination_reason, std::string("ended"));
+    REQUIRE(!ctx.recent().empty());
+    CHECK(ctx.recent()[0].first_event_seq > 0);
+    CHECK(ctx.recent()[0].first_event_seq <= ctx.recent()[0].last_event_seq);
+
+    (void)::system(("rm -rf " + root).c_str());
+}

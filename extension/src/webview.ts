@@ -2724,9 +2724,9 @@ window.addEventListener('message', (e) => {
   // path the sidecar will be given; a failure keeps the chip and says why, rather than
   // vanishing and leaving the user unsure whether the drop registered at all.
   if (kind === 'attached') {
-    const a = attached.get(msg.id);
+    const a = attached.get(payload.id);
     if (a) {
-      if (msg.error) { a.error = msg.error; } else { a.path = msg.path; }
+      if (payload.error) { a.error = payload.error; } else { a.path = payload.path; }
       renderAttachments();
     }
     return;
@@ -3336,7 +3336,7 @@ export function webviewHtml(nonce: string): string {
   }
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+      content="default-src 'none'; img-src blob: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>${cachedStyles}</style></head><body>${cachedMarkup}
 <script nonce="${nonce}">const VIEW_BUILD = ${JSON.stringify(cachedBuild)};
 ${cachedBody}</script></body></html>`;

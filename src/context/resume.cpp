@@ -7,7 +7,7 @@ namespace lmp::context {
 namespace {
 
 [[nodiscard]] bool status_is_error(std::string_view status) {
-    return status != "ok" && !status.empty();
+    return !status.empty() && status != "ok" && status != "Ok";
 }
 
 [[nodiscard]] ResumeIdentity identity_from_run_begin(const platform::Event& ev) {
@@ -79,26 +79,27 @@ ResumeGate can_auto_resume(const ResumeIdentity& checkpoint, const ResumeIdentit
 ResumeRebuild reconstruct_context(const std::vector<platform::Event>& events,
                                   std::string_view run_id_filter) {
     ResumeRebuild out;
-    const platform::Event* begin = nullptr;
-    for (const platform::Event& ev : events) {
-        if (ev.kind != "run_begin") {
+    std::size_t begin_idx = events.size();
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        if (events[i].kind != "run_begin") {
             continue;
         }
-        if (!event_matches_run(ev, run_id_filter)) {
+        if (!event_matches_run(events[i], run_id_filter)) {
             continue;
         }
-        begin = &ev;
+        begin_idx = i;
         if (!run_id_filter.empty()) {
             break;
         }
         // Without a filter, the latest run_begin wins.
     }
-    if (begin == nullptr) {
+    if (begin_idx == events.size()) {
         out.why = "no run_begin event";
         return out;
     }
-    out.identity = identity_from_run_begin(*begin);
-    const std::string mission = field_or(*begin, "mission");
+    const platform::Event& begin = events[begin_idx];
+    out.identity = identity_from_run_begin(begin);
+    const std::string mission = field_or(begin, "mission");
     if (mission.empty() || out.identity.run_id.empty()) {
         out.why = "run_begin missing mission or run_id";
         return out;
@@ -111,11 +112,41 @@ ResumeRebuild reconstruct_context(const std::vector<platform::Event>& events,
 
     std::string open_edit;
     std::string last_assistant;
-    for (const platform::Event& ev : events) {
-        if (ev.seq < begin->seq) {
-            continue;
+    for (std::size_t i = begin_idx + 1; i < events.size(); ++i) {
+        const platform::Event& ev = events[i];
+        if (ev.kind == "run_begin" && field_or(ev, "run_id") != run_id) {
+            break;
         }
         if (!event_matches_run(ev, run_id)) {
+            continue;
+        }
+        if (ev.kind == "checklist") {
+            const std::string packed = field_or(ev, "items");
+            if (!packed.empty()) {
+                std::vector<ChecklistItem> items;
+                std::size_t pos = 0;
+                while (pos <= packed.size()) {
+                    const std::size_t sep = packed.find(" | ", pos);
+                    const std::string_view chunk =
+                        sep == std::string::npos
+                            ? std::string_view(packed).substr(pos)
+                            : std::string_view(packed).substr(pos, sep - pos);
+                    if (chunk.rfind("[x] ", 0) == 0) {
+                        items.push_back({std::string(chunk.substr(4)), true});
+                    } else if (chunk.rfind("[ ] ", 0) == 0) {
+                        items.push_back({std::string(chunk.substr(4)), false});
+                    } else if (!chunk.empty()) {
+                        items.push_back({std::string(chunk), false});
+                    }
+                    if (sep == std::string::npos) {
+                        break;
+                    }
+                    pos = sep + 3;
+                }
+                if (!items.empty()) {
+                    out.store.set_checklist(std::move(items));
+                }
+            }
             continue;
         }
         if (ev.kind == "edit_begin") {

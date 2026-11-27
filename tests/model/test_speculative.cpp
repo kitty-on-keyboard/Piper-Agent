@@ -16,9 +16,12 @@
 #include <cstdio>
 #include <functional>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <vector>
 
+#include "src/model/draft_proposer/suffix_proposer.hpp"
+#include "src/model/sampler.hpp"
 #include "src/model/speculative.hpp"
 #include "tests/check.hpp"
 
@@ -646,4 +649,41 @@ TEST(a_walked_mask_leaves_the_source_exactly_where_the_committed_tokens_put_it) 
                                       seq.begin() + static_cast<long>(start) +
                                           static_cast<long>(emitted.size()));
     CHECK(emitted == expect);
+}
+
+TEST(sampler_ignores_non_finite_logits_and_non_positive_penalty) {
+    SamplingParams params;
+    params.temperature = 0.0F;
+    params.repetition_penalty = 0.0F;
+    Sampler sampler(params);
+
+    std::vector<float> logits = {
+        std::numeric_limits<float>::quiet_NaN(),
+        1.5F,
+        std::numeric_limits<float>::infinity(),
+        -1.0F,
+    };
+    const std::vector<TokenId> recent = {1};
+    const SampleResult pick = sampler.sample(logits, nullptr, recent);
+    CHECK(!pick.no_legal_token);
+    CHECK_EQ(pick.id, TokenId{1});
+}
+
+TEST(suffix_proposer_reclaims_evicted_nodes) {
+    draft::Config cfg;
+    cfg.min_match_len = 2;
+    cfg.max_match_len = 8;
+    cfg.max_indexed_tokens = 256;
+    draft::SuffixProposer proposer(cfg);
+
+    for (int round = 0; round < 30; ++round) {
+        std::vector<draft::TokenId> seq;
+        seq.reserve(256);
+        for (int j = 0; j < 256; ++j) {
+            seq.push_back(round * 1000 + j);
+        }
+        proposer.ingest(seq);
+    }
+    CHECK(proposer.indexed_tokens() <= 256U);
+    CHECK(proposer.node_count() <= 4096U);
 }

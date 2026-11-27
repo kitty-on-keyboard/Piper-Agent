@@ -21,6 +21,7 @@
 //
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -140,6 +141,7 @@ class EventLogWriter {
     // holds, and lose the very report it exists to write. write(2) on this fd is safe.
     // Ordinary callers use append(); reaching for this anywhere else is a mistake.
     [[nodiscard]] int fd_for_signal_handler() const noexcept { return fd_; }
+    void set_fd_observer(std::function<void(int)> cb) { fd_observer_ = std::move(cb); }
     [[nodiscard]] std::uint64_t events_written() const noexcept { return next_seq_ - 1; }
     [[nodiscard]] std::size_t bytes_in_current_file() const noexcept { return cur_bytes_; }
     [[nodiscard]] std::uint64_t rotations() const noexcept { return rotations_; }
@@ -162,6 +164,7 @@ class EventLogWriter {
     std::size_t cur_bytes_ = 0;
     std::uint64_t next_seq_ = 1;
     std::uint64_t rotations_ = 0;
+    std::function<void(int)> fd_observer_;
 };
 
 // `path` with ".<n>" inserted before the final extension: events.jsonl -> events.1.jsonl.

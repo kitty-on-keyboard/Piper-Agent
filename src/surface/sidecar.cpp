@@ -328,8 +328,7 @@ class RunInbox {
                 // block forever on a dead pipe holding 19 GB of weights.
                 return false;
             }
-            if (!inbox_.try_pop(msg)) {
-                std::this_thread::yield();
+            if (!inbox_.wait_pop(msg, std::chrono::milliseconds(10))) {
                 continue;
             }
             if (handle(msg, &request_id, &answer)) {
@@ -377,8 +376,7 @@ class RunInbox {
                 emit_edit_end(request_id, false, "the editor is gone");
                 return {false, "the editor is gone"};
             }
-            if (!inbox_.try_pop(msg)) {
-                std::this_thread::yield();
+            if (!inbox_.wait_pop(msg, std::chrono::milliseconds(10))) {
                 continue;
             }
             if (handle_edit_reply(msg, request_id)) {
@@ -413,8 +411,7 @@ class RunInbox {
             if (inbox_.drained()) {
                 return {false, {}, "the editor is gone"};
             }
-            if (!inbox_.try_pop(msg)) {
-                std::this_thread::yield();
+            if (!inbox_.wait_pop(msg, std::chrono::milliseconds(10))) {
                 continue;
             }
             if (handle_code_intel_reply(msg, request_id)) {
@@ -1037,6 +1034,12 @@ bool start_mission(const std::string& id, const std::string& message,
                         "none may be empty (S7.5: no defaultable security input)");
         return false;
     }
+    loop::AgentConfig config;
+    if (!apply_settings(id, message, config)) {
+        return false;
+    }
+    session.config = config;
+
     // MINTED HERE, and `id` is not it. `id` is the JSON-RPC correlation token for this one
     // request -- a counter that restarts with the extension host -- so everything below
     // takes `run_id` instead: the event log, the PCC session, and every notification the
@@ -1046,12 +1049,6 @@ bool start_mission(const std::string& id, const std::string& message,
     const std::string run_id = surface::mint_run_id(clock);
     session.run_id = run_id;
     reply_result(id, R"({"run_id":")" + run_id + R"("})");
-
-    loop::AgentConfig config;
-    if (!apply_settings(id, message, config)) {
-        return false;
-    }
-    session.config = config;
 
     // Still loads on demand, so lmp/load_model is a door into this and not a new
     // precondition -- a headless client that only knows lmp/start keeps working. The
@@ -1570,12 +1567,16 @@ void handle_resume(const std::string& id, const std::string& message,
     report_journal(journal, run_id, workspace, log, clock);
     std::unique_ptr<surface::ContextJournal> candidate_journal = std::move(journal.journal);
     if (candidate_journal != nullptr && session.registry != nullptr) {
-        surface::ContextJournal* jp = candidate_journal.get();
+        // Resolve through `session` at call time rather than capturing `candidate_journal`,
+        // because declare_context_tools may return early when tools already exist and
+        // subsequent missions replace `session.journal`.
         (void)session.registry->declare_context_tools(
-            [jp] {
+            [&session] {
                 tools::Registry::ContextSource src;
-                src.store = &jp->store();
-                src.session = jp->session_id();
+                if (session.journal != nullptr) {
+                    src.store = &session.journal->store();
+                    src.session = session.journal->session_id();
+                }
                 return src;
             },
             [&session](std::string_view text) {
@@ -1686,8 +1687,8 @@ bool continue_session(const std::string& id, const std::string& message,
         reply_error(id, "lmp/message requires a non-empty 'text'");
         return false;
     }
-    if (session.ctx == nullptr) {
-        reply_error(id, "there is no session to continue; send lmp/start first");
+    if (session.ctx == nullptr || !session.model_ready() || session.registry == nullptr) {
+        reply_error(id, "there is no active loaded session to continue; send lmp/start first");
         return false;
     }
     // Rebind from the editor's current settings BEFORE the next Agent is built.
@@ -1787,20 +1788,21 @@ bool dispatch_one(const std::string& message, surface::Session& session,
 // so this writes to the log's fd through the same write(2) the writer uses and does not
 // touch its state. Then the default handler is restored and the signal re-raised, so the
 // process still dies exactly as it would have -- this observes, it does not rescue.
-int g_log_fd = -1;
+volatile sig_atomic_t g_log_fd = -1;
 
 extern "C" void fatal_signal_handler(int sig) {
-    if (g_log_fd >= 0) {
+    const int log_fd = g_log_fd;
+    if (log_fd >= 0) {
         char line[160];
         const int n = std::snprintf(line, sizeof(line),
                                     "{\"kind\":\"fatal_signal\",\"signal\":%d}\n", sig);
         if (n > 0) {
-            const ssize_t w = ::write(g_log_fd, line, static_cast<std::size_t>(n));
+            const ssize_t w = ::write(log_fd, line, static_cast<std::size_t>(n));
             (void)w;
         }
         void* frames[32];
         const int depth = ::backtrace(frames, 32);
-        ::backtrace_symbols_fd(frames, depth, g_log_fd);
+        ::backtrace_symbols_fd(frames, depth, log_fd);
     }
     std::signal(sig, SIG_DFL);
     std::raise(sig);
@@ -1904,12 +1906,25 @@ class LiveJournal {
     std::string channel_;
 };
 
+void write_fd_all(int fd, std::string_view data) {
+    const char* p = data.data();
+    std::size_t rem = data.size();
+    while (rem > 0) {
+        const ssize_t w = ::write(fd, p, rem);
+        if (w < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        p += w;
+        rem -= static_cast<std::size_t>(w);
+    }
+}
+
 int execute_task_packet(const TaskPacket& packet, surface::Session& session,
                         platform::SystemClock& clock, bool jsonl, bool quiet,
                         int client_fd = -1) {
-    ::setenv("LMP_COMMIT_THINK", packet.commit_think ? "1" : "0", 1);
-    ::setenv("LMP_SHADOW_COMPACT", packet.shadow_compact ? "1" : "0", 1);
-
     struct SinkReset {
         ~SinkReset() {
             surface::wire::set_output_sink(nullptr);
@@ -1920,7 +1935,7 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         surface::wire::set_output_sink([client_fd](const std::string& line) {
             if (client_fd >= 0) {
                 std::string nl = line + "\n";
-                (void)::write(client_fd, nl.data(), nl.size());
+                write_fd_all(client_fd, nl);
             } else {
                 std::fwrite(line.data(), 1, line.size(), stdout);
                 std::fputc('\n', stdout);
@@ -1967,8 +1982,8 @@ int execute_task_packet(const TaskPacket& packet, surface::Session& session,
         }
         if (client_fd >= 0) {
             nlohmann::json res_line = {{"status", r.status}, {"exit_code", kExitError}, {"error", r.error}};
-            std::string s = res_line.dump() + "\n";
-            (void)::write(client_fd, s.data(), s.size());
+            std::string s = res_line.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+            write_fd_all(client_fd, s);
         }
         return kExitError;
     }
@@ -2592,6 +2607,16 @@ int worker_main(int argc, char** argv) {
         surface::Session session;
         platform::SystemClock clock;
 
+        auto write_all = [](int fd, const char* data, size_t len) {
+            size_t sent = 0;
+            while (sent < len) {
+                const ssize_t n = ::write(fd, data + sent, len - sent);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                sent += static_cast<size_t>(n);
+            }
+        };
+
         while (true) {
             int client_fd = listener.accept_client();
             if (client_fd < 0) {
@@ -2599,33 +2624,48 @@ int worker_main(int argc, char** argv) {
                 break;
             }
 
+            // Cap initial request line read to 5s so a stalled peer cannot wedge the daemon.
+            struct timeval rcv_tv{5, 0};
+            (void)::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+
             std::string line;
-            char ch;
-            while (line.size() < 65536 && ::read(client_fd, &ch, 1) > 0) {
-                if (ch == '\n') break;
+            char ch = '\0';
+            while (line.size() < 65536) {
+                const ssize_t rn = ::read(client_fd, &ch, 1);
+                if (rn < 0 && errno == EINTR) continue;
+                if (rn <= 0 || ch == '\n') break;
                 line.push_back(ch);
             }
 
             auto req = nlohmann::json::parse(line, nullptr, false);
             if (!req.is_discarded() && req.is_object()) {
-                std::string method = req.value("method", "run");
+                auto str_or = [&](const char* key, const std::string& def) -> std::string {
+                    const auto it = req.find(key);
+                    return (it != req.end() && it->is_string()) ? it->get<std::string>() : def;
+                };
+                auto bool_or = [&](const char* key, bool def) -> bool {
+                    const auto it = req.find(key);
+                    return (it != req.end() && it->is_boolean()) ? it->get<bool>() : def;
+                };
+
+                const std::string method = str_or("method", "run");
                 if (method == "ping") {
-                    std::string resp = "{\"status\":\"ok\"}\n";
-                    (void)::write(client_fd, resp.data(), resp.size());
+                    const std::string resp = "{\"status\":\"ok\"}\n";
+                    write_all(client_fd, resp.data(), resp.size());
                     ::shutdown(client_fd, SHUT_RDWR);
                     ::close(client_fd);
                     continue;
                 }
                 if (method == "stop") {
-                    std::string resp = "{\"status\":\"stopping\"}\n";
-                    (void)::write(client_fd, resp.data(), resp.size());
+                    const std::string resp = "{\"status\":\"stopping\"}\n";
+                    write_all(client_fd, resp.data(), resp.size());
                     ::shutdown(client_fd, SHUT_RDWR);
                     ::close(client_fd);
                     break;
                 }
                 if (method == "run") {
-                    std::string task_file = req.value("task", "");
-                    bool cli_jsonl = req.value("jsonl", false);
+                    const std::string task_file = str_or("task", "");
+                    const bool cli_jsonl = bool_or("jsonl", false);
                     std::string err;
                     auto pkt = load_packet(task_file, err);
                     if (!pkt) {
@@ -2634,25 +2674,27 @@ int worker_main(int argc, char** argv) {
                             {"error", err},
                             {"exit_code", kExitInvalid}
                         };
-                        std::string s = err_res.dump() + "\n";
-                        (void)::write(client_fd, s.data(), s.size());
+                        const std::string s =
+                            err_res.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) +
+                            "\n";
+                        write_all(client_fd, s.data(), s.size());
                         ::shutdown(client_fd, SHUT_RDWR);
                         ::close(client_fd);
                         continue;
                     }
-                    if (req.value("auto_approve_all", false)) {
+                    if (bool_or("auto_approve_all", false)) {
                         pkt->auto_approve_exec = true;
                         pkt->auto_approve_irreversible = true;
-                    } else if (req.value("auto_approve_irreversible", false)) {
+                    } else if (bool_or("auto_approve_irreversible", false)) {
                         pkt->auto_approve_irreversible = true;
                     }
                     {
                         // The client knows its own attachment; an older client that
                         // sends neither field keeps the old behaviour (wait).
-                        std::string req_on_ask = req.value("on_ask", std::string());
+                        std::string req_on_ask = str_or("on_ask", "");
                         if (!is_valid_on_ask(req_on_ask)) req_on_ask.clear();
                         const bool client_can_answer =
-                            req.value("on_ask_default", std::string("wait")) != "continue";
+                            str_or("on_ask_default", "wait") != "continue";
                         pkt->on_ask = resolve_on_ask(req_on_ask, pkt->on_ask, client_can_answer);
                     }
                     execute_task_packet(*pkt, session, clock, cli_jsonl, quiet, client_fd);
@@ -2851,12 +2893,12 @@ int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(log_path).parent_path(), ec);
 
+    log.set_fd_observer([](int fd) { g_log_fd = static_cast<sig_atomic_t>(fd); });
     const platform::OpenResult opened = log.open({log_path, 32U * 1024 * 1024, 4});
     if (opened.ok) {
         // Armed as soon as there is somewhere to report to, and before a model is loaded
         // -- the deaths under investigation happen deep in a run, but a fault during load
         // would be just as silent.
-        g_log_fd = log.fd_for_signal_handler();
         for (const int sig : {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE}) {
             std::signal(sig, fatal_signal_handler);
         }
@@ -2889,8 +2931,7 @@ int main(int argc, char** argv) {
 
     std::string message;
     while (!inbox.drained()) {
-        if (!inbox.try_pop(message)) {
-            std::this_thread::yield();
+        if (!inbox.wait_pop(message, std::chrono::milliseconds(10))) {
             continue;
         }
         if (dispatch_one(message, session, inbox, cancel, log, clock)) {

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/pcc/recall.hpp"
@@ -1858,6 +1859,19 @@ TEST(commit_think_block_is_declared_only_when_flag_on) {
 
 TEST(registry_skill_tools_execution) {
     const std::string root = temp_dir();
+    const std::string fake_home = temp_dir();
+    const char* prev_home = std::getenv("HOME");
+    const std::string saved_home = prev_home ? prev_home : "";
+    ::setenv("HOME", fake_home.c_str(), 1);
+    struct HomeRestore {
+        const char* orig;
+        std::string copy;
+        ~HomeRestore() {
+            if (orig != nullptr) ::setenv("HOME", copy.c_str(), 1);
+            else ::unsetenv("HOME");
+        }
+    } restore_home{prev_home, saved_home};
+
     Registry reg = make_registry(root);
 
     // list_skills empty
@@ -1980,6 +1994,56 @@ TEST(commit_think_block_sandbox_and_overwrite_gates_match_write_file) {
              std::string("one\n"));
 }
 
+TEST(batched_reads_record_every_version) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    constexpr int kN = 8;
+    for (int i = 0; i < kN; ++i) {
+        std::ofstream(root + "/f" + std::to_string(i) + ".txt") << "body " << i << "\n";
+    }
+    std::vector<std::thread> threads;
+    std::vector<ToolResult> reads(static_cast<std::size_t>(kN));
+    for (int i = 0; i < kN; ++i) {
+        threads.emplace_back([&reg, &reads, i] {
+            reads[static_cast<std::size_t>(i)] = reg.execute(
+                "read_file", args({{"path", "f" + std::to_string(i) + ".txt"}}), 1);
+        });
+    }
+    for (std::thread& th : threads) {
+        th.join();
+    }
+    for (int i = 0; i < kN; ++i) {
+        CHECK(reads[static_cast<std::size_t>(i)].ok());
+        const ToolResult wrote = reg.execute(
+            "write_file",
+            args({{"path", "f" + std::to_string(i) + ".txt"}, {"content", "next\n"}}), 1);
+        CHECK(wrote.ok());
+    }
+    const ToolResult many = reg.execute(
+        "read_many", args({{"paths", "f0.txt\nf1.txt"}}), 1);
+    CHECK(many.ok());
+    CHECK(many.summary.find("f0.txt") != std::string::npos);
+    CHECK(many.summary.find("f1.txt") != std::string::npos);
+}
+
+TEST(git_readonly_tools_disable_config_hooks_and_ext_diff) {
+    const std::string root = temp_dir();
+    Registry reg = make_registry(root);
+    REQUIRE(reg.execute("shell", args({{"command", "git init && git config user.email t@example.com && git config user.name t && echo one > a.txt && git add a.txt && git commit -m init"}}), 1).ok());
+    std::ofstream(root + "/a.txt") << "two\n";
+
+    // Inject hostile core.fsmonitor and diff.external into .git/config.
+    {
+        std::ofstream cfg(root + "/.git/config", std::ios::app);
+        cfg << "\n[core]\n\tfsmonitor = touch pwn_fsm\n[diff]\n\texternal = touch pwn_ext\n";
+    }
+
+    (void)reg.execute("git_status", {}, 1);
+    (void)reg.execute("git_diff", {}, 1);
+    CHECK(!std::filesystem::exists(root + "/pwn_fsm"));
+    CHECK(!std::filesystem::exists(root + "/pwn_ext"));
+}
+
 TEST(append_file_description_says_it_chunks_a_file_that_will_not_fit) {
     const std::string root = temp_dir();
     Registry reg = make_registry(root);
@@ -1988,4 +2052,31 @@ TEST(append_file_description_says_it_chunks_a_file_that_will_not_fit) {
     CHECK(d->description.find("will not fit") != std::string::npos);
     CHECK(d->description.find("write_file") != std::string::npos);
     CHECK(d->description.find("duplicates") != std::string::npos);
+}
+
+TEST(apply_patch_rejects_duplicate_paths_in_same_patch) {
+    const std::string root = temp_dir();
+    {
+        std::ofstream f(root + "/a.txt");
+        f << "one\ntwo\n";
+    }
+    Registry reg = make_registry(root);
+    const std::string patch =
+        "*** Begin Patch\n"
+        "*** Update File: a.txt\n"
+        "@@\n"
+        "-one\n"
+        "+ONE\n"
+        " two\n"
+        "*** Update File: a.txt\n"
+        "@@\n"
+        " one\n"
+        "-two\n"
+        "+TWO\n"
+        "*** End Patch";
+    const ToolResult r = reg.execute("apply_patch", args({{"patch", patch}}), 1);
+    CHECK(!r.ok());
+    const auto bytes = lmp::platform::read_file_whole(root + "/a.txt", 4096);
+    REQUIRE(bytes.ok());
+    CHECK_EQ(bytes.bytes, std::string("one\ntwo\n"));
 }

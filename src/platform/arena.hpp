@@ -14,6 +14,7 @@
 //
 #include <cstddef>
 #include <memory_resource>
+#include <vector>
 
 namespace lmp::platform {
 
@@ -67,12 +68,17 @@ class Arena {
             const std::pmr::memory_resource& other) const noexcept override;
     };
 
+    // Pre-allocated reserve buffer declared BEFORE monotonic_ so monotonic_ is
+    // destroyed first. monotonic_.release() rewinds into initial_buf_ without freeing it.
+    std::vector<std::byte> initial_buf_;
     std::pmr::monotonic_buffer_resource monotonic_;
     Counting counter_;
 };
 
 inline Arena::Arena(std::size_t reserve_bytes, std::size_t cap_bytes)
-    : monotonic_(reserve_bytes, std::pmr::new_delete_resource()) {
+    : initial_buf_(reserve_bytes),
+      monotonic_(initial_buf_.data(), initial_buf_.size(),
+                 std::pmr::new_delete_resource()) {
     counter_.downstream = &monotonic_;
     counter_.cap = cap_bytes;
 }

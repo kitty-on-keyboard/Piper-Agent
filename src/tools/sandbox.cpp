@@ -1,7 +1,9 @@
 #include "src/tools/sandbox.hpp"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <libproc.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/resource.h>
@@ -90,12 +92,26 @@ std::string home_dir() {
 }
 
 void allow_subpath(std::string& profile, const std::string& path) {
-    // An empty or relative path would produce a rule that matches nothing, or -- worse --
-    // one that matches something unintended. Dropped rather than written.
+    // An empty or relative path, or one containing control characters, cannot form a
+    // safe SBPL string literal. Reject control chars and escape \ and " so a path
+    // cannot break out of `(subpath "...")` and inject extra Seatbelt rules.
     if (path.empty() || path.front() != '/') {
         return;
     }
-    profile += "(allow file-write* (subpath \"" + path + "\"))\n";
+    for (const char c : path) {
+        if (c == '\0' || c == '\n' || c == '\r') {
+            return;
+        }
+    }
+    std::string escaped;
+    escaped.reserve(path.size());
+    for (const char c : path) {
+        if (c == '\\' || c == '"') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(c);
+    }
+    profile += "(allow file-write* (subpath \"" + escaped + "\"))\n";
 }
 
 } // namespace
@@ -420,6 +436,8 @@ struct Pipe {
         if (::pipe(fds) != 0) {
             return false;
         }
+        (void)::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        (void)::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
         read_fd = fds[0];
         write_fd = fds[1];
         return true;
@@ -473,23 +491,160 @@ std::string scratch_dir(const std::string& workspace_root) {
 // the same workspace, and its scratch directory is not ours to remove. Six hours is far
 // longer than any command that survives the wall-clock killer, so anything older is
 // abandoned by definition.
-void prune_scratch(const std::string& workspace_root) {
-    namespace fs = std::filesystem;
-    const fs::path tmp(scratch_dir(workspace_root));
-    std::error_code ec;
-    if (!fs::is_directory(tmp, ec)) {
-        return;
+bool remove_dir_tree_no_follow(int dir_fd) {
+    const int scan_fd = ::openat(dir_fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0) {
+        return false;
     }
-    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(6);
-    for (fs::directory_iterator it(tmp, fs::directory_options::skip_permission_denied, ec);
-         !ec && it != fs::directory_iterator(); it.increment(ec)) {
-        std::error_code each;
-        const auto when = fs::last_write_time(it->path(), each);
-        if (each || when >= cutoff) {
+    DIR* dir = ::fdopendir(scan_fd);
+    if (dir == nullptr) {
+        ::close(scan_fd);
+        return false;
+    }
+    bool all_ok = true;
+    while (const dirent* ent = ::readdir(dir)) {
+        const char* name = ent->d_name;
+        if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
             continue;
         }
-        fs::remove_all(it->path(), each);
+        struct stat st{};
+        if (::fstatat(dir_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            all_ok = false;
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            const int sub_fd =
+                ::openat(dir_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (sub_fd < 0) {
+                all_ok = false;
+                continue;
+            }
+            const bool sub_ok = remove_dir_tree_no_follow(sub_fd);
+            ::close(sub_fd);
+            if (!sub_ok || ::unlinkat(dir_fd, name, AT_REMOVEDIR) != 0) {
+                all_ok = false;
+            }
+        } else {
+            if (::unlinkat(dir_fd, name, 0) != 0) {
+                all_ok = false;
+            }
+        }
     }
+    ::closedir(dir);
+    return all_ok;
+}
+
+void prune_scratch(const std::string& workspace_root) {
+    const std::string tmp = scratch_dir(workspace_root);
+    // Descriptor-based walk with O_NOFOLLOW + AT_SYMLINK_NOFOLLOW so a symlink
+    // planted inside workspace .lmp_tmp can never redirect pruning to host files.
+    const int root_fd = ::open(tmp.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root_fd < 0) {
+        return;
+    }
+    DIR* dir = ::fdopendir(root_fd);
+    if (dir == nullptr) {
+        ::close(root_fd);
+        return;
+    }
+    const auto cutoff = std::chrono::system_clock::now() - std::chrono::hours(6);
+    const std::time_t cutoff_sec = std::chrono::system_clock::to_time_t(cutoff);
+    while (const dirent* ent = ::readdir(dir)) {
+        const char* name = ent->d_name;
+        if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
+            continue;
+        }
+        struct stat st{};
+        if (::fstatat(root_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            continue;
+        }
+        if (st.st_mtime >= cutoff_sec) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            const int sub_fd =
+                ::openat(root_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (sub_fd >= 0) {
+                (void)remove_dir_tree_no_follow(sub_fd);
+                ::close(sub_fd);
+                (void)::unlinkat(root_fd, name, AT_REMOVEDIR);
+            }
+        } else {
+            (void)::unlinkat(root_fd, name, 0);
+        }
+    }
+    ::closedir(dir);
+}
+
+bool is_secret_env_key(std::string_view key) noexcept {
+    auto ascii_ieq = [](std::string_view a, std::string_view b) noexcept {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto ascii_istarts = [&](std::string_view p) noexcept {
+        return key.size() >= p.size() && ascii_ieq(key.substr(0, p.size()), p);
+    };
+    auto ascii_iends = [&](std::string_view s) noexcept {
+        return key.size() >= s.size() && ascii_ieq(key.substr(key.size() - s.size()), s);
+    };
+    static constexpr std::string_view kExact[] = {
+        "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "GNUPGHOME",
+        "KUBECONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "DATABASE_URL", "REDIS_URL",
+        "NODE_AUTH_TOKEN", "NPM_TOKEN", "PYPI_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+    };
+    for (const std::string_view e : kExact) {
+        if (ascii_ieq(key, e)) return true;
+    }
+    static constexpr std::string_view kPrefix[] = {
+        "AWS_", "AZURE_", "GCP_", "OPENAI_", "ANTHROPIC_", "GEMINI_", "GITHUB_",
+        "GITLAB_", "NPM_", "PYPI_", "SSH_",
+    };
+    for (const std::string_view p : kPrefix) {
+        if (ascii_istarts(p)) return true;
+    }
+    static constexpr std::string_view kSuffix[] = {
+        "TOKEN", "SECRET", "KEY", "API_KEY", "APIKEY", "PASSWORD", "PASSWD",
+        "CREDENTIAL", "CREDENTIALS", "PASSPHRASE", "PRIVATE_KEY", "SECRET_KEY",
+        "AUTH_TOKEN", "ACCESS_TOKEN", "BEARER",
+    };
+    for (const std::string_view s : kSuffix) {
+        if (ascii_ieq(key, s)) return true;
+        if (key.size() > s.size() + 1 && key[key.size() - s.size() - 1] == '_' &&
+            ascii_iends(s)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> build_sandbox_environ(const std::string& tmp_dir) {
+    std::vector<std::string> env;
+    bool has_tmpdir = false;
+    if (environ != nullptr) {
+        for (char* const* e = environ; *e != nullptr; ++e) {
+            const std::string_view kv(*e);
+            const std::size_t eq = kv.find('=');
+            if (eq == std::string_view::npos || eq == 0) continue;
+            const std::string_view key = kv.substr(0, eq);
+            if (is_secret_env_key(key)) continue;
+            if (key == "TMPDIR") {
+                env.push_back("TMPDIR=" + tmp_dir);
+                has_tmpdir = true;
+            } else {
+                env.emplace_back(kv);
+            }
+        }
+    }
+    if (!has_tmpdir) {
+        env.push_back("TMPDIR=" + tmp_dir);
+    }
+    return env;
 }
 
 // Once per ROOT, not once per process. A single sidecar only ever has one workspace, but
@@ -547,11 +702,10 @@ void pump_output(int fd, pid_t pid, const ExecLimits& limits, ExecOutcome& out,
             out.wall_clock_killed = true;
             return;
         }
-        struct timeval tv {0, 200000}; // 200 ms poll so cancel and the deadline are honoured
-        fd_set set;
-        FD_ZERO(&set);
-        FD_SET(fd, &set);
-        const int rc = ::select(fd + 1, &set, nullptr, nullptr, &tv);
+        struct pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        const int rc = ::poll(&pfd, 1, 200);
         if (rc < 0 && errno != EINTR) {
             return;
         }
@@ -654,6 +808,32 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
         return out;
     }
 
+    // Prepare scratch dir, scrubbed child environ, and argv BEFORE fork() so the
+    // child uses only async-signal-safe syscalls between fork() and execve().
+    const std::string tmp = scratch_dir(workspace_root);
+    ::mkdir(tmp.c_str(), 0700);
+    std::vector<std::string> child_env_storage = build_sandbox_environ(tmp);
+    std::vector<char*> child_envp;
+    child_envp.reserve(child_env_storage.size() + 1);
+    for (std::string& s : child_env_storage) {
+        child_envp.push_back(s.data());
+    }
+    child_envp.push_back(nullptr);
+
+    std::string exec_path = jailed ? "/usr/bin/sandbox-exec" : "/bin/sh";
+    std::vector<std::string> argv_storage;
+    if (jailed) {
+        argv_storage = {"sandbox-exec", "-p", profile, "/bin/sh", "-c", command_to_run};
+    } else {
+        argv_storage = {"sh", "-c", command_to_run};
+    }
+    std::vector<char*> child_argv;
+    child_argv.reserve(argv_storage.size() + 1);
+    for (std::string& s : argv_storage) {
+        child_argv.push_back(s.data());
+    }
+    child_argv.push_back(nullptr);
+
     // Before the fork: see nproc_ceiling().
     const rlim_t nproc = nproc_ceiling(limits.max_processes);
 
@@ -666,30 +846,24 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
     }
     if (pid == 0) {
         ::close(pipe.read_fd);
+        const int devnull = ::open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            ::dup2(devnull, STDIN_FILENO);
+            if (devnull > STDERR_FILENO) {
+                ::close(devnull);
+            }
+        }
         ::dup2(pipe.write_fd, STDOUT_FILENO);
         ::dup2(pipe.write_fd, STDERR_FILENO);
         ::close(pipe.write_fd);
         if (::chdir(cwd.c_str()) != 0) {
             ::_exit(126);
         }
-        // Scratch space inside the jail, so no temp-tree hole is needed in the profile.
-        const std::string tmp = scratch_dir(workspace_root);
-        ::mkdir(tmp.c_str(), 0700);
-        ::setenv("TMPDIR", tmp.c_str(), 1);
         // A new process group, so the wall-clock killer can take down the whole tree a
         // shell may have spawned rather than just the shell.
         ::setpgid(0, 0);
         apply_rlimits_in_child(limits, nproc);
-        if (jailed) {
-            // sandbox-exec applies the Seatbelt profile then execs the shell. Deprecated
-            // in the headers, load-bearing across macOS tooling, and the ONLY per-process
-            // profile API without an entitlement; the T2 container is the successor path.
-            ::execlp("/usr/bin/sandbox-exec", "sandbox-exec", "-p", profile.c_str(),
-                     "/bin/sh", "-c", command_to_run.c_str(), static_cast<char*>(nullptr));
-        } else {
-            ::execlp("/bin/sh", "sh", "-c", command_to_run.c_str(),
-                     static_cast<char*>(nullptr));
-        }
+        ::execve(exec_path.c_str(), child_argv.data(), child_envp.data());
         ::_exit(127);
     }
     ::setpgid(pid, pid);
@@ -698,7 +872,8 @@ ExecOutcome run_sandboxed(const ExecutionGrant& grant, const std::string& comman
     ::close(pipe.read_fd);
 
     int wstatus = 0;
-    (void)::waitpid(pid, &wstatus, 0);
+    while (::waitpid(pid, &wstatus, 0) < 0 && errno == EINTR) {
+    }
     if (out.cancelled) {
         out.status = Status::Cancelled;
         return out;

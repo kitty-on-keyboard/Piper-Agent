@@ -489,3 +489,33 @@ TEST(reasoning_effort_support_is_read_from_the_template_not_the_name) {
     // default rather than being handed an instruction it may not understand.
     CHECK(!supports_reasoning_effort(root + "/missing"));
 }
+
+TEST(qwen35_config_rejects_zero_divisors) {
+    const std::string bad_dir = "/tmp/lmp_bad_qwen35_cfg_" + std::to_string(getpid());
+    ::mkdir(bad_dir.c_str(), 0700);
+    {
+        std::ofstream out(bad_dir + "/config.json");
+        out << R"({
+            "text_config": {
+                "vocab_size": 1000,
+                "hidden_size": 1024,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 0,
+                "num_key_value_heads": 2,
+                "head_dim": 128
+            },
+            "vision_config": {
+                "depth": 2,
+                "hidden_size": 128,
+                "num_heads": 3,
+                "patch_size": 0
+            }
+        })";
+    }
+    lmp::model::mlxl::Qwen35MoeConfig tcfg;
+    CHECK(!lmp::model::mlxl::load_qwen35_moe_config(bad_dir, tcfg));
+    lmp::model::mlxl::Qwen35VisionConfig vcfg;
+    CHECK(!lmp::model::mlxl::load_qwen35_vision_config(bad_dir, vcfg));
+    ::unlink((bad_dir + "/config.json").c_str());
+    ::rmdir(bad_dir.c_str());
+}

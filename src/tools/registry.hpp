@@ -35,6 +35,8 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -421,7 +423,9 @@ class Registry {
 
     // Records a successful read's content version so a later write_file/delete_file can
     // carry it without the model copying the digest. Keyed by absolute path.
+    // Safe to call from parallel read workers: the map is locked.
     void note_read_version(const std::string& abs_path, std::string_view bytes);
+    void forget_read_version(const std::string& abs_path);
     // Resolves the version claim for an existing-file mutation: optional tool param wins,
     // else the harness ledger from a prior read in this run. Empty means "no claim".
     [[nodiscard]] std::string resolve_expected_version(
@@ -449,6 +453,7 @@ class Registry {
     // Set by declare_context_tools. Read by remember_fact() too, which mirrors each note
     // into the store -- see memory_file.cpp.
     ContextSourceFn context_source_;
+    TokenCounter context_token_counter_;
     ThinkBlocksFn think_blocks_source_;
     std::vector<ThinkBlock> think_blocks_owned_;
     std::vector<ToolDecl> decls_;
@@ -458,6 +463,8 @@ class Registry {
     // Invalidated on a successful mutation so the next whole-file overwrite must read
     // again. Re-reads always return current content; duplicate collapse under context
     // pressure is the agent's job, never a pointer-only System Observation here.
+    // Indirect so Registry stays movable.
+    mutable std::unique_ptr<std::mutex> read_versions_mu_ = std::make_unique<std::mutex>();
     std::map<std::string, std::string> read_versions_;
 };
 

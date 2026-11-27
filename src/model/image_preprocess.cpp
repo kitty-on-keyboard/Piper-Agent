@@ -69,13 +69,16 @@ AxisWeights axis_weights(int src_n, int dst_n) {
 } // namespace
 
 void resample_bicubic(const ImageRGB& src, int dst_w, int dst_h, ImageRGB& dst) {
+    if (!src.valid() || dst_w <= 0 || dst_h <= 0) {
+        dst.width = 0;
+        dst.height = 0;
+        dst.rgb.clear();
+        return;
+    }
     dst.width = dst_w;
     dst.height = dst_h;
     dst.rgb.assign(static_cast<std::size_t>(dst_w) * static_cast<std::size_t>(dst_h) * 3U,
                    0);
-    if (!src.valid() || dst_w <= 0 || dst_h <= 0) {
-        return;
-    }
 
     const AxisWeights ax = axis_weights(src.width, dst_w);
     const AxisWeights ay = axis_weights(src.height, dst_h);

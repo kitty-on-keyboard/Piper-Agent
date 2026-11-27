@@ -151,7 +151,9 @@ def test_a_skip_always_writes_its_status():
     args.model_dir = work
     with open(args.out, "w") as f:
         json.dump({"status": "diagnosed", "diagnoses": [{"diagnosis": "last week"}]}, f)
-    holder = open("/tmp/piper_distill.lock", "w")
+    lock_dir = os.path.join(os.path.expanduser("~"), ".piper")
+    os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    holder = open(os.path.join(lock_dir, "distill.lock"), "w")
     fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
     try:
         assert pw.cmd_distill(args) == pw.EXIT_OK

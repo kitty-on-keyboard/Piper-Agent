@@ -112,6 +112,7 @@ private:
     LineFramer framer_;
 
     std::thread reader_;
+    std::mutex join_mutex_;
     std::mutex write_mutex_;
     std::atomic<bool> writable_{false};   // the write side is usable
     std::atomic<bool> reader_done_{false}; // the peer's output stream ended

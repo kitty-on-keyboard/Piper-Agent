@@ -64,14 +64,20 @@ def ts_field(field, structs, enums):
 
 def gen_cpp(schema):
     structs, enums = schema["structs"], schema["enums"]
-    out = [BANNER, "#pragma once\n", "#include <cstdint>", "#include <string>",
-           "#include <vector>\n", "namespace lmp::protocol {\n"]
+    out = [BANNER, "#pragma once\n", "#include <cmath>", "#include <cstdint>",
+           "#include <string>", "#include <vector>\n", "namespace lmp::protocol {\n"]
     out.append(f'inline constexpr const char* kProtocolVersion = "{schema["version"]}";\n')
     out.append("""// Value serializers. String escaping is delegated to the platform layer so the
 // protocol and the event log cannot disagree about what a JSON string is.
 void append_value(std::string& out, const std::string& v);
 inline void append_value(std::string& out, std::int64_t v) { out += std::to_string(v); }
-inline void append_value(std::string& out, double v) { out += std::to_string(v); }
+inline void append_value(std::string& out, double v) {
+    if (!std::isfinite(v)) {
+        out += "0";
+        return;
+    }
+    out += std::to_string(v);
+}
 inline void append_value(std::string& out, bool v) { out += v ? "true" : "false"; }
 
 // Repeated fields. The element overload is found by ADL at instantiation, so this may

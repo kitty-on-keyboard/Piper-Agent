@@ -594,6 +594,10 @@ TEST(persistent_allowlist_cannot_auto_approve_opaque_or_destructive_hints) {
     CHECK(forces_escalation(partial)); // status-only property
     CHECK(opaque_script_command("bash unknown.sh"));
     CHECK(opaque_script_command("source unknown.sh"));
+    CHECK(opaque_script_command("FOO=1 bash unknown.sh"));
+    CHECK(opaque_script_command("env bash unknown.sh"));
+    CHECK(opaque_script_command("true && bash unknown.sh"));
+    CHECK(opaque_script_command("bash -o errexit unknown.sh"));
     CHECK(!opaque_script_command("swift build")); // toolchain Partial, not a script shape
 
     tools::RiskHint destroy;

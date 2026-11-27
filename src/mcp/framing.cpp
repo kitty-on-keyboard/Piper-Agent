@@ -30,6 +30,18 @@ void LineFramer::feed(std::string_view bytes, const LineFn& on_line) {
 
 void LineFramer::feed(std::string_view bytes, const LineFn& on_line,
                       const OverflowFn& on_overflow) {
+    if (discarding_overflow_) {
+        const std::size_t nl = bytes.find('\n');
+        if (nl == std::string_view::npos) {
+            return;
+        }
+        bytes.remove_prefix(nl + 1);
+        discarding_overflow_ = false;
+        if (bytes.empty()) {
+            return;
+        }
+    }
+
     buf_.append(bytes);
 
     std::size_t start = 0;
@@ -57,6 +69,7 @@ void LineFramer::feed(std::string_view bytes, const LineFn& on_line,
     if (buf_.size() > kMaxMessageBytes) {
         const std::size_t dropped = buf_.size();
         buf_.clear();
+        discarding_overflow_ = true;
         if (on_overflow) {
             on_overflow(dropped);
         }

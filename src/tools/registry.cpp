@@ -420,12 +420,16 @@ void Registry::set_think_blocks(std::vector<ThinkBlock> blocks) {
 
 ToolResult Registry::run_git(const std::string& args, int approved_tier) {
     // Read-only git still runs in the jail: `git` reads config from outside the
-    // workspace, and T1 allows reads. What it must not do is write, and the profile --
-    // not this function -- is what guarantees that.
+    // workspace, and T1 allows reads. Disable config-driven command hooks (fsmonitor,
+    // external diff, hooks, credential helpers) so an untrusted repo's .git/config
+    // cannot trigger arbitrary execution from read-only status/diff calls.
     const ExecutionGrant grant = grant_execution(tier_for(approved_tier));
     const ExecLimits limits{30, 30, 2LL << 30, 256, 64, ctx_.max_result_bytes};
+    const std::string cmd =
+        "git -c core.fsmonitor=false -c core.hooksPath=/dev/null "
+        "-c diff.external= -c core.pager=cat -c credential.helper= " + args;
     const ExecOutcome o =
-        run_sandboxed(grant, "git " + args, ctx_.root, ctx_.root, limits, cancel_token_);
+        run_sandboxed(grant, cmd, ctx_.root, ctx_.root, limits, cancel_token_);
 
     if (o.status == Status::Cancelled) {
         return ToolResult::cancelled(o.output.empty() ? "cancelled" : o.output);
@@ -500,6 +504,15 @@ ToolResult Registry::execute(const std::string& name,
         // Unreachable when the guard did its job; typed anyway, never a crash.
         return ToolResult::error(ErrorClass::NotFound, false,
                                  "tool '" + name + "' is not registered");
+    }
+    if (const ToolDecl* decl = find(name); decl != nullptr) {
+        for (const parsephony::ParamSpec& ps : decl->spec.params) {
+            if (ps.required && get(params, ps.name.c_str()) == nullptr) {
+                return ToolResult::error(
+                    ErrorClass::Malformed, false,
+                    "missing required parameter '" + ps.name + "' for " + name);
+            }
+        }
     }
     ToolResult r = it->second(params, approved_tier);
     // NO TOOL MAY RETURN A SILENT RESULT. An empty summary is dropped from the rendered
@@ -845,26 +858,27 @@ Registry::Registry(WorkspaceContext ctx)
                         " does not look like an image. view_image reads png, jpg, heic, "
                         "gif, bmp, tiff and webp; for text use read_file.)");
             }
-            // A path that is not on disk is a missing file, not a decode failure.
-            // ImageIO's "could not open PATH as an image" was read as a sandbox
-            // denial on r-18d29cca3dc62598: Blender had returned a rendered path
-            // that never landed, view_image failed, and the next two turns were
-            // df/mount/file at ~6k think tokens each.
-            {
-                const fsx::OpenedFile opened = workspace_fs_.open_file_readonly(path);
-                if (!opened.ok()) {
-                    if (opened.status == fsx::FsStatus::NotFound) {
-                        std::string err_msg = "File not found at '" + path + "'";
-                        const std::string where = suggest_paths_for(path);
-                        err_msg += where.empty()
-                                       ? ". Nothing by that name is in the workspace. "
-                                         "This read was not blocked -- the file is not "
-                                         "on disk."
-                                       : where;
-                        return ToolResult::error(ErrorClass::NotFound, false, err_msg);
-                    }
-                    return ToolResult::error(ErrorClass::Malformed, false, opened.error);
+            // Read through the O_NOFOLLOW workspace descriptor rather than reopening
+            // `resolved.absolute` by path (avoids TOCTOU symlink swap before decode).
+            constexpr std::size_t kMaxImageFileBytes = 64U << 20;
+            const fsx::FileContents img_file =
+                workspace_fs_.read_file_whole(path, kMaxImageFileBytes);
+            if (!img_file.ok()) {
+                if (img_file.status == fsx::FsStatus::NotFound) {
+                    std::string err_msg = "File not found at '" + path + "'";
+                    const std::string where = suggest_paths_for(path);
+                    err_msg += where.empty()
+                                   ? ". Nothing by that name is in the workspace. "
+                                     "This read was not blocked -- the file is not "
+                                     "on disk."
+                                   : where;
+                    return ToolResult::error(ErrorClass::NotFound, false, err_msg);
                 }
+                if (img_file.status == fsx::FsStatus::Symlink ||
+                    img_file.status == fsx::FsStatus::InvalidPath) {
+                    return refused_path(path, img_file.error);
+                }
+                return ToolResult::error(ErrorClass::Malformed, false, img_file.error);
             }
             // Decoded HERE as well as at render time, so a file that cannot be read is a
             // failed tool call the model can react to -- rather than a prompt that throws
@@ -876,7 +890,9 @@ Registry::Registry(WorkspaceContext ctx)
             // checked against the file's header. 64 MP is well past any real screenshot
             // and well short of a 48 GB host's patience.
             constexpr long long kMaxDecodedPixels = 64LL * 1000LL * 1000LL;
-            if (!model::decode_image_file(resolved.absolute, kMaxDecodedPixels, img, err)) {
+            if (!model::decode_image_bytes(
+                    reinterpret_cast<const std::uint8_t*>(img_file.bytes.data()),
+                    img_file.bytes.size(), kMaxDecodedPixels, img, err)) {
                 return ToolResult::error(ErrorClass::Malformed, false,
                                          "(" + path + " could not be decoded: " + err + ")");
             }
@@ -1901,7 +1917,7 @@ Registry::Registry(WorkspaceContext ctx)
                         }
                         return ToolResult::error(ErrorClass::Transient, true, removed.error);
                     }
-                    read_versions_.erase(resolved.absolute);
+                    forget_read_version(resolved.absolute);
                     bytes_changed += removed.removed_size;
                     ok_paths.push_back(ch.path);
                     continue;
@@ -2094,7 +2110,7 @@ Registry::Registry(WorkspaceContext ctx)
                 return ToolResult::error(ErrorClass::Transient, true,
                                          removed.error);
             }
-            read_versions_.erase(resolved.absolute);
+            forget_read_version(resolved.absolute);
             return measured_edit(
                 ToolResult::okay("deleted " + path), removed.removed_size);
         });
@@ -2256,13 +2272,14 @@ Registry::Registry(WorkspaceContext ctx)
         declare(d, [this](const std::vector<ToolParamValue>& p, int approved_tier) {
             const std::string* path = get(p, "path");
             if (path == nullptr || path->empty()) {
-                return run_git("diff --stat -p", approved_tier);
+                return run_git("diff --no-ext-diff --no-textconv --stat -p", approved_tier);
             }
             const fsx::ContainedPath resolved = workspace_fs_.contained_path(*path);
             if (!resolved.ok()) {
                 return contained_failure(*path, resolved);
             }
-            return run_git("diff --stat -p -- " + shell_quote(*path), approved_tier);
+            return run_git("diff --no-ext-diff --no-textconv --stat -p -- " +
+                           shell_quote(*path), approved_tier);
         });
     }
     {

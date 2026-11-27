@@ -228,6 +228,10 @@ class DraftProposer {
     virtual void settle(std::size_t /*accepted*/, std::span<const TokenId> /*committed*/,
                         std::size_t /*prefix*/, SpecForward&) {}
 
+    // Called when a non-empty draft is discarded before verification (e.g. walk_masks
+    // truncated all drafted tokens) so stateful proposers can trim speculative appends.
+    virtual void cancel_draft(SpecForward&) {}
+
     virtual void reset() {}
 };
 

@@ -560,6 +560,10 @@
         {
           "name": "model_dir",
           "type": "string"
+        },
+        {
+          "name": "draft_model_dir",
+          "type": "string"
         }
       ],
       "result": [
@@ -677,6 +681,12 @@
     }
   },
   "notifications": {
+    "lmp/ready": [
+      {
+        "name": "protocol_version",
+        "type": "string"
+      }
+    ],
     "lmp/model_status": [
       {
         "_comment": "The ONLY thing that says whether this process can answer a prompt. It is sent on every transition, and once unsolicited right after lmp/ready, so a surface that attaches at any moment learns the truth without asking -- rather than inferring 'loaded' from the absence of an error, which is how a run came to sit on 'Thinking' for a minute with no model behind it.",

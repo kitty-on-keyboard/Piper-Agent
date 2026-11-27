@@ -267,11 +267,22 @@ struct Word {
     // Every byte came from inside quotes, so it is inert as CODE (rule 6).
     bool quoted = false;
     bool overflow = false;
-    // The text inside the first `$(...)` or `` `...` ``. A command substitution
-    // RUNS its body, so the body's capabilities are real and visible even though
-    // the resulting VALUE is not -- which is the whole of `sh -c "$(curl ...)"`:
-    // the fetch is visible, the executed payload is not.
-    std::string_view subst_body;
+    // The text inside up to kMaxSubstBodies `$(...)` or `` `...` `` substitutions
+    // in this word. Every command substitution RUNS its body, so evaluating only the
+    // first one would miss `echo $(ok) $(rm -rf /)`.
+    static constexpr std::size_t kMaxSubstBodies = 8;
+    std::string_view subst_bodies[kMaxSubstBodies];
+    std::size_t subst_count = 0;
+    bool subst_overflow = false;
+
+    void add_subst(std::string_view body) noexcept {
+        if (body.empty()) return;
+        if (subst_count < kMaxSubstBodies) {
+            subst_bodies[subst_count++] = body;
+        } else {
+            subst_overflow = true;
+        }
+    }
 
     void push(char c) noexcept {
         if (len < kMaxWordLen) {
@@ -401,11 +412,11 @@ inline constexpr std::string_view kHelpFlags[] = {"--help", "--usage", "--versio
     if (w == "--dry-run" || w == "--dryrun" || w == "--just-print" || w == "--no-act") {
         return true;
     }
-    // `-n` means dry-run for exactly these; it means something else elsewhere
-    // (`sed -n` is quiet, `tail -n` is a count, `sort -n` is numeric).
+    // `-n` means dry-run for exactly these; for `cp`, `mv`, and `ln` it means
+    // `--no-clobber` (no overwrite), NOT dry-run, so treating it as dry-run would hide
+    // external-write or link capabilities.
     if (w == "-n") {
-        return verb == "git" || verb == "cp" || verb == "mv" || verb == "rsync" ||
-               verb == "ln" || verb == "make" || verb == "gmake";
+        return verb == "git" || verb == "rsync" || verb == "make" || verb == "gmake";
     }
     return false;
 }
@@ -688,9 +699,7 @@ private:
                 unterminated_ = true;
                 return;
             }
-            if (w.subst_body.empty()) {
-                w.subst_body = src_.substr(start, pos_ - start);
-            }
+            w.add_subst(src_.substr(start, pos_ - start));
             ++pos_;
             return;
         }
@@ -706,9 +715,7 @@ private:
                     ++depth;
                 } else if (peek() == ')') {
                     if (--depth == 0) {
-                        if (w.subst_body.empty()) {
-                            w.subst_body = src_.substr(start, pos_ - start);
-                        }
+                        w.add_subst(src_.substr(start, pos_ - start));
                         ++pos_;
                         return;
                     }
@@ -1077,7 +1084,11 @@ inline void evaluate_docker(Args a, const Scope& sc, Verdict& v, ParseStatus& st
 }
 
 inline void evaluate(Args a, const Scope& sc, Verdict& v, int depth, bool piped_stdin) noexcept {
-    if (a.n == 0 || depth <= 0) {
+    if (a.n == 0) {
+        return;
+    }
+    if (depth <= 0) {
+        raise(v.status, ParseStatus::PartiallyParsed);
         return;
     }
     // Shell keywords introduce a stage without being its verb.
@@ -1119,10 +1130,14 @@ inline void evaluate(Args a, const Scope& sc, Verdict& v, int depth, bool piped_
     }
 
     // Rule 9, applied FIRST and universally: a flag that means "tell me, do not
-    // do it" removes every capability. All 11 entrants answer `rm --help` as
-    // destroys_data because they never look.
+    // do it" removes every capability. Only inspect flags BEFORE a script payload (`-c`/`-e`)
+    // so `sh -c 'rm -rf /' --help` or `bash -c 'evil' --dry-run` cannot disarm analysis.
     for (std::size_t i = 1; i < a.n; ++i) {
-        if (in(a.at(i), kHelpFlags) || is_dry_run_flag(verb, a.at(i))) {
+        const std::string_view arg = a.at(i);
+        if (arg == "-c" || arg == "-e" || arg == "--") {
+            break;
+        }
+        if (in(arg, kHelpFlags) || is_dry_run_flag(verb, arg)) {
             return;
         }
     }
@@ -1160,9 +1175,13 @@ inline void evaluate(Args a, const Scope& sc, Verdict& v, int depth, bool piped_
     // does on the way to producing that value is right there in the string --
     // the `curl` in `sh -c "$(curl -s ...)"` really does reach the network.
     for (std::size_t i = 0; i < a.n; ++i) {
-        if (!a.v[i].subst_body.empty()) {
-            const Verdict inner = classify_body({a.v[i].subst_body, sc.root, {}}, sc, depth - 1);
+        if (a.v[i].subst_overflow) {
+            raise(v.status, ParseStatus::PartiallyParsed);
+        }
+        for (std::size_t k = 0; k < a.v[i].subst_count; ++k) {
+            const Verdict inner = classify_body({a.v[i].subst_bodies[k], sc.root, {}}, sc, depth - 1);
             merge(v.capabilities, inner.capabilities);
+            raise(v.status, inner.status);
         }
     }
 
@@ -1719,10 +1738,11 @@ inline void run_chain(Lexer& lex, Scope sc, Verdict& v, int depth) noexcept {
                             // therefore undecidable, which IS partial.
                             sc.cwd_unknown = true;
                             raise(v.status, ParseStatus::PartiallyParsed);
-                            if (!args[1].subst_body.empty()) {
+                            for (std::size_t k = 0; k < args[1].subst_count; ++k) {
                                 const Verdict in2 = classify_body(
-                                    {args[1].subst_body, sc.root, {}}, sc, depth - 1);
+                                    {args[1].subst_bodies[k], sc.root, {}}, sc, depth - 1);
                                 merge(v.capabilities, in2.capabilities);
+                                raise(v.status, in2.status);
                             }
                         } else {
                             sc.cwd.append(args[1].view());

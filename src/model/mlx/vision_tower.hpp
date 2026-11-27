@@ -236,12 +236,13 @@ private:
     // gelu: the two differ by ~1e-3 at the tails, and this is the one the weights were
     // trained and converted against.
     [[nodiscard]] static mx::array gelu_tanh(const mx::array& x) {
+        const mx::Dtype dt = x.dtype();
         const mx::array x3 = mx::multiply(mx::multiply(x, x), x);
         const mx::array inner = mx::multiply(
-            mx::array(0.7978845608028654F),
-            mx::add(x, mx::multiply(mx::array(0.044715F), x3)));
-        return mx::multiply(mx::multiply(mx::array(0.5F), x),
-                            mx::add(mx::array(1.0F), mx::tanh(inner)));
+            mx::array(0.7978845608028654F, dt),
+            mx::add(x, mx::multiply(mx::array(0.044715F, dt), x3)));
+        return mx::multiply(mx::multiply(mx::array(0.5F, dt), x),
+                            mx::add(mx::array(1.0F, dt), mx::tanh(inner)));
     }
 
     [[nodiscard]] mx::array mlp(const mx::array& x, const std::string& p) const {

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -142,4 +143,24 @@ TEST(send_fails_if_peer_destroyed) {
     CHECK(!p.client->send(msg));
 
     p.client->stop();
+}
+
+TEST(concurrent_peer_destruction_while_sending_is_safe) {
+    for (int i = 0; i < 25; ++i) {
+        InProcessTransport::Pair p = InProcessTransport::make_pair();
+        Receiver client_rx;
+        Receiver server_rx;
+        p.client->start(client_rx.handlers());
+        p.server->start(server_rx.handlers());
+
+        std::thread destroyer([srv = std::move(p.server)]() mutable {
+            srv->stop();
+            srv.reset();
+        });
+        for (int j = 0; j < 20; ++j) {
+            (void)p.client->send({{"n", j}});
+        }
+        p.client->stop();
+        destroyer.join();
+    }
 }

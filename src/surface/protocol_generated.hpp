@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,7 +17,13 @@ inline constexpr const char* kProtocolVersion = "1.0.0";
 // protocol and the event log cannot disagree about what a JSON string is.
 void append_value(std::string& out, const std::string& v);
 inline void append_value(std::string& out, std::int64_t v) { out += std::to_string(v); }
-inline void append_value(std::string& out, double v) { out += std::to_string(v); }
+inline void append_value(std::string& out, double v) {
+    if (!std::isfinite(v)) {
+        out += "0";
+        return;
+    }
+    out += std::to_string(v);
+}
 inline void append_value(std::string& out, bool v) { out += v ? "true" : "false"; }
 
 // Repeated fields. The element overload is found by ADL at instantiation, so this may
@@ -452,6 +459,7 @@ struct MessageResult {
 // request "lmp/load_model"
 struct LoadModelParams {
     std::string model_dir;
+    std::string draft_model_dir;
 };
 struct LoadModelResult {
     bool loaded = false;
@@ -496,6 +504,19 @@ struct ResumeResult {
     std::vector<TranscriptEntry> transcript;
     std::int64_t omitted_leading = 0;
 };
+
+// notification "lmp/ready"
+struct ReadyNotification {
+    std::string protocol_version;
+    static constexpr const char* kMethod = "lmp/ready";
+};
+[[nodiscard]] inline std::string to_json(const ReadyNotification& n) {
+    std::string out = "{";
+    out += "\"protocol_version\":";
+    append_value(out, n.protocol_version);
+    out += "}";
+    return out;
+}
 
 // notification "lmp/model_status"
 struct ModelStatusNotification {

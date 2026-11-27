@@ -16,6 +16,7 @@ import { EventEmitter } from "events";
 import { appendFileSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { StringDecoder } from "string_decoder";
 import {
   PROTOCOL_VERSION,
   RunSettings,
@@ -67,13 +68,21 @@ export type Reply<T> = Partial<T> & { error?: string };
 export class SidecarClient extends EventEmitter {
   private proc: ChildProcess | undefined;
   private accumulator = "";
+  private stdoutDecoder = new StringDecoder("utf8");
+  private stderrDecoder = new StringDecoder("utf8");
   private nextId = 1;
   private pending = new Map<string, (result: unknown) => void>();
   // Last stderr lines, kept so a crash can be SURFACED rather than guessed at (S12.3).
   private stderrTail: string[] = [];
+  private stopTimer?: NodeJS.Timeout;
 
   get running(): boolean {
     return this.proc !== undefined && this.proc.exitCode === null;
+  }
+
+  private settlePending(why: string): void {
+    for (const [, resolve] of this.pending) resolve({ error: why });
+    this.pending.clear();
   }
 
   start(binaryPath: string): void {
@@ -83,10 +92,24 @@ export class SidecarClient extends EventEmitter {
       throw new Error("sidecar already running");
     }
     this.accumulator = "";
+    this.stdoutDecoder = new StringDecoder("utf8");
+    this.stderrDecoder = new StringDecoder("utf8");
     this.stderrTail = [];
     const proc = spawn(binaryPath, [], { stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
 
+    proc.on("error", (err: Error) => {
+      if (this.stopTimer) {
+        clearTimeout(this.stopTimer);
+        this.stopTimer = undefined;
+      }
+      if (this.proc === proc) this.proc = undefined;
+      this.settlePending(`sidecar process error: ${err.message}`);
+      this.emit("exit", { code: null, stderr: err.message });
+    });
+    proc.stdin?.on("error", (err: Error) => {
+      this.settlePending(`sidecar stdin error: ${err.message}`);
+    });
     proc.stdout?.on("data", (chunk: Buffer) => this.onStdout(chunk));
     proc.stderr?.on("data", (chunk: Buffer) => {
       // PERSISTED, not just tailed. The 40-line buffer below is what a notification can
@@ -102,7 +125,7 @@ export class SidecarClient extends EventEmitter {
       } catch {
         /* the tail below still works */
       }
-      const str = chunk.toString("utf8");
+      const str = this.stderrDecoder.write(chunk);
       let start = 0;
       while (start <= str.length) {
         let nl = str.indexOf("\n", start);
@@ -115,30 +138,50 @@ export class SidecarClient extends EventEmitter {
       }
     });
     proc.on("exit", (code) => {
-      this.proc = undefined;
+      if (this.stopTimer) {
+        clearTimeout(this.stopTimer);
+        this.stopTimer = undefined;
+      }
+      if (this.proc === proc) this.proc = undefined;
       // Settle everything still outstanding BEFORE announcing the exit. A pending
       // request whose sidecar has died can never be answered, and an `await` on one
       // would hang the caller for the lifetime of the window -- including sidebar's
       // applyEdit, whose whole contract is that every path replies.
       const why = `sidecar exited (code ${code ?? "signal"})`;
-      for (const [, resolve] of this.pending) resolve({ error: why });
-      this.pending.clear();
+      this.settlePending(why);
       this.emit("exit", { code, stderr: this.stderrTail.join("\n") });
     });
   }
 
-  /** Closes stdin. The sidecar exits on EOF, so no process is ever orphaned holding a
-   *  model in memory (S12.3). */
+  /** Closes stdin and arms a forced-kill deadline so an unresponsive child cannot orphan weights. */
   stop(): void {
-    this.proc?.stdin?.end();
+    const proc = this.proc;
+    if (!proc) return;
+    try {
+      proc.stdin?.end();
+    } catch {
+      /* ignore write-after-end */
+    }
+    if (!this.stopTimer) {
+      this.stopTimer = setTimeout(() => {
+        this.stopTimer = undefined;
+        if (this.proc === proc && proc.exitCode === null) {
+          proc.kill("SIGKILL");
+        }
+      }, 3000);
+    }
   }
 
   kill(): void {
+    if (this.stopTimer) {
+      clearTimeout(this.stopTimer);
+      this.stopTimer = undefined;
+    }
     this.proc?.kill("SIGKILL");
   }
 
   private onStdout(chunk: Buffer): void {
-    this.accumulator += chunk.toString("utf8");
+    this.accumulator += this.stdoutDecoder.write(chunk);
     const lastNl = this.accumulator.lastIndexOf("\n");
     if (lastNl === -1) return;
 
@@ -164,8 +207,12 @@ export class SidecarClient extends EventEmitter {
     try {
       msg = JSON.parse(raw);
     } catch {
-      // A malformed line is a transport defect, not a model failure. Say so.
-      this.emit("exit", { code: null, stderr: `unparseable sidecar output: ${raw}` });
+      this.settlePending("unparseable sidecar output");
+      const proc = this.proc;
+      this.kill();
+      if (!proc) {
+        this.emit("exit", { code: null, stderr: `unparseable sidecar output: ${raw}` });
+      }
       return;
     }
     if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
@@ -180,7 +227,7 @@ export class SidecarClient extends EventEmitter {
   }
 
   private request<T extends object>(method: string, params: unknown): Promise<Reply<T>> {
-    if (!this.proc?.stdin) {
+    if (!this.proc?.stdin || this.proc.stdin.destroyed) {
       return Promise.resolve({
         error: `cannot send ${method}: the sidecar is not running`,
       } as Reply<T>);
@@ -189,7 +236,14 @@ export class SidecarClient extends EventEmitter {
     const line = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
     return new Promise((resolve) => {
       this.pending.set(id, resolve as (result: unknown) => void);
-      this.proc?.stdin?.write(line);
+      try {
+        this.proc?.stdin?.write(line);
+      } catch (err) {
+        this.pending.delete(id);
+        resolve({
+          error: `failed to send ${method}: ${err instanceof Error ? err.message : String(err)}`,
+        } as Reply<T>);
+      }
     });
   }
 

@@ -70,6 +70,10 @@ std::vector<unsigned char> compress(std::string_view data, std::string_view dict
 // whose size field disagrees with its data fails here instead of silently truncating.
 std::string decompress(std::span<const unsigned char> data, std::string_view dict,
                        std::size_t expected) {
+    constexpr std::size_t kMaxBlobBytes = 256u * 1024u * 1024u;
+    if (expected > kMaxBlobBytes || data.size() > kMaxBlobBytes) {
+        throw SqlError("cas blob exceeds maximum allowed size");
+    }
     ZStream z(false);
     z_stream& s = z.get();
     if (inflateInit2(&s, kRawWindowBits) != Z_OK) {
@@ -148,7 +152,7 @@ std::string Cas::put(std::string_view content, std::string_view base) {
     }
 
     const std::vector<unsigned char> packed = compress(content, base_content);
-    Stmt ins(*db_, "INSERT INTO blob (hash, base, depth, size, stored, data) "
+    Stmt ins(*db_, "INSERT OR IGNORE INTO blob (hash, base, depth, size, stored, data) "
                    "VALUES (?, ?, ?, ?, ?, ?)");
     ins.bind(1, hash);
     if (depth == 0) {

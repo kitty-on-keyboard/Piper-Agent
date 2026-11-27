@@ -5,6 +5,7 @@
 #include <system_error>
 #include <utility>
 
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 
@@ -85,25 +86,22 @@ bool FdTransport::send(const nlohmann::json& message) {
 }
 
 void FdTransport::stop() {
-    if (stopping_.exchange(true, std::memory_order_acq_rel)) {
-        // Already stopping. Still join, so stop() means "finished" on every path.
+    if (!stopping_.exchange(true, std::memory_order_acq_rel)) {
+        writable_.store(false, std::memory_order_release);
+
+        // Wake the poll() immediately rather than waiting out a timeout.
+        if (wake_write_fd_ >= 0) {
+            const char b = 'x';
+            const ssize_t ignored = ::write(wake_write_fd_, &b, 1);
+            static_cast<void>(ignored);
+        }
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(join_mutex_);
         if (reader_.joinable() && reader_.get_id() != std::this_thread::get_id()) {
             reader_.join();
         }
-        return;
-    }
-
-    writable_.store(false, std::memory_order_release);
-
-    // Wake the poll() immediately rather than waiting out a timeout.
-    if (wake_write_fd_ >= 0) {
-        const char b = 'x';
-        const ssize_t ignored = ::write(wake_write_fd_, &b, 1);
-        static_cast<void>(ignored);
-    }
-
-    if (reader_.joinable() && reader_.get_id() != std::this_thread::get_id()) {
-        reader_.join();
     }
     fire_closed();
 }
@@ -118,6 +116,12 @@ void FdTransport::fire_closed() {
 
 void FdTransport::reader_loop() {
     std::array<char, kReadChunk> chunk{};
+    if (stderr_fd_ >= 0) {
+        const int fl = ::fcntl(stderr_fd_, F_GETFL, 0);
+        if (fl >= 0 && (fl & O_NONBLOCK) == 0) {
+            static_cast<void>(::fcntl(stderr_fd_, F_SETFL, fl | O_NONBLOCK));
+        }
+    }
 
     for (;;) {
         std::array<pollfd, 3> fds{};
@@ -160,25 +164,30 @@ void FdTransport::reader_loop() {
         // stderr fd is in the poll set: a pipe nobody reads is a child that blocks in
         // write(2) and stops answering (cook-off entrant C6).
         if (idx_err != static_cast<std::size_t>(-1) &&
-            (fds[idx_err].revents & (POLLIN | POLLHUP)) != 0) {
-            for (;;) {
-                const ssize_t n = ::read(stderr_fd_, chunk.data(), chunk.size());
-                if (n > 0) {
-                    if (handlers_.on_stderr) {
-                        handlers_.on_stderr(std::string_view(chunk.data(), static_cast<std::size_t>(n)));
+            (fds[idx_err].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0) {
+            if ((fds[idx_err].revents & POLLNVAL) != 0) {
+                stderr_fd_ = -1;
+            } else {
+                for (;;) {
+                    const ssize_t n = ::read(stderr_fd_, chunk.data(), chunk.size());
+                    if (n > 0) {
+                        if (handlers_.on_stderr) {
+                            handlers_.on_stderr(std::string_view(chunk.data(), static_cast<std::size_t>(n)));
+                        }
+                        if (static_cast<std::size_t>(n) < chunk.size()) {
+                            break;
+                        }
+                        continue;
                     }
-                    if (static_cast<std::size_t>(n) < chunk.size()) {
+                    if (n < 0 && errno == EINTR) {
+                        continue;
+                    }
+                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                         break;
                     }
-                    continue;
+                    stderr_fd_ = -1; // EOF or error; drop it from the poll set
+                    break;
                 }
-                if (n < 0 && errno == EINTR) {
-                    continue;
-                }
-                if (n == 0) {
-                    stderr_fd_ = -1; // EOF; drop it from the poll set
-                }
-                break;
             }
         }
 

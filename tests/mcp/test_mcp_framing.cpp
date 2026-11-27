@@ -195,3 +195,18 @@ TEST(the_framing_checks_can_actually_fail) {
                   .is_notification()); // it is a request
     });
 }
+
+TEST(framer_discards_oversized_tail_until_newline) {
+    LineFramer f;
+    std::vector<std::string> lines;
+    std::size_t overflows = 0;
+    const std::string chunk(LineFramer::kMaxMessageBytes / 2 + 16, 'a');
+    const auto on_line = [&](std::string_view l) { lines.emplace_back(l); };
+    const auto on_ovf = [&](std::size_t) { ++overflows; };
+    f.feed(chunk, on_line, on_ovf);
+    f.feed(chunk, on_line, on_ovf); // triggers overflow
+    CHECK_EQ(overflows, std::size_t(1));
+    f.feed("tail-still-same-line\n{\"ok\":true}\n", on_line, on_ovf);
+    REQUIRE(lines.size() == 1);
+    CHECK_EQ(lines[0], std::string("{\"ok\":true}"));
+}

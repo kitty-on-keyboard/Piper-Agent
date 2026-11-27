@@ -113,10 +113,24 @@ struct SuffixProposer::Impl {
         evict();
     }
 
+    void rebuild_from_history() {
+        std::vector<Node> fresh;
+        fresh.push_back({}); // index 0 sentinel
+        roots_.clear();
+        nodes_.swap(fresh);
+        for (const auto& s : history_) {
+            for (std::size_t i = 0; i < s.size(); ++i) {
+                const std::size_t len = std::min(window(), s.size() - i);
+                insert_suffix(std::span<const TokenId>(s.data() + i, len));
+            }
+        }
+    }
+
     void evict() {
         if (config_.max_indexed_tokens == 0) {
             return;
         }
+        bool evicted = false;
         while (total_ > config_.max_indexed_tokens && !history_.empty()) {
             const std::vector<TokenId>& s = history_.front();
             for (std::size_t i = 0; i < s.size(); ++i) {
@@ -125,6 +139,13 @@ struct SuffixProposer::Impl {
             }
             total_ -= s.size();
             history_.pop_front();
+            evicted = true;
+        }
+        if (evicted && nodes_.size() > 2048) {
+            const std::size_t max_expected = total_ * window() + 1;
+            if (nodes_.size() > max_expected + max_expected / 2) {
+                rebuild_from_history();
+            }
         }
     }
 
@@ -257,6 +278,9 @@ Proposal SuffixProposer::propose(std::span<const TokenId> context,
 
 std::size_t SuffixProposer::indexed_tokens() const noexcept { return impl_->total_; }
 std::size_t SuffixProposer::sequence_count() const noexcept { return impl_->history_.size(); }
+std::size_t SuffixProposer::node_count() const noexcept {
+    return impl_->nodes_.size() > 0 ? impl_->nodes_.size() - 1 : 0;
+}
 
 void SuffixProposer::clear() noexcept {
     impl_->nodes_.clear();

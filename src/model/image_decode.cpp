@@ -73,10 +73,12 @@ bool decode_source(CGImageSourceRef src, long long max_pixels, ImageRGB& out,
         read(kCGImagePropertyPixelWidth, w);
         read(kCGImagePropertyPixelHeight, h);
     }
-    if (w > 0 && h > 0 && w * h > max_pixels) {
-        error = "image is " + std::to_string(w) + "x" + std::to_string(h) + " (" +
-                std::to_string(w * h) + " pixels), over the " +
-                std::to_string(max_pixels) + " pixel limit for a decoded image";
+    if (w > 0 && h > 0 && max_pixels > 0 &&
+        static_cast<std::uint64_t>(w) >
+            static_cast<std::uint64_t>(max_pixels) / static_cast<std::uint64_t>(h)) {
+        error = "image is " + std::to_string(w) + "x" + std::to_string(h) +
+                ", over the " + std::to_string(max_pixels) +
+                " pixel limit for a decoded image";
         return false;
     }
 

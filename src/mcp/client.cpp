@@ -1,6 +1,7 @@
 #include "src/mcp/client.hpp"
 
 #include <future>
+#include <unordered_set>
 #include <utility>
 
 namespace lmp::mcp {
@@ -391,7 +392,10 @@ void Client::handle_server_notification(const Message& msg) {
             }
         }
         if (fn) {
-            const double progress = p.value("progress", 0.0);
+            const double progress =
+                (p.contains("progress") && p["progress"].is_number())
+                    ? p["progress"].get<double>()
+                    : 0.0;
             std::optional<double> total;
             if (p.contains("total") && p["total"].is_number()) {
                 total = p["total"].get<double>();
@@ -438,10 +442,12 @@ void Client::handle_server_notification(const Message& msg) {
 // ---------------------------------------------------------------------------
 
 nlohmann::json Client::list_paged(std::string_view method_name, const char* key) {
+    constexpr int kMaxPages = 1000;
     nlohmann::json all = nlohmann::json::array();
     nlohmann::json params = nlohmann::json::object();
+    std::unordered_set<std::string> seen_cursors;
 
-    for (;;) {
+    for (int page_num = 0; page_num < kMaxPages; ++page_num) {
         const nlohmann::json page = call(method_name, params, options_.default_timeout);
         if (page.contains(key) && page[key].is_array()) {
             for (const auto& item : page[key]) {
@@ -451,7 +457,11 @@ nlohmann::json Client::list_paged(std::string_view method_name, const char* key)
         if (!page.contains("nextCursor") || !page["nextCursor"].is_string()) {
             break;
         }
-        params["cursor"] = page["nextCursor"];
+        const std::string cursor = page["nextCursor"].get<std::string>();
+        if (cursor.empty() || !seen_cursors.insert(cursor).second) {
+            break;
+        }
+        params["cursor"] = cursor;
     }
     return all;
 }

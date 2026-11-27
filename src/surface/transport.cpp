@@ -1,15 +1,17 @@
 #include "src/surface/transport.hpp"
 
+#include <nlohmann/json.hpp>
 #include <unistd.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <vector>
 
 namespace lmp::surface {
 namespace {
 
-// UTF-8 encode one code point. \uXXXX is the one JSON escape that is not a single byte,
-// and dropping it would put the letter u and four hex digits into the value.
+constexpr std::size_t kMaxAccumulatorBytes = 64U << 20;
+
 void append_utf8(std::string& out, unsigned int cp) {
     if (cp < 0x80U) {
         out.push_back(static_cast<char>(cp));
@@ -28,7 +30,6 @@ void append_utf8(std::string& out, unsigned int cp) {
     }
 }
 
-// Four hex digits at `at`, or -1. Does not advance the caller's cursor.
 [[nodiscard]] int hex4(std::string_view s, std::size_t at) {
     if (at + 4 > s.size()) {
         return -1;
@@ -51,41 +52,8 @@ void append_utf8(std::string& out, unsigned int cp) {
     return value;
 }
 
-// Finds "key" as a top-level-ish JSON string field and returns its value.
-//
-// THE ESCAPES ARE DECODED. `\n` IS A NEWLINE, NOT THE LETTER n.
-//
-// This used to skip the backslash and push the character after it verbatim, which is
-// correct for exactly two escapes -- \" and \\, where the escaped byte IS the intended
-// byte -- and silently wrong for every other one. \n became `n`, \t became `t`, \r became
-// `r`, and \uXXXX became `uXXXX`.
-//
-// MEASURED, in the shipped log (events.jsonl, run_id 5): a 5,000-character plan handed
-// from plan mode to agent mode arrived as ONE RUN-ON LINE, every newline replaced by a
-// letter n -- `"Plan\n\n## Overview"` reaching the model as `Plannn## Overview`. Every
-// heading, bullet and phase boundary in the plan was destroyed on the way in, and the
-// run that had to follow it flailed and ended having written 118 bytes. This is upstream
-// of the prompt, the context store and the loop: they were all faithfully carrying
-// mangled text.
-//
-// The comment this replaces said "minimal on purpose: the reader thread needs the method
-// and an id, nothing more". That stopped being true when start_mission began reading
-// `mission`, `model_dir` and `workspace_root` through here, and steering messages after
-// it -- an id and a method have no escapes worth decoding, which is why nothing noticed.
-// The scope grew and the parser did not, which is the whole defect.
-std::string extract_string(std::string_view message, std::string_view key) {
-    const std::string needle = "\"" + std::string(key) + "\"";
-    std::size_t at = message.find(needle);
-    if (at == std::string_view::npos) {
-        return {};
-    }
-    at = message.find(':', at + needle.size());
-    if (at == std::string_view::npos) {
-        return {};
-    }
-    while (at < message.size() && (message[at] == ':' || message[at] == ' ')) {
-        ++at;
-    }
+std::string decode_json_string_content(std::string_view message, std::size_t& at) {
+    // Assumes message[at] is the opening '"' and advances `at` past the closing '"'.
     if (at >= message.size() || message[at] != '"') {
         return {};
     }
@@ -98,7 +66,7 @@ std::string extract_string(std::string_view message, std::string_view key) {
             continue;
         }
         if (at + 1 >= message.size()) {
-            break; // trailing backslash at end of input; nothing to escape
+            break;
         }
         const char esc = message[at + 1];
         at += 2;
@@ -114,14 +82,11 @@ std::string extract_string(std::string_view message, std::string_view key) {
             case 'u': {
                 const int hi = hex4(message, at);
                 if (hi < 0) {
-                    // Malformed: keep the bytes rather than invent a character.
                     out.append("\\u");
                     break;
                 }
                 at += 4;
                 unsigned int cp = static_cast<unsigned int>(hi);
-                // A surrogate PAIR is one code point in two escapes; a lone surrogate is
-                // not encodable, and U+FFFD says so rather than emitting invalid UTF-8.
                 if (cp >= 0xD800U && cp <= 0xDBFFU) {
                     if (at + 1 < message.size() && message[at] == '\\' &&
                         message[at + 1] == 'u') {
@@ -137,66 +102,194 @@ std::string extract_string(std::string_view message, std::string_view key) {
                         cp = 0xFFFDU;
                     }
                 } else if (cp >= 0xDC00U && cp <= 0xDFFFU) {
-                    cp = 0xFFFDU; // orphaned low surrogate
+                    cp = 0xFFFDU;
                 }
                 append_utf8(out, cp);
                 break;
             }
             default:
-                // Not a JSON escape at all. Keep both bytes: inventing one byte from two
-                // is what the old code did, and it is how `\n` became `n`.
                 out.push_back('\\');
                 out.push_back(esc);
                 break;
         }
     }
+    if (at < message.size() && message[at] == '"') {
+        ++at;
+    }
     return out;
 }
 
-// Finds "key" and returns the raw token that follows the colon, unquoted and
-// untrimmed at the far end -- enough to recognise a JSON literal.
-std::string_view extract_literal(std::string_view message, std::string_view key) {
-    const std::string needle = "\"" + std::string(key) + "\"";
-    std::size_t at = message.find(needle);
-    if (at == std::string_view::npos) {
-        return {};
-    }
-    at = message.find(':', at + needle.size());
-    if (at == std::string_view::npos) {
-        return {};
-    }
-    ++at;
-    while (at < message.size() && message[at] == ' ') {
+void skip_ws(std::string_view s, std::size_t& at) {
+    while (at < s.size() && std::isspace(static_cast<unsigned char>(s[at])) != 0) {
         ++at;
     }
-    return message.substr(at);
+}
+
+void skip_json_value(std::string_view s, std::size_t& at) {
+    skip_ws(s, at);
+    if (at >= s.size()) return;
+    if (s[at] == '"') {
+        ++at;
+        while (at < s.size()) {
+            if (s[at] == '\\' && at + 1 < s.size()) {
+                at += 2;
+                continue;
+            }
+            if (s[at] == '"') {
+                ++at;
+                return;
+            }
+            ++at;
+        }
+        return;
+    }
+    if (s[at] == '{' || s[at] == '[') {
+        const char open = s[at];
+        const char close = (open == '{') ? '}' : ']';
+        int depth = 1;
+        ++at;
+        while (at < s.size() && depth > 0) {
+            if (s[at] == '"') {
+                skip_json_value(s, at);
+                continue;
+            }
+            if (s[at] == open) ++depth;
+            else if (s[at] == close) --depth;
+            ++at;
+        }
+        return;
+    }
+    while (at < s.size() && s[at] != ',' && s[at] != '}' && s[at] != ']' &&
+           std::isspace(static_cast<unsigned char>(s[at])) == 0) {
+        ++at;
+    }
+}
+
+// Structural JSON object field lookup. Only descends into object-typed container keys
+// (`params`, `settings`, `sampling`), never matching inside string values.
+const nlohmann::json* find_in_ast(const nlohmann::json& j, std::string_view key, int depth = 0) {
+    if (!j.is_object() || depth > 3) {
+        return nullptr;
+    }
+    const auto it = j.find(key);
+    if (it != j.end()) {
+        return &(*it);
+    }
+    for (const char* child : {"params", "settings", "sampling"}) {
+        const auto cit = j.find(child);
+        if (cit != j.end() && cit->is_object()) {
+            if (const nlohmann::json* hit = find_in_ast(*cit, key, depth + 1)) {
+                return hit;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// Structural fallback when nlohmann::json::parse rejects legacy malformed escapes
+// (e.g. \uZZZZ or lone surrogates pinned by unit tests). Still parses actual object
+// structure so string values cannot spoof keys.
+bool find_raw_value_span(std::string_view s, std::size_t obj_at, std::string_view key,
+                         int depth, std::size_t& val_start, bool top_only) {
+    skip_ws(s, obj_at);
+    if (obj_at >= s.size() || s[obj_at] != '{' || depth > 3) {
+        return false;
+    }
+    std::size_t at = obj_at + 1;
+    std::vector<std::size_t> nested_containers;
+    while (at < s.size()) {
+        skip_ws(s, at);
+        if (at >= s.size() || s[at] == '}') break;
+        if (s[at] == ',') {
+            ++at;
+            continue;
+        }
+        if (s[at] != '"') break;
+        const std::string field_name = decode_json_string_content(s, at);
+        skip_ws(s, at);
+        if (at >= s.size() || s[at] != ':') break;
+        ++at;
+        skip_ws(s, at);
+        if (field_name == key) {
+            val_start = at;
+            return true;
+        }
+        if (!top_only && at < s.size() && s[at] == '{' &&
+            (field_name == "params" || field_name == "settings" || field_name == "sampling")) {
+            nested_containers.push_back(at);
+        }
+        skip_json_value(s, at);
+    }
+    for (std::size_t sub : nested_containers) {
+        if (find_raw_value_span(s, sub, key, depth + 1, val_start, false)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
 
 std::string method_of(std::string_view message) {
-    return extract_string(message, "method");
+    const auto j = nlohmann::json::parse(message, nullptr, false);
+    if (!j.is_discarded()) {
+        if (!j.is_object()) return {};
+        const auto it = j.find("method");
+        return (it != j.end() && it->is_string()) ? it->get<std::string>() : std::string{};
+    }
+    std::size_t val_at = 0;
+    if (!find_raw_value_span(message, 0, "method", 0, val_at, true)) {
+        return {};
+    }
+    return decode_json_string_content(message, val_at);
 }
 
 std::string string_field(std::string_view message, std::string_view key) {
-    return extract_string(message, key);
+    const auto j = nlohmann::json::parse(message, nullptr, false);
+    if (!j.is_discarded()) {
+        const nlohmann::json* v = find_in_ast(j, key);
+        return (v != nullptr && v->is_string()) ? v->get<std::string>() : std::string{};
+    }
+    std::size_t val_at = 0;
+    if (!find_raw_value_span(message, 0, key, 0, val_at, false)) {
+        return {};
+    }
+    return decode_json_string_content(message, val_at);
 }
 
 bool bool_field(std::string_view message, std::string_view key) {
-    return extract_literal(message, key).substr(0, 4) == "true";
+    const auto j = nlohmann::json::parse(message, nullptr, false);
+    if (!j.is_discarded()) {
+        const nlohmann::json* v = find_in_ast(j, key);
+        return v != nullptr && v->is_boolean() && v->get<bool>();
+    }
+    std::size_t val_at = 0;
+    if (!find_raw_value_span(message, 0, key, 0, val_at, false)) {
+        return false;
+    }
+    return message.substr(val_at, 4) == "true";
 }
 
 bool has_field(std::string_view message, std::string_view key) {
-    return !extract_literal(message, key).empty();
+    const auto j = nlohmann::json::parse(message, nullptr, false);
+    if (!j.is_discarded()) {
+        return find_in_ast(j, key) != nullptr;
+    }
+    std::size_t val_at = 0;
+    return find_raw_value_span(message, 0, key, 0, val_at, false) && val_at < message.size();
 }
 
 double double_field(std::string_view message, std::string_view key, double fallback) {
-    const std::string_view literal = extract_literal(message, key);
-    if (literal.empty()) {
+    const auto j = nlohmann::json::parse(message, nullptr, false);
+    if (!j.is_discarded()) {
+        const nlohmann::json* v = find_in_ast(j, key);
+        return (v != nullptr && v->is_number()) ? v->get<double>() : fallback;
+    }
+    std::size_t val_at = 0;
+    if (!find_raw_value_span(message, 0, key, 0, val_at, false) || val_at >= message.size()) {
         return fallback;
     }
-    // strtod needs a terminator, and the view is the whole message tail.
-    const std::string text(literal.substr(0, 64));
+    const std::string text(message.substr(val_at, 64));
     const char* begin = text.c_str();
     char* end = nullptr;
     const double value = std::strtod(begin, &end);
@@ -237,6 +330,10 @@ void StdinReader::drain_accumulator() {
 }
 
 void StdinReader::feed_for_test(std::string_view bytes) {
+    if (accumulator_.size() + bytes.size() > kMaxAccumulatorBytes) {
+        accumulator_.clear();
+        return;
+    }
     accumulator_.append(bytes);
     drain_accumulator();
 }
@@ -260,12 +357,29 @@ namespace {
 void StdinReader::start(int fd) {
     thread_ = std::thread([this, fd] {
         std::vector<char> block(kReadBlockBytes);
+        bool discarding_overlong = false;
         while (true) {
             const ssize_t n = read_block(fd, block.data(), block.size());
             if (n < 0) {
                 break; // EOF (the parent is gone) or an unrecoverable error
             }
-            accumulator_.append(block.data(), static_cast<std::size_t>(n));
+            const std::string_view chunk(block.data(), static_cast<std::size_t>(n));
+            if (discarding_overlong) {
+                const std::size_t nl = chunk.find('\n');
+                if (nl == std::string_view::npos) continue;
+                discarding_overlong = false;
+                accumulator_.append(chunk.substr(nl + 1));
+            } else if (accumulator_.size() + chunk.size() > kMaxAccumulatorBytes) {
+                accumulator_.clear();
+                const std::size_t nl = chunk.find('\n');
+                if (nl == std::string_view::npos) {
+                    discarding_overlong = true;
+                } else {
+                    accumulator_.append(chunk.substr(nl + 1));
+                }
+            } else {
+                accumulator_.append(chunk);
+            }
             drain_accumulator();
         }
         out_.close();

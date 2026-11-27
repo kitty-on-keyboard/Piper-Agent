@@ -328,6 +328,26 @@ TEST(recall_reaches_across_sessions_and_can_be_confined_to_one) {
     CHECK(confined.summary.find("PGHOST to be set") == std::string::npos);
 }
 
+TEST(rebinding_context_tools_replaces_store_without_uaf) {
+    const std::string root = temp_dir();
+    REQUIRE(!root.empty());
+    Registry reg(workspace(root));
+
+    {
+        Store first(root + "/first.sqlite");
+        put_turn(first, "s1", "read_file", "first session ephemeral fact", 1);
+        CHECK(reg.declare_context_tools(source_of(&first, "s1"), estimate_tokens));
+    } // `first` is destroyed here (mirrors a rejected candidate_journal on resume).
+
+    Store second(root + "/second.sqlite");
+    put_turn(second, "s2", "read_file", "second session durable truth", 1);
+    CHECK(!reg.declare_context_tools(source_of(&second, "s2"), estimate_tokens));
+
+    const ToolResult r = reg.execute("context_recall", args({{"query", "durable truth"}}), 1);
+    CHECK(r.ok());
+    CHECK(r.summary.find("second session durable truth") != std::string::npos);
+}
+
 TEST(check_framework_can_still_fail_here) {
     const std::string root = temp_dir();
     REQUIRE(!root.empty());

@@ -1627,6 +1627,17 @@ bool post_orch_webhook(const std::string& webhook_url,
     };
     std::string body = j.dump();
 
+    const bool scheme_ok =
+        webhook_url.rfind("http://", 0) == 0 || webhook_url.rfind("https://", 0) == 0;
+    const bool has_ctrl =
+        webhook_url.find_first_of("\r\n\0") != std::string::npos;
+    if (!scheme_ok || has_ctrl) {
+        return false;
+    }
+
+    const int timeout_sec = std::max(1, static_cast<int>(std::ceil(timeout_s)));
+    const std::string timeout_str = std::to_string(timeout_sec);
+
     int in_pipe[2];
     if (::pipe(in_pipe) != 0) {
         std::fprintf(stderr, "piper: warning: pipe() failed for webhook POST: %s\n", std::strerror(errno));
@@ -1640,6 +1651,10 @@ bool post_orch_webhook(const std::string& webhook_url,
         ::close(in_pipe[1]);
         return false;
     }
+    (void)::fcntl(in_pipe[0], F_SETFD, FD_CLOEXEC);
+    (void)::fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
+    (void)::fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
+    (void)::fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC);
 
     const pid_t pid = ::fork();
     if (pid < 0) {
@@ -1669,14 +1684,13 @@ bool post_orch_webhook(const std::string& webhook_url,
 
         ::setpgid(0, 0);
 
-        int timeout_sec = std::max(1, static_cast<int>(std::ceil(timeout_s)));
-        std::string timeout_str = std::to_string(timeout_sec);
-
         ::execlp("curl", "curl", "-f", "-s", "-S",
+                 "--max-redirs", "0",
                  "--max-time", timeout_str.c_str(),
                  "-X", "POST",
                  "-H", "Content-Type: application/json",
                  "--data-binary", "@-",
+                 "--",
                  webhook_url.c_str(),
                  static_cast<char*>(nullptr));
         ::_exit(127);

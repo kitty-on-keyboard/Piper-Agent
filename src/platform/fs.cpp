@@ -849,7 +849,7 @@ OpenedFile WorkspaceFs::open_file_readonly(std::string_view path,
         return out;
     }
     const int flags =
-        O_RDONLY | O_NOFOLLOW | (inherit_across_exec ? 0 : O_CLOEXEC);
+        O_RDONLY | O_NOFOLLOW | O_NONBLOCK | (inherit_across_exec ? 0 : O_CLOEXEC);
     out.fd = ::openat(parent, parsed.components.back().c_str(), flags);
     if (out.fd < 0) {
         const int e = errno;
@@ -877,6 +877,10 @@ OpenedFile WorkspaceFs::open_file_readonly(std::string_view path,
                     (S_ISDIR(st.st_mode) ? ": is a directory"
                                          : ": is not a regular file");
         return out;
+    }
+    const int fd_flags = ::fcntl(out.fd, F_GETFL, 0);
+    if (fd_flags >= 0 && (fd_flags & O_NONBLOCK) != 0) {
+        (void)::fcntl(out.fd, F_SETFL, fd_flags & ~O_NONBLOCK);
     }
     out.status = FsStatus::Ok;
     return out;
@@ -1138,6 +1142,12 @@ bool is_within(std::string_view root, std::string_view path) {
     const std::vector<std::string_view> pc = normalized_components(np, np.front() == '/');
     if ((nr.front() == '/') != (np.front() == '/')) {
         return false; // comparing an absolute path against a relative root is a bug
+    }
+    // For relative paths: if `path` walks above the shared base (`..`) while `root` did
+    // not, `pc` escapes `root` (e.g. `is_within(".", "../secret")` when `rc` is empty).
+    if (nr.front() != '/' && !pc.empty() && pc[0] == ".." &&
+        (rc.empty() || rc[0] != "..")) {
+        return false;
     }
     if (pc.size() < rc.size()) {
         return false;

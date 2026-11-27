@@ -78,12 +78,20 @@ struct KVCache {
     // a plausible wrong answer; refusing to grow produces a slow one instead.
     void truncate_to(int n) noexcept { offset = std::clamp(n, 0, offset); }
 
-    void sync() const {
+    void collect_live(std::vector<mx::array>& out) const {
         if (keys) {
-            mx::eval({*keys});
+            out.push_back(*keys);
         }
         if (values) {
-            mx::eval({*values});
+            out.push_back(*values);
+        }
+    }
+
+    void sync() const {
+        std::vector<mx::array> live;
+        collect_live(live);
+        if (!live.empty()) {
+            mx::eval(live);
         }
     }
 };
@@ -131,12 +139,20 @@ struct SsmCache {
         offset = s.offset;
     }
 
-    void sync() const {
+    void collect_live(std::vector<mx::array>& out) const {
         if (conv_state) {
-            mx::eval({*conv_state});
+            out.push_back(*conv_state);
         }
         if (delta_state) {
-            mx::eval({*delta_state});
+            out.push_back(*delta_state);
+        }
+    }
+
+    void sync() const {
+        std::vector<mx::array> live;
+        collect_live(live);
+        if (!live.empty()) {
+            mx::eval(live);
         }
     }
 };
@@ -261,11 +277,24 @@ struct QuantizedKVCache {
     // much of the buffer is real, so a rollback is an integer assignment.
     void truncate_to(int n) noexcept { offset = std::clamp(n, 0, offset); }
 
+    void collect_live(std::vector<mx::array>& out) const {
+        if (keys) {
+            out.push_back(keys->w);
+            out.push_back(keys->scales);
+            out.push_back(keys->biases);
+        }
+        if (values) {
+            out.push_back(values->w);
+            out.push_back(values->scales);
+            out.push_back(values->biases);
+        }
+    }
+
     void sync() const {
-        for (const std::optional<QTensor>* t : {&keys, &values}) {
-            if (t->has_value()) {
-                mx::eval({(*t)->w, (*t)->scales, (*t)->biases});
-            }
+        std::vector<mx::array> live;
+        collect_live(live);
+        if (!live.empty()) {
+            mx::eval(live);
         }
     }
 
@@ -363,12 +392,20 @@ struct RotatingKVCache {
         return {*keys, *values};
     }
 
-    void sync() const {
+    void collect_live(std::vector<mx::array>& out) const {
         if (keys) {
-            mx::eval({*keys});
+            out.push_back(*keys);
         }
         if (values) {
-            mx::eval({*values});
+            out.push_back(*values);
+        }
+    }
+
+    void sync() const {
+        std::vector<mx::array> live;
+        collect_live(live);
+        if (!live.empty()) {
+            mx::eval(live);
         }
     }
 };
