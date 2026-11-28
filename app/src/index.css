@@ -1,0 +1,192 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --bg-canvas: #faf9f7;
+  --bg-sidebar: #f3f1ed;
+  --bg-surface: #ffffff;
+  --bg-surface-2: #f5f3ef;
+  --bg-hover: rgba(26, 25, 24, 0.045);
+  --bg-active: rgba(26, 25, 24, 0.075);
+  --border: rgba(26, 25, 24, 0.09);
+  --border-strong: rgba(26, 25, 24, 0.16);
+  --ink: #1a1918;
+  --ink-secondary: #63615c;
+  --ink-muted: #8f8c85;
+  --accent: #c95b36;
+  --accent-hover: #b54e2c;
+  --accent-soft: rgba(201, 91, 54, 0.1);
+  --ok: #257a4b;
+  --ok-soft: rgba(37, 122, 75, 0.11);
+  --warn: #b4690e;
+  --warn-soft: rgba(180, 105, 14, 0.12);
+  --err: #c23934;
+  --err-soft: rgba(194, 57, 52, 0.11);
+  --code-bg: #f3f1ec;
+  --diff-add-bg: rgba(37, 122, 75, 0.1);
+  --diff-add-ink: #1b653c;
+  --diff-del-bg: rgba(194, 57, 52, 0.09);
+  --diff-del-ink: #a62b26;
+  --shadow-card: 0 1px 2px rgba(20, 19, 18, 0.04), 0 6px 20px rgba(20, 19, 18, 0.04);
+  --shadow-modal: 0 24px 64px rgba(15, 14, 13, 0.18), 0 0 0 1px rgba(26, 25, 24, 0.08);
+}
+
+html.dark {
+  color-scheme: dark;
+  --bg-canvas: #191918;
+  --bg-sidebar: #141413;
+  --bg-surface: #222220;
+  --bg-surface-2: #2a2a27;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.09);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --ink: #f1f0ec;
+  --ink-secondary: #a8a69e;
+  --ink-muted: #76746e;
+  --accent: #e07a52;
+  --accent-hover: #eb8a63;
+  --accent-soft: rgba(224, 122, 82, 0.15);
+  --ok: #50b87d;
+  --ok-soft: rgba(80, 184, 125, 0.14);
+  --warn: #e2a03f;
+  --warn-soft: rgba(226, 160, 63, 0.15);
+  --err: #e56b65;
+  --err-soft: rgba(229, 107, 101, 0.15);
+  --code-bg: #141413;
+  --diff-add-bg: rgba(80, 184, 125, 0.12);
+  --diff-add-ink: #7ed4a1;
+  --diff-del-bg: rgba(229, 107, 101, 0.12);
+  --diff-del-ink: #f09590;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 24px rgba(0, 0, 0, 0.25);
+  --shadow-modal: 0 28px 70px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-canvas);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle native-like scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--ink) 28%, transparent);
+}
+
+/* Markdown prose formatting */
+.piper-prose {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.piper-prose > *:first-child {
+  margin-top: 0;
+}
+
+.piper-prose > *:last-child {
+  margin-bottom: 0;
+}
+
+.piper-prose p {
+  margin: 0.65em 0;
+}
+
+.piper-prose h1,
+.piper-prose h2,
+.piper-prose h3,
+.piper-prose h4 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 1.15em 0 0.45em;
+  color: var(--ink);
+}
+
+.piper-prose h1 { font-size: 1.25em; }
+.piper-prose h2 { font-size: 1.12em; }
+.piper-prose h3 { font-size: 1.02em; }
+
+.piper-prose ul,
+.piper-prose ol {
+  margin: 0.55em 0;
+  padding-left: 1.4em;
+}
+
+.piper-prose ul { list-style: disc; }
+.piper-prose ol { list-style: decimal; }
+
+.piper-prose li {
+  margin: 0.25em 0;
+}
+
+.piper-prose blockquote {
+  margin: 0.75em 0;
+  padding: 0.15em 0 0.15em 0.9em;
+  border-left: 2px solid var(--border-strong);
+  color: var(--ink-secondary);
+}
+
+.piper-prose code:not(pre code) {
+  font-size: 0.88em;
+  padding: 0.14em 0.38em;
+  border-radius: 5px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border);
+}
+
+.piper-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 13px;
+}
+
+.piper-prose th,
+.piper-prose td {
+  border: 1px solid var(--border);
+  padding: 0.42em 0.65em;
+  text-align: left;
+}
+
+.piper-prose th {
+  background: var(--bg-surface-2);
+  font-weight: 600;
+}
+
+.piper-prose a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

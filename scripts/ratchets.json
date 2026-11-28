@@ -88,7 +88,8 @@
     "src/tools": 2,
     "src/context": 3,
     "src/loop": 4,
-    "src/surface": 5
+    "src/surface": 5,
+    "src/app": 6
   },
   "_scan_exempt_comment": [
     "Paths no gate inspects. Formerly `size_exempt`, renamed when the size gate was",

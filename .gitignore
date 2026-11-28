@@ -4,6 +4,8 @@ build-*/
 out/
 dist/
 node_modules/
+app/node_modules/
+app/dist/
 
 # Extension packaging products. bin/ holds the sidecar STAGED from build/ by
 # scripts/stage-sidecar.js -- it is a copy of a build artifact, never a source.
