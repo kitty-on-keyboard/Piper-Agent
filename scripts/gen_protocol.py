@@ -181,7 +181,8 @@ def gen_ts(schema):
 
 
 TARGETS = [("src/surface/protocol_generated.hpp", gen_cpp),
-           ("extension/src/protocol.generated.ts", gen_ts)]
+           ("extension/src/protocol.generated.ts", gen_ts),
+           ("app/src/protocol.generated.ts", gen_ts)]
 
 
 def main():

@@ -36,7 +36,7 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
       "Minimum macOS. >= 26.2 enables MLX's M5 accelerator kernels (NAX)." FORCE)
 endif()
 
-project(lm_pipe2 CXX)
+project(lm_pipe2 CXX OBJCXX)
 
 # LM_Pipe v2 -- Apple Silicon only. Unified memory is assumed, not abstracted over.
 if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
